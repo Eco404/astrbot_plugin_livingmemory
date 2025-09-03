@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional
 from astrbot.api import logger
 from astrbot.api.star import Context
 from ...storage.faiss_manager import FaissManager
-from ..utils import get_now_datetime
+from ..utils import get_now_datetime, safe_parse_metadata, validate_timestamp
 
 
 class ForgettingAgent:
@@ -77,55 +77,96 @@ class ForgettingAgent:
                 await asyncio.sleep(60)
 
     async def _prune_memories(self):
-        """执行一次完整的记忆衰减和修剪。"""
-        all_memories = await self.faiss_manager.get_all_memories_for_forgetting()
-        if not all_memories:
+        """执行一次完整的记忆衰减和修剪，使用分页处理避免内存过载。"""
+        # 获取记忆总数
+        total_memories = await self.faiss_manager.count_total_memories()
+        if total_memories == 0:
             logger.info("数据库中没有记忆，无需清理。")
             return
 
         retention_days = self.config.get("retention_days", 90)
         decay_rate = self.config.get("importance_decay_rate", 0.005)
         current_time = get_now_datetime(self.context).timestamp()
+        
+        # 分页处理配置
+        page_size = self.config.get("forgetting_batch_size", 1000)  # 每批处理数量
+        
+        logger.info(f"开始处理 {total_memories} 条记忆，每批 {page_size} 条")
 
         memories_to_update = []
         ids_to_delete = []
-
-        for mem in all_memories:
-            metadata = json.loads(mem["metadata"])
-
-            # 1. 重要性衰减
-            create_time = metadata.get("create_time", current_time)
-            # 增加健壮性检查
-            if isinstance(create_time, str):
-                try:
-                    create_time = float(create_time)
-                except (ValueError, TypeError):
-                    create_time = current_time
-
-            days_since_creation = (current_time - create_time) / (24 * 3600)
-
-            # 线性衰减
-            decayed_importance = metadata.get("importance", 0.5) - (
-                days_since_creation * decay_rate
+        total_processed = 0
+        
+        # 分页处理所有记忆
+        for offset in range(0, total_memories, page_size):
+            batch_memories = await self.faiss_manager.get_memories_paginated(
+                page_size=page_size, offset=offset
             )
-            metadata["importance"] = max(0, decayed_importance)  # 确保不为负
+            
+            if not batch_memories:
+                break
+            
+            logger.debug(f"处理第 {offset//page_size + 1} 批，共 {len(batch_memories)} 条记忆")
 
-            mem["metadata"] = metadata  # 更新内存中的 metadata
-            memories_to_update.append(mem)
+            batch_updates = []
+            batch_deletes = []
+            
+            for mem in batch_memories:
+                # 使用统一的元数据解析函数
+                metadata = safe_parse_metadata(mem["metadata"])
+                if not metadata:
+                    logger.warning(f"无法解析记忆 {mem['id']} 的元数据，跳过处理")
+                    continue
 
-            # 2. 识别待删除项
-            retention_seconds = retention_days * 24 * 3600
-            is_old = (current_time - create_time) > retention_seconds
-            is_unimportant = metadata["importance"] < 0.1  # 硬编码一个低重要性阈值
+                # 1. 重要性衰减
+                create_time = validate_timestamp(metadata.get("create_time"), current_time)
+                days_since_creation = (current_time - create_time) / (24 * 3600)
 
-            if is_old and is_unimportant:
-                ids_to_delete.append(mem["id"])
+                # 线性衰减
+                decayed_importance = metadata.get("importance", 0.5) - (
+                    days_since_creation * decay_rate
+                )
+                metadata["importance"] = max(0, decayed_importance)  # 确保不为负
 
-        # 3. 执行数据库操作
+                mem["metadata"] = metadata  # 更新内存中的 metadata
+                batch_updates.append(mem)
+
+                # 2. 识别待删除项
+                retention_seconds = retention_days * 24 * 3600
+                is_old = (current_time - create_time) > retention_seconds
+                # 从配置中读取重要性阈值
+                importance_threshold = self.config.get("importance_threshold", 0.1)
+                is_unimportant = metadata["importance"] < importance_threshold
+
+                if is_old and is_unimportant:
+                    batch_deletes.append(mem["id"])
+
+            # 累积到全局列表
+            memories_to_update.extend(batch_updates)
+            ids_to_delete.extend(batch_deletes)
+            total_processed += len(batch_memories)
+            
+            # 如果批次数据过多，执行中间提交
+            if len(memories_to_update) >= page_size * 2:
+                logger.debug(f"执行中间批次更新，更新 {len(memories_to_update)} 条记忆")
+                await self.faiss_manager.update_memories_metadata(memories_to_update)
+                memories_to_update.clear()
+            
+            logger.debug(f"已处理 {total_processed}/{total_memories} 条记忆")
+
+        # 3. 执行最终数据库操作
         if memories_to_update:
             await self.faiss_manager.update_memories_metadata(memories_to_update)
             logger.info(f"更新了 {len(memories_to_update)} 条记忆的重要性得分。")
 
         if ids_to_delete:
-            await self.faiss_manager.delete_memories(ids_to_delete)
-            logger.info(f"删除了 {len(ids_to_delete)} 条陈旧且不重要的记忆。")
+            # 分批删除，避免一次删除太多
+            delete_batch_size = 100
+            for i in range(0, len(ids_to_delete), delete_batch_size):
+                batch = ids_to_delete[i:i + delete_batch_size]
+                await self.faiss_manager.delete_memories(batch)
+                logger.debug(f"删除了 {len(batch)} 条记忆")
+            
+            logger.info(f"总共删除了 {len(ids_to_delete)} 条陈旧且不重要的记忆。")
+        
+        logger.info(f"记忆清理完成，处理了 {total_processed} 条记忆")

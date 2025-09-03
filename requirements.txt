@@ -1,2 +1,3 @@
-faiss-cpu
-networkx
+faiss-cpu>=1.7.0
+networkx>=3.0
+jieba>=0.42.1

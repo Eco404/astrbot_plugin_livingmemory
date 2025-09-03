@@ -120,7 +120,7 @@ class ReflectionEngine:
                 f"分数评估阶段JSON解析失败: {e}\n原始返回: {response.completion_text.strip()}",
                 exc_info=True,
             )
-            return []
+            return {}
 
     async def reflect_and_store(
         self,
@@ -174,7 +174,7 @@ class ReflectionEngine:
                 if event.importance_score >= threshold:
                     # MemoryEvent 的 id 将由存储后端自动生成，这里不需要手动创建
                     # 我们只需要传递完整的元数据
-                    event_metadata = json.loads(event.model_dump_json())
+                    event_metadata = event.model_dump()
 
                     # add_memory 返回的是新插入记录的整数 ID
                     inserted_id = await self.faiss_manager.add_memory(

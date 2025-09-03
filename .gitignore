@@ -13,3 +13,5 @@ __pycache__/
 .idea/
 .DS_Store
 work_list.md
+CLAUDE.md
+.claude/settings.local.json

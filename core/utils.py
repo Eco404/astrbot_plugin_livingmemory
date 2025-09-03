@@ -6,14 +6,165 @@ utils.py - 插件的辅助工具函数
 import re
 import json
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 import pytz
 
+from astrbot.api import logger
 from astrbot.api.star import Context
 from astrbot.api.event import AstrMessageEvent
 from ..storage.faiss_manager import Result
 from .constants import MEMORY_INJECTION_HEADER, MEMORY_INJECTION_FOOTER
+
+
+def safe_parse_metadata(metadata_raw: Any) -> Dict[str, Any]:
+    """
+    安全解析元数据，统一处理字符串和字典类型。
+    
+    Args:
+        metadata_raw: 原始元数据，可能是字符串或字典
+        
+    Returns:
+        Dict[str, Any]: 解析后的元数据字典，解析失败时返回空字典
+    """
+    if isinstance(metadata_raw, dict):
+        return metadata_raw
+    elif isinstance(metadata_raw, str):
+        try:
+            return json.loads(metadata_raw)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"解析元数据JSON失败: {e}, 原始数据: {metadata_raw}")
+            return {}
+    else:
+        logger.warning(f"不支持的元数据类型: {type(metadata_raw)}")
+        return {}
+
+
+def safe_serialize_metadata(metadata: Dict[str, Any]) -> str:
+    """
+    安全序列化元数据为JSON字符串。
+    
+    Args:
+        metadata: 元数据字典
+        
+    Returns:
+        str: JSON字符串
+    """
+    try:
+        return json.dumps(metadata, ensure_ascii=False)
+    except (TypeError, ValueError) as e:
+        logger.error(f"序列化元数据失败: {e}, 数据: {metadata}")
+        return "{}"
+
+
+def validate_timestamp(timestamp: Any, default_time: Optional[float] = None) -> float:
+    """
+    验证和标准化时间戳。
+    
+    Args:
+        timestamp: 时间戳，可能是字符串、数字或其他类型
+        default_time: 默认时间，如果为None则使用当前时间
+        
+    Returns:
+        float: 标准化的时间戳
+    """
+    import time
+    
+    if default_time is None:
+        default_time = time.time()
+        
+    if isinstance(timestamp, (int, float)):
+        return float(timestamp)
+    elif isinstance(timestamp, str):
+        try:
+            return float(timestamp)
+        except (ValueError, TypeError):
+            logger.warning(f"无法解析时间戳字符串: {timestamp}")
+            return default_time
+    elif hasattr(timestamp, 'timestamp'):  # datetime对象
+        try:
+            return timestamp.timestamp()
+        except Exception as e:
+            logger.warning(f"无法从datetime对象获取时间戳: {e}")
+            return default_time
+    else:
+        logger.warning(f"不支持的时间戳类型: {type(timestamp)}")
+        return default_time
+
+
+async def retry_on_failure(
+    func, 
+    *args, 
+    max_retries: int = 3, 
+    backoff_factor: float = 1.0,
+    exceptions: tuple = (Exception,),
+    **kwargs
+):
+    """
+    带重试机制的函数执行器。
+    
+    Args:
+        func: 要执行的函数
+        *args: 函数位置参数
+        max_retries: 最大重试次数
+        backoff_factor: 退避因子
+        exceptions: 需要重试的异常类型
+        **kwargs: 函数关键字参数
+        
+    Returns:
+        函数执行结果
+    """
+    import asyncio
+    
+    last_exception = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            if asyncio.iscoroutinefunction(func):
+                return await func(*args, **kwargs)
+            else:
+                return func(*args, **kwargs)
+        except exceptions as e:
+            last_exception = e
+            if attempt < max_retries:
+                wait_time = backoff_factor * (2 ** attempt)
+                logger.warning(f"函数 {func.__name__} 执行失败 (尝试 {attempt + 1}/{max_retries + 1}): {e}")
+                logger.info(f"等待 {wait_time:.2f} 秒后重试...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"函数 {func.__name__} 重试 {max_retries} 次后仍然失败: {e}")
+                
+    # 所有重试都失败，抛出最后一个异常
+    raise last_exception
+
+
+class OperationContext:
+    """操作上下文管理器，用于错误处理和资源清理"""
+    
+    def __init__(self, operation_name: str, session_id: Optional[str] = None):
+        self.operation_name = operation_name
+        self.session_id = session_id
+        self.start_time = None
+        
+    async def __aenter__(self):
+        import time
+        self.start_time = time.time()
+        session_info = f"[{self.session_id}] " if self.session_id else ""
+        logger.debug(f"{session_info}开始执行操作: {self.operation_name}")
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        import time
+        duration = time.time() - self.start_time if self.start_time else 0
+        session_info = f"[{self.session_id}] " if self.session_id else ""
+        
+        if exc_type is None:
+            logger.debug(f"{session_info}操作成功完成: {self.operation_name} (耗时 {duration:.3f}s)")
+        else:
+            logger.error(f"{session_info}操作失败: {self.operation_name} (耗时 {duration:.3f}s) - {exc_val}")
+            
+        # 不抑制异常，让调用者处理
+        return False
 
 
 async def get_persona_id(context: Context, event: AstrMessageEvent) -> Optional[str]:
@@ -36,8 +187,9 @@ async def get_persona_id(context: Context, event: AstrMessageEvent) -> Optional[
             persona_id = default_persona["name"] if default_persona else None
 
         return persona_id
-    except Exception:
+    except Exception as e:
         # 在某些情况下（如无会话），获取可能会失败，返回 None
+        logger.debug(f"获取人格ID失败: {e}")
         return None
 
 
@@ -83,21 +235,18 @@ def format_memories_for_injection(memories: List[Result]) -> str:
     formatted_entries = []
     for mem in memories:
         try:
-            # 元数据可能是字符串或字典，需要处理
+            # 使用统一的元数据解析函数
             metadata_raw = mem.data.get("metadata", "{}")
-            metadata = (
-                json.loads(metadata_raw)
-                if isinstance(metadata_raw, str)
-                else metadata_raw
-            )
+            metadata = safe_parse_metadata(metadata_raw)
 
             content = mem.data.get("text", "内容缺失")
             importance = metadata.get("importance", 0.0)
 
             entry = f"- [重要性: {importance:.2f}] {content}"
             formatted_entries.append(entry)
-        except (json.JSONDecodeError, AttributeError):
-            # 如果元数据解析失败或格式不正确，则跳过此条记忆
+        except Exception as e:
+            # 如果处理失败，则跳过此条记忆
+            logger.debug(f"格式化记忆时出错，跳过此记忆: {e}")
             continue
 
     if not formatted_entries:

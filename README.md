@@ -1,16 +1,19 @@
-# LivingMemory - 动态生命周期记忆插件
+# LivingMemory - 动态生命周期记忆插件 v1.0.0
 
 
 <div align="center">
 
-<img src="https://img.shields.io/badge/状态-开发中-critical?style=for-the-badge&logo=github" alt="开发中" />
+<img src="https://img.shields.io/badge/状态-准备测试-warning?style=for-the-badge&logo=github" alt="准备测试" />
 
-<details open>
-<summary><strong>🚧 施工警示卡</strong></summary>
+<details>
+<summary><strong>🧪 测试准备 v1.0.0-beta</strong></summary>
 
-> ⚠️ **本插件处于开发阶段**  
-> 部分功能尚未完善或可能存在不稳定情况。  
-> 使用过程中如遇到问题，欢迎通过 Issue 反馈！
+> ✨ **新增混合检索系统**: 支持9种先进融合策略  
+> 🛡️ **增强稳定性**: 全面错误处理和事务安全  
+> ⚙️ **智能配置验证**: Pydantic驱动的配置系统  
+> 📊 **会话管理优化**: 内存效率和自动清理机制  
+>   
+> ⚠️ **需要测试验证**: 请在测试环境中验证所有新功能
 
 </details>
 
@@ -43,83 +46,263 @@
 
 ---
 
-`LivingMemory` 告别了传统记忆插件`astrbot_plugin_mnemosyne`对大型数据库的依赖，创新性地采用轻量级的 `Faiss` 和 `SQLite` 作为存储后端。这不仅实现了 **零配置部署** 和 **极低的资源消耗**，更引入了革命性的 **动态记忆生命周期 (Dynamic Memory Lifecycle)** 模型。
+`LivingMemory` 告别了传统记忆插件对大型数据库的依赖，创新性地采用轻量级的 `Faiss` 和 `SQLite` 作为存储后端。这不仅实现了 **零配置部署** 和 **极低的资源消耗**，更引入了革命性的 **动态记忆生命周期 (Dynamic Memory Lifecycle)** 模型。
 
-## ✨ 核心特性：动态记忆生命周期
+## ✨ 核心特性：三大引擎架构
 
 本插件通过三大智能引擎的协同工作，完美模拟了人类记忆的形成、巩固、联想和遗忘的全过程。
 
-| 引擎 | 图标 | 核心功能 | 描述 |
+| 引擎 | 图标 | 核心功能 | 最新增强 |
 | :--- | :---: | :--- | :--- |
-| **反思引擎** | 🧠 | `智能总结` & `重要性评估` | 在对话中自动提炼关键信息，形成结构化记忆，并利用 LLM 评估其重要性，确保高价值信息得以保留。 |
-| **回忆引擎** | 🔍 | `多策略召回` & `动态刷新` | 综合考虑记忆的 **相关性**、**重要性** 和 **新近度**，精准召回最匹配的记忆。每次成功回忆都会强化该记忆，模拟人类的记忆强化效应。 |
-| **遗忘代理** | 🗑️ | `模拟遗忘曲线` & `自动修剪` | 作为后台任务，它会模拟艾宾浩斯遗忘曲线，让记忆的重要性随时间自然衰减，并自动清理那些陈旧且价值低的记忆，保持记忆库的健康与高效。 |
+| **反思引擎** | 🧠 | `智能总结` & `重要性评估` | ✨ 增强错误重试机制，提高提取成功率 |
+| **回忆引擎** | 🔍 | `混合检索` & `智能融合` | 🚀 **9种先进融合策略** - RRF、自适应、级联等 |
+| **遗忘代理** | 🗑️ | `遗忘曲线` & `批量清理` | 💾 **分页处理** - 优化内存使用，支持大规模数据 |
+
+## 🔥 新特性：混合检索系统
+
+### 检索模式
+- **🔍 Dense (密集检索)**: 基于语义向量的深度理解
+- **⚡ Sparse (稀疏检索)**: BM25关键词匹配，支持中文分词
+- **🤝 Hybrid (混合检索)**: 智能融合两种检索方式的优势
+
+### 9种融合策略
+
+| 策略 | 特点 | 适用场景 | 计算复杂度 |
+|------|------|----------|------------|
+| **RRF** | 经典倒数排名融合 | 通用场景，平衡性好 | 低 |
+| **Hybrid RRF** | 动态参数调整 | 自适应查询类型 | 中 |  
+| **Weighted** | 简单加权融合 | 明确权重偏好 | 低 |
+| **Convex** | 凸组合数学融合 | 需要严格数学性质 | 低 |
+| **Interleave** | 交替选择结果 | 保证结果多样性 | 低 |
+| **Rank Fusion** | 基于排序位置 | 重视排序信息 | 中 |
+| **Score Fusion** | Borda Count投票 | 民主投票机制 | 高 |
+| **Cascade** | 两阶段处理 | 大规模高效检索 | 低 |
+| **Adaptive** | 查询特征自适应 | 多样化查询场景 | 中 |
+
+### 智能查询分析
+系统会自动分析查询特征，选择最优融合策略：
+- **关键词查询** → 偏向稀疏检索
+- **语义查询** → 偏向密集检索  
+- **混合查询** → 使用RRF平衡融合
 
 ## 🚀 快速开始
 
 ### 1. 安装
 
-将 `astrbot_plugin_livingmemory` 文件夹放置于 AstrBot 的 `data/plugins` 目录下。AstrBot 将自动检测并安装 `requirements.txt` 中声明的依赖。
+将 `astrbot_plugin_livingmemory` 文件夹放置于 AstrBot 的 `data/plugins` 目录下。AstrBot 将自动检测并安装依赖。
 
-**依赖项:**
+**核心依赖:**
 ```
-faiss-cpu
+faiss-cpu>=1.7.0
+pydantic>=1.8.0
+jieba>=0.42.1
 ```
-> **注意**: 请确保您的系统环境支持 `faiss-cpu` 的编译和安装。
+
+**🧪 测试阶段**: 插件已完成重构和功能增强，正在进行全面测试验证。
 
 ### 2. 配置
 
-所有详细配置均可在 **AstrBot WebUI -> 插件管理 -> LivingMemory** 中进行调整。每个配置项都提供了清晰的中文说明，方便您快速上手。
+**✨ 全新配置系统**: 基于 Pydantic 的智能配置验证，确保参数有效性。
 
 <details>
 <summary><strong>⚙️ 点击展开详细配置说明</strong></summary>
 
-#### Provider 设置
-- **Embedding Provider ID**: 用于生成向量的 Embedding Provider。留空则自动使用第一个加载的向量服务。
-- **LLM Provider ID**: 用于总结和评估记忆的 LLM Provider。留空则使用 AstrBot 的默认 LLM 服务。
-- **Timezone**: 用于解析和显示时间的时区。默认为 `Asia/Shanghai`。
+#### 🔧 基础设置
+- **Provider设置**: 自定义 Embedding 和 LLM Provider，支持多Provider混用
+- **时区配置**: 支持全球时区，时间显示本地化
+- **会话管理**: 智能会话生命周期，自动清理过期会话
 
-#### 回忆引擎 (Recall Engine)
-- **top_k**: 单次检索返回的记忆数量。
-- **recall_strategy**: 召回策略。`similarity` (仅相似度) 或 `weighted` (综合加权)。
-- **权重配置**: 当使用 `weighted` 策略时，可自由调整 **相似度**、**重要性** 和 **新近度** 的权重。
+#### 🔍 检索配置  
+- **检索模式**: `hybrid`(混合) | `dense`(密集) | `sparse`(稀疏)
+- **融合策略**: 9种策略可选，支持动态参数调整
+- **BM25参数**: 可调整k1、b参数优化中文检索效果
+- **权重控制**: 相似度、重要性、新近度权重精细调节
 
-#### 过滤设置 (Filtering Settings)
-- **use_persona_filtering**: 开启后，只会召回和总结与当前人格相关的记忆。
-- **use_session_filtering**: 开启后，每个会话的记忆将是独立的。
+#### 🧠 智能引擎配置
+- **反思触发**: 可配置对话轮次阈值(1-100轮)  
+- **重要性评估**: 自定义重要性阈值(0.0-1.0)
+- **自定义提示词**: 完全可定制的事件提取和评估提示
 
-#### 反思引擎 (Reflection Engine)
-- **summary_trigger_rounds**: 触发对话历史总结的对话轮次。
-- **importance_threshold**: 记忆重要性得分的最低阈值。
-- **summary_prompt / evaluation_prompt**: 可自定义用于指导 LLM 进行总结和评估的提示。
+#### 🗑️ 遗忘机制
+- **智能清理**: 基于重要性衰减的自动清理
+- **批量处理**: 分页加载，支持大规模记忆库
+- **保留策略**: 灵活的天数和阈值配置
 
-#### 遗忘代理 (Forgetting Agent)
-- **enabled**: 是否启用自动遗忘。
-- **check_interval_hours**: 遗忘代理的运行周期（小时）。
-- **retention_days**: 记忆的最长无条件保留天数。
-- **importance_decay_rate**: 重要性得分的每日衰减率。
+#### 🛡️ 过滤隔离
+- **人格过滤**: 按AI人格隔离记忆，互不干扰
+- **会话隔离**: 会话级别的记忆独立性
+- **状态管理**: 记忆状态(活跃/归档/删除)精细控制
 
 </details>
 
-## 🛠️ 管理命令
+### 3. 高级配置示例
 
-插件在后台自动运行，无需用户干预。同时，也为管理员提供了以下命令来便捷地管理记忆库：
+```yaml
+# 针对中文优化的推荐配置
+sparse_retriever:
+  bm25_k1: 1.2      # 中文词频参数
+  bm25_b: 0.75      # 文档长度归一化
+  use_jieba: true   # 启用中文分词
 
-> **数据模型变更**: 请注意，从最新版本开始，记忆的唯一标识符（ID）已从 UUID 更改为自增整数。这简化了管理操作。
+fusion:
+  strategy: "hybrid_rrf"    # 自适应融合策略
+  rrf_k: 60                # RRF参数
+  diversity_bonus: 0.1     # 多样性奖励
 
+recall_engine:
+  retrieval_mode: "hybrid"  # 混合检索模式
+  similarity_weight: 0.6   # 相似度权重
+  importance_weight: 0.2   # 重要性权重  
+  recency_weight: 0.2      # 新近度权重
+```
+
+## 🛠️ 完整管理命令
+
+插件在后台自动运行，同时提供了强大的命令行管理界面：
+
+### 📊 基础管理
 | 命令 | 参数 | 描述 |
 | :--- | :--- | :--- |
-| `/lmem status` | - | 查看当前记忆库的状态，如总记忆数。 |
-| `/lmem search` | `<query> [k=3]` | 手动搜索与 `<query>` 相关的记忆，并以卡片形式展示结果。 |
-| `/lmem forget` | `<memory_id>` | 强制删除一条指定整数 ID 的记忆。 |
-| `/lmem run_forgetting_agent` | - | 手动触发一次遗忘代理的清理任务。 |
+| `/lmem status` | - | 📈 查看记忆库状态和统计信息 |
+| `/lmem search` | `<query> [k=3]` | 🔍 手动搜索记忆，支持详细信息展示 |
+| `/lmem forget` | `<memory_id>` | 🗑️ 删除指定ID的记忆 |
 
----
+### 🧠 引擎管理  
+| 命令 | 参数 | 描述 |
+| :--- | :--- | :--- |
+| `/lmem run_forgetting_agent` | - | 🔄 手动触发遗忘代理清理任务 |
+| `/lmem sparse_rebuild` | - | 🏗️ 重建稀疏检索索引 |
+| `/lmem sparse_test` | `<query> [k=5]` | ⚡ 测试稀疏检索功能 |
+
+### ⚙️ 配置管理
+| 命令 | 参数 | 描述 |
+| :--- | :--- | :--- |
+| `/lmem config` | `[show\|validate]` | 📋 显示或验证当前配置 |
+| `/lmem search_mode` | `<hybrid\|dense\|sparse>` | 🔄 切换检索模式 |
+
+### 🔄 融合策略管理  
+| 命令 | 参数 | 描述 | 
+| :--- | :--- | :--- |
+| `/lmem fusion` | `[strategy] [param=value]` | 🎯 管理融合策略和参数 |
+| `/lmem test_fusion` | `<query> [k=5]` | 🧪 测试当前融合策略效果 |
+
+### 📝 记忆编辑 *(新增)*
+| 命令 | 参数 | 描述 |
+| :--- | :--- | :--- |
+| `/lmem edit` | `<id> <field> <value> [reason]` | ✏️ 精确编辑记忆内容或元数据 |
+| `/lmem update` | `<id>` | 📝 交互式记忆编辑引导 |
+| `/lmem history` | `<id>` | 📚 查看记忆的完整更新历史 |
+
+#### 编辑示例
+```bash
+# 编辑记忆内容
+/lmem edit 123 content 这是新的记忆内容 修正错误信息
+
+# 调整重要性评分
+/lmem edit 123 importance 0.9 提高重要性
+
+# 更改记忆类型
+/lmem edit 123 type PREFERENCE 重新分类为偏好
+
+# 归档记忆
+/lmem edit 123 status archived 项目已完成
+```
+
+#### 融合策略示例  
+```bash  
+# 查看当前融合配置
+/lmem fusion show
+
+# 切换到自适应RRF
+/lmem fusion hybrid_rrf
+
+# 调整凸组合参数
+/lmem fusion convex convex_lambda=0.6
+
+# 调整加权融合权重
+/lmem fusion weighted dense_weight=0.8
+
+# 测试融合效果
+/lmem test_fusion "用户的兴趣爱好" 5
+```
+
+## 🎯 性能优化与最佳实践
+
+### 💾 内存管理
+- **分页加载**: 支持大规模记忆库，避免OOM
+- **会话清理**: 智能TTL机制，自动清理过期会话
+- **事务安全**: SQLite事务保证数据一致性
+
+### 🚀 并发处理
+- **异步初始化**: 避免阻塞主线程
+- **后台任务**: 反思和遗忘任务后台执行
+- **错误重试**: 自动重试机制，提高稳定性
+
+### 🔧 故障排除
+
+<details>
+<summary><strong>🚨 常见问题解决方案</strong></summary>
+
+#### Q: 插件初始化失败
+```bash
+# 检查依赖安装
+pip install faiss-cpu pydantic jieba
+
+# 验证配置
+/lmem config validate
+```
+
+#### Q: 检索效果不佳  
+```bash
+# 尝试不同融合策略
+/lmem fusion adaptive
+
+# 重建稀疏索引
+/lmem sparse_rebuild
+
+# 调整检索模式
+/lmem search_mode hybrid
+```
+
+#### Q: 内存占用过高
+```bash
+# 手动触发遗忘
+/lmem run_forgetting_agent
+
+# 检查会话数量
+/lmem config show
+```
+
+</details>
+
+## 📚 相关文档
+
+- 📖 [融合策略详解](FUSION_STRATEGIES.md) - 深入了解9种融合算法
+- ⚙️ [配置参考](docs/CONFIG.md) - 完整配置参数说明  
+- 🔧 [开发指南](docs/DEVELOPMENT.md) - 插件开发和扩展指南
+- 🐛 [故障排除](docs/TROUBLESHOOTING.md) - 常见问题和解决方案
 
 ## 🤝 贡献
 
-欢迎各种形式的贡献，包括提交问题 (Issues)、请求新功能 (Feature Requests) 和代码贡献 (Pull Requests)。
+欢迎各种形式的贡献：
+- 🐛 **问题报告**: [GitHub Issues](https://github.com/lxfight/astrbot_plugin_livingmemory/issues)
+- 💡 **功能建议**: [Feature Requests](https://github.com/lxfight/astrbot_plugin_livingmemory/issues/new?template=feature_request.md)
+- 🔧 **代码贡献**: [Pull Requests](https://github.com/lxfight/astrbot_plugin_livingmemory/pulls)
+- 📖 **文档改进**: 欢迎改进文档和示例
 
 ## 📄 许可证
 
-本项目遵循 AGPLv3 许可证。请查看 [LICENSE](LICENSE) 文件以获取更多信息。
+本项目遵循 **AGPLv3** 许可证 - 详见 [LICENSE](LICENSE) 文件。
+
+---
+
+<div align="center">
+<br>
+
+**⭐ 如果这个项目对您有帮助，请给我们一个 Star！**
+
+<br>
+
+*LivingMemory - 让AI拥有真正的生命记忆 🧠✨*
+
+</div>
