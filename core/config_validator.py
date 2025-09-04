@@ -5,7 +5,7 @@ config_validator.py - 配置验证模块
 """
 
 from typing import Dict, Any, List, Optional, Union
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from astrbot.api import logger
 
 
@@ -18,17 +18,24 @@ class SessionManagerConfig(BaseModel):
 class RecallEngineConfig(BaseModel):
     """回忆引擎配置"""
     top_k: int = Field(default=5, ge=1, le=50, description="返回记忆数量")
-    recall_strategy: str = Field(default="weighted", regex="^(similarity|weighted)$", description="召回策略")
-    retrieval_mode: str = Field(default="hybrid", regex="^(hybrid|dense|sparse)$", description="检索模式")
+    recall_strategy: str = Field(default="weighted", pattern="^(similarity|weighted)$", description="召回策略")
+    retrieval_mode: str = Field(default="hybrid", pattern="^(hybrid|dense|sparse)$", description="检索模式")
     similarity_weight: float = Field(default=0.6, ge=0.0, le=1.0, description="相似度权重")
     importance_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="重要性权重") 
     recency_weight: float = Field(default=0.2, ge=0.0, le=1.0, description="新近度权重")
     
-    @validator('similarity_weight', 'importance_weight', 'recency_weight')
-    def validate_weights_sum(cls, v, values):
+    @field_validator('similarity_weight', 'importance_weight', 'recency_weight')
+    @classmethod
+    def validate_weights_sum(cls, v, info):
         """验证权重总和接近1.0"""
-        if len(values) == 2:  # 当所有权重都设置后
-            total = v + values.get('similarity_weight', 0) + values.get('importance_weight', 0)
+        # Pydantic v2 中 info 对象包含字段信息
+        if info.data and len(info.data) >= 2:  # 当有足够的权重值时
+            similarity = info.data.get('similarity_weight', 0.6)
+            importance = info.data.get('importance_weight', 0.2) 
+            recency = info.data.get('recency_weight', 0.2)
+            
+            # 计算当前已设置的权重总和
+            total = similarity + importance + recency
             if abs(total - 1.0) > 0.1:
                 logger.warning(f"权重总和 {total:.2f} 偏离1.0较多，可能影响检索效果")
         return v
@@ -38,7 +45,7 @@ class FusionConfig(BaseModel):
     """结果融合配置"""
     strategy: str = Field(
         default="rrf", 
-        regex="^(rrf|weighted|cascade|adaptive|convex|interleave|rank_fusion|score_fusion|hybrid_rrf)$", 
+        pattern="^(rrf|weighted|cascade|adaptive|convex|interleave|rank_fusion|score_fusion|hybrid_rrf)$", 
         description="融合策略"
     )
     rrf_k: int = Field(default=60, ge=1, le=1000, description="RRF参数k")
@@ -111,8 +118,7 @@ class LivingMemoryConfig(BaseModel):
     # 为融合配置添加嵌套支持
     fusion: Optional[FusionConfig] = Field(default_factory=FusionConfig, description="结果融合配置")
 
-    class Config:
-        extra = "allow"  # 允许额外字段，向前兼容
+    model_config = {"extra": "allow"}  # 允许额外字段，向前兼容
 
 
 def validate_config(raw_config: Dict[str, Any]) -> LivingMemoryConfig:
@@ -144,7 +150,7 @@ def get_default_config() -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: 默认配置
     """
-    return LivingMemoryConfig().dict()
+    return LivingMemoryConfig().model_dump()
 
 
 def merge_config_with_defaults(user_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -187,7 +193,7 @@ def validate_runtime_config_changes(current_config: LivingMemoryConfig, changes:
     """
     try:
         # 创建更新后的配置副本进行验证
-        updated_dict = current_config.dict()
+        updated_dict = current_config.model_dump()
         
         def update_nested_dict(target: Dict[str, Any], updates: Dict[str, Any]):
             for key, value in updates.items():

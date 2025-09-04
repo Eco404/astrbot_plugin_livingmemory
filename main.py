@@ -109,7 +109,7 @@ class LivingMemoryPlugin(Star):
         try:
             merged_config = merge_config_with_defaults(config)
             self.config_obj = validate_config(merged_config)
-            self.config = self.config_obj.dict()  # 保持向后兼容
+            self.config = self.config_obj.model_dump()  # 保持向后兼容
             logger.info("插件配置验证成功")
         except Exception as e:
             logger.error(f"配置验证失败，使用默认配置: {e}")
