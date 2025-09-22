@@ -8,10 +8,18 @@ import time
 import json
 from typing import List, Dict, Any, Optional, Union
 import numpy as np
+from datetime import datetime
 
 from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB, Result
 from astrbot.api import logger
 from ..core.utils import safe_parse_metadata, safe_serialize_metadata, validate_timestamp
+
+class DateTimeEncoder(json.JSONEncoder):
+    """自定义 JSON 编码器，用于处理 datetime 对象"""
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
 
 
 class FaissManager:
@@ -28,6 +36,7 @@ class FaissManager:
             db (FaissVecDB): 已经实例化的 FaissVecDB 对象。
         """
         self.db = db
+        self.datetime_encoder = DateTimeEncoder()
 
     async def add_memory(
         self,
@@ -79,7 +88,10 @@ class FaissManager:
                 "persona_id": persona_id,
             }
 
-        inserted_id = await self.db.insert(content=content, metadata=metadata)
+        # 确保元数据中的所有 datetime 对象都被序列化为字符串
+        serialized_metadata = json.loads(self.datetime_encoder.encode(metadata))
+        
+        inserted_id = await self.db.insert(content=content, metadata=serialized_metadata)
         return inserted_id
 
     async def search_memory(
