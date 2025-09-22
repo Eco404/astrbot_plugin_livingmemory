@@ -213,6 +213,13 @@ def get_now_datetime(tz_str: str = "Asia/Shanghai") -> datetime:
     Returns:
         datetime: 带有时区信息的当前时间
     """
+    # 如果传入的是 Context 对象，则使用从上下文获取时间的方法
+    # 检查传入的是否是 Context 对象
+    from astrbot.api.star import Context  # 导入 Context 类型
+    if isinstance(tz_str, Context):
+        # 如果是 Context 对象，调用专门的函数处理
+        return get_now_datetime_from_context(tz_str)
+        
     try:
         timezone = pytz.timezone(tz_str)
     except pytz.UnknownTimeZoneError:
