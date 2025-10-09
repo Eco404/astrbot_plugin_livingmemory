@@ -143,9 +143,29 @@ class LivingMemoryPlugin(Star):
             max_sessions=session_config.get("max_sessions", 1000),
             session_ttl=session_config.get("session_ttl", 3600)
         )
+        # 启动初始化任务
+        self._initialization_task = asyncio.create_task(self._wait_for_astrbot_and_initialize())
 
+    async def _wait_for_astrbot_and_initialize(self):
+        """
+        等待AstrBot完全启动后进行插件初始化。
+        通过检查是否有可用的LLM provider来判断AstrBot是否完全启动。
+        在插件重载时，由于AstrBot仍在运行，providers应该立即可用。
+        """
+        logger.info("等待AstrBot完全启动...")
 
-    @filter.on_astrbot_loaded()
+        while True:
+            # 检查是否有可用的LLM provider，这表明AstrBot已完全初始化
+            if self.context.get_using_provider() is not None:
+                try:
+                    await self._initialize_plugin()
+                    break
+                except Exception as e:
+                    logger.error(f"插件初始化失败: {e}", exc_info=True)
+                    break
+
+            await asyncio.sleep(1)
+
     async def _initialize_plugin(self):
         """
         执行插件的异步初始化。
