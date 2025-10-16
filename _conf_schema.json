@@ -308,9 +308,9 @@
       },
       "host": {
         "description": "WebUI主机",
-        "hint": "WebUI服务监听的主机地址",
+        "hint": "WebUI服务监听的主机地址，Docker环境建议使用0.0.0.0",
         "type": "string",
-        "default": "127.0.0.1"
+        "default": "0.0.0.0"
       },
       "access_password": {
         "description": "访问密码",
