@@ -150,7 +150,6 @@ class LivingMemoryPlugin(Star):
         # 初始化WebUI（暂时不在这里初始化，会在_initialize_plugin中完成）
         self.webui = None
 
-
     @filter.on_astrbot_loaded
     async def _initialize_plugin(self):
         """
