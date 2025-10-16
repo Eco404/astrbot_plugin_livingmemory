@@ -142,6 +142,9 @@ jieba>=0.42.1
 
 > 启用 WebUI 时务必设置强密码，避免长期记忆泄露。配置生效后访问 `http://host:port` 即可使用白色现代风格的控制台。
 
+- **首次安装或升级插件时**，请先到 AstrBot 插件配置页填写 `webui_settings.access_password`；未设置密码会导致 WebUI 无法启用。
+- 如果插件运行在 Docker / 容器环境，为方便外部访问可将 `webui_settings.host` 调整为 `0.0.0.0`，再配合映射的端口进行访问。
+
 ### 3. 高级配置示例
 
 ```yaml
