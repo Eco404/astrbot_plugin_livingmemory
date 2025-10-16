@@ -612,9 +612,7 @@ def format_datetime(timestamp: float) -> str:
         return '-'
 
 # 注册过滤器
-@app.template_filter('format_datetime')
-def template_format_datetime(timestamp: float) -> str:
-    return format_datetime(timestamp)
+templates.env.filters['format_datetime'] = format_datetime
 
 # 登录页面
 @app.get("/", response_class=HTMLResponse)
