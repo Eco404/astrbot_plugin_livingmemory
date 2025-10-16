@@ -1,3 +1,25 @@
+# AstrBot LivingMemory 插件依赖
+
+# WebUI相关依赖
+aiohttp>=3.8.0
+aiohttp-cors>=0.7.0
+
+# 核心依赖（已包含在AstrBot中）
+# astrbot>=3.0.0
+
+# 数据库和向量检索
 faiss-cpu>=1.7.0
-networkx>=3.0
+numpy>=1.21.0
+scipy>=1.7.0
+
+# 自然语言处理
 jieba>=0.42.1
+networkx>=3.0
+scikit-learn>=1.0.0
+
+# 配置验证
+pydantic>=2.0.0
+
+# 日志和工具
+python-dateutil>=2.8.0
+pytz>=2021.1
