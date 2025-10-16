@@ -20,7 +20,7 @@ except ImportError:
 
 from astrbot.api import logger
 
-from ..core.handlers.webui_handler import WebUIHandler
+from astrbot_plugin_livingmemory.core.handlers.webui_handler import WebUIHandler
 
 
 class WebUIServer:

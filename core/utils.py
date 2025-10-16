@@ -15,7 +15,7 @@ import pytz
 from astrbot.api import logger
 from astrbot.api.star import Context
 from astrbot.api.event import AstrMessageEvent
-from ..storage.faiss_manager import Result
+from astrbot_plugin_livingmemory.storage.faiss_manager import Result
 from .constants import MEMORY_INJECTION_HEADER, MEMORY_INJECTION_FOOTER
 
 

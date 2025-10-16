@@ -105,7 +105,7 @@ class AdminHandler(BaseHandler):
                 
         elif action == "validate":
             try:
-                from ..config_validator import validate_config
+                from astrbot_plugin_livingmemory.core.config_validator import validate_config
                 # 重新验证当前配置
                 validate_config(self.config)
                 return self.create_response(True, "配置验证通过，所有参数均有效")

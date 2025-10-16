@@ -10,8 +10,8 @@ import time
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from astrbot.api import logger
-from ..core.utils import safe_parse_metadata
-from ..storage.faiss_manager import FaissManager
+from astrbot_plugin_livingmemory.core.utils import safe_parse_metadata
+from astrbot_plugin_livingmemory.storage.faiss_manager import FaissManager
 
 
 class WebUIHandler:

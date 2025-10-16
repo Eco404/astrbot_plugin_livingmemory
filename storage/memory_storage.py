@@ -4,7 +4,7 @@ import json
 import aiosqlite
 from typing import List, Dict, Any
 
-from ..core.models.memory_models import Memory
+from astrbot_plugin_livingmemory.core.models.memory_models import Memory
 
 
 class MemoryStorage:

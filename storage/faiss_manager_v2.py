@@ -8,7 +8,7 @@ import aiosqlite
 
 from astrbot.api import logger
 
-from ..core.models.memory_models import (
+from astrbot_plugin_livingmemory.core.models.memory_models import (
     Memory,
     AccessInfo,  # noqa: F401
     UserFeedback,  # noqa: F401
