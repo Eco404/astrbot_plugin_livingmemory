@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/main.css">
+</head>
+<body>
+    <div class="container">
+        <!-- 顶部导航栏 -->
+        <nav class="navbar">
+            <div class="navbar-left">
+                <h1 class="logo">LivingMemory</h1>
+            </div>
+            <div class="navbar-right">
+                <a href="/logout" class="btn btn-sm btn-secondary">退出登录</a>
+            </div>
+        </nav>
+        
+        <!-- 侧边导航 -->
+        <div class="sidebar">
+            <ul class="nav-menu">
+                <li class="nav-item">
+                    <a href="/dashboard">
+                        <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20">
+                            <path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"></path>
+                        </svg>
+                        <span>仪表板</span>
+                    </a>
+                </li>
+                <li class="nav-item active">
+                    <a href="/memories">
+                        <svg class="nav-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="20" height="20">
+                            <path d="M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42A8.96 8.96 0 0 0 12 4c-4.97 0-9 4.03-9 9s4.02 9 9 9 9-4.03 9-9c0-2.12-.74-4.07-1.97-5.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"></path>
+                        </svg>
+                        <span>记忆管理</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <div class="page-header">
+                <h2>记忆管理</h2>
+                <div class="page-actions">
+                    <button id="batchDeleteBtn" class="btn btn-danger" disabled>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16">
+                            <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"></path>
+                        </svg>
+                        批量删除
+                    </button>
+                    <div class="page-info">
+                        <span id="totalCount">0 条记录</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="card-body">
+                    <!-- 表格加载状态 -->
+                    <div id="loading" class="loading">
+                        <div class="loading-spinner"></div>
+                        <p>正在加载记忆数据...</p>
+                    </div>
+                    
+                    <!-- 无数据状态 -->
+                    <div id="emptyState" class="empty-state" style="display: none;">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="64" height="64">
+                            <path fill="#e0e0e0" d="M15 1H9v2h6V1zm-4 13h2V8h-2v6zm8.03-6.61l1.42-1.42c-.43-.51-.9-.99-1.41-1.41l-1.42 1.42A8.96 8.96 0 0 0 12 4c-4.97 0-9 4.03-9 9s4.02 9 9 9 9-4.03 9-9c0-2.12-.74-4.07-1.97-5.61zM12 20c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"></path>
+                        </svg>
+                        <p>暂无记忆数据</p>
+                    </div>
+                    
+                    <!-- 表格 -->
+                    <div id="tableContainer" class="table-container" style="display: none;">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th class="checkbox-col">
+                                        <input type="checkbox" id="selectAll">
+                                    </th>
+                                    <th>ID</th>
+                                    <th>内容</th>
+                                    <th>重要性</th>
+                                    <th>创建时间</th>
+                                    <th>最后访问</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="memoriesTableBody"></tbody>
+                        </table>
+                    </div>
+                    
+                    <!-- 分页控件 -->
+                    <div id="pagination" class="pagination" style="display: none;">
+                        <div class="pagination-info">
+                            <span id="pageInfo">显示 0-0 条，共 0 条</span>
+                        </div>
+                        <div class="pagination-controls">
+                            <button id="prevPage" class="btn btn-sm" disabled>
+                                上一页
+                            </button>
+                            <div id="pageButtons" class="page-buttons"></div>
+                            <button id="nextPage" class="btn btn-sm" disabled>
+                                下一页
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <!-- 确认对话框 -->
+    <div id="confirmDialog" class="dialog" style="display: none;">
+        <div class="dialog-content">
+            <div class="dialog-header">
+                <h3>确认删除</h3>
+            </div>
+            <div class="dialog-body">
+                <p>确定要删除选中的 <span id="deleteCount">0</span> 条记忆吗？此操作不可撤销。</p>
+            </div>
+            <div class="dialog-footer">
+                <button id="cancelDelete" class="btn btn-secondary">取消</button>
+                <button id="confirmDelete" class="btn btn-danger">确认删除</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 消息提示 -->
+    <div id="toast" class="toast" style="display: none;">
+        <div class="toast-content">
+            <svg id="toastIcon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"></path>
+            </svg>
+            <span id="toastMessage"></span>
+        </div>
+    </div>
+    
+    <script src="/static/main.js"></script>
+    <script>
+        // 当前页码
+        let currentPage = 1;
+        // 每页显示数量
+        const pageSize = parseInt('{{ page_size }}') || 10;
+        // 选中的记忆ID
+        let selectedMemoryIds = [];
+        
+        // 初始化页面
+        document.addEventListener('DOMContentLoaded', function() {
+            // 加载数据
+            loadMemories();
+            
+            // 全选/取消全选
+            document.getElementById('selectAll').addEventListener('change', function() {
+                const isChecked = this.checked;
+                const checkboxes = document.querySelectorAll('tbody input[type="checkbox"]');
+                
+                selectedMemoryIds = [];
+                checkboxes.forEach(checkbox => {
+                    checkbox.checked = isChecked;
+                    if (isChecked) {
+                        selectedMemoryIds.push(parseInt(checkbox.value));
+                    }
+                });
+                
+                updateBatchDeleteButton();
+            });
+            
+            // 批量删除按钮
+            document.getElementById('batchDeleteBtn').addEventListener('click', showDeleteConfirm);
+            
+            // 确认删除
+            document.getElementById('confirmDelete').addEventListener('click', performBatchDelete);
+            
+            // 取消删除
+            document.getElementById('cancelDelete').addEventListener('click', hideDeleteConfirm);
+        });
+        
+        // 加载记忆数据
+        async function loadMemories() {
+            showLoading();
+            
+            try {
+                const response = await fetch(`/memories/data?page=${currentPage}&page_size=${pageSize}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    showToast('加载数据失败: ' + data.error, 'error');
+                    return;
+                }
+                
+                renderMemories(data);
+                renderPagination(data);
+                updateTotalCount(data.total);
+                
+                // 显示表格或空状态
+                if (data.total === 0) {
+                    document.getElementById('emptyState').style.display = 'flex';
+                    document.getElementById('tableContainer').style.display = 'none';
+                    document.getElementById('pagination').style.display = 'none';
+                } else {
+                    document.getElementById('emptyState').style.display = 'none';
+                    document.getElementById('tableContainer').style.display = 'block';
+                    document.getElementById('pagination').style.display = 'flex';
+                }
+                
+            } catch (error) {
+                console.error('加载记忆失败:', error);
+                showToast('加载数据失败', 'error');
+                document.getElementById('emptyState').style.display = 'flex';
+            } finally {
+                hideLoading();
+            }
+        }
+        
+        // 渲染记忆列表
+        function renderMemories(data) {
+            const tbody = document.getElementById('memoriesTableBody');
+            tbody.innerHTML = '';
+            
+            selectedMemoryIds = [];
+            document.getElementById('selectAll').checked = false;
+            
+            data.items.forEach(memory => {
+                const row = document.createElement('tr');
+                
+                // 处理元数据
+                const metadata = memory.metadata || {};
+                const importance = metadata.importance || 'N/A';
+                const createTime = memory.create_time || 'N/A';
+                const lastAccessTime = memory.last_access_time || 'N/A';
+                
+                row.innerHTML = `
+                    <td class="checkbox-col">
+                        <input type="checkbox" class="memory-checkbox" value="${memory.id}">
+                    </td>
+                    <td>${memory.id}</td>
+                    <td class="content-col">
+                        <div class="content-preview">${truncateText(memory.content, 100)}</div>
+                    </td>
+                    <td>${formatImportance(importance)}</td>
+                    <td>${createTime}</td>
+                    <td>${lastAccessTime}</td>
+                    <td class="action-col">
+                        <a href="/memory/${memory.id}" class="btn btn-sm btn-primary">查看详情</a>
+                    </td>
+                `;
+                
+                tbody.appendChild(row);
+                
+                // 添加复选框事件
+                const checkbox = row.querySelector('.memory-checkbox');
+                checkbox.addEventListener('change', function() {
+                    const memoryId = parseInt(this.value);
+                    if (this.checked) {
+                        selectedMemoryIds.push(memoryId);
+                    } else {
+                        selectedMemoryIds = selectedMemoryIds.filter(id => id !== memoryId);
+                    }
+                    updateBatchDeleteButton();
+                    // 取消全选
+                    document.getElementById('selectAll').checked = false;
+                });
+            });
+        }
+        
+        // 渲染分页控件
+        function renderPagination(data) {
+            const { page, pages } = data;
+            const pageButtons = document.getElementById('pageButtons');
+            
+            // 更新页码信息
+            const startItem = (page - 1) * pageSize + 1;
+            const endItem = Math.min(page * pageSize, data.total);
+            document.getElementById('pageInfo').textContent = 
+                `显示 ${startItem}-${endItem} 条，共 ${data.total} 条`;
+            
+            // 更新按钮状态
+            document.getElementById('prevPage').disabled = page <= 1;
+            document.getElementById('nextPage').disabled = page >= pages;
+            
+            // 生成页码按钮
+            pageButtons.innerHTML = '';
+            
+            // 计算显示的页码范围
+            let startPage = Math.max(1, page - 2);
+            let endPage = Math.min(pages, startPage + 4);
+            
+            // 调整起始页码，确保显示5个页码
+            if (endPage - startPage < 4 && startPage > 1) {
+                startPage = Math.max(1, endPage - 4);
+            }
+            
+            // 添加页码按钮
+            for (let i = startPage; i <= endPage; i++) {
+                const button = document.createElement('button');
+                button.className = `btn btn-sm ${i === page ? 'btn-primary' : 'btn-secondary'}`;
+                button.textContent = i;
+                button.addEventListener('click', function() {
+                    currentPage = i;
+                    loadMemories();
+                });
+                pageButtons.appendChild(button);
+            }
+            
+            // 添加事件监听
+            document.getElementById('prevPage').addEventListener('click', function() {
+                if (currentPage > 1) {
+                    currentPage--;
+                    loadMemories();
+                }
+            });
+            
+            document.getElementById('nextPage').addEventListener('click', function() {
+                if (currentPage < pages) {
+                    currentPage++;
+                    loadMemories();
+                }
+            });
+        }
+        
+        // 更新批量删除按钮状态
+        function updateBatchDeleteButton() {
+            const batchDeleteBtn = document.getElementById('batchDeleteBtn');
+            batchDeleteBtn.disabled = selectedMemoryIds.length === 0;
+        }
+        
+        // 更新总数显示
+        function updateTotalCount(total) {
+            document.getElementById('totalCount').textContent = `${total} 条记录`;
+        }
+        
+        // 显示删除确认对话框
+        function showDeleteConfirm() {
+            document.getElementById('deleteCount').textContent = selectedMemoryIds.length;
+            document.getElementById('confirmDialog').style.display = 'flex';
+        }
+        
+        // 隐藏删除确认对话框
+        function hideDeleteConfirm() {
+            document.getElementById('confirmDialog').style.display = 'none';
+        }
+        
+        // 执行批量删除
+        async function performBatchDelete() {
+            try {
+                const response = await fetch('/memories/delete', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ ids: selectedMemoryIds })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showToast(result.message, 'success');
+                    // 重新加载当前页数据
+                    loadMemories();
+                } else {
+                    showToast('删除失败: ' + (result.error || '未知错误'), 'error');
+                }
+            } catch (error) {
+                console.error('删除记忆失败:', error);
+                showToast('删除失败: ' + error.message, 'error');
+            } finally {
+                hideDeleteConfirm();
+            }
+        }
+        
+        // 显示加载状态
+        function showLoading() {
+            document.getElementById('loading').style.display = 'flex';
+        }
+        
+        // 隐藏加载状态
+        function hideLoading() {
+            document.getElementById('loading').style.display = 'none';
+        }
+        
+        // 显示消息提示
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            const toastMessage = document.getElementById('toastMessage');
+            const toastIcon = document.getElementById('toastIcon');
+            
+            toastMessage.textContent = message;
+            
+            // 设置图标和样式
+            if (type === 'success') {
+                toast.className = 'toast toast-success';
+                toastIcon.innerHTML = '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"></path>';
+            } else {
+                toast.className = 'toast toast-error';
+                toastIcon.innerHTML = '<path d="M11 15h2v2h-2v-2zm0-8h2v6h-2V7zm.99-5C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8z"></path>';
+            }
+            
+            // 显示toast
+            toast.style.display = 'block';
+            
+            // 3秒后隐藏
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 3000);
+        }
+        
+        // 截断文本
+        function truncateText(text, maxLength) {
+            if (!text) return '';
+            if (text.length <= maxLength) return text;
+            return text.substring(0, maxLength) + '...';
+        }
+        
+        // 格式化重要性
+        function formatImportance(importance) {
+            if (typeof importance !== 'number') return 'N/A';
+            return (importance * 100).toFixed(0) + '%';
+        }
+    </script>
+</body>
+</html>
