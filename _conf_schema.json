@@ -288,5 +288,42 @@
         "default": 1000
       }
     }
+  },
+  "webui_settings": {
+    "description": "WebUI设置",
+    "hint": "记忆插件WebUI配置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用WebUI",
+        "hint": "是否启用WebUI管理界面",
+        "type": "bool",
+        "default": true
+      },
+      "port": {
+        "description": "WebUI端口",
+        "hint": "WebUI服务监听的端口号",
+        "type": "int",
+        "default": 8080
+      },
+      "host": {
+        "description": "WebUI主机",
+        "hint": "WebUI服务监听的主机地址",
+        "type": "string",
+        "default": "127.0.0.1"
+      },
+      "access_password": {
+        "description": "访问密码",
+        "hint": "WebUI访问密码，请设置强密码",
+        "type": "string",
+        "default": ""
+      },
+      "session_timeout": {
+        "description": "会话超时时间(秒)",
+        "hint": "WebUI会话的超时时间，超过此时间需要重新验证密码。",
+        "type": "int",
+        "default": 3600
+      }
+    }
   }
 }
