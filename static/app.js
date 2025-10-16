@@ -5,11 +5,12 @@
     pageSize: 20,
     total: 0,
     hasMore: false,
-    items: [],
+    loadAll: false,
     filters: {
       status: "all",
       keyword: "",
     },
+    items: [],
     selected: new Set(),
   };
 
@@ -20,6 +21,7 @@
     loginError: document.getElementById("login-error"),
     passwordInput: document.getElementById("password-input"),
     refreshButton: document.getElementById("refresh-button"),
+    loadAllButton: document.getElementById("load-all-button"),
     logoutButton: document.getElementById("logout-button"),
     stats: {
       total: document.getElementById("stat-total"),
@@ -39,13 +41,24 @@
     nextPage: document.getElementById("next-page"),
     pageSize: document.getElementById("page-size"),
     toast: document.getElementById("toast"),
+    drawer: document.getElementById("detail-drawer"),
+    drawerClose: document.getElementById("drawer-close"),
+    detail: {
+      memoryId: document.getElementById("detail-memory-id"),
+      source: document.getElementById("detail-source"),
+      status: document.getElementById("detail-status"),
+      importance: document.getElementById("detail-importance"),
+      type: document.getElementById("detail-type"),
+      created: document.getElementById("detail-created"),
+      access: document.getElementById("detail-access"),
+      json: document.getElementById("detail-json"),
+    },
   };
 
   function init() {
     dom.loginForm.addEventListener("submit", onLoginSubmit);
-    dom.refreshButton.addEventListener("click", () => {
-      fetchAll();
-    });
+    dom.refreshButton.addEventListener("click", fetchAll);
+    dom.loadAllButton.addEventListener("click", onLoadAll);
     dom.logoutButton.addEventListener("click", logout);
     dom.prevPage.addEventListener("click", goPrevPage);
     dom.nextPage.addEventListener("click", goNextPage);
@@ -53,7 +66,7 @@
     dom.applyFilter.addEventListener("click", applyFilters);
     dom.selectAll.addEventListener("change", toggleSelectAll);
     dom.deleteSelected.addEventListener("click", deleteSelectedMemories);
-
+    dom.drawerClose.addEventListener("click", closeDetailDrawer);
     dom.keywordInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
@@ -107,9 +120,6 @@
   }
 
   async function fetchAll() {
-    state.selected.clear();
-    dom.selectAll.checked = false;
-    dom.deleteSelected.disabled = true;
     await Promise.all([fetchStats(), fetchMemories()]);
   }
 
@@ -117,9 +127,10 @@
     try {
       const stats = await apiRequest("/api/stats");
       dom.stats.total.textContent = stats.total_memories ?? "--";
-      dom.stats.active.textContent = stats.status_breakdown?.active ?? 0;
-      dom.stats.archived.textContent = stats.status_breakdown?.archived ?? 0;
-      dom.stats.deleted.textContent = stats.status_breakdown?.deleted ?? 0;
+      const breakdown = stats.status_breakdown || {};
+      dom.stats.active.textContent = breakdown.active ?? 0;
+      dom.stats.archived.textContent = breakdown.archived ?? 0;
+      dom.stats.deleted.textContent = breakdown.deleted ?? 0;
       dom.stats.sessions.textContent = stats.active_sessions ?? 0;
     } catch (error) {
       showToast(error.message || "无法获取统计信息", true);
@@ -127,15 +138,32 @@
   }
 
   async function fetchMemories() {
+    const params = new URLSearchParams();
+    if (!state.loadAll) {
+      params.set("page", String(state.page));
+      params.set("page_size", String(state.pageSize));
+    } else {
+      params.set("all", "true");
+    }
+    if (state.filters.status && state.filters.status !== "all") {
+      params.set("status", state.filters.status);
+    }
+    if (state.filters.keyword) {
+      params.set("keyword", state.filters.keyword);
+    }
+
     try {
-      const params = new URLSearchParams({
-        page: String(state.page),
-        page_size: String(state.pageSize),
-      });
-      const result = await apiRequest(`/api/memories?${params.toString()}`);
-      state.total = result.total || 0;
-      state.hasMore = Boolean(result.has_more);
-      state.items = Array.isArray(result.items) ? result.items : [];
+      const data = await apiRequest(`/api/memories?${params.toString()}`);
+      state.items = Array.isArray(data.items) ? data.items : [];
+      state.total = data.total ?? state.items.length;
+      state.hasMore = Boolean(data.has_more);
+      state.page = data.page ?? state.page;
+      if (!state.loadAll && data.page_size) {
+        state.pageSize = data.page_size;
+      }
+      state.selected.clear();
+      dom.selectAll.checked = false;
+      dom.deleteSelected.disabled = true;
       renderTable();
       updatePagination();
     } catch (error) {
@@ -144,82 +172,80 @@
     }
   }
 
-  function getFilteredItems() {
-    let items = [...state.items];
-    if (state.filters.status !== "all") {
-      items = items.filter((item) => item.status === state.filters.status);
-    }
-    if (state.filters.keyword) {
-      const keyword = state.filters.keyword.toLowerCase();
-      items = items.filter((item) => {
-        const base = `${item.content || ""} ${item.session_id || ""}`.toLowerCase();
-        return base.includes(keyword);
-      });
-    }
-    return items;
-  }
-
   function renderTable() {
-    const items = getFilteredItems();
-    if (!items.length) {
+    if (!state.items.length) {
       renderEmptyTable("暂无数据");
       return;
     }
 
-    const rows = items
+    const rows = state.items
       .map((item) => {
-        const id = String(item.id);
-        const checked = state.selected.has(id) ? "checked" : "";
-        const statusClass = `status-pill ${item.status || "active"}`;
-        const importance = item.importance !== undefined && item.importance !== null
-          ? Number(item.importance).toFixed(2)
-          : "--";
-        const preview = escapeHTML(item.preview || item.content || "")
-          .replace(/\s+/g, " ")
-          .slice(0, 140);
+        const key = getItemKey(item);
+        const checked = state.selected.has(key) ? "checked" : "";
+        const rowClass = state.selected.has(key) ? "selected" : "";
+        const importance =
+          item.importance !== undefined && item.importance !== null
+            ? Number(item.importance).toFixed(2)
+            : "--";
+        const statusPill = formatStatus(item.status);
 
         return `
-          <tr data-id="${id}" class="${state.selected.has(id) ? "selected" : ""}">
+          <tr data-key="${escapeHTML(key)}" class="${rowClass}">
             <td>
-              <input type="checkbox" class="row-select" data-id="${id}" ${checked} />
+              <input type="checkbox" class="row-select" data-key="${escapeHTML(
+                key
+              )}" ${checked} />
             </td>
-            <td>${id}</td>
+            <td class="mono">${escapeHTML(item.memory_id || item.doc_id || "-")}</td>
+            <td class="summary-cell" title="${escapeHTML(item.summary || "")}">
+              ${escapeHTML(item.summary || "（无摘要）")}
+            </td>
+            <td>${escapeHTML(item.memory_type || "--")}</td>
+            <td>${importance}</td>
+            <td>${statusPill}</td>
+            <td>${escapeHTML(item.created_at || "--")}</td>
+            <td>${escapeHTML(item.last_access || "--")}</td>
             <td>
-              <div class="preview" title="${preview}">
-                ${preview || "<span class='muted'>（无内容）</span>"}
+              <div class="table-actions">
+                <button class="ghost detail-btn" data-key="${escapeHTML(
+                  key
+                )}">详情</button>
               </div>
             </td>
-            <td>${importance}</td>
-            <td><span class="${statusClass}">${statusLabel(item.status)}</span></td>
-            <td>${formatDate(item.create_time) || "--"}</td>
-            <td>${formatDate(item.last_access_time) || "--"}</td>
           </tr>
         `;
       })
       .join("");
 
     dom.tableBody.innerHTML = rows;
+
     dom.tableBody.querySelectorAll(".row-select").forEach((checkbox) => {
       checkbox.addEventListener("change", onRowSelect);
+    });
+    dom.tableBody.querySelectorAll(".detail-btn").forEach((btn) => {
+      btn.addEventListener("click", onDetailClick);
     });
   }
 
   function renderEmptyTable(message) {
     dom.tableBody.innerHTML = `
       <tr>
-        <td colspan="7" class="empty">${escapeHTML(message)}</td>
+        <td colspan="9" class="empty">${escapeHTML(message)}</td>
       </tr>
     `;
   }
 
   function onRowSelect(event) {
     const checkbox = event.target;
-    const id = String(checkbox.dataset.id);
+    const key = checkbox.dataset.key;
+    if (!key) return;
+
     if (checkbox.checked) {
-      state.selected.add(id);
+      state.selected.add(key);
     } else {
-      state.selected.delete(id);
+      state.selected.delete(key);
     }
+
     const row = checkbox.closest("tr");
     if (row) {
       row.classList.toggle("selected", checkbox.checked);
@@ -229,13 +255,16 @@
 
   function toggleSelectAll(event) {
     const checked = event.target.checked;
-    const items = getFilteredItems();
-    items.forEach((item) => {
-      const id = String(item.id);
+    if (!state.items.length) {
+      event.target.checked = false;
+      return;
+    }
+    state.items.forEach((item) => {
+      const key = getItemKey(item);
       if (checked) {
-        state.selected.add(id);
+        state.selected.add(key);
       } else {
-        state.selected.delete(id);
+        state.selected.delete(key);
       }
     });
     renderTable();
@@ -244,18 +273,31 @@
 
   function updateSelectionState() {
     dom.deleteSelected.disabled = state.selected.size === 0;
-
-    const items = getFilteredItems();
-    const allSelected = items.length > 0 && items.every((item) => state.selected.has(String(item.id)));
+    if (!state.items.length) {
+      dom.selectAll.checked = false;
+      return;
+    }
+    const allSelected = state.items.every((item) =>
+      state.selected.has(getItemKey(item))
+    );
     dom.selectAll.checked = allSelected;
   }
 
   function applyFilters() {
     state.filters.status = dom.statusFilter.value;
     state.filters.keyword = dom.keywordInput.value.trim();
-    state.selected.clear();
-    renderTable();
-    updateSelectionState();
+    state.page = 1;
+    state.loadAll = false;
+    dom.loadAllButton.classList.remove("active");
+    fetchMemories();
+  }
+
+  function onPageSizeChange() {
+    state.pageSize = Number(dom.pageSize.value) || 20;
+    state.page = 1;
+    state.loadAll = false;
+    dom.loadAllButton.classList.remove("active");
+    fetchMemories();
   }
 
   function goPrevPage() {
@@ -272,18 +314,24 @@
     }
   }
 
-  function onPageSizeChange() {
-    state.pageSize = Number(dom.pageSize.value) || 20;
+  function onLoadAll() {
+    state.loadAll = !state.loadAll;
+    dom.loadAllButton.classList.toggle("active", state.loadAll);
     state.page = 1;
     fetchMemories();
   }
 
   function updatePagination() {
-    const totalPages = state.total ? Math.max(1, Math.ceil(state.total / state.pageSize)) : 1;
-    const filteredCount = getFilteredItems().length;
-    dom.paginationInfo.textContent = `第 ${state.page} 页 · 共 ${totalPages} 页 · 当前 ${filteredCount} 条`;
-    dom.prevPage.disabled = state.page <= 1;
-    dom.nextPage.disabled = !state.hasMore;
+    if (state.loadAll) {
+      dom.paginationInfo.textContent = `共 ${state.items.length} 条记录`;
+    } else {
+      const totalPages = state.total
+        ? Math.max(1, Math.ceil(state.total / state.pageSize))
+        : 1;
+      dom.paginationInfo.textContent = `第 ${state.page} / ${totalPages} 页 · 共 ${state.total} 条`;
+    }
+    dom.prevPage.disabled = state.loadAll || state.page <= 1;
+    dom.nextPage.disabled = state.loadAll || !state.hasMore;
   }
 
   async function deleteSelectedMemories() {
@@ -296,11 +344,27 @@
       return;
     }
 
+    const docIds = [];
+    const memoryIds = [];
+    state.items.forEach((item) => {
+      const key = getItemKey(item);
+      if (state.selected.has(key)) {
+        if (item.doc_id !== null && item.doc_id !== undefined) {
+          docIds.push(item.doc_id);
+        }
+        if (item.memory_id) {
+          memoryIds.push(item.memory_id);
+        }
+      }
+    });
+
     try {
-      const ids = Array.from(state.selected).map((id) => Number(id));
       await apiRequest("/api/memories", {
         method: "DELETE",
-        body: { ids },
+        body: {
+          doc_ids: docIds,
+          memory_ids: memoryIds,
+        },
       });
       showToast(`已删除 ${count} 条记忆`);
       state.selected.clear();
@@ -317,6 +381,37 @@
     localStorage.removeItem("lmem_token");
     switchView("login");
     showToast("已退出登录");
+  }
+
+  function onDetailClick(event) {
+    const key = event.target.dataset.key;
+    if (!key) return;
+    const item = state.items.find((record) => getItemKey(record) === key);
+    if (!item) {
+      showToast("未找到对应的记录", true);
+      return;
+    }
+    openDetailDrawer(item);
+  }
+
+  function openDetailDrawer(item) {
+    dom.detail.memoryId.textContent = item.memory_id || item.doc_id || "--";
+    dom.detail.source.textContent =
+      item.source === "storage" ? "自定义存储" : "向量存储";
+    dom.detail.status.textContent = item.status || "--";
+    dom.detail.importance.textContent =
+      item.importance !== undefined && item.importance !== null
+        ? Number(item.importance).toFixed(2)
+        : "--";
+    dom.detail.type.textContent = item.memory_type || "--";
+    dom.detail.created.textContent = item.created_at || "--";
+    dom.detail.access.textContent = item.last_access || "--";
+    dom.detail.json.textContent = item.raw_json || JSON.stringify(item.raw, null, 2);
+    dom.drawer.classList.remove("hidden");
+  }
+
+  function closeDetailDrawer() {
+    dom.drawer.classList.add("hidden");
   }
 
   async function apiRequest(path, options = {}) {
@@ -360,7 +455,8 @@
     }
 
     if (!response.ok) {
-      const message = (data && (data.detail || data.message)) || "请求失败";
+      const message =
+        (data && (data.detail || data.message || data.error)) || "请求失败";
       throw new Error(message);
     }
 
@@ -383,43 +479,35 @@
     clearTimeout(showToast._timer);
     showToast._timer = setTimeout(() => {
       dom.toast.classList.remove("visible");
-    }, 3200);
+    }, 3000);
   }
 
-  function statusLabel(status) {
-    switch ((status || "").toLowerCase()) {
-      case "archived":
-        return "已归档";
-      case "deleted":
-        return "已删除";
-      default:
-        return "活跃";
+  function getItemKey(item) {
+    if (item.doc_id !== null && item.doc_id !== undefined) {
+      return `doc:${item.doc_id}`;
     }
+    if (item.memory_id) {
+      return `mem:${item.memory_id}`;
+    }
+    return `row:${state.items.indexOf(item)}`;
   }
 
-  function formatDate(value) {
-    if (!value || value === "None") {
-      return "";
+  function formatStatus(status) {
+    const value = (status || "active").toLowerCase();
+    let text = "活跃";
+    let cls = "status-pill";
+    if (value === "archived") {
+      text = "已归档";
+      cls += " archived";
+    } else if (value === "deleted") {
+      text = "已删除";
+      cls += " deleted";
     }
-    try {
-      const date = new Date(value);
-      if (Number.isNaN(date.getTime())) {
-        return value;
-      }
-      return date.toLocaleString("zh-CN", {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-    } catch (error) {
-      return value;
-    }
+    return `<span class="${cls}">${text}</span>`;
   }
 
   function escapeHTML(text) {
-    return String(text)
+    return String(text ?? "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
@@ -429,4 +517,3 @@
 
   document.addEventListener("DOMContentLoaded", init);
 })();
-

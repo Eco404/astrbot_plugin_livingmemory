@@ -9,67 +9,67 @@
   <body>
     <div id="app">
       <section id="login-view" class="view active">
-        <div class="card">
-          <h1 class="brand">LivingMemory 控制台</h1>
-          <p class="subtitle">请输入入口密码以继续</p>
+        <div class="panel">
+          <h1 class="title">LivingMemory 控制台</h1>
+          <p class="intro">请输入入口密码以保护长期记忆数据</p>
           <form id="login-form" autocomplete="off">
             <label for="password-input">入口密码</label>
             <input
               id="password-input"
               type="password"
               name="password"
-              required
-              autocomplete="current-password"
               placeholder="••••••••"
+              required
             />
             <button type="submit" class="primary">登录</button>
-            <p id="login-error" class="error" role="alert"></p>
+            <p id="login-error" class="form-error" role="alert"></p>
           </form>
         </div>
       </section>
 
       <section id="dashboard-view" class="view">
         <header class="top-bar">
-          <div>
-            <h1 class="brand">LivingMemory 控制台</h1>
-            <p class="subtitle">安全管理 AstrBot 的长期记忆</p>
+          <div class="brand">
+            <h1>LivingMemory 控制台</h1>
+            <p class="subtitle">自定义记忆数据库管理面板</p>
           </div>
-          <div class="top-actions">
+          <div class="toolbar">
             <button id="refresh-button" class="ghost">刷新</button>
-            <button id="logout-button" class="danger ghost">退出</button>
+            <button id="load-all-button" class="ghost">加载全部</button>
+            <button id="logout-button" class="ghost">退出</button>
           </div>
         </header>
 
-        <main>
-          <section id="stats-panel" class="card stats">
-            <div class="stat-item">
-              <span class="label">总记忆数</span>
+        <main class="content">
+          <section class="card stats-card">
+            <div class="stat">
+              <span class="label">总记忆</span>
               <span class="value" id="stat-total">--</span>
             </div>
-            <div class="stat-item">
+            <div class="stat">
               <span class="label">活跃</span>
-              <span class="value accent" id="stat-active">--</span>
+              <span class="value" id="stat-active">--</span>
             </div>
-            <div class="stat-item">
+            <div class="stat">
               <span class="label">已归档</span>
               <span class="value" id="stat-archived">--</span>
             </div>
-            <div class="stat-item">
+            <div class="stat">
               <span class="label">已删除</span>
               <span class="value" id="stat-deleted">--</span>
             </div>
-            <div class="stat-item">
+            <div class="stat">
               <span class="label">活跃会话</span>
               <span class="value" id="stat-sessions">--</span>
             </div>
           </section>
 
-          <section class="card controls">
-            <div class="filters">
+          <section class="card controls-card">
+            <div class="filter-group">
               <input
                 type="text"
                 id="keyword-input"
-                placeholder="搜索内容关键字"
+                placeholder="关键字（支持 memory_id / 内容搜索）"
               />
               <select id="status-filter">
                 <option value="all">全部状态</option>
@@ -77,12 +77,12 @@
                 <option value="archived">已归档</option>
                 <option value="deleted">已删除</option>
               </select>
-              <button id="apply-filter" class="ghost">应用筛选</button>
+              <button id="apply-filter" class="ghost">筛选</button>
             </div>
-            <div class="bulk-actions">
+            <div class="selection-group">
               <label class="checkbox">
                 <input type="checkbox" id="select-all" />
-                <span>全选当前页</span>
+                <span>全选</span>
               </label>
               <button id="delete-selected" class="danger" disabled>
                 删除选中
@@ -90,28 +90,30 @@
             </div>
           </section>
 
-          <section class="card table-wrapper">
+          <section class="card table-card">
             <table id="memories-table">
               <thead>
                 <tr>
                   <th></th>
-                  <th>ID</th>
-                  <th>内容预览</th>
+                  <th>记忆 ID</th>
+                  <th>摘要</th>
+                  <th>类型</th>
                   <th>重要性</th>
                   <th>状态</th>
                   <th>创建时间</th>
                   <th>最后访问</th>
+                  <th>操作</th>
                 </tr>
               </thead>
               <tbody id="memories-body">
                 <tr>
-                  <td colspan="7" class="empty">暂无数据</td>
+                  <td colspan="9" class="empty">暂无数据</td>
                 </tr>
               </tbody>
             </table>
           </section>
 
-          <section class="pagination">
+          <section class="card pagination-card">
             <div class="pager">
               <button id="prev-page" class="ghost">上一页</button>
               <span id="pagination-info">第 1 页</span>
@@ -123,6 +125,7 @@
                 <option value="10">10</option>
                 <option value="20" selected>20</option>
                 <option value="50">50</option>
+                <option value="100">100</option>
               </select>
             </div>
           </section>
@@ -130,9 +133,48 @@
       </section>
     </div>
 
+    <div id="detail-drawer" class="drawer hidden">
+      <div class="drawer-content">
+        <button id="drawer-close" class="close-btn" aria-label="关闭详情">×</button>
+        <h2>记忆详情</h2>
+        <div class="detail-meta">
+          <div>
+            <span class="meta-label">记忆 ID</span>
+            <span class="meta-value" id="detail-memory-id">--</span>
+          </div>
+          <div>
+            <span class="meta-label">来源</span>
+            <span class="meta-value" id="detail-source">--</span>
+          </div>
+          <div>
+            <span class="meta-label">状态</span>
+            <span class="meta-value" id="detail-status">--</span>
+          </div>
+          <div>
+            <span class="meta-label">重要性</span>
+            <span class="meta-value" id="detail-importance">--</span>
+          </div>
+          <div>
+            <span class="meta-label">类型</span>
+            <span class="meta-value" id="detail-type">--</span>
+          </div>
+          <div>
+            <span class="meta-label">创建时间</span>
+            <span class="meta-value" id="detail-created">--</span>
+          </div>
+          <div>
+            <span class="meta-label">最后访问</span>
+            <span class="meta-value" id="detail-access">--</span>
+          </div>
+        </div>
+        <div class="detail-json">
+          <pre id="detail-json"></pre>
+        </div>
+      </div>
+    </div>
+
     <div id="toast" class="toast hidden"></div>
 
     <script src="/static/app.js"></script>
   </body>
 </html>
-

@@ -2,7 +2,7 @@
 
 import json
 import aiosqlite
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from ..core.models.memory_models import Memory
 
@@ -146,5 +146,120 @@ class MemoryStorage:
         await self.connection.execute(
             f"UPDATE memories SET status = ? WHERE id IN ({placeholders})",
             [new_status] + internal_ids,
+        )
+        await self.connection.commit()
+
+    async def count_memories(
+        self,
+        status: Optional[str] = None,
+        keyword: Optional[str] = None,
+    ) -> int:
+        """统计记忆数量，可选状态与关键字过滤。"""
+        sql = "SELECT COUNT(*) FROM memories"
+        conditions = []
+        params: List[Any] = []
+
+        if status and status != "all":
+            conditions.append("status = ?")
+            params.append(status)
+
+        if keyword:
+            conditions.append("(memory_data LIKE ? OR memory_id LIKE ?)")
+            like = f"%{keyword}%"
+            params.extend([like, like])
+
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+
+        async with self.connection.execute(sql, params) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+
+    async def get_memories_paginated(
+        self,
+        page_size: int,
+        offset: int = 0,
+        status: Optional[str] = None,
+        keyword: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """分页获取记忆数据，同时支持状态和关键字筛选。"""
+        sql = """
+            SELECT id, memory_id, timestamp, memory_type, importance_score, status, community_id, memory_data
+            FROM memories
+        """
+        conditions = []
+        params: List[Any] = []
+
+        if status and status != "all":
+            conditions.append("status = ?")
+            params.append(status)
+
+        if keyword:
+            conditions.append("(memory_data LIKE ? OR memory_id LIKE ?)")
+            like = f"%{keyword}%"
+            params.extend([like, like])
+
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+
+        sql += " ORDER BY datetime(timestamp) DESC, id DESC"
+
+        if page_size > 0:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([page_size, offset])
+
+        async with self.connection.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+
+        memories: List[Dict[str, Any]] = []
+        for row in rows:
+            memories.append(
+                {
+                    "id": row[0],
+                    "memory_id": row[1],
+                    "timestamp": row[2],
+                    "memory_type": row[3],
+                    "importance_score": row[4],
+                    "status": row[5],
+                    "community_id": row[6],
+                    "memory_data": row[7],
+                }
+            )
+        return memories
+
+    async def get_memory_by_memory_id(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        """根据 memory_id 获取单条记忆。"""
+        async with self.connection.execute(
+            """
+            SELECT id, memory_id, timestamp, memory_type, importance_score, status, community_id, memory_data
+            FROM memories
+            WHERE memory_id = ?
+            """,
+            (memory_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "id": row[0],
+            "memory_id": row[1],
+            "timestamp": row[2],
+            "memory_type": row[3],
+            "importance_score": row[4],
+            "status": row[5],
+            "community_id": row[6],
+            "memory_data": row[7],
+        }
+
+    async def delete_memories_by_memory_ids(self, memory_ids: List[str]):
+        """根据 memory_id 列表删除记忆。"""
+        if not memory_ids:
+            return
+
+        placeholders = ",".join("?" for _ in memory_ids)
+        await self.connection.execute(
+            f"DELETE FROM memories WHERE memory_id IN ({placeholders})", memory_ids
         )
         await self.connection.commit()

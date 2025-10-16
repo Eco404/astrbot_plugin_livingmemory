@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-server.py - LivingMemory WebUI 服务
-提供基于 FastAPI 的管理界面后端，包括登录、记忆浏览与批量删除功能。
+server.py - LivingMemory WebUI backend
+Provides authentication, memory browsing, detail view and bulk deletion APIs built on FastAPI.
 """
 
+
 import asyncio
+import json
 import secrets
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -20,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from astrbot.api import logger
 
 from ..core.utils import safe_parse_metadata
+from ..storage.memory_storage import MemoryStorage
 
 if TYPE_CHECKING:
     from ..storage.faiss_manager import FaissManager
@@ -28,7 +31,7 @@ if TYPE_CHECKING:
 
 class WebUIServer:
     """
-    负责启动和管理 WebUI 服务的类。
+    Helper class responsible for starting and managing the LivingMemory WebUI service.
     """
 
     def __init__(
@@ -51,7 +54,10 @@ class WebUIServer:
         self._server: Optional[uvicorn.Server] = None
         self._server_task: Optional[asyncio.Task] = None
 
-        self._app = FastAPI(title="LivingMemory 控制台", version="1.0.0")
+        self.memory_storage: Optional[MemoryStorage] = None
+        self._storage_prepared = False
+
+        self._app = FastAPI(title="LivingMemory 控制台", version="1.1.0")
         self._setup_routes()
 
     # ------------------------------------------------------------------
@@ -65,6 +71,8 @@ class WebUIServer:
         if self._server_task and not self._server_task.done():
             logger.warning("WebUI 服务已经在运行")
             return
+
+        await self._prepare_storage()
 
         config = uvicorn.Config(
             app=self._app,
@@ -104,6 +112,34 @@ class WebUIServer:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _prepare_storage(self):
+        """
+        初始化自定义记忆存储（如可用）。
+        """
+        if self._storage_prepared:
+            return
+
+        connection = None
+        try:
+            doc_storage = getattr(self.faiss_manager.db, "document_storage", None)
+            connection = getattr(doc_storage, "connection", None)
+        except Exception as exc:  # pragma: no cover
+            logger.debug(f"获取文档存储连接失败: {exc}")
+
+        if connection:
+            try:
+                storage = MemoryStorage(connection)
+                await storage.initialize_schema()
+                self.memory_storage = storage
+                logger.info("WebUI 已接入插件自定义的记忆存储（SQLite）")
+            except Exception as exc:
+                logger.warning(f"初始化 MemoryStorage 失败，将回退至文档存储: {exc}")
+                self.memory_storage = None
+        else:
+            logger.debug("未获取到 MemoryStorage 连接，将仅使用 Faiss 文档存储接口")
+
+        self._storage_prepared = True
 
     def _setup_routes(self):
         """
@@ -162,66 +198,107 @@ class WebUIServer:
             request: Request,
             token: str = Depends(self._auth_dependency()),
         ):
-            page = max(1, int(request.query_params.get("page", 1)))
-            page_size = min(200, max(1, int(request.query_params.get("page_size", 50))))
+            query = request.query_params
+            keyword = query.get("keyword", "").strip()
+            status_filter = query.get("status", "all").strip() or "all"
+            load_all = query.get("all", "false").lower() == "true"
 
-            offset = (page - 1) * page_size
+            if load_all:
+                page = 1
+                page_size = 0
+                offset = 0
+            else:
+                page = max(1, int(query.get("page", 1)))
+                page_size = query.get("page_size")
+                page_size = min(200, max(1, int(page_size))) if page_size else 50
+                offset = (page - 1) * page_size
+
             try:
-                memories_task = asyncio.create_task(
-                    self.faiss_manager.get_memories_paginated(
-                        page_size=page_size, offset=offset
-                    )
+                total, items = await self._fetch_memories(
+                    page=page,
+                    page_size=page_size,
+                    offset=offset,
+                    status_filter=status_filter,
+                    keyword=keyword,
+                    load_all=load_all,
                 )
-                total_task = asyncio.create_task(
-                    self.faiss_manager.count_total_memories()
-                )
-
-                raw_memories = await memories_task
-                total = await total_task
             except Exception as exc:
                 logger.error(f"获取记忆列表失败: {exc}", exc_info=True)
-                raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="读取记忆失败")
+                raise HTTPException(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR, detail="读取记忆失败"
+                ) from exc
 
-            items = [self._format_memory(record) for record in raw_memories]
+            has_more = False if load_all else offset + len(items) < total
+            effective_page_size = page_size if page_size else len(items)
 
             return {
                 "items": items,
                 "page": page,
-                "page_size": page_size,
+                "page_size": effective_page_size,
                 "total": total,
-                "has_more": offset + len(items) < total,
+                "has_more": has_more,
             }
+
+        @self._app.get("/api/memories/{memory_id}")
+        async def memory_detail(
+            memory_id: str, token: str = Depends(self._auth_dependency())
+        ):
+            detail = await self._get_memory_detail(memory_id)
+            if not detail:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="未找到记忆记录")
+            return detail
 
         @self._app.delete("/api/memories")
         async def delete_memories(
             payload: Dict[str, Any],
             token: str = Depends(self._auth_dependency()),
         ):
-            ids = payload.get("ids") or payload.get("doc_ids")
-            if not isinstance(ids, list) or not ids:
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="需要提供待删除的记忆ID列表")
+            doc_ids = payload.get("doc_ids") or payload.get("ids") or []
+            memory_ids = payload.get("memory_ids") or []
 
-            try:
-                doc_ids = [int(x) for x in ids]
-            except (TypeError, ValueError):
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="ID列表必须为整数")
+            if not doc_ids and not memory_ids:
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, detail="需要提供待删除的记忆ID列表"
+                )
 
-            try:
-                await self.faiss_manager.delete_memories(doc_ids)
-            except Exception as exc:
-                logger.error(f"删除记忆失败: {exc}", exc_info=True)
-                raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="删除记忆失败")
+            deleted_docs = 0
+            deleted_memories = 0
 
-            return {"deleted": len(doc_ids)}
+            if doc_ids:
+                try:
+                    doc_ids_int = [int(x) for x in doc_ids]
+                    await self.faiss_manager.delete_memories(doc_ids_int)
+                    deleted_docs = len(doc_ids_int)
+                except Exception as exc:
+                    logger.error(f"删除 Faiss 记忆失败: {exc}", exc_info=True)
+                    raise HTTPException(
+                        status.HTTP_500_INTERNAL_SERVER_ERROR, detail="向量记忆删除失败"
+                    ) from exc
+
+            if memory_ids and self.memory_storage:
+                try:
+                    ids = [str(x) for x in memory_ids]
+                    await self.memory_storage.delete_memories_by_memory_ids(ids)
+                    deleted_memories = len(ids)
+                except Exception as exc:
+                    logger.error(f"删除结构化记忆失败: {exc}", exc_info=True)
+                    raise HTTPException(
+                        status.HTTP_500_INTERNAL_SERVER_ERROR, detail="结构化记忆删除失败"
+                    ) from exc
+
+            return {
+                "deleted_doc_count": deleted_docs,
+                "deleted_memory_count": deleted_memories,
+            }
 
         @self._app.get("/api/stats")
         async def stats(token: str = Depends(self._auth_dependency())):
-            total_task = asyncio.create_task(self.faiss_manager.count_total_memories())
-            status_task = asyncio.create_task(self._collect_status_counts())
-
-            total = await total_task
-            status_counts = await status_task
-            active_sessions = self.session_manager.get_session_count() if self.session_manager else 0
+            total, status_counts = await self._gather_statistics()
+            active_sessions = (
+                self.session_manager.get_session_count()
+                if self.session_manager
+                else 0
+            )
 
             return {
                 "total_memories": total,
@@ -233,6 +310,160 @@ class WebUIServer:
         @self._app.get("/api/health")
         async def health():
             return {"status": "ok"}
+
+    async def _fetch_memories(
+        self,
+        page: int,
+        page_size: int,
+        offset: int,
+        status_filter: str,
+        keyword: str,
+        load_all: bool,
+    ) -> Tuple[int, list]:
+        if self.memory_storage:
+            if load_all:
+                records = await self.memory_storage.get_memories_paginated(
+                    page_size=0,
+                    offset=0,
+                    status=status_filter,
+                    keyword=keyword,
+                )
+                total = len(records)
+            else:
+                total = await self.memory_storage.count_memories(
+                    status=status_filter, keyword=keyword
+                )
+                records = await self.memory_storage.get_memories_paginated(
+                    page_size=page_size,
+                    offset=offset,
+                    status=status_filter,
+                    keyword=keyword,
+                )
+            items = [self._format_memory(record, source="storage") for record in records]
+            return total, items
+
+        # fallback: 使用 Faiss 文档存储
+        total = await self.faiss_manager.count_total_memories()
+        fetch_size = page_size if page_size else max(total, 1)
+        records = await self.faiss_manager.get_memories_paginated(
+            page_size=fetch_size, offset=offset
+        )
+        items = [self._format_memory(record, source="faiss") for record in records]
+        return total, items
+
+    async def _get_memory_detail(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        if self.memory_storage:
+            record = await self.memory_storage.get_memory_by_memory_id(memory_id)
+            if record:
+                return self._format_memory(record, source="storage")
+
+        # fallback: 尝试按文档ID查询
+        try:
+            doc_id = int(memory_id)
+        except ValueError:
+            return None
+
+        try:
+            docs = await self.faiss_manager.db.document_storage.get_documents(
+                ids=[doc_id]
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.error(f"查询文档存储失败: {exc}")
+            return None
+
+        if not docs:
+            return None
+
+        return self._format_memory(docs[0], source="faiss")
+
+    def _format_memory(self, raw: Dict[str, Any], source: str) -> Dict[str, Any]:
+        if source == "storage":
+            memory_json = raw.get("memory_data") or "{}"
+            parsed = self._safe_json_loads(memory_json)
+            metadata = parsed.get("metadata", {})
+            access_info = metadata.get("access_info", {})
+
+            summary = (
+                parsed.get("summary")
+                or parsed.get("description")
+                or parsed.get("memory_content")
+                or ""
+            )
+            created_at = parsed.get("timestamp") or raw.get("timestamp")
+            last_access = access_info.get("last_accessed_timestamp")
+
+            return {
+                "doc_id": None,
+                "memory_id": raw.get("memory_id"),
+                "summary": summary,
+                "memory_type": raw.get("memory_type"),
+                "importance": raw.get("importance_score"),
+                "status": raw.get("status"),
+                "created_at": self._format_timestamp(created_at),
+                "last_access": self._format_timestamp(last_access),
+                "source": "storage",
+                "metadata": metadata,
+                "raw": parsed,
+                "raw_json": memory_json,
+            }
+
+        metadata = safe_parse_metadata(raw.get("metadata"))
+        summary = metadata.get("memory_content") or raw.get("content") or ""
+        importance = metadata.get("importance")
+        event_type = metadata.get("event_type")
+        status = metadata.get("status", "active")
+        created_at = metadata.get("create_time")
+        last_access = metadata.get("last_access_time")
+
+        return {
+            "doc_id": raw.get("id"),
+            "memory_id": metadata.get("memory_id"),
+            "summary": summary,
+            "memory_type": event_type,
+            "importance": importance,
+            "status": status,
+            "created_at": self._format_timestamp(created_at),
+            "last_access": self._format_timestamp(last_access),
+            "source": "faiss",
+            "metadata": metadata,
+            "raw": {
+                "content": raw.get("content"),
+                "metadata": metadata,
+            },
+            "raw_json": json.dumps(metadata, ensure_ascii=False),
+        }
+
+    async def _gather_statistics(self) -> Tuple[int, Dict[str, int]]:
+        if self.memory_storage:
+            total = await self.memory_storage.count_memories()
+            counts = {
+                "active": await self.memory_storage.count_memories(status="active"),
+                "archived": await self.memory_storage.count_memories(status="archived"),
+                "deleted": await self.memory_storage.count_memories(status="deleted"),
+            }
+            return total, counts
+
+        total = await self.faiss_manager.count_total_memories()
+        counts = await self._collect_status_counts()
+        return total, counts
+
+    async def _collect_status_counts(self) -> Dict[str, int]:
+        """
+        针对 Faiss 文档存储统计不同状态的记忆数量。
+        """
+        counts: Dict[str, int] = {"active": 0, "archived": 0, "deleted": 0}
+        try:
+            conn = self.faiss_manager.db.document_storage.connection
+            async with conn.execute(
+                "SELECT json_extract(metadata, '$.status') AS status FROM documents"
+            ) as cursor:
+                rows = await cursor.fetchall()
+            for row in rows:
+                status_value = row[0] if row and row[0] else "active"
+                counts[status_value] = counts.get(status_value, 0) + 1
+        except Exception as exc:
+            logger.error(f"统计记忆状态失败: {exc}", exc_info=True)
+        return counts
 
     def _auth_dependency(self):
         async def dependency(request: Request) -> str:
@@ -271,53 +502,26 @@ class WebUIServer:
         custom_header = request.headers.get("X-Auth-Token", "")
         return custom_header.strip()
 
-    def _format_memory(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        metadata = safe_parse_metadata(raw.get("metadata"))
-
-        def _fmt(ts: Any) -> Optional[str]:
-            if ts in (None, "", 0):
-                return None
-            if isinstance(ts, (int, float)):
-                return datetime.fromtimestamp(ts).isoformat(sep=" ", timespec="seconds")
-            try:
-                return datetime.fromtimestamp(float(ts)).isoformat(sep=" ", timespec="seconds")
-            except (TypeError, ValueError):
-                if isinstance(ts, str):
-                    return ts
-            return None
-
-        content = raw.get("content") or ""
-        preview = content.replace("\n", " ")[:120]
-
-        return {
-            "id": raw.get("id"),
-            "content": content,
-            "preview": preview,
-            "importance": metadata.get("importance"),
-            "event_type": metadata.get("event_type"),
-            "status": metadata.get("status", "active"),
-            "session_id": metadata.get("session_id"),
-            "persona_id": metadata.get("persona_id"),
-            "create_time": _fmt(metadata.get("create_time")),
-            "last_access_time": _fmt(metadata.get("last_access_time")),
-            "last_updated_time": _fmt(metadata.get("last_updated_time")),
-        }
-
-    async def _collect_status_counts(self) -> Dict[str, int]:
-        """
-        统计不同状态的记忆数量。
-        """
-        counts: Dict[str, int] = {"active": 0, "archived": 0, "deleted": 0}
+    @staticmethod
+    def _safe_json_loads(payload: str) -> Dict[str, Any]:
+        if not payload:
+            return {}
         try:
-            conn = self.faiss_manager.db.document_storage.connection
-            async with conn.execute(
-                "SELECT json_extract(metadata, '$.status') AS status FROM documents"
-            ) as cursor:
-                rows = await cursor.fetchall()
-            for row in rows:
-                status_value = row[0] if row and row[0] else "active"
-                counts[status_value] = counts.get(status_value, 0) + 1
-        except Exception as exc:
-            logger.error(f"统计记忆状态失败: {exc}", exc_info=True)
-        return counts
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            return {}
 
+    @staticmethod
+    def _format_timestamp(value: Any) -> Optional[str]:
+        if not value:
+            return None
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(value).isoformat(sep=" ", timespec="seconds")
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat(
+                    sep=" ", timespec="seconds"
+                )
+            except ValueError:
+                return value
+        return str(value)
