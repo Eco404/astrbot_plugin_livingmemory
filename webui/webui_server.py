@@ -102,7 +102,10 @@ class WebUIServer:
         self.app.router.add_delete('/api/memory/{memory_id}', self.delete_memory_handler)
         self.app.router.add_get('/api/stats', self.get_stats_handler)
         self.app.router.add_get('/api/search', self.search_memories_handler)
-        self.app.router.add_static('/static', 'webui/static')
+        # 获取正确的静态文件路径
+        import os
+        static_path = os.path.join(os.path.dirname(__file__), 'static')
+        self.app.router.add_static('/static', static_path)
     
     def _generate_session_id(self) -> str:
         """生成会话ID"""

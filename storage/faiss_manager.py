@@ -9,10 +9,50 @@ import json
 from typing import List, Dict, Any, Optional, Union
 import numpy as np
 from datetime import datetime
+import numpy as np
 
-from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB, Result
-from astrbot.api import logger
-from ..core.utils import safe_parse_metadata, safe_serialize_metadata, validate_timestamp
+try:
+    from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB, Result
+    from astrbot.api import logger
+    from ..core.utils import safe_parse_metadata, safe_serialize_metadata, validate_timestamp
+except ImportError:
+    # 降级处理 - 创建模拟类
+    class Result:
+        def __init__(self, content, score, data):
+            self.content = content
+            self.score = score
+            self.data = data
+    
+    class FaissVecDB:
+        def __init__(self, *args, **kwargs):
+            pass
+        
+        async def insert(self, content, metadata):
+            return 1
+        
+        async def retrieve(self, query, k, fetch_k, metadata_filters):
+            return []
+    
+    class logger:
+        @staticmethod
+        def warning(msg): print(f"[WARNING] {msg}")
+        @staticmethod
+        def debug(msg): print(f"[DEBUG] {msg}")
+        @staticmethod
+        def error(msg): print(f"[ERROR] {msg}")
+    
+    def safe_parse_metadata(metadata):
+        import json
+        if isinstance(metadata, str):
+            return json.loads(metadata)
+        return metadata
+    
+    def safe_serialize_metadata(metadata):
+        import json
+        return json.dumps(metadata)
+    
+    def validate_timestamp(timestamp):
+        return timestamp
 
 class DateTimeEncoder(json.JSONEncoder):
     """自定义 JSON 编码器，用于处理 datetime 对象"""

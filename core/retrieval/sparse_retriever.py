@@ -11,7 +11,18 @@ from dataclasses import dataclass
 import asyncio
 import aiosqlite
 
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ImportError:
+    class logger:
+        @staticmethod
+        def info(msg): print(f"[INFO] {msg}")
+        @staticmethod
+        def debug(msg): print(f"[DEBUG] {msg}")
+        @staticmethod
+        def warning(msg): print(f"[WARNING] {msg}")
+        @staticmethod
+        def error(msg): print(f"[ERROR] {msg}")
 
 try:
     import jieba

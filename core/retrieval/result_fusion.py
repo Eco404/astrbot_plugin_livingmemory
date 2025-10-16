@@ -8,7 +8,18 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from collections import defaultdict
 
-from astrbot.api import logger
+try:
+    from astrbot.api import logger
+except ImportError:
+    class logger:
+        @staticmethod
+        def info(msg): print(f"[INFO] {msg}")
+        @staticmethod
+        def debug(msg): print(f"[DEBUG] {msg}")
+        @staticmethod
+        def warning(msg): print(f"[WARNING] {msg}")
+        @staticmethod
+        def error(msg): print(f"[ERROR] {msg}")
 
 try:
     from astrbot.core.db.vec_db.faiss_impl.vec_db import Result

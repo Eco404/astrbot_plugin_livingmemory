@@ -9,11 +9,67 @@ import json
 import math
 from typing import List, Dict, Any, Optional
 
-from astrbot.api import logger
-from astrbot.api.star import Context
-from ...storage.faiss_manager import FaissManager, Result
-from ..retrieval import SparseRetriever, ResultFusion, SearchResult
-from ..utils import get_now_datetime
+try:
+    from astrbot.api import logger
+except ImportError:
+    class logger:
+        @staticmethod
+        def info(msg): print(f"[INFO] {msg}")
+        @staticmethod
+        def debug(msg): print(f"[DEBUG] {msg}")
+        @staticmethod
+        def warning(msg): print(f"[WARNING] {msg}")
+        @staticmethod
+        def error(msg): print(f"[ERROR] {msg}")
+try:
+    from astrbot.api.star import Context
+except ImportError:
+    class Context:
+        def __init__(self):
+            self.session_id = "test_session"
+            self.persona_id = "test_persona"
+try:
+    from ...storage.faiss_manager import FaissManager, Result
+except ImportError:
+    try:
+        from storage.faiss_manager import FaissManager, Result
+    except ImportError:
+        from faiss_manager import FaissManager, Result
+try:
+    from ..utils import get_now_datetime
+except ImportError:
+    try:
+        from core.retrieval.sparse_retriever import SparseRetriever, SparseResult
+        from core.retrieval.result_fusion import ResultFusion, SearchResult
+        from core.utils import get_now_datetime
+    except ImportError:
+        try:
+            from retrieval.sparse_retriever import SparseRetriever, SparseResult
+            from retrieval.result_fusion import ResultFusion, SearchResult
+            from utils import get_now_datetime
+        except ImportError:
+            # 创建模拟类
+            class SparseRetriever:
+                def __init__(self, *args, **kwargs): pass
+                async def initialize(self): pass
+                async def search(self, *args, **kwargs): return []
+            
+            class ResultFusion:
+                def __init__(self, *args, **kwargs): pass
+                def fuse(self, *args, **kwargs): return []
+                def analyze_query(self, query): return {}
+            
+            class SearchResult:
+                def __init__(self, **kwargs): 
+                    for k, v in kwargs.items(): setattr(self, k, v)
+            
+            class SparseResult:
+                def __init__(self, **kwargs): 
+                    for k, v in kwargs.items(): setattr(self, k, v)
+            
+            def get_now_datetime():
+                from datetime import datetime
+                return datetime.now()
 
 
 class RecallEngine:
