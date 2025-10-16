@@ -36,8 +36,7 @@ from .core.config_validator import validate_config, merge_config_with_defaults
 from .core.handlers import MemoryHandler, SearchHandler, AdminHandler, FusionHandler
 from .webui.webui_server import WebUIServer
 
-# WebUI服务器
-self.webui_server = None
+# WebUI服务器将在Star类中初始化
 
 # 会话管理器类，替代全局字典
 class SessionManager:
@@ -130,6 +129,7 @@ class LivingMemoryPlugin(Star):
         self.recall_engine: Optional[RecallEngine] = None
         self.reflection_engine: Optional[ReflectionEngine] = None
         self.forgetting_agent: Optional[ForgettingAgent] = None
+        self.webui_server = None
         
         # 初始化业务逻辑处理器
         self.memory_handler: Optional[MemoryHandler] = None
