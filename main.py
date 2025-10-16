@@ -147,19 +147,11 @@ class LivingMemoryPlugin(Star):
             session_ttl=session_config.get("session_ttl", 3600)
         )
         
-        # 初始化WebUI
+        # 初始化WebUI（暂时不在这里初始化，会在_initialize_plugin中完成）
         self.webui = None
-        if self.config.webui_settings.enabled:
-            self.webui = WebUIApp(
-                config_data,
-                self.faiss_manager,
-                self.memory_agent,
-                self.admin_handler,
-                self.forgetting_agent
-            )
 
 
-    @filter.on_astrbot_loaded()
+    @filter.on_astrbot_loaded
     async def _initialize_plugin(self):
         """
         执行插件的异步初始化。
@@ -216,13 +208,25 @@ class LivingMemoryPlugin(Star):
             self.admin_handler = AdminHandler(self.context, self.config, self.faiss_manager, self.forgetting_agent, self.session_manager)
             self.fusion_handler = FusionHandler(self.context, self.config, self.recall_engine)
 
-            # 启动WebUI
-            if self.webui:
-                webui_result = await self.webui.start()
-                if webui_result:
-                    logger.info(f"WebUI已成功启动，访问地址: http://127.0.0.1:{self.config.webui_settings.port}")
-                else:
-                    logger.warning("WebUI启动失败")
+            # 初始化并启动WebUI
+            if self.config.get('webui_settings', {}).get('enabled', False):
+                try:
+                    self.webui = WebUIApp(
+                        self.config,
+                        self.faiss_manager,
+                        self.recall_engine,
+                        self.admin_handler,
+                        self.forgetting_agent
+                    )
+                    webui_result = await self.webui.start()
+                    if webui_result:
+                        port = self.config.get('webui_settings', {}).get('port', 8080)
+                        logger.info(f"WebUI已成功启动，访问地址: http://127.0.0.1:{port}")
+                    else:
+                        logger.warning("WebUI启动失败")
+                except Exception as e:
+                    logger.error(f"初始化WebUI时发生错误: {e}")
+                    self.webui = None
             
             # 标记初始化完成
             self._initialization_complete = True
