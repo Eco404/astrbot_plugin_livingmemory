@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LivingMemory 控制台</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <section id="login-view" class="view active">
+        <div class="card">
+          <h1 class="brand">LivingMemory 控制台</h1>
+          <p class="subtitle">请输入入口密码以继续</p>
+          <form id="login-form" autocomplete="off">
+            <label for="password-input">入口密码</label>
+            <input
+              id="password-input"
+              type="password"
+              name="password"
+              required
+              autocomplete="current-password"
+              placeholder="••••••••"
+            />
+            <button type="submit" class="primary">登录</button>
+            <p id="login-error" class="error" role="alert"></p>
+          </form>
+        </div>
+      </section>
+
+      <section id="dashboard-view" class="view">
+        <header class="top-bar">
+          <div>
+            <h1 class="brand">LivingMemory 控制台</h1>
+            <p class="subtitle">安全管理 AstrBot 的长期记忆</p>
+          </div>
+          <div class="top-actions">
+            <button id="refresh-button" class="ghost">刷新</button>
+            <button id="logout-button" class="danger ghost">退出</button>
+          </div>
+        </header>
+
+        <main>
+          <section id="stats-panel" class="card stats">
+            <div class="stat-item">
+              <span class="label">总记忆数</span>
+              <span class="value" id="stat-total">--</span>
+            </div>
+            <div class="stat-item">
+              <span class="label">活跃</span>
+              <span class="value accent" id="stat-active">--</span>
+            </div>
+            <div class="stat-item">
+              <span class="label">已归档</span>
+              <span class="value" id="stat-archived">--</span>
+            </div>
+            <div class="stat-item">
+              <span class="label">已删除</span>
+              <span class="value" id="stat-deleted">--</span>
+            </div>
+            <div class="stat-item">
+              <span class="label">活跃会话</span>
+              <span class="value" id="stat-sessions">--</span>
+            </div>
+          </section>
+
+          <section class="card controls">
+            <div class="filters">
+              <input
+                type="text"
+                id="keyword-input"
+                placeholder="搜索内容关键字"
+              />
+              <select id="status-filter">
+                <option value="all">全部状态</option>
+                <option value="active">活跃</option>
+                <option value="archived">已归档</option>
+                <option value="deleted">已删除</option>
+              </select>
+              <button id="apply-filter" class="ghost">应用筛选</button>
+            </div>
+            <div class="bulk-actions">
+              <label class="checkbox">
+                <input type="checkbox" id="select-all" />
+                <span>全选当前页</span>
+              </label>
+              <button id="delete-selected" class="danger" disabled>
+                删除选中
+              </button>
+            </div>
+          </section>
+
+          <section class="card table-wrapper">
+            <table id="memories-table">
+              <thead>
+                <tr>
+                  <th></th>
+                  <th>ID</th>
+                  <th>内容预览</th>
+                  <th>重要性</th>
+                  <th>状态</th>
+                  <th>创建时间</th>
+                  <th>最后访问</th>
+                </tr>
+              </thead>
+              <tbody id="memories-body">
+                <tr>
+                  <td colspan="7" class="empty">暂无数据</td>
+                </tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section class="pagination">
+            <div class="pager">
+              <button id="prev-page" class="ghost">上一页</button>
+              <span id="pagination-info">第 1 页</span>
+              <button id="next-page" class="ghost">下一页</button>
+            </div>
+            <div class="page-size">
+              <label for="page-size">每页</label>
+              <select id="page-size">
+                <option value="10">10</option>
+                <option value="20" selected>20</option>
+                <option value="50">50</option>
+              </select>
+            </div>
+          </section>
+        </main>
+      </section>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
+

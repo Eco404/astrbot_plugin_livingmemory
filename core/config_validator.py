@@ -5,7 +5,7 @@ config_validator.py - 配置验证模块
 """
 
 from typing import Dict, Any, List, Optional, Union
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_validator
 from astrbot.api import logger
 
 
@@ -102,6 +102,22 @@ class TimezoneConfig(BaseModel):
     timezone: str = Field(default="Asia/Shanghai", description="时区")
 
 
+class WebUISettings(BaseModel):
+    """WebUI 设置"""
+    enabled: bool = Field(default=False, description="是否启用 WebUI 控制台")
+    host: str = Field(default="127.0.0.1", description="WebUI 监听地址")
+    port: int = Field(default=8080, ge=1, le=65535, description="WebUI 监听端口")
+    access_password: str = Field(default="", description="WebUI 入口密码")
+    session_timeout: int = Field(default=3600, ge=60, le=86400, description="WebUI 会话有效期（秒）")
+
+    @model_validator(mode='after')
+    def validate_password(self):
+        """启用时必须设置密码"""
+        if self.enabled and not self.access_password:
+            raise ValueError("启用 WebUI 时必须设置入口密码")
+        return self
+
+
 class LivingMemoryConfig(BaseModel):
     """完整插件配置"""
     session_manager: SessionManagerConfig = Field(default_factory=SessionManagerConfig)
@@ -112,6 +128,7 @@ class LivingMemoryConfig(BaseModel):
     filtering_settings: FilteringConfig = Field(default_factory=FilteringConfig)
     provider_settings: ProviderConfig = Field(default_factory=ProviderConfig)
     timezone_settings: TimezoneConfig = Field(default_factory=TimezoneConfig)
+    webui_settings: WebUISettings = Field(default_factory=WebUISettings)
     
     # 为融合配置添加嵌套支持
     fusion: Optional[FusionConfig] = Field(default_factory=FusionConfig, description="结果融合配置")

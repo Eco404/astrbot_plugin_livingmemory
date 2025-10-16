@@ -29,6 +29,43 @@
       }
     }
   },
+  "webui_settings": {
+    "description": "Web UI 访问信息",
+    "hint": "配置插件自带的 Web 控制台，进入前需要密码验证",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 WebUI",
+        "hint": "是否启用插件内置的 Web 控制台",
+        "type": "bool",
+        "default": false
+      },
+      "host": {
+        "description": "监听地址",
+        "hint": "WebUI 服务监听的主机地址",
+        "type": "string",
+        "default": "127.0.0.1"
+      },
+      "port": {
+        "description": "监听端口",
+        "hint": "WebUI 服务监听端口，默认 8080，可按需修改",
+        "type": "int",
+        "default": 8080
+      },
+      "access_password": {
+        "description": "入口密码",
+        "hint": "访问 WebUI 时需要输入的密码，建议设置复杂度较高的密码",
+        "type": "string",
+        "default": ""
+      },
+      "session_timeout": {
+        "description": "会话超时秒数",
+        "hint": "登录会话的有效时长，超过该时间需重新登录",
+        "type": "int",
+        "default": 3600
+      }
+    }
+  },
   "session_manager": {
     "description": "会话管理器设置",
     "hint": "管理用户会话状态和内存",
@@ -75,7 +112,7 @@
         "type": "string",
         "options": [
           "dense",
-          "sparse", 
+          "sparse",
           "hybrid"
         ],
         "default": "hybrid"

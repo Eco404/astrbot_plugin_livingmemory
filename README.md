@@ -122,6 +122,26 @@ jieba>=0.42.1
 
 </details>
 
+#### 🔐 WebUI 控制台
+
+- **访问安全**：新增 `webui_settings.access_password` 入口密码校验，未通过验证无法进入面板。
+- **端口可配**：默认监听 `8080`，通过 `webui_settings.port` 自定义端口，支持只监听本地或外部地址。
+- **可视化功能**：登陆后即可查看全部记忆、按页浏览、筛选状态、批量勾选删除，并实时查看记忆与会话统计。
+
+```jsonc
+{
+  "webui_settings": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8080,
+    "access_password": "请替换为安全密码",
+    "session_timeout": 3600
+  }
+}
+```
+
+> 启用 WebUI 时务必设置强密码，避免长期记忆泄露。配置生效后访问 `http://host:port` 即可使用白色现代风格的控制台。
+
 ### 3. 高级配置示例
 
 ```yaml
