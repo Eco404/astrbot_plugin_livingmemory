@@ -1,0 +1,484 @@
+{% extends "base.html" %}
+
+{% block title %}记忆管理 - LivingMemory WebUI{% endblock %}
+
+{% block content %}
+<!-- 统计信息卡片 -->
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-number">{{ stats.total_count }}</div>
+        <div class="stat-label">总记忆数</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ stats.active_count }}</div>
+        <div class="stat-label">活跃记忆</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-number">{{ stats.archived_count }}</div>
+        <div class="stat-label">归档记忆</div>
+    </div>
+</div>
+
+<!-- 工具栏 -->
+<div class="card">
+    <div class="action-bar">
+        <div>
+            <button id="delete-selected-btn" class="btn btn-danger" disabled>批量删除</button>
+            <button id="trigger-forget-btn" class="btn btn-secondary" style="margin-left: 10px;">触发遗忘</button>
+        </div>
+        <div class="filter-group">
+            <label for="status-filter">状态筛选:</label>
+            <select id="status-filter">
+                <option value="">全部</option>
+                <option value="active">活跃</option>
+                <option value="archived">归档</option>
+            </select>
+        </div>
+    </div>
+</div>
+
+<!-- 记忆列表 -->
+<div class="card">
+    <h2 style="margin-bottom: 20px;">记忆列表</h2>
+    <div id="memories-table-container">
+        <table id="memories-table">
+            <thead>
+                <tr>
+                    <th class="checkbox-column">
+                        <input type="checkbox" id="select-all-checkbox">
+                    </th>
+                    <th>ID</th>
+                    <th>内容</th>
+                    <th>重要性</th>
+                    <th>状态</th>
+                    <th>创建时间</th>
+                    <th>最后访问</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="memories-list">
+                <!-- 记忆列表将通过JavaScript动态加载 -->
+                <tr>
+                    <td colspan="8" style="text-align: center; padding: 30px;">
+                        <div>正在加载记忆数据...</div>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+        
+        <div id="pagination" class="pagination">
+            <!-- 分页将通过JavaScript动态加载 -->
+        </div>
+    </div>
+</div>
+
+<!-- 记忆详情模态框 -->
+<div id="memory-detail-modal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2>记忆详情</h2>
+            <button class="modal-close" id="close-modal">&times;</button>
+        </div>
+        <div id="memory-detail-content">
+            <!-- 详情内容将通过JavaScript动态加载 -->
+        </div>
+        <div class="modal-footer">
+            <button id="close-detail-btn" class="btn btn-secondary">关闭</button>
+        </div>
+    </div>
+</div>
+
+<!-- 删除确认模态框 -->
+<div id="delete-confirm-modal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2>确认删除</h2>
+            <button class="modal-close" id="close-delete-modal">&times;</button>
+        </div>
+        <div>
+            <p style="margin-bottom: 20px;">确定要删除选中的 <strong id="delete-count">0</strong> 条记忆吗？此操作不可撤销。</p>
+        </div>
+        <div class="modal-footer">
+            <button id="cancel-delete-btn" class="btn btn-secondary">取消</button>
+            <button id="confirm-delete-btn" class="btn btn-danger">确认删除</button>
+        </div>
+    </div>
+</div>
+
+<!-- 提示信息模态框 -->
+<div id="message-modal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2 id="message-title">提示信息</h2>
+            <button class="modal-close" id="close-message-modal">&times;</button>
+        </div>
+        <div id="message-content">
+            <p>操作成功</p>
+        </div>
+        <div class="modal-footer">
+            <button id="close-message-btn" class="btn">确定</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    // 当前选中的记忆ID
+    let selectedMemoryIds = [];
+    // 当前页码
+    let currentPage = 1;
+    // 每页大小
+    const pageSize = 50;
+    // 当前状态筛选
+    let currentStatus = '';
+    
+    // 初始化页面
+    document.addEventListener('DOMContentLoaded', function() {
+        // 加载记忆数据
+        loadMemories();
+        
+        // 绑定全选框事件
+        document.getElementById('select-all-checkbox').addEventListener('change', function() {
+            const isChecked = this.checked;
+            document.querySelectorAll('#memories-list input[type="checkbox"]').forEach(checkbox => {
+                checkbox.checked = isChecked;
+            });
+            updateSelectedMemories();
+        });
+        
+        // 绑定状态筛选事件
+        document.getElementById('status-filter').addEventListener('change', function() {
+            currentStatus = this.value;
+            currentPage = 1; // 重置到第一页
+            loadMemories();
+        });
+        
+        // 绑定删除按钮事件
+        document.getElementById('delete-selected-btn').addEventListener('click', showDeleteConfirm);
+        
+        // 绑定触发遗忘按钮事件
+        document.getElementById('trigger-forget-btn').addEventListener('click', triggerForgetting);
+        
+        // 绑定模态框关闭事件
+        document.getElementById('close-modal').addEventListener('click', closeModal);
+        document.getElementById('close-detail-btn').addEventListener('click', closeModal);
+        document.getElementById('close-delete-modal').addEventListener('click', closeDeleteConfirmModal);
+        document.getElementById('cancel-delete-btn').addEventListener('click', closeDeleteConfirmModal);
+        document.getElementById('confirm-delete-btn').addEventListener('click', confirmDelete);
+        document.getElementById('close-message-modal').addEventListener('click', closeMessageModal);
+        document.getElementById('close-message-btn').addEventListener('click', closeMessageModal);
+    });
+    
+    // 加载记忆数据
+    async function loadMemories() {
+        try {
+            const response = await fetch(`/api/memories?page=${currentPage}&page_size=${pageSize}&status=${currentStatus}`);
+            const data = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(data.detail || '加载失败');
+            }
+            
+            // 清空记忆列表
+            const memoriesList = document.getElementById('memories-list');
+            memoriesList.innerHTML = '';
+            
+            if (data.memories.length === 0) {
+                memoriesList.innerHTML = `
+                    <tr>
+                        <td colspan="8" style="text-align: center; padding: 30px;">
+                            <div>暂无记忆数据</div>
+                        </td>
+                    </tr>
+                `;
+                document.getElementById('pagination').innerHTML = '';
+                return;
+            }
+            
+            // 渲染记忆列表
+            data.memories.forEach(memory => {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>
+                        <input type="checkbox" class="memory-checkbox" data-id="${memory.id}">
+                    </td>
+                    <td>${memory.id}</td>
+                    <td class="memory-content" title="${memory.full_content}">
+                        <span class="memory-content-text">${memory.content}</span>
+                    </td>
+                    <td>
+                        <span class="importance-badge importance-${getImportanceLevel(memory.importance)}">
+                            ${Math.round(memory.importance * 100)}%
+                        </span>
+                    </td>
+                    <td>
+                        <span class="status-badge status-${memory.status}">
+                            ${getStatusText(memory.status)}
+                        </span>
+                    </td>
+                    <td>${memory.create_time}</td>
+                    <td>${memory.last_access_time}</td>
+                    <td>
+                        <button class="btn btn-secondary" onclick="showMemoryDetail(${memory.id})" style="padding: 5px 10px; font-size: 12px;">查看</button>
+                    </td>
+                `;
+                
+                // 绑定复选框事件
+                const checkbox = row.querySelector('.memory-checkbox');
+                checkbox.addEventListener('change', updateSelectedMemories);
+                
+                memoriesList.appendChild(row);
+            });
+            
+            // 渲染分页
+            renderPagination(data.page, data.pages);
+        } catch (error) {
+            showMessage('加载失败', error.message, 'error');
+        }
+    }
+    
+    // 显示记忆详情
+    async function showMemoryDetail(id) {
+        try {
+            const response = await fetch(`/api/memories/${id}`);
+            const data = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(data.detail || '加载失败');
+            }
+            
+            const modalContent = document.getElementById('memory-detail-content');
+            modalContent.innerHTML = `
+                <div class="form-group">
+                    <label>ID</label>
+                    <div style="padding: 10px; background-color: #f8f9fa; border-radius: 4px;">${data.id}</div>
+                </div>
+                <div class="form-group">
+                    <label>内容</label>
+                    <div style="padding: 10px; background-color: #f8f9fa; border-radius: 4px; white-space: pre-wrap;">${data.content}</div>
+                </div>
+                <div class="form-group">
+                    <label>重要性</label>
+                    <div style="padding: 10px; background-color: #f8f9fa; border-radius: 4px;">${Math.round(data.importance * 100)}%</div>
+                </div>
+                <div class="form-group">
+                    <label>状态</label>
+                    <div style="padding: 10px; background-color: #f8f9fa; border-radius: 4px;">${getStatusText(data.status)}</div>
+                </div>
+                <div class="form-group">
+                    <label>事件类型</label>
+                    <div style="padding: 10px; background-color: #f8f9fa; border-radius: 4px;">${data.event_type || 'OTHER'}</div>
+                </div>
+                <div class="form-group">
+                    <label>创建时间</label>
+                    <div style="padding: 10px; background-color: #f8f9fa; border-radius: 4px;">${formatTimestamp(data.create_time)}</div>
+                </div>
+                <div class="form-group">
+                    <label>最后访问时间</label>
+                    <div style="padding: 10px; background-color: #f8f9fa; border-radius: 4px;">${formatTimestamp(data.last_access_time)}</div>
+                </div>
+                <div class="form-group">
+                    <label>会话ID</label>
+                    <div style="padding: 10px; background-color: #f8f9fa; border-radius: 4px;">${data.session_id || 'N/A'}</div>
+                </div>
+            `;
+            
+            document.getElementById('memory-detail-modal').classList.add('active');
+        } catch (error) {
+            showMessage('加载失败', error.message, 'error');
+        }
+    }
+    
+    // 更新选中的记忆
+    function updateSelectedMemories() {
+        selectedMemoryIds = [];
+        document.querySelectorAll('#memories-list input[type="checkbox"]:checked').forEach(checkbox => {
+            selectedMemoryIds.push(checkbox.getAttribute('data-id'));
+        });
+        
+        // 更新删除按钮状态
+        const deleteBtn = document.getElementById('delete-selected-btn');
+        deleteBtn.disabled = selectedMemoryIds.length === 0;
+        
+        // 更新全选框状态
+        const allCheckbox = document.getElementById('select-all-checkbox');
+        const totalCheckboxes = document.querySelectorAll('#memories-list input[type="checkbox"]').length;
+        allCheckbox.checked = totalCheckboxes > 0 && selectedMemoryIds.length === totalCheckboxes;
+    }
+    
+    // 显示删除确认对话框
+    function showDeleteConfirm() {
+        document.getElementById('delete-count').textContent = selectedMemoryIds.length;
+        document.getElementById('delete-confirm-modal').classList.add('active');
+    }
+    
+    // 确认删除
+    async function confirmDelete() {
+        try {
+            const response = await fetch('/api/memories', {
+                method: 'DELETE',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(selectedMemoryIds)
+            });
+            
+            const data = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(data.detail || '删除失败');
+            }
+            
+            // 关闭对话框
+            closeDeleteConfirmModal();
+            
+            // 重置选中状态
+            selectedMemoryIds = [];
+            document.getElementById('select-all-checkbox').checked = false;
+            document.getElementById('delete-selected-btn').disabled = true;
+            
+            // 重新加载数据
+            loadMemories();
+            
+            // 显示成功消息
+            showMessage('删除成功', data.message);
+        } catch (error) {
+            showMessage('删除失败', error.message, 'error');
+        }
+    }
+    
+    // 触发遗忘操作
+    async function triggerForgetting() {
+        try {
+            const response = await fetch('/api/forget', {
+                method: 'POST'
+            });
+            
+            const data = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(data.detail || '执行失败');
+            }
+            
+            // 重新加载数据
+            loadMemories();
+            
+            // 显示成功消息
+            showMessage('操作成功', data.message);
+        } catch (error) {
+            showMessage('操作失败', error.message, 'error');
+        }
+    }
+    
+    // 渲染分页
+    function renderPagination(current, total) {
+        const pagination = document.getElementById('pagination');
+        pagination.innerHTML = '';
+        
+        if (total <= 1) return;
+        
+        // 上一页
+        if (current > 1) {
+            addPageButton(pagination, current - 1, '上一页');
+        }
+        
+        // 页码按钮
+        const startPage = Math.max(1, current - 2);
+        const endPage = Math.min(total, startPage + 4);
+        
+        // 首页
+        if (startPage > 1) {
+            addPageButton(pagination, 1, '1');
+            if (startPage > 2) {
+                addEllipsis(pagination);
+            }
+        }
+        
+        // 中间页码
+        for (let i = startPage; i <= endPage; i++) {
+            addPageButton(pagination, i, i.toString(), i === current);
+        }
+        
+        // 末页
+        if (endPage < total) {
+            if (endPage < total - 1) {
+                addEllipsis(pagination);
+            }
+            addPageButton(pagination, total, total.toString());
+        }
+        
+        // 下一页
+        if (current < total) {
+            addPageButton(pagination, current + 1, '下一页');
+        }
+    }
+    
+    // 添加页码按钮
+    function addPageButton(container, pageNum, text, isActive = false) {
+        const button = document.createElement('a');
+        button.href = '#';
+        button.textContent = text;
+        if (isActive) {
+            button.classList.add('active');
+        }
+        button.addEventListener('click', function(e) {
+            e.preventDefault();
+            currentPage = pageNum;
+            loadMemories();
+        });
+        container.appendChild(button);
+    }
+    
+    // 添加省略号
+    function addEllipsis(container) {
+        const ellipsis = document.createElement('span');
+        ellipsis.textContent = '...';
+        ellipsis.style.padding = '8px 12px';
+        container.appendChild(ellipsis);
+    }
+    
+    // 显示消息模态框
+    function showMessage(title, message, type = 'info') {
+        document.getElementById('message-title').textContent = title;
+        document.getElementById('message-content').innerHTML = `<p>${message}</p>`;
+        document.getElementById('message-modal').classList.add('active');
+    }
+    
+    // 关闭详情模态框
+    function closeModal() {
+        document.getElementById('memory-detail-modal').classList.remove('active');
+    }
+    
+    // 关闭删除确认模态框
+    function closeDeleteConfirmModal() {
+        document.getElementById('delete-confirm-modal').classList.remove('active');
+    }
+    
+    // 关闭消息模态框
+    function closeMessageModal() {
+        document.getElementById('message-modal').classList.remove('active');
+    }
+    
+    // 获取重要性级别
+    function getImportanceLevel(importance) {
+        if (importance >= 0.7) return 'high';
+        if (importance >= 0.4) return 'medium';
+        return 'low';
+    }
+    
+    // 获取状态文本
+    function getStatusText(status) {
+        const statusMap = {
+            'active': '活跃',
+            'archived': '归档',
+            'deleted': '删除'
+        };
+        return statusMap[status] || status;
+    }
+    
+    // 格式化时间戳
+    function formatTimestamp(timestamp) {
+        if (!timestamp) return '未知';
+        return timestamp;
+    }
+</script>
+{% endblock %}

@@ -11,6 +11,9 @@ import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
+# WebUI 相关导入
+from .webui.webui_app import WebUIApp
+
 # AstrBot API
 from astrbot.api.event import filter, AstrMessageEvent,MessageChain
 from astrbot.api.event.filter import PermissionType, permission_type
@@ -143,6 +146,17 @@ class LivingMemoryPlugin(Star):
             max_sessions=session_config.get("max_sessions", 1000),
             session_ttl=session_config.get("session_ttl", 3600)
         )
+        
+        # 初始化WebUI
+        self.webui = None
+        if self.config.webui_settings.enabled:
+            self.webui = WebUIApp(
+                config_data,
+                self.faiss_manager,
+                self.memory_agent,
+                self.admin_handler,
+                self.forgetting_agent
+            )
 
 
     @filter.on_astrbot_loaded()
@@ -202,6 +216,14 @@ class LivingMemoryPlugin(Star):
             self.admin_handler = AdminHandler(self.context, self.config, self.faiss_manager, self.forgetting_agent, self.session_manager)
             self.fusion_handler = FusionHandler(self.context, self.config, self.recall_engine)
 
+            # 启动WebUI
+            if self.webui:
+                webui_result = await self.webui.start()
+                if webui_result:
+                    logger.info(f"WebUI已成功启动，访问地址: http://127.0.0.1:{self.config.webui_settings.port}")
+                else:
+                    logger.warning("WebUI启动失败")
+            
             # 标记初始化完成
             self._initialization_complete = True
             logger.info("LivingMemory 插件初始化成功！")
@@ -642,6 +664,12 @@ class LivingMemoryPlugin(Star):
         插件停止时的清理逻辑。
         """
         logger.info("LivingMemory 插件正在停止...")
+        
+        # 停止WebUI
+        if self.webui:
+            await self.webui.stop()
+            logger.info("WebUI已停止")
+        
         if self.forgetting_agent:
             await self.forgetting_agent.stop()
         if self.db:

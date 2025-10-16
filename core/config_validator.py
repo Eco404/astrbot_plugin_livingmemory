@@ -97,6 +97,13 @@ class ProviderConfig(BaseModel):
     llm_provider_id: Optional[str] = Field(default=None, description="LLM Provider ID")
 
 
+class WebUIConfig(BaseModel):
+    """WebUI配置"""
+    enabled: bool = Field(default=True, description="是否启用WebUI")
+    port: int = Field(default=8080, ge=1024, le=65535, description="WebUI端口")
+    password: str = Field(default="", description="访问密码")
+
+
 class TimezoneConfig(BaseModel):
     """时区配置"""
     timezone: str = Field(default="Asia/Shanghai", description="时区")
@@ -112,6 +119,7 @@ class LivingMemoryConfig(BaseModel):
     filtering_settings: FilteringConfig = Field(default_factory=FilteringConfig)
     provider_settings: ProviderConfig = Field(default_factory=ProviderConfig)
     timezone_settings: TimezoneConfig = Field(default_factory=TimezoneConfig)
+    webui_settings: WebUIConfig = Field(default_factory=WebUIConfig)
     
     # 为融合配置添加嵌套支持
     fusion: Optional[FusionConfig] = Field(default_factory=FusionConfig, description="结果融合配置")
