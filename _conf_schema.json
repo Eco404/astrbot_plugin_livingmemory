@@ -288,27 +288,5 @@
         "default": 1000
       }
     }
-  },
-  "webui_settings": {
-    "description": "WebUI 设置",
-    "type": "object",
-    "items": {
-      "enabled": {
-        "description": "启用 WebUI",
-        "type": "bool",
-        "default": true
-      },
-      "port": {
-        "description": "WebUI 端口",
-        "type": "int",
-        "default": 8080
-      },
-      "password": {
-        "description": "WebUI 访问密码",
-        "type": "string",
-        "hint": "用于访问 WebUI 的密码，请设置强密码。",
-        "default": ""
-      }
-    }
   }
 }
