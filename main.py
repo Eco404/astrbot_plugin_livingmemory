@@ -25,9 +25,6 @@ from astrbot.core.provider.provider import EmbeddingProvider
 from astrbot.api import logger
 from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
 
-# WebUI集成
-from .webui.app import WebUIManager
-
 # 插件内部模块
 from .storage.faiss_manager import FaissManager
 from .core.engines.recall_engine import RecallEngine
@@ -129,7 +126,6 @@ class LivingMemoryPlugin(Star):
         self.recall_engine: Optional[RecallEngine] = None
         self.reflection_engine: Optional[ReflectionEngine] = None
         self.forgetting_agent: Optional[ForgettingAgent] = None
-        self.webui_manager: Optional[WebUIManager] = None
         
         # 初始化业务逻辑处理器
         self.memory_handler: Optional[MemoryHandler] = None
@@ -199,8 +195,6 @@ class LivingMemoryPlugin(Star):
 
             # 4. 启动后台任务
             await self.forgetting_agent.start()
-            
-
 
             # 初始化业务逻辑处理器
             self.memory_handler = MemoryHandler(self.context, self.config, self.faiss_manager)
@@ -648,12 +642,6 @@ class LivingMemoryPlugin(Star):
         插件停止时的清理逻辑。
         """
         logger.info("LivingMemory 插件正在停止...")
-        
-        # 停止WebUI
-        if hasattr(self, 'webui_manager') and self.webui_manager:
-            await self.webui_manager.stop()
-            logger.info("WebUI服务已停止")
-            
         if self.forgetting_agent:
             await self.forgetting_agent.stop()
         if self.db:

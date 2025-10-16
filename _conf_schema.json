@@ -288,42 +288,5 @@
         "default": 1000
       }
     }
-  },
-  "webui": {
-    "description": "WebUI 设置",
-    "hint": "配置 LivingMemory 插件的 WebUI 界面",
-    "type": "object",
-    "items": {
-      "enabled": {
-        "description": "启用 WebUI",
-        "hint": "是否启用 WebUI 功能。",
-        "type": "bool",
-        "default": true
-      },
-      "port": {
-        "description": "WebUI 端口",
-        "hint": "WebUI 服务监听的端口，默认为 8080。",
-        "type": "int",
-        "default": 8080
-      },
-      "password": {
-        "description": "WebUI 访问密码",
-        "hint": "访问 WebUI 界面时需要输入的密码，出于安全考虑请务必设置。",
-        "type": "string",
-        "default": "livingmemory"
-      },
-      "host": {
-        "description": "WebUI 主机地址",
-        "hint": "WebUI 服务监听的主机地址，默认为 '0.0.0.0'（监听所有网卡）。",
-        "type": "string",
-        "default": "0.0.0.0"
-      },
-      "page_size": {
-        "description": "每页显示数量",
-        "hint": "WebUI 列表页面每页显示的记忆数量。",
-        "type": "int",
-        "default": 20
-      }
-    }
   }
 }
