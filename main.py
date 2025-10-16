@@ -34,6 +34,7 @@ from .core.retrieval import SparseRetriever
 from .core.utils import get_persona_id, format_memories_for_injection, get_now_datetime, retry_on_failure, OperationContext, safe_parse_metadata
 from .core.config_validator import validate_config, merge_config_with_defaults
 from .core.handlers import MemoryHandler, SearchHandler, AdminHandler, FusionHandler
+from .webui import WebUIServer
 
 # 会话管理器类，替代全局字典
 class SessionManager:
@@ -97,7 +98,7 @@ class SessionManager:
     "LivingMemory",
     "lxfight",
     "一个拥有动态生命周期的智能长期记忆插件。",
-    "1.0.0",
+    "1.1.0",
     "https://github.com/lxfight/astrbot_plugin_livingmemory",
 )
 class LivingMemoryPlugin(Star):
@@ -145,6 +146,9 @@ class LivingMemoryPlugin(Star):
         )
         # 启动初始化任务
         self._initialization_task = asyncio.create_task(self._wait_for_astrbot_and_initialize())
+
+        # WebUI 服务句柄
+        self.webui_server: Optional[WebUIServer] = None
 
     async def _wait_for_astrbot_and_initialize(self):
         """
@@ -222,6 +226,9 @@ class LivingMemoryPlugin(Star):
             self.admin_handler = AdminHandler(self.context, self.config, self.faiss_manager, self.forgetting_agent, self.session_manager)
             self.fusion_handler = FusionHandler(self.context, self.config, self.recall_engine)
 
+            # 启动 WebUI（如启用）
+            await self._start_webui()
+
             # 标记初始化完成
             self._initialization_complete = True
             logger.info("LivingMemory 插件初始化成功！")
@@ -231,6 +238,46 @@ class LivingMemoryPlugin(Star):
                 f"LivingMemory 插件初始化过程中发生严重错误: {e}", exc_info=True
             )
             self._initialization_complete = False
+
+    async def _start_webui(self):
+        """
+        根据配置启动 WebUI 控制台。
+        """
+        webui_config = self.config.get("webui_settings", {}) if isinstance(self.config, dict) else {}
+        if not webui_config.get("enabled"):
+            return
+        if self.webui_server:
+            return
+        if not self.faiss_manager:
+            logger.warning("WebUI 控制台启动失败：记忆管理器尚未初始化")
+            return
+        if not webui_config.get("access_password"):
+            logger.error("WebUI 控制台已启用但未配置入口密码，已跳过启动")
+            return
+
+        try:
+            self.webui_server = WebUIServer(
+                webui_config,
+                self.faiss_manager,
+                self.session_manager,
+            )
+            await self.webui_server.start()
+        except Exception as e:
+            logger.error(f"启动 WebUI 控制台失败: {e}", exc_info=True)
+            self.webui_server = None
+
+    async def _stop_webui(self):
+        """
+        停止 WebUI 控制台。
+        """
+        if not self.webui_server:
+            return
+        try:
+            await self.webui_server.stop()
+        except Exception as e:
+            logger.warning(f"停止 WebUI 控制台时出现异常: {e}", exc_info=True)
+        finally:
+            self.webui_server = None
 
     async def _wait_for_initialization(self, timeout: float = 30.0) -> bool:
         """
@@ -662,6 +709,7 @@ class LivingMemoryPlugin(Star):
         插件停止时的清理逻辑。
         """
         logger.info("LivingMemory 插件正在停止...")
+        await self._stop_webui()
         if self.forgetting_agent:
             await self.forgetting_agent.stop()
         if self.db:
