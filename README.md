@@ -198,51 +198,6 @@ recall_engine:
 #### 融合策略示例  
 ```bash  
 # 查看当前融合配置
-/lmem fusion
-
-# 设置RRF融合策略
-/lmem fusion strategy=rrf rrf_k=60
-
-# 测试融合效果
-/lmem test_fusion 测试查询内容
-```
-
-## 🌐 WebUI 管理界面
-
-插件现在提供了直观的 WebUI 管理界面，支持：
-
-### 🔐 安全特性
-- **密码保护**: 基于配置文件的访问密码验证
-- **会话管理**: 自动会话超时和清理机制
-- **访问控制**: 防止未授权访问敏感记忆数据
-
-### 📊 功能特性
-- **记忆查看**: 可视化展示所有记忆内容
-- **搜索筛选**: 支持关键词搜索和高级筛选
-- **批量操作**: 批量删除和管理记忆
-- **统计信息**: 实时显示记忆库统计
-- **响应式设计**: 适配各种设备屏幕
-
-### ⚙️ 配置方法
-在 `_conf_schema.json` 中配置 WebUI：
-
-```json
-{
-  "webui_settings": {
-    "enabled": true,
-    "port": 8080,
-    "host": "0.0.0.0",
-    "access_password": "your_secure_password",
-    "session_timeout": 3600
-  }
-}
-```
-
-### 🚀 启动和使用
-1. 配置 WebUI 参数并重启插件
-2. 访问 `http://localhost:8080`（根据配置）
-3. 输入访问密码进入管理界面
-4. 使用各项功能管理记忆数据
 /lmem fusion show
 
 # 切换到自适应RRF

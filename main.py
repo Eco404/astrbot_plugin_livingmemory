@@ -12,239 +12,28 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 # AstrBot API
-try:
-    from astrbot.api.event import filter, AstrMessageEvent,MessageChain
-    from astrbot.api.event.filter import PermissionType, permission_type
-    from astrbot.api.star import Context, Star, register, StarTools
-    from astrbot.api.provider import (
-        LLMResponse,
-        ProviderRequest,
-        Provider,
-    )
-    from astrbot.core.provider.provider import EmbeddingProvider
-    from astrbot.api import logger
-    from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
-except ImportError:
-    # 降级处理，创建模拟类
-    import logging
-    logger = logging.getLogger(__name__)
-    
-    class filter:
-        @staticmethod
-        def on_astrbot_loaded():
-            def decorator(func):
-                return func
-            return decorator
-        
-        @staticmethod
-        def on_llm_request():
-            def decorator(func):
-                return func
-            return decorator
-            
-        @staticmethod
-        def on_llm_response():
-            def decorator(func):
-                return func
-            return decorator
-            
-        @staticmethod
-        def command_group(name):
-            def decorator(func):
-                return func
-            return decorator
-    
-    class AstrMessageEvent:
-        pass
-    
-    class MessageChain:
-        pass
-    
-    class PermissionType:
-        ADMIN = "admin"
-    
-    def permission_type(ptype):
-        def decorator(func):
-            return func
-        return decorator
-    
-    class Context:
-        pass
-    
-    class Star:
-        pass
-    
-    class register:
-        def __init__(self, name, author, desc, version, url):
-            pass
-        
-        def __call__(self, cls):
-            return cls
-    
-    class StarTools:
-        @staticmethod
-        def get_data_dir():
-            return "./data"
-    
-    class LLMResponse:
-        def __init__(self, *args, **kwargs):
-            self.role = "assistant"
-            self.completion_text = ""
-    
-    class ProviderRequest:
-        def __init__(self, *args, **kwargs):
-            self.prompt = ""
-            self.system_prompt = ""
-    
-    class Provider:
-        pass
-    
-    class EmbeddingProvider:
-        pass
-    
-    class FaissVecDB:
-        def __init__(self, *args, **kwargs):
-            pass
-        
-        async def initialize(self):
-            pass
-        
-        async def close(self):
-            pass
+from astrbot.api.event import filter, AstrMessageEvent,MessageChain
+from astrbot.api.event.filter import PermissionType, permission_type
+from astrbot.api.star import Context, Star, register, StarTools
+from astrbot.api.provider import (
+    LLMResponse,
+    ProviderRequest,
+    Provider,
+)
+from astrbot.core.provider.provider import EmbeddingProvider
 
-# 插件内部模块 - 使用多层降级导入策略
-import importlib.util
-import sys
-import os
+from astrbot.api import logger
+from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
 
-# 获取当前文件目录
-current_dir = os.path.dirname(os.path.abspath(__file__))
-
-# 创建模拟的装饰器类，用于解决AstrBot依赖问题
-class MockCommandGroup:
-    """模拟的命令组装饰器"""
-    def __init__(self, name):
-        self.name = name
-    
-    def command(self, cmd_name):
-        """模拟命令装饰器"""
-        def decorator(func):
-            # 简单地返回原函数，不做任何处理
-            return func
-        return decorator
-    
-    def __call__(self, func):
-        """使对象可以被调用，用于装饰器"""
-        return func
-
-class MockFilter:
-    """模拟的过滤器装饰器"""
-    def command_group(self, name):
-        return MockCommandGroup(name)
-    
-    def on_astrbot_loaded(self):
-        def decorator(func):
-            return func
-        return decorator
-    
-    def on_llm_request(self):
-        def decorator(func):
-            return func
-        return decorator
-    
-    def on_llm_response(self):
-        def decorator(func):
-            return func
-        return decorator
-
-class MockPermission:
-    """模拟的权限装饰器"""
-    def __init__(self, perm_type):
-        self.perm_type = perm_type
-    
-    def __call__(self, func):
-        return func
-
-# 创建模拟实例
-filter = MockFilter()
-permission_type = MockPermission
-
-# 尝试导入所有必需的模块
-try:
-    # 首先尝试相对导入
-    from .storage.faiss_manager import FaissManager
-    from .core.engines.recall_engine import RecallEngine
-    from .core.engines.reflection_engine import ReflectionEngine
-    from .core.engines.forgetting_agent import ForgettingAgent
-    from .core.retrieval import SparseRetriever
-    from .core.utils import get_persona_id, format_memories_for_injection, get_now_datetime, retry_on_failure, OperationContext, safe_parse_metadata
-    from .core.config_validator import validate_config, merge_config_with_defaults
-    from .core.handlers import MemoryHandler, SearchHandler, AdminHandler, FusionHandler
-    from .webui import WebUIServer
-except ImportError:
-    try:
-        # 尝试绝对导入
-        from storage.faiss_manager import FaissManager
-        from core.engines.recall_engine import RecallEngine
-        from core.engines.reflection_engine import ReflectionEngine
-        from core.engines.forgetting_agent import ForgettingAgent
-        from core.retrieval import SparseRetriever
-        from core.utils import get_persona_id, format_memories_for_injection, get_now_datetime, retry_on_failure, OperationContext, safe_parse_metadata
-        from core.config_validator import validate_config, merge_config_with_defaults
-        from core.handlers import MemoryHandler, SearchHandler, AdminHandler, FusionHandler
-        from webui import WebUIServer
-    except ImportError as e:
-        logger.error(f"模块导入失败: {e}")
-        # 创建模拟类作为最后手段
-        class FaissManager:
-            def __init__(self, *args, **kwargs): pass
-        
-        class RecallEngine:
-            def __init__(self, *args, **kwargs): pass
-        
-        class ReflectionEngine:
-            def __init__(self, *args, **kwargs): pass
-        
-        class ForgettingAgent:
-            def __init__(self, *args, **kwargs): pass
-            async def start(self): pass
-        
-        class SparseRetriever:
-            def __init__(self, *args, **kwargs): pass
-        
-        def get_persona_id(*args, **kwargs): return "default"
-        def format_memories_for_injection(*args, **kwargs): return ""
-        def get_now_datetime(): 
-            from datetime import datetime
-            return datetime.now()
-        def retry_on_failure(*args, **kwargs): 
-            def decorator(func): return func
-            return decorator
-        
-        class OperationContext:
-            def __init__(self, *args, **kwargs): pass
-        
-        def safe_parse_metadata(*args, **kwargs): return {}
-        
-        def validate_config(*args, **kwargs): return args[0] if args else {}
-        def merge_config_with_defaults(*args, **kwargs): return args[0] if args else {}
-        
-        class MemoryHandler:
-            def __init__(self, *args, **kwargs): pass
-        
-        class SearchHandler:
-            def __init__(self, *args, **kwargs): pass
-        
-        class AdminHandler:
-            def __init__(self, *args, **kwargs): pass
-        
-        class FusionHandler:
-            def __init__(self, *args, **kwargs): pass
-        
-        class WebUIServer:
-            def __init__(self, *args, **kwargs): pass
-            async def start(self): pass
-            async def stop(self): pass
+# 插件内部模块
+from .storage.faiss_manager import FaissManager
+from .core.engines.recall_engine import RecallEngine
+from .core.engines.reflection_engine import ReflectionEngine
+from .core.engines.forgetting_agent import ForgettingAgent
+from .core.retrieval import SparseRetriever
+from .core.utils import get_persona_id, format_memories_for_injection, get_now_datetime, retry_on_failure, OperationContext, safe_parse_metadata
+from .core.config_validator import validate_config, merge_config_with_defaults
+from .core.handlers import MemoryHandler, SearchHandler, AdminHandler, FusionHandler
 
 # 会话管理器类，替代全局字典
 class SessionManager:
@@ -354,9 +143,6 @@ class LivingMemoryPlugin(Star):
             max_sessions=session_config.get("max_sessions", 1000),
             session_ttl=session_config.get("session_ttl", 3600)
         )
-        
-        # WebUI服务器
-        self.webui_server: Optional[WebUIServer] = None
 
 
     @filter.on_astrbot_loaded()
@@ -415,15 +201,6 @@ class LivingMemoryPlugin(Star):
             self.search_handler = SearchHandler(self.context, self.config, self.recall_engine, self.sparse_retriever)
             self.admin_handler = AdminHandler(self.context, self.config, self.faiss_manager, self.forgetting_agent, self.session_manager)
             self.fusion_handler = FusionHandler(self.context, self.config, self.recall_engine)
-            
-            # 初始化WebUI服务器
-            try:
-                self.webui_server = WebUIServer(self.config, self.faiss_manager)
-                await self.webui_server.start()
-                logger.info("WebUI服务器初始化成功")
-            except Exception as e:
-                logger.error(f"WebUI服务器初始化失败: {e}")
-                self.webui_server = None
 
             # 标记初始化完成
             self._initialization_complete = True
@@ -642,23 +419,21 @@ class LivingMemoryPlugin(Star):
             logger.error(f"处理 on_llm_response 钩子时发生错误: {e}", exc_info=True)
 
     # --- 命令处理 ---
-    @property
+    @filter.command_group("lmem")
     def lmem_group(self):
         """长期记忆管理命令组 /lmem"""
-        return filter.command_group("lmem")
+        pass
 
-    # 由于装饰器问题，我们暂时移除命令装饰，专注于核心功能测试
-    async def lmem_status(self, event=None):
+    @permission_type(PermissionType.ADMIN)
+    @lmem_group.command("status")
+    async def lmem_status(self, event: AstrMessageEvent):
         """[管理员] 查看当前记忆库的状态。"""
         if not self.admin_handler:
-            if event:
-                yield event.plain_result("管理员处理器尚未初始化。")
+            yield event.plain_result("管理员处理器尚未初始化。")
             return
             
         result = await self.admin_handler.get_memory_status()
-        if event:
-            yield event.plain_result(self.admin_handler.format_status_for_display(result))
-        return result
+        yield event.plain_result(self.admin_handler.format_status_for_display(result))
 
     @permission_type(PermissionType.ADMIN)
     @lmem_group.command("search")
@@ -869,8 +644,6 @@ class LivingMemoryPlugin(Star):
         logger.info("LivingMemory 插件正在停止...")
         if self.forgetting_agent:
             await self.forgetting_agent.stop()
-        if self.webui_server:
-            await self.webui_server.stop()
         if self.db:
             await self.db.close()
         logger.info("LivingMemory 插件已成功停止。")
