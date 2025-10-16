@@ -9,11 +9,13 @@ from .memory_handler import MemoryHandler
 from .search_handler import SearchHandler
 from .admin_handler import AdminHandler
 from .fusion_handler import FusionHandler
+from .webui_handler import WebUIHandler
 
 __all__ = [
     'BaseHandler',
     'MemoryHandler', 
     'SearchHandler',
     'AdminHandler',
-    'FusionHandler'
+    'FusionHandler',
+    'WebUIHandler'
 ]

@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LivingMemory - 记忆管理</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <style>
+        body {
+            background-color: #f8f9fa;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .navbar {
+            background-color: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,.08);
+        }
+        .navbar-brand {
+            font-weight: 600;
+            color: #4a6cf7 !important;
+        }
+        .main-container {
+            padding: 2rem 0;
+        }
+        .card {
+            border: none;
+            border-radius: 10px;
+            box-shadow: 0 0.125rem 0.25rem rgba(0,0,0,.075);
+            margin-bottom: 1.5rem;
+        }
+        .card-header {
+            background-color: white;
+            border-bottom: 1px solid rgba(0,0,0,.125);
+            font-weight: 600;
+        }
+        .memory-item {
+            border-bottom: 1px solid #eee;
+            padding: 1rem 0;
+        }
+        .memory-item:last-child {
+            border-bottom: none;
+        }
+        .memory-content {
+            margin-bottom: 0.5rem;
+            line-height: 1.5;
+        }
+        .memory-meta {
+            font-size: 0.85rem;
+            color: #6c757d;
+        }
+        .memory-type {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            margin-right: 0.5rem;
+        }
+        .type-FACT {
+            background-color: #e3f2fd;
+            color: #1976d2;
+        }
+        .type-PREFERENCE {
+            background-color: #f3e5f5;
+            color: #7b1fa2;
+        }
+        .type-GOAL {
+            background-color: #e8f5e9;
+            color: #388e3c;
+        }
+        .type-OPINION {
+            background-color: #fff3e0;
+            color: #f57c00;
+        }
+        .type-RELATIONSHIP {
+            background-color: #fce4ec;
+            color: #c2185b;
+        }
+        .type-OTHER {
+            background-color: #f5f5f5;
+            color: #616161;
+        }
+        .importance-bar {
+            height: 5px;
+            border-radius: 3px;
+            background-color: #e9ecef;
+            margin-top: 0.5rem;
+        }
+        .importance-fill {
+            height: 100%;
+            border-radius: 3px;
+        }
+        .importance-high {
+            background-color: #28a745;
+        }
+        .importance-medium {
+            background-color: #ffc107;
+        }
+        .importance-low {
+            background-color: #dc3545;
+        }
+        .search-container {
+            margin-bottom: 1.5rem;
+        }
+        .stats-card {
+            text-align: center;
+            padding: 1rem;
+        }
+        .stats-number {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #4a6cf7;
+        }
+        .stats-label {
+            font-size: 0.9rem;
+            color: #6c757d;
+        }
+        .loading-spinner {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 200px;
+        }
+        .pagination-container {
+            display: flex;
+            justify-content: center;
+            margin-top: 1.5rem;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #6c757d;
+        }
+        .empty-state i {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: #dee2e6;
+        }
+        .btn-action {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.875rem;
+        }
+        .modal-header {
+            background-color: #f8f9fa;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .memory-detail-content {
+            white-space: pre-wrap;
+            line-height: 1.6;
+        }
+        .memory-detail-meta {
+            font-size: 0.85rem;
+            color: #6c757d;
+            margin-top: 1rem;
+        }
+        .memory-detail-meta-item {
+            margin-bottom: 0.5rem;
+        }
+        .memory-detail-meta-label {
+            font-weight: 600;
+            margin-right: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导航栏 -->
+    <nav class="navbar navbar-expand-lg navbar-light">
+        <div class="container">
+            <a class="navbar-brand" href="#">
+                <i class="bi bi-memory"></i> LivingMemory
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link active" href="#" id="nav-memories">记忆列表</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" id="nav-statistics">统计信息</a>
+                    </li>
+                </ul>
+                <div class="d-flex">
+                    <a href="/logout" class="btn btn-outline-danger btn-sm">
+                        <i class="bi bi-box-arrow-right"></i> 退出
+                    </a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- 主容器 -->
+    <div class="container main-container">
+        <!-- 统计信息卡片 -->
+        <div class="row mb-4" id="statistics-section" style="display: none;">
+            <div class="col-md-3 col-sm-6 mb-3">
+                <div class="card stats-card">
+                    <div class="stats-number" id="total-count">-</div>
+                    <div class="stats-label">总记忆数</div>
+                </div>
+            </div>
+            <div class="col-md-3 col-sm-6 mb-3">
+                <div class="card stats-card">
+                    <div class="stats-number" id="avg-importance">-</div>
+                    <div class="stats-label">平均重要性</div>
+                </div>
+            </div>
+            <div class="col-md-3 col-sm-6 mb-3">
+                <div class="card stats-card">
+                    <div class="stats-number" id="high-importance">-</div>
+                    <div class="stats-label">高重要性</div>
+                </div>
+            </div>
+            <div class="col-md-3 col-sm-6 mb-3">
+                <div class="card stats-card">
+                    <div class="stats-number" id="low-importance">-</div>
+                    <div class="stats-label">低重要性</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 记忆列表部分 -->
+        <div id="memories-section">
+            <!-- 搜索和操作栏 -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <div class="row align-items-center">
+                        <div class="col-md-6">
+                            <h5 class="mb-0">记忆管理</h5>
+                        </div>
+                        <div class="col-md-6 text-end">
+                            <button class="btn btn-danger btn-sm" id="batch-delete-btn" disabled>
+                                <i class="bi bi-trash"></i> 批量删除
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="search-container">
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="search-input" placeholder="搜索记忆内容...">
+                            <button class="btn btn-primary" id="search-btn">
+                                <i class="bi bi-search"></i> 搜索
+                            </button>
+                            <button class="btn btn-outline-secondary" id="reset-btn">
+                                <i class="bi bi-arrow-clockwise"></i> 重置
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 记忆列表 -->
+            <div class="card">
+                <div class="card-header">
+                    记忆列表
+                </div>
+                <div class="card-body">
+                    <div id="memories-list">
+                        <div class="loading-spinner">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">加载中...</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="pagination-container" id="pagination-container"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 记忆详情模态框 -->
+    <div class="modal fade" id="memoryDetailModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">记忆详情</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="memory-detail-content">
+                    <!-- 记忆详情内容将在这里动态加载 -->
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-danger" id="delete-memory-btn">
+                        <i class="bi bi-trash"></i> 删除
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // 全局变量
+        let currentPage = 1;
+        let itemsPerPage = 20;
+        let currentQuery = '';
+        let selectedMemories = new Set();
+        let currentMemoryId = null;
+
+        // DOM元素
+        const memoriesList = document.getElementById('memories-list');
+        const paginationContainer = document.getElementById('pagination-container');
+        const searchInput = document.getElementById('search-input');
+        const searchBtn = document.getElementById('search-btn');
+        const resetBtn = document.getElementById('reset-btn');
+        const batchDeleteBtn = document.getElementById('batch-delete-btn');
+        const navMemories = document.getElementById('nav-memories');
+        const navStatistics = document.getElementById('nav-statistics');
+        const memoriesSection = document.getElementById('memories-section');
+        const statisticsSection = document.getElementById('statistics-section');
+        const memoryDetailModal = new bootstrap.Modal(document.getElementById('memoryDetailModal'));
+        const memoryDetailContent = document.getElementById('memory-detail-content');
+        const deleteMemoryBtn = document.getElementById('delete-memory-btn');
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            loadMemories();
+            setupEventListeners();
+        });
+
+        // 设置事件监听器
+        function setupEventListeners() {
+            searchBtn.addEventListener('click', function() {
+                currentQuery = searchInput.value.trim();
+                currentPage = 1;
+                selectedMemories.clear();
+                updateBatchDeleteButton();
+                if (currentQuery) {
+                    searchMemories();
+                } else {
+                    loadMemories();
+                }
+            });
+
+            resetBtn.addEventListener('click', function() {
+                searchInput.value = '';
+                currentQuery = '';
+                currentPage = 1;
+                selectedMemories.clear();
+                updateBatchDeleteButton();
+                loadMemories();
+            });
+
+            batchDeleteBtn.addEventListener('click', batchDeleteMemories);
+
+            navMemories.addEventListener('click', function(e) {
+                e.preventDefault();
+                showMemoriesSection();
+            });
+
+            navStatistics.addEventListener('click', function(e) {
+                e.preventDefault();
+                showStatisticsSection();
+            });
+
+            deleteMemoryBtn.addEventListener('click', function() {
+                if (currentMemoryId) {
+                    deleteMemory(currentMemoryId);
+                }
+            });
+        }
+
+        // 加载记忆列表
+        async function loadMemories() {
+            try {
+                showLoading();
+                const response = await fetch(`/api/memories?page=${currentPage}&items_per_page=${itemsPerPage}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    showError(data.error);
+                    return;
+                }
+                
+                renderMemories(data.memories);
+                renderPagination(data.pagination);
+            } catch (error) {
+                showError('加载记忆列表失败: ' + error.message);
+            }
+        }
+
+        // 搜索记忆
+        async function searchMemories() {
+            try {
+                showLoading();
+                const response = await fetch(`/api/memories/search?query=${encodeURIComponent(currentQuery)}&page=${currentPage}&items_per_page=${itemsPerPage}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    showError(data.error);
+                    return;
+                }
+                
+                renderMemories(data.memories);
+                renderPagination(data.pagination);
+            } catch (error) {
+                showError('搜索记忆失败: ' + error.message);
+            }
+        }
+
+        // 渲染记忆列表
+        function renderMemories(memories) {
+            if (memories.length === 0) {
+                memoriesList.innerHTML = `
+                    <div class="empty-state">
+                        <i class="bi bi-inbox"></i>
+                        <p>暂无记忆数据</p>
+                    </div>
+                `;
+                return;
+            }
+
+            let html = '';
+            memories.forEach(memory => {
+                const isSelected = selectedMemories.has(memory.id);
+                const importanceClass = memory.importance >= 0.7 ? 'importance-high' : 
+                                       memory.importance >= 0.4 ? 'importance-medium' : 'importance-low';
+                
+                html += `
+                    <div class="memory-item">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div class="form-check me-3">
+                                <input class="form-check-input memory-checkbox" type="checkbox" 
+                                    data-id="${memory.id}" ${isSelected ? 'checked' : ''}>
+                            </div>
+                            <div class="flex-grow-1">
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <div>
+                                        <span class="memory-type type-${memory.type}">${getTypeLabel(memory.type)}</span>
+                                        <span class="badge bg-secondary">${memory.importance.toFixed(2)}</span>
+                                    </div>
+                                    <div>
+                                        <button class="btn btn-sm btn-outline-primary btn-action view-memory-btn" data-id="${memory.id}">
+                                            <i class="bi bi-eye"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="memory-content">${escapeHtml(memory.content)}</div>
+                                <div class="importance-bar">
+                                    <div class="importance-fill ${importanceClass}" style="width: ${memory.importance * 100}%"></div>
+                                </div>
+                                <div class="memory-meta">
+                                    <span><i class="bi bi-clock"></i> ${memory.created_at_formatted}</span>
+                                    ${memory.session_id ? `<span class="ms-3"><i class="bi bi-person-circle"></i> ${memory.session_id}</span>` : ''}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+
+            memoriesList.innerHTML = html;
+
+            // 添加事件监听器
+            document.querySelectorAll('.memory-checkbox').forEach(checkbox => {
+                checkbox.addEventListener('change', function() {
+                    const memoryId = this.getAttribute('data-id');
+                    if (this.checked) {
+                        selectedMemories.add(memoryId);
+                    } else {
+                        selectedMemories.delete(memoryId);
+                    }
+                    updateBatchDeleteButton();
+                });
+            });
+
+            document.querySelectorAll('.view-memory-btn').forEach(button => {
+                button.addEventListener('click', function() {
+                    const memoryId = this.getAttribute('data-id');
+                    showMemoryDetail(memoryId);
+                });
+            });
+        }
+
+        // 渲染分页
+        function renderPagination(pagination) {
+            if (pagination.total_pages <= 1) {
+                paginationContainer.innerHTML = '';
+                return;
+            }
+
+            let html = '<nav><ul class="pagination">';
+            
+            // 上一页
+            html += `
+                <li class="page-item ${pagination.has_prev ? '' : 'disabled'}">
+                    <a class="page-link" href="#" data-page="${pagination.current_page - 1}">上一页</a>
+                </li>
+            `;
+            
+            // 页码
+            for (let i = 1; i <= pagination.total_pages; i++) {
+                if (i === 1 || i === pagination.total_pages || (i >= pagination.current_page - 2 && i <= pagination.current_page + 2)) {
+                    html += `
+                        <li class="page-item ${i === pagination.current_page ? 'active' : ''}">
+                            <a class="page-link" href="#" data-page="${i}">${i}</a>
+                        </li>
+                    `;
+                } else if (i === pagination.current_page - 3 || i === pagination.current_page + 3) {
+                    html += '<li class="page-item disabled"><span class="page-link">...</span></li>';
+                }
+            }
+            
+            // 下一页
+            html += `
+                <li class="page-item ${pagination.has_next ? '' : 'disabled'}">
+                    <a class="page-link" href="#" data-page="${pagination.current_page + 1}">下一页</a>
+                </li>
+            `;
+            
+            html += '</ul></nav>';
+            paginationContainer.innerHTML = html;
+
+            // 添加事件监听器
+            document.querySelectorAll('.page-link').forEach(link => {
+                link.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    const page = parseInt(this.getAttribute('data-page'));
+                    if (page !== currentPage && page > 0 && page <= pagination.total_pages) {
+                        currentPage = page;
+                        selectedMemories.clear();
+                        updateBatchDeleteButton();
+                        if (currentQuery) {
+                            searchMemories();
+                        } else {
+                            loadMemories();
+                        }
+                    }
+                });
+            });
+        }
+
+        // 显示记忆详情
+        async function showMemoryDetail(memoryId) {
+            try {
+                const response = await fetch(`/api/memories/${memoryId}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    showError(data.error);
+                    return;
+                }
+                
+                currentMemoryId = memoryId;
+                renderMemoryDetail(data);
+                memoryDetailModal.show();
+            } catch (error) {
+                showError('获取记忆详情失败: ' + error.message);
+            }
+        }
+
+        // 渲染记忆详情
+        function renderMemoryDetail(memory) {
+            const html = `
+                <div class="memory-detail-content">${escapeHtml(memory.content)}</div>
+                <div class="memory-detail-meta">
+                    <div class="memory-detail-meta-item">
+                        <span class="memory-detail-meta-label">ID:</span>
+                        <span>${memory.id}</span>
+                    </div>
+                    <div class="memory-detail-meta-item">
+                        <span class="memory-detail-meta-label">类型:</span>
+                        <span class="memory-type type-${memory.type}">${getTypeLabel(memory.type)}</span>
+                    </div>
+                    <div class="memory-detail-meta-item">
+                        <span class="memory-detail-meta-label">重要性:</span>
+                        <span>${memory.importance.toFixed(2)}</span>
+                    </div>
+                    <div class="memory-detail-meta-item">
+                        <span class="memory-detail-meta-label">会话ID:</span>
+                        <span>${memory.session_id || '-'}</span>
+                    </div>
+                    <div class="memory-detail-meta-item">
+                        <span class="memory-detail-meta-label">人格ID:</span>
+                        <span>${memory.persona_id || '-'}</span>
+                    </div>
+                    <div class="memory-detail-meta-item">
+                        <span class="memory-detail-meta-label">创建时间:</span>
+                        <span>${memory.created_at_formatted}</span>
+                    </div>
+                    <div class="memory-detail-meta-item">
+                        <span class="memory-detail-meta-label">更新时间:</span>
+                        <span>${memory.updated_at_formatted}</span>
+                    </div>
+                </div>
+            `;
+            
+            memoryDetailContent.innerHTML = html;
+        }
+
+        // 删除记忆
+        async function deleteMemory(memoryId) {
+            if (!confirm('确定要删除这条记忆吗？此操作不可撤销。')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/memories/${memoryId}`, {
+                    method: 'DELETE'
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    memoryDetailModal.hide();
+                    loadMemories();
+                } else {
+                    showToast(data.message, 'danger');
+                }
+            } catch (error) {
+                showToast('删除记忆失败: ' + error.message, 'danger');
+            }
+        }
+
+        // 批量删除记忆
+        async function batchDeleteMemories() {
+            if (selectedMemories.size === 0) {
+                showToast('请选择要删除的记忆', 'warning');
+                return;
+            }
+            
+            if (!confirm(`确定要删除选中的 ${selectedMemories.size} 条记忆吗？此操作不可撤销。`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/memories/batch', {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        memory_ids: Array.from(selectedMemories)
+                    })
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    selectedMemories.clear();
+                    updateBatchDeleteButton();
+                    loadMemories();
+                } else {
+                    showToast(data.message, 'danger');
+                }
+            } catch (error) {
+                showToast('批量删除记忆失败: ' + error.message, 'danger');
+            }
+        }
+
+        // 更新批量删除按钮状态
+        function updateBatchDeleteButton() {
+            batchDeleteBtn.disabled = selectedMemories.size === 0;
+        }
+
+        // 显示记忆列表部分
+        function showMemoriesSection() {
+            memoriesSection.style.display = 'block';
+            statisticsSection.style.display = 'none';
+            navMemories.classList.add('active');
+            navStatistics.classList.remove('active');
+        }
+
+        // 显示统计信息部分
+        async function showStatisticsSection() {
+            memoriesSection.style.display = 'none';
+            statisticsSection.style.display = 'block';
+            navMemories.classList.remove('active');
+            navStatistics.classList.add('active');
+            
+            try {
+                const response = await fetch('/api/statistics');
+                const data = await response.json();
+                
+                if (data.error) {
+                    showError(data.error);
+                    return;
+                }
+                
+                document.getElementById('total-count').textContent = data.total_count || 0;
+                document.getElementById('avg-importance').textContent = (data.average_importance || 0).toFixed(2);
+                document.getElementById('high-importance').textContent = data.importance_distribution ? data.importance_distribution.high || 0 : 0;
+                document.getElementById('low-importance').textContent = data.importance_distribution ? data.importance_distribution.low || 0 : 0;
+            } catch (error) {
+                showError('加载统计信息失败: ' + error.message);
+            }
+        }
+
+        // 显示加载状态
+        function showLoading() {
+            memoriesList.innerHTML = `
+                <div class="loading-spinner">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">加载中...</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        // 显示错误信息
+        function showError(message) {
+            memoriesList.innerHTML = `
+                <div class="alert alert-danger" role="alert">
+                    ${message}
+                </div>
+            `;
+        }
+
+        // 显示提示消息
+        function showToast(message, type = 'info') {
+            const toastContainer = document.createElement('div');
+            toastContainer.style.position = 'fixed';
+            toastContainer.style.top = '20px';
+            toastContainer.style.right = '20px';
+            toastContainer.style.zIndex = '9999';
+            
+            toastContainer.innerHTML = `
+                <div class="toast show align-items-center text-white bg-${type} border-0" role="alert">
+                    <div class="d-flex">
+                        <div class="toast-body">
+                            ${message}
+                        </div>
+                        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+                    </div>
+                </div>
+            `;
+            
+            document.body.appendChild(toastContainer);
+            
+            setTimeout(() => {
+                toastContainer.remove();
+            }, 3000);
+        }
+
+        // 获取类型标签
+        function getTypeLabel(type) {
+            const labels = {
+                'FACT': '事实',
+                'PREFERENCE': '偏好',
+                'GOAL': '目标',
+                'OPINION': '观点',
+                'RELATIONSHIP': '关系',
+                'OTHER': '其他'
+            };
+            return labels[type] || type;
+        }
+
+        // HTML转义
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, m => map[m]);
+        }
+    </script>
+</body>
+</html>
