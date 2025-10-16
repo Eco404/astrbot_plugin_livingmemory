@@ -66,7 +66,8 @@ class WebUIServer:
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
             margin: 0;
             padding: 0;
-            background-color: #f5f5f5;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
             color: #333;
         }
         
@@ -74,174 +75,269 @@ class WebUIServer:
         .container {
             max-width: 1200px;
             margin: 0 auto;
-            padding: 20px;
+            padding: 30px;
         }
         
         /* 头部样式 */
         .header {
             background-color: #fff;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            backdrop-filter: blur(10px);
+            background-color: rgba(255, 255, 255, 0.95);
         }
         
         .header h1 {
             margin: 0;
             color: #2c3e50;
-            font-size: 24px;
+            font-size: 28px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
         }
         
         /* 卡片样式 */
         .card {
             background-color: #fff;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            padding: 20px;
-            margin-bottom: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            padding: 25px;
+            margin-bottom: 30px;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            backdrop-filter: blur(10px);
+            background-color: rgba(255, 255, 255, 0.95);
+        }
+        
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.15);
         }
         
         /* 表格样式 */
         .memory-table {
             width: 100%;
             border-collapse: collapse;
-            margin-top: 10px;
+            margin-top: 15px;
+            overflow: hidden;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
         }
         
         .memory-table th, .memory-table td {
-            padding: 12px;
+            padding: 15px;
             text-align: left;
             border-bottom: 1px solid #e0e0e0;
+            transition: background-color 0.2s ease;
         }
         
         .memory-table th {
-            background-color: #f8f9fa;
+            background-color: #007bff;
+            color: white;
             font-weight: 600;
-            color: #495057;
+            cursor: pointer;
+            position: sticky;
+            top: 0;
+            z-index: 10;
         }
         
-        .memory-table tr:hover {
+        .memory-table th:hover {
+            background-color: #0056b3;
+        }
+        
+        .memory-table tbody tr {
+            background-color: white;
+            transition: all 0.2s ease;
+        }
+        
+        .memory-table tbody tr:hover {
             background-color: #f8f9fa;
+            transform: scale(1.01);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .memory-table tbody tr:nth-child(even) {
+            background-color: #f8f9fa;
+        }
+        
+        .memory-table tbody tr:nth-child(even):hover {
+            background-color: #e9ecef;
         }
         
         /* 按钮样式 */
         .btn {
             display: inline-block;
-            padding: 8px 16px;
+            padding: 10px 20px;
             border: none;
-            border-radius: 4px;
+            border-radius: 6px;
             cursor: pointer;
-            font-size: 14px;
-            transition: background-color 0.3s;
+            font-size: 16px;
+            font-weight: 500;
+            transition: all 0.3s ease;
             text-decoration: none;
+            letter-spacing: 0.5px;
         }
         
         .btn-primary {
             background-color: #007bff;
             color: white;
+            box-shadow: 0 4px 6px rgba(0, 123, 255, 0.3);
         }
         
         .btn-primary:hover {
             background-color: #0056b3;
+            transform: translateY(-1px);
+            box-shadow: 0 6px 12px rgba(0, 123, 255, 0.4);
+        }
+        
+        .btn-primary:active {
+            transform: translateY(0);
         }
         
         .btn-danger {
             background-color: #dc3545;
             color: white;
+            box-shadow: 0 4px 6px rgba(220, 53, 69, 0.3);
         }
         
         .btn-danger:hover {
             background-color: #c82333;
+            transform: translateY(-1px);
+            box-shadow: 0 6px 12px rgba(220, 53, 69, 0.4);
         }
         
         .btn-secondary {
             background-color: #6c757d;
             color: white;
+            box-shadow: 0 4px 6px rgba(108, 117, 125, 0.3);
         }
         
         .btn-secondary:hover {
             background-color: #545b62;
+            transform: translateY(-1px);
+            box-shadow: 0 6px 12px rgba(108, 117, 125, 0.4);
         }
         
         /* 表单样式 */
         .form-group {
-            margin-bottom: 16px;
+            margin-bottom: 20px;
         }
         
         .form-group label {
             display: block;
-            margin-bottom: 4px;
-            font-weight: 500;
+            margin-bottom: 8px;
+            font-weight: 600;
             color: #495057;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
         
         .form-control {
             width: 100%;
-            padding: 8px 12px;
-            border: 1px solid #ced4da;
-            border-radius: 4px;
-            font-size: 14px;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: all 0.3s ease;
+            background-color: #f9f9f9;
         }
         
         .form-control:focus {
             outline: none;
             border-color: #007bff;
+            background-color: #fff;
+            box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
+        }
+        
+        .form-control::placeholder {
+            color: #999;
         }
         
         /* 分页样式 */
         .pagination {
             display: flex;
             justify-content: center;
-            margin-top: 20px;
+            margin-top: 25px;
+            flex-wrap: wrap;
+            gap: 10px;
         }
         
-        .pagination button {
+        .pagination a {
             margin: 0 5px;
+            transition: all 0.2s ease;
+        }
+        
+        .pagination a:hover {
+            transform: translateY(-2px);
         }
         
         /* 统计信息样式 */
         .stats {
             display: flex;
-            gap: 20px;
-            margin-bottom: 20px;
+            gap: 25px;
+            margin-bottom: 25px;
+            flex-wrap: wrap;
         }
         
         .stat-item {
-            background-color: #f8f9fa;
-            padding: 15px;
-            border-radius: 8px;
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            padding: 20px;
+            border-radius: 12px;
             text-align: center;
             flex: 1;
+            min-width: 150px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+        
+        .stat-item:hover {
+            transform: translateY(-3px);
         }
         
         .stat-value {
-            font-size: 28px;
+            font-size: 32px;
             font-weight: bold;
             color: #007bff;
+            margin-bottom: 5px;
         }
         
         .stat-label {
             color: #6c757d;
             font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 500;
         }
         
         /* 登录页面样式 */
         .login-container {
             max-width: 400px;
             margin: 100px auto;
-            padding: 20px;
+            padding: 30px;
             background-color: #fff;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-radius: 12px;
+            box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+        
+        .login-container:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.15);
         }
         
         .login-title {
             text-align: center;
-            margin-bottom: 20px;
+            margin-bottom: 25px;
             color: #2c3e50;
+            font-size: 28px;
+            font-weight: 600;
         }
         
         /* 操作栏样式 */
@@ -249,26 +345,45 @@ class WebUIServer:
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 15px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
         }
         
         /* 消息提示样式 */
         .message {
-            padding: 10px 15px;
-            margin-bottom: 15px;
-            border-radius: 4px;
+            padding: 15px 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 500;
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
         
         .message-success {
             background-color: #d4edda;
             color: #155724;
             border: 1px solid #c3e6cb;
+            box-shadow: 0 2px 8px rgba(29, 78, 216, 0.15);
         }
         
         .message-error {
             background-color: #f8d7da;
             color: #721c24;
             border: 1px solid #f5c6cb;
+            box-shadow: 0 2px 8px rgba(220, 38, 38, 0.15);
         }
         
         /* 加载动画 */
@@ -286,13 +401,33 @@ class WebUIServer:
             
             .header {
                 flex-direction: column;
-                gap: 10px;
+                gap: 15px;
+                text-align: center;
             }
             
             .action-bar {
                 flex-direction: column;
-                gap: 10px;
+                gap: 15px;
                 align-items: stretch;
+            }
+            
+            .container {
+                padding: 15px;
+            }
+            
+            .card {
+                padding: 15px;
+                margin-bottom: 20px;
+            }
+            
+            .memory-table th, .memory-table td {
+                padding: 10px;
+                font-size: 14px;
+            }
+            
+            .login-container {
+                margin: 50px 15px;
+                padding: 20px;
             }
         }
         """
@@ -676,32 +811,52 @@ async def index(request: Request):
         logger.error(f"获取记忆列表时出错: {e}")
         raise HTTPException(status_code=500, detail="获取记忆数据失败")
 
-# 登录页面
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    """
-    登录页面
-    """
-    return templates.TemplateResponse(
-        "login.html",
-        {"request": request, "error": None}
-    )
+# 注意：登录页面路由已与登录处理合并，使用@app.api_route同时处理GET和POST
 
-# 登录处理
-@app.post("/login", response_class=RedirectResponse)
+# 登录处理 - 同时支持GET和POST方法
+@app.api_route("/login", methods=["GET", "POST"], response_class=HTMLResponse)
 async def login(request: Request):
     """
-    处理登录请求
+    处理登录页面请求和登录提交
     """
-    form_data = await request.form()
-    password = form_data.get("password", "")
+    # 处理GET请求 - 显示登录页面
+    if request.method == "GET":
+        return templates.TemplateResponse(
+            "login.html",
+            {"request": request, "error": None}
+        )
     
-    # 获取配置的密码
-    webui_config = request.app.state.webui_config
-    configured_password = webui_config.get("access_password", "")
-    
-    # 如果没有设置密码，直接登录成功
-    if not configured_password:
+    # 处理POST请求 - 验证登录
+    try:
+        form_data = await request.form()
+        password = form_data.get("password", "")
+        
+        # 获取配置的密码
+        webui_config = request.app.state.webui_config
+        configured_password = webui_config.get("access_password", "")
+        
+        # 如果没有设置密码，直接登录成功
+        if not configured_password:
+            # 创建会话
+            session_id = os.urandom(16).hex()
+            sessions[session_id] = {
+                'created_at': time.time(),
+                'last_activity': time.time(),
+                'timeout': webui_config.get("session_timeout", 3600)
+            }
+            
+            # 创建响应
+            response = RedirectResponse(url="/")
+            response.set_cookie("session_id", session_id, httponly=True)
+            return response
+        
+        # 验证密码
+        if password != configured_password:
+            return templates.TemplateResponse(
+                "login.html",
+                {"request": request, "error": "密码错误，请重试"}
+            )
+        
         # 创建会话
         session_id = os.urandom(16).hex()
         sessions[session_id] = {
@@ -714,26 +869,12 @@ async def login(request: Request):
         response = RedirectResponse(url="/")
         response.set_cookie("session_id", session_id, httponly=True)
         return response
-    
-    # 验证密码
-    if password != configured_password:
+    except Exception as e:
+        logger.error(f"登录处理时出错: {e}")
         return templates.TemplateResponse(
             "login.html",
-            {"request": request, "error": "密码错误，请重试"}
+            {"request": request, "error": "登录处理时出错，请重试"}
         )
-    
-    # 创建会话
-    session_id = os.urandom(16).hex()
-    sessions[session_id] = {
-        'created_at': time.time(),
-        'last_activity': time.time(),
-        'timeout': webui_config.get("session_timeout", 3600)
-    }
-    
-    # 创建响应
-    response = RedirectResponse(url="/")
-    response.set_cookie("session_id", session_id, httponly=True)
-    return response
 
 # 退出登录
 @app.get("/logout", response_class=RedirectResponse)
