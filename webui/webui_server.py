@@ -20,7 +20,7 @@ except ImportError:
 
 from astrbot.api import logger
 
-from .core.handlers.webui_handler import WebUIHandler
+from ..core.handlers.webui_handler import WebUIHandler
 
 
 class WebUIServer:
@@ -43,7 +43,7 @@ class WebUIServer:
         self.config_manager = context  # 使用context作为配置管理器
         self.db_manager = db_manager
         self.llm_provider = llm_provider
-        self.webui_handler = WebUIHandler(db_manager)
+        self.webui_handler = WebUIHandler(self.context, self.config_manager.get("livingmemory", {}), db_manager)
         self.webui_config = self.config_manager.get("webui", {})
         
         # 获取配置
