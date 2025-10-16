@@ -34,9 +34,6 @@ from .core.retrieval import SparseRetriever
 from .core.utils import get_persona_id, format_memories_for_injection, get_now_datetime, retry_on_failure, OperationContext, safe_parse_metadata
 from .core.config_validator import validate_config, merge_config_with_defaults
 from .core.handlers import MemoryHandler, SearchHandler, AdminHandler, FusionHandler
-from .webui.webui_server import WebUIServer
-
-# WebUI服务器将在Star类中初始化
 
 # 会话管理器类，替代全局字典
 class SessionManager:
@@ -129,7 +126,6 @@ class LivingMemoryPlugin(Star):
         self.recall_engine: Optional[RecallEngine] = None
         self.reflection_engine: Optional[ReflectionEngine] = None
         self.forgetting_agent: Optional[ForgettingAgent] = None
-        self.webui_server = None
         
         # 初始化业务逻辑处理器
         self.memory_handler: Optional[MemoryHandler] = None
@@ -206,17 +202,6 @@ class LivingMemoryPlugin(Star):
             self.admin_handler = AdminHandler(self.context, self.config, self.faiss_manager, self.forgetting_agent, self.session_manager)
             self.fusion_handler = FusionHandler(self.context, self.config, self.recall_engine)
 
-            # 启动WebUI服务（如果配置启用）
-            webui_config = self.config.get("webui_settings", {})
-            if webui_config.get("enabled", True):
-                try:
-                    self.webui_server = WebUIServer(webui_config, self.faiss_manager)
-                    # 创建一个新的线程来运行WebUI服务
-                    asyncio.create_task(self.webui_server.start())
-                except Exception as e:
-                    logger.error(f"启动WebUI服务失败: {e}")
-                    self.webui_server = None
-            
             # 标记初始化完成
             self._initialization_complete = True
             logger.info("LivingMemory 插件初始化成功！")
@@ -657,13 +642,6 @@ class LivingMemoryPlugin(Star):
         插件停止时的清理逻辑。
         """
         logger.info("LivingMemory 插件正在停止...")
-        # 停止WebUI服务
-        if self.webui_server:
-            try:
-                await self.webui_server.stop()
-            except Exception as e:
-                logger.error(f"停止WebUI服务时出错: {e}")
-        # 停止遗忘代理
         if self.forgetting_agent:
             await self.forgetting_agent.stop()
         if self.db:
