@@ -73,7 +73,7 @@ class FusionHandler(BaseHandler):
         try:
             # 执行搜索
             session_id = await self.context.conversation_manager.get_curr_conversation_id(None)
-            from astrbot_plugin_livingmemory.core.utils import get_persona_id
+            from ..utils import get_persona_id
             persona_id = await get_persona_id(self.context, None)
             
             results = await self.recall_engine.recall(

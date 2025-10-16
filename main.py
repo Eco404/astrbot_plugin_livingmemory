@@ -33,8 +33,7 @@ from .core.engines.forgetting_agent import ForgettingAgent
 from .core.retrieval import SparseRetriever
 from .core.utils import get_persona_id, format_memories_for_injection, get_now_datetime, retry_on_failure, OperationContext, safe_parse_metadata
 from .core.config_validator import validate_config, merge_config_with_defaults
-from .core.handlers import MemoryHandler, SearchHandler, AdminHandler, FusionHandler, WebUIHandler
-from .webui.webui_server import WebUIServer
+from .core.handlers import MemoryHandler, SearchHandler, AdminHandler, FusionHandler
 
 # 会话管理器类，替代全局字典
 class SessionManager:
@@ -133,7 +132,6 @@ class LivingMemoryPlugin(Star):
         self.search_handler: Optional[SearchHandler] = None
         self.admin_handler: Optional[AdminHandler] = None
         self.fusion_handler: Optional[FusionHandler] = None
-        self.webui_server: Optional[WebUIServer] = None
         
         # 初始化状态标记
         self._initialization_complete = False
@@ -203,10 +201,6 @@ class LivingMemoryPlugin(Star):
             self.search_handler = SearchHandler(self.context, self.config, self.recall_engine, self.sparse_retriever)
             self.admin_handler = AdminHandler(self.context, self.config, self.faiss_manager, self.forgetting_agent, self.session_manager)
             self.fusion_handler = FusionHandler(self.context, self.config, self.recall_engine)
-            
-            # 初始化WebUI服务器
-            self.webui_server = WebUIServer(self.context, self.faiss_manager, self.llm_provider)
-            await self.webui_server.start()
 
             # 标记初始化完成
             self._initialization_complete = True
@@ -650,8 +644,6 @@ class LivingMemoryPlugin(Star):
         logger.info("LivingMemory 插件正在停止...")
         if self.forgetting_agent:
             await self.forgetting_agent.stop()
-        if self.webui_server:
-            await self.webui_server.stop()
         if self.db:
             await self.db.close()
         logger.info("LivingMemory 插件已成功停止。")

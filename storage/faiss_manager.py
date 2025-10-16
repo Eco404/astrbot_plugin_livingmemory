@@ -12,7 +12,7 @@ from datetime import datetime
 
 from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB, Result
 from astrbot.api import logger
-from astrbot_plugin_livingmemory.core.utils import safe_parse_metadata, safe_serialize_metadata, validate_timestamp
+from ..core.utils import safe_parse_metadata, safe_serialize_metadata, validate_timestamp
 
 class DateTimeEncoder(json.JSONEncoder):
     """自定义 JSON 编码器，用于处理 datetime 对象"""

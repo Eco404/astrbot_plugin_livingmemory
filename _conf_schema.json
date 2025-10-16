@@ -288,42 +288,5 @@
         "default": 1000
       }
     }
-  },
-  "webui": {
-    "description": "WebUI设置",
-    "hint": "Web界面管理配置",
-    "type": "object",
-    "items": {
-      "enabled": {
-        "description": "启用WebUI",
-        "hint": "是否启用Web管理界面。",
-        "type": "bool",
-        "default": true
-      },
-      "access_password": {
-        "description": "访问密码",
-        "hint": "访问WebUI所需的密码，留空则不启用密码验证。",
-        "type": "string",
-        "default": ""
-      },
-      "port": {
-        "description": "WebUI端口",
-        "hint": "WebUI服务监听的端口。",
-        "type": "int",
-        "default": 8080
-      },
-      "host": {
-        "description": "WebUI主机地址",
-        "hint": "WebUI服务绑定的主机地址。",
-        "type": "string",
-        "default": "127.0.0.1"
-      },
-      "items_per_page": {
-        "description": "每页显示项目数",
-        "hint": "在WebUI中每页显示的记忆条目数量。",
-        "type": "int",
-        "default": 20
-      }
-    }
   }
 }

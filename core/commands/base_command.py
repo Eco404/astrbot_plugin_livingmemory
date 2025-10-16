@@ -31,7 +31,7 @@ class BaseCommand(ABC):
         """获取当前时区"""
         tz_config = self.config.get("timezone_settings", {})
         tz_str = tz_config.get("timezone", "Asia/Shanghai")
-        from astrbot_plugin_livingmemory.core.utils import get_now_datetime
+        from ..utils import get_now_datetime
         return get_now_datetime(tz_str).tzinfo
     
     def format_timestamp(self, ts: Optional[float]) -> str:

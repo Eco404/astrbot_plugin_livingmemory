@@ -10,8 +10,8 @@ from typing import Dict, Any, Optional
 
 from astrbot.api import logger
 from astrbot.api.star import Context
-from astrbot_plugin_livingmemory.storage.faiss_manager import FaissManager
-from astrbot_plugin_livingmemory.core.utils import get_now_datetime, safe_parse_metadata, validate_timestamp
+from ...storage.faiss_manager import FaissManager
+from ..utils import get_now_datetime, safe_parse_metadata, validate_timestamp
 
 
 class ForgettingAgent:

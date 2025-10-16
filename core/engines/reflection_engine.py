@@ -11,9 +11,9 @@ from pydantic import ValidationError
 
 from astrbot.api import logger
 from astrbot.api.provider import Provider
-from astrbot_plugin_livingmemory.storage.faiss_manager import FaissManager
-from astrbot_plugin_livingmemory.core.utils import extract_json_from_response
-from astrbot_plugin_livingmemory.core.models import (
+from ...storage.faiss_manager import FaissManager
+from ..utils import extract_json_from_response
+from ..models import (
     MemoryEvent,
     _LLMExtractionEventList,
     _LLMScoreEvaluation,
