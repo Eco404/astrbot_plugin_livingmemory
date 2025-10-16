@@ -14,7 +14,10 @@ from .memory_models import (
     KnowledgeGraphPayload,
     EventEntity,
     Entity,
+)
+from .models import (
     MemoryEvent,
+    MemoryEventList,
     _LLMExtractionEvent,
     _LLMExtractionEventList,
     _LLMScoreEvaluation,
@@ -32,6 +35,7 @@ __all__ = [
     "EventEntity",
     "Entity",
     "MemoryEvent",
+    "MemoryEventList",
     "_LLMExtractionEvent",
     "_LLMExtractionEventList",
     "_LLMScoreEvaluation",
