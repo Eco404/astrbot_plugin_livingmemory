@@ -199,42 +199,55 @@ class FaissManager:
         return await self.db.document_storage.get_documents(metadata_filters={})
     
     async def get_memories_paginated(
-        self, 
-        page_size: int = 1000, 
+        self,
+        page_size: int = 1000,
         offset: int = 0
     ) -> List[Dict[str, Any]]:
         """
         分页获取记忆数据，避免一次性加载大量数据。
-        
+
         Args:
             page_size: 每页记录数
             offset: 偏移量
-            
+
         Returns:
-            List[Dict[str, Any]]: 分页记忆数据
+            List[Dict[str, Any]]: 分页记忆数据,metadata 已解析为字典
         """
         try:
-            # 使用 SQLite 的 LIMIT 和 OFFSET 进行分页
+            # 修复: 明确指定列名,避免依赖列顺序
+            # 注意: documents 表的文本列名是 'text' 而非 'content'
             async with self.db.document_storage.connection.execute(
-                "SELECT * FROM documents ORDER BY id LIMIT ? OFFSET ?",
+                "SELECT id, text, metadata FROM documents ORDER BY id LIMIT ? OFFSET ?",
                 (page_size, offset)
             ) as cursor:
                 rows = await cursor.fetchall()
-                
-            # 转换为字典格式
+
+            # 修复: 解析 metadata JSON 为字典
             memories = []
             for row in rows:
+                metadata_str = row[2] if row[2] else "{}"
+                try:
+                    # 如果已经是字典就直接用,否则解析JSON
+                    metadata_dict = (
+                        json.loads(metadata_str)
+                        if isinstance(metadata_str, str)
+                        else metadata_str
+                    )
+                except json.JSONDecodeError:
+                    logger.warning(f"记忆 {row[0]} 的 metadata 解析失败,使用空字典")
+                    metadata_dict = {}
+
                 memory = {
-                    "id": row[0],  # id 列
-                    "content": row[1],  # content 列
-                    "metadata": row[2] if row[2] else "{}"  # metadata 列
+                    "id": row[0],
+                    "content": row[1],  # 从 'text' 列读取但返回为 'content' 字段
+                    "metadata": metadata_dict  # ✅ 返回字典而非字符串
                 }
                 memories.append(memory)
-                
+
             return memories
-            
+
         except Exception as e:
-            logger.error(f"分页获取记忆失败: {e}")
+            logger.error(f"分页获取记忆失败: {e}", exc_info=True)
             return []
     
     async def count_total_memories(self) -> int:

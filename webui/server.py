@@ -11,7 +11,7 @@ import secrets
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, Optional, Tuple,List, TYPE_CHECKING
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -49,10 +49,17 @@ class WebUIServer:
         self.session_timeout = max(60, int(config.get("session_timeout", 3600)))
         self._access_password = str(config.get("access_password", "")).strip()
 
-        self._tokens: Dict[str, float] = {}
+        # Token 管理 - 修复: 使用字典存储更多信息防止永不过期
+        self._tokens: Dict[str, Dict[str, float]] = {}
         self._token_lock = asyncio.Lock()
+
+        # 请求频率限制 - 新增: 防止暴力破解
+        self._failed_attempts: Dict[str, List[float]] = {}
+        self._attempt_lock = asyncio.Lock()
+
         self._server: Optional[uvicorn.Server] = None
         self._server_task: Optional[asyncio.Task] = None
+        self._cleanup_task: Optional[asyncio.Task] = None
 
         self.memory_storage: Optional[MemoryStorage] = None
         self._storage_prepared = False
@@ -85,6 +92,9 @@ class WebUIServer:
         self._server = uvicorn.Server(config)
         self._server_task = asyncio.create_task(self._server.serve())
 
+        # 启动定期清理任务 - 新增: 防止内存泄漏
+        self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+
         # 等待服务启动
         for _ in range(50):
             if getattr(self._server, "started", False):
@@ -101,17 +111,84 @@ class WebUIServer:
         """
         停止 WebUI 服务。
         """
+        # 停止定期清理任务
+        if self._cleanup_task and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+
         if self._server:
             self._server.should_exit = True
         if self._server_task:
             await self._server_task
         self._server = None
         self._server_task = None
+        self._cleanup_task = None
         logger.info("WebUI 已停止")
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _periodic_cleanup(self):
+        """
+        定期清理过期 token 和失败尝试记录 - 新增: 防止内存泄漏
+        """
+        while True:
+            try:
+                await asyncio.sleep(300)  # 每5分钟清理一次
+                async with self._token_lock:
+                    await self._cleanup_tokens_locked()
+                async with self._attempt_lock:
+                    await self._cleanup_failed_attempts_locked()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"定期清理任务出错: {e}")
+
+    async def _cleanup_failed_attempts_locked(self):
+        """
+        清理过期的失败尝试记录 - 新增
+        """
+        now = time.time()
+        expired_ips = []
+        for ip, attempts in self._failed_attempts.items():
+            # 只保留5分钟内的尝试记录
+            recent = [t for t in attempts if now - t < 300]
+            if recent:
+                self._failed_attempts[ip] = recent
+            else:
+                expired_ips.append(ip)
+
+        for ip in expired_ips:
+            self._failed_attempts.pop(ip, None)
+
+    async def _check_rate_limit(self, client_ip: str) -> bool:
+        """
+        检查请求频率限制 - 新增: 防止暴力破解
+
+        Returns:
+            bool: True 表示未超限, False 表示已超限
+        """
+        async with self._attempt_lock:
+            await self._cleanup_failed_attempts_locked()
+            attempts = self._failed_attempts.get(client_ip, [])
+            recent = [t for t in attempts if time.time() - t < 300]  # 5分钟窗口
+
+            if len(recent) >= 5:  # 5分钟内最多5次失败尝试
+                return False
+            return True
+
+    async def _record_failed_attempt(self, client_ip: str):
+        """
+        记录失败的登录尝试 - 新增
+        """
+        async with self._attempt_lock:
+            if client_ip not in self._failed_attempts:
+                self._failed_attempts[client_ip] = []
+            self._failed_attempts[client_ip].append(time.time())
 
     async def _prepare_storage(self):
         """
@@ -157,8 +234,8 @@ class WebUIServer:
                 "http://localhost",
                 "http://127.0.0.1",
             ],
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_methods=["GET", "POST", "DELETE"],  # 修复: 限制允许的方法
+            allow_headers=["Content-Type", "Authorization", "X-Auth-Token"],  # 修复: 限制允许的头部
             allow_credentials=True,
         )
 
@@ -171,19 +248,37 @@ class WebUIServer:
             return HTMLResponse(index_path.read_text(encoding="utf-8"))
 
         @self._app.post("/api/login")
-        async def login(payload: Dict[str, Any]):
+        async def login(request: Request, payload: Dict[str, Any]):
             password = str(payload.get("password", "")).strip()
             if not password:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="密码不能为空")
+
+            # 检查请求频率限制 - 新增
+            client_ip = request.client.host if request.client else "unknown"
+            if not await self._check_rate_limit(client_ip):
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="尝试次数过多，请5分钟后再试"
+                )
+
             if password != self._access_password:
-                await asyncio.sleep(0.3)  # 减缓暴力破解
+                # 记录失败尝试 - 新增
+                await self._record_failed_attempt(client_ip)
+                await asyncio.sleep(1.0)  # 增加延迟到1秒，减缓暴力破解
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="认证失败")
 
+            # 生成 token - 修复: 使用字典存储多个时间戳
             token = secrets.token_urlsafe(32)
-            expires_at = time.time() + self.session_timeout
+            now = time.time()
+            max_lifetime = 86400  # 24小时绝对过期
+
             async with self._token_lock:
                 await self._cleanup_tokens_locked()
-                self._tokens[token] = expires_at
+                self._tokens[token] = {
+                    "created_at": now,
+                    "last_active": now,
+                    "max_lifetime": max_lifetime
+                }
 
             return {"token": token, "expires_in": self.session_timeout}
 
@@ -320,61 +415,104 @@ class WebUIServer:
         keyword: str,
         load_all: bool,
     ) -> Tuple[int, list]:
-        if self.memory_storage:
-            if load_all:
-                records = await self.memory_storage.get_memories_paginated(
-                    page_size=0,
-                    offset=0,
-                    status=status_filter,
-                    keyword=keyword,
-                )
-                total = len(records)
-            else:
-                total = await self.memory_storage.count_memories(
-                    status=status_filter, keyword=keyword
-                )
-                records = await self.memory_storage.get_memories_paginated(
-                    page_size=page_size,
-                    offset=offset,
-                    status=status_filter,
-                    keyword=keyword,
-                )
-            items = [self._format_memory(record, source="storage") for record in records]
-            return total, items
+        # 修复: 统一使用 Faiss 文档存储,移除 MemoryStorage 分支
+        # (因为插件主逻辑使用 documents 表,而 memories 表可能为空)
 
-        # fallback: 使用 Faiss 文档存储
+        # 获取总数
         total = await self.faiss_manager.count_total_memories()
-        fetch_size = page_size if page_size else max(total, 1)
+
+        # 确定抓取大小
+        if load_all:
+            fetch_size = max(total, 1) if total > 0 else 1000
+            fetch_offset = 0
+        else:
+            fetch_size = page_size
+            fetch_offset = offset
+
+        # 获取记录
         records = await self.faiss_manager.get_memories_paginated(
-            page_size=fetch_size, offset=offset
+            page_size=fetch_size, offset=fetch_offset
         )
-        items = [self._format_memory(record, source="faiss") for record in records]
-        return total, items
+
+        # 应用过滤 (修复: 添加状态和关键词过滤)
+        filtered_records = self._filter_records(records, status_filter, keyword)
+
+        # 格式化
+        items = [self._format_memory(record, source="faiss") for record in filtered_records]
+
+        return len(filtered_records), items
+
+    def _filter_records(
+        self,
+        records: List[Dict[str, Any]],
+        status_filter: str,
+        keyword: str
+    ) -> List[Dict[str, Any]]:
+        """
+        在内存中过滤记录 - 新增: 支持状态和关键词筛选
+        """
+        filtered = []
+
+        for record in records:
+            # metadata 现在已经是字典
+            metadata = record.get("metadata", {})
+
+            # 状态过滤
+            if status_filter and status_filter != "all":
+                record_status = metadata.get("status", "active")
+                if record_status != status_filter:
+                    continue
+
+            # 关键词过滤 (搜索 content 和 memory_content)
+            if keyword:
+                content = record.get("content", "")
+                memory_content = metadata.get("memory_content", "")
+                keyword_lower = keyword.lower()
+
+                if (keyword_lower not in content.lower() and
+                    keyword_lower not in memory_content.lower()):
+                    continue
+
+            filtered.append(record)
+
+        return filtered
 
     async def _get_memory_detail(self, memory_id: str) -> Optional[Dict[str, Any]]:
-        if self.memory_storage:
-            record = await self.memory_storage.get_memory_by_memory_id(memory_id)
-            if record:
-                return self._format_memory(record, source="storage")
-
-        # fallback: 尝试按文档ID查询
+        """
+        获取单个记忆详情 - 修复: 统一使用 Faiss 文档存储
+        """
+        # 尝试按文档ID查询
         try:
             doc_id = int(memory_id)
         except ValueError:
-            return None
+            # 如果不是整数,尝试按 memory_id 查询
+            doc_id = None
 
         try:
-            docs = await self.faiss_manager.db.document_storage.get_documents(
-                ids=[doc_id]
-            )
-        except Exception as exc:  # pragma: no cover
-            logger.error(f"查询文档存储失败: {exc}")
-            return None
+            if doc_id is not None:
+                # 按整数 ID 查询
+                docs = await self.faiss_manager.db.document_storage.get_documents(
+                    ids=[doc_id]
+                )
+            else:
+                # 按 memory_id 查询 (在 metadata 中)
+                all_docs = await self.faiss_manager.get_memories_paginated(
+                    page_size=10000, offset=0
+                )
+                docs = [
+                    doc for doc in all_docs
+                    if doc.get("metadata", {}).get("memory_id") == memory_id
+                ]
 
-        if not docs:
-            return None
+            if not docs:
+                return None
 
-        return self._format_memory(docs[0], source="faiss")
+            # metadata 已经是字典,直接返回
+            return self._format_memory(docs[0], source="faiss")
+
+        except Exception as exc:
+            logger.error(f"查询记忆详情失败: {exc}", exc_info=True)
+            return None
 
     def _format_memory(self, raw: Dict[str, Any], source: str) -> Dict[str, Any]:
         if source == "storage":
@@ -407,7 +545,10 @@ class WebUIServer:
                 "raw_json": memory_json,
             }
 
-        metadata = safe_parse_metadata(raw.get("metadata"))
+        # Faiss source 的格式化 (修复: metadata 现在已经是字典)
+        metadata = raw.get("metadata", {})  # ✅ 已经是字典,不需要 safe_parse_metadata
+
+        # 优先使用 metadata.memory_content,fallback 到 content
         summary = metadata.get("memory_content") or raw.get("content") or ""
         importance = metadata.get("importance")
         event_type = metadata.get("event_type")
@@ -434,15 +575,9 @@ class WebUIServer:
         }
 
     async def _gather_statistics(self) -> Tuple[int, Dict[str, int]]:
-        if self.memory_storage:
-            total = await self.memory_storage.count_memories()
-            counts = {
-                "active": await self.memory_storage.count_memories(status="active"),
-                "archived": await self.memory_storage.count_memories(status="archived"),
-                "deleted": await self.memory_storage.count_memories(status="deleted"),
-            }
-            return total, counts
-
+        """
+        统计记忆数量 - 修复: 统一使用 Faiss 文档存储
+        """
         total = await self.faiss_manager.count_total_memories()
         counts = await self._collect_status_counts()
         return total, counts
@@ -476,19 +611,44 @@ class WebUIServer:
         return dependency
 
     async def _validate_token(self, token: str):
+        """
+        验证 token - 修复: 检查绝对过期时间和会话超时
+        """
         async with self._token_lock:
             await self._cleanup_tokens_locked()
-            expiry = self._tokens.get(token)
-            if not expiry:
+            token_data = self._tokens.get(token)
+
+            if not token_data:
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="会话已失效")
-            if expiry < time.time():
+
+            now = time.time()
+
+            # 检查绝对过期时间 (24小时)
+            if now - token_data["created_at"] > token_data["max_lifetime"]:
+                self._tokens.pop(token, None)
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="会话已达最大时长")
+
+            # 检查会话超时 (最后活动时间)
+            if now - token_data["last_active"] > self.session_timeout:
                 self._tokens.pop(token, None)
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="会话已过期")
-            self._tokens[token] = time.time() + self.session_timeout
+
+            # 更新最后活动时间
+            token_data["last_active"] = now
 
     async def _cleanup_tokens_locked(self):
+        """
+        清理过期 token - 修复: 适配新的 token 数据结构
+        """
         now = time.time()
-        expired = [token for token, expiry in self._tokens.items() if expiry < now]
+        expired = []
+
+        for token, token_data in self._tokens.items():
+            # 检查是否超过绝对过期时间或会话超时
+            if (now - token_data["created_at"] > token_data["max_lifetime"] or
+                now - token_data["last_active"] > self.session_timeout):
+                expired.append(token)
+
         for token in expired:
             self._tokens.pop(token, None)
 
