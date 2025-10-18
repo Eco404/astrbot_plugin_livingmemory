@@ -215,8 +215,9 @@ class FaissManager:
         """
         try:
             # 修复: 明确指定列名,避免依赖列顺序
+            # 注意: documents 表的文本列名是 'text' 而非 'content'
             async with self.db.document_storage.connection.execute(
-                "SELECT id, content, metadata FROM documents ORDER BY id LIMIT ? OFFSET ?",
+                "SELECT id, text, metadata FROM documents ORDER BY id LIMIT ? OFFSET ?",
                 (page_size, offset)
             ) as cursor:
                 rows = await cursor.fetchall()
@@ -238,7 +239,7 @@ class FaissManager:
 
                 memory = {
                     "id": row[0],
-                    "content": row[1],
+                    "content": row[1],  # 从 'text' 列读取但返回为 'content' 字段
                     "metadata": metadata_dict  # ✅ 返回字典而非字符串
                 }
                 memories.append(memory)
