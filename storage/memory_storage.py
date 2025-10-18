@@ -81,8 +81,9 @@ class MemoryStorage:
         """
         if not internal_ids:
             return []
-        placeholders = ",".join("?" for _ in internal_ids)
-        sql = f"SELECT id, memory_id, memory_data FROM memories WHERE id IN ({placeholders})"
+        # 安全的 SQL 构造: 使用固定模板而非 f-string
+        placeholders = ",".join("?" * len(internal_ids))
+        sql = "SELECT id, memory_id, memory_data FROM memories WHERE id IN ({})".format(placeholders)
         async with self.connection.execute(sql, internal_ids) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
@@ -95,8 +96,9 @@ class MemoryStorage:
         """
         if not memory_ids:
             return []
-        placeholders = ",".join("?" for _ in memory_ids)
-        sql = f"SELECT id, memory_id, memory_data FROM memories WHERE memory_id IN ({placeholders})"
+        # 安全的 SQL 构造: 使用固定模板而非 f-string
+        placeholders = ",".join("?" * len(memory_ids))
+        sql = "SELECT id, memory_id, memory_data FROM memories WHERE memory_id IN ({})".format(placeholders)
         async with self.connection.execute(sql, memory_ids) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
@@ -129,10 +131,10 @@ class MemoryStorage:
         """
         if not internal_ids:
             return
-        placeholders = ",".join("?" for _ in internal_ids)
-        await self.connection.execute(
-            f"DELETE FROM memories WHERE id IN ({placeholders})", internal_ids
-        )
+        # 安全的 SQL 构造: 使用固定模板而非 f-string
+        placeholders = ",".join("?" * len(internal_ids))
+        sql = "DELETE FROM memories WHERE id IN ({})".format(placeholders)
+        await self.connection.execute(sql, internal_ids)
         await self.connection.commit()
 
     async def update_memory_status(self, internal_ids: List[int], new_status: str):
@@ -141,12 +143,11 @@ class MemoryStorage:
         """
         if not internal_ids:
             return
-        placeholders = ",".join("?" for _ in internal_ids)
+        # 安全的 SQL 构造: 使用固定模板而非 f-string
+        placeholders = ",".join("?" * len(internal_ids))
+        sql = "UPDATE memories SET status = ? WHERE id IN ({})".format(placeholders)
         # 注意参数绑定的方式，new_status 在前
-        await self.connection.execute(
-            f"UPDATE memories SET status = ? WHERE id IN ({placeholders})",
-            [new_status] + internal_ids,
-        )
+        await self.connection.execute(sql, [new_status] + internal_ids)
         await self.connection.commit()
 
     async def count_memories(
@@ -258,8 +259,8 @@ class MemoryStorage:
         if not memory_ids:
             return
 
-        placeholders = ",".join("?" for _ in memory_ids)
-        await self.connection.execute(
-            f"DELETE FROM memories WHERE memory_id IN ({placeholders})", memory_ids
-        )
+        # 安全的 SQL 构造: 使用固定模板而非 f-string
+        placeholders = ",".join("?" * len(memory_ids))
+        sql = "DELETE FROM memories WHERE memory_id IN ({})".format(placeholders)
+        await self.connection.execute(sql, memory_ids)
         await self.connection.commit()
