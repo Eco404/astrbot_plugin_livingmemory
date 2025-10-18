@@ -415,61 +415,104 @@ class WebUIServer:
         keyword: str,
         load_all: bool,
     ) -> Tuple[int, list]:
-        if self.memory_storage:
-            if load_all:
-                records = await self.memory_storage.get_memories_paginated(
-                    page_size=0,
-                    offset=0,
-                    status=status_filter,
-                    keyword=keyword,
-                )
-                total = len(records)
-            else:
-                total = await self.memory_storage.count_memories(
-                    status=status_filter, keyword=keyword
-                )
-                records = await self.memory_storage.get_memories_paginated(
-                    page_size=page_size,
-                    offset=offset,
-                    status=status_filter,
-                    keyword=keyword,
-                )
-            items = [self._format_memory(record, source="storage") for record in records]
-            return total, items
+        # 修复: 统一使用 Faiss 文档存储,移除 MemoryStorage 分支
+        # (因为插件主逻辑使用 documents 表,而 memories 表可能为空)
 
-        # fallback: 使用 Faiss 文档存储
+        # 获取总数
         total = await self.faiss_manager.count_total_memories()
-        fetch_size = page_size if page_size else max(total, 1)
+
+        # 确定抓取大小
+        if load_all:
+            fetch_size = max(total, 1) if total > 0 else 1000
+            fetch_offset = 0
+        else:
+            fetch_size = page_size
+            fetch_offset = offset
+
+        # 获取记录
         records = await self.faiss_manager.get_memories_paginated(
-            page_size=fetch_size, offset=offset
+            page_size=fetch_size, offset=fetch_offset
         )
-        items = [self._format_memory(record, source="faiss") for record in records]
-        return total, items
+
+        # 应用过滤 (修复: 添加状态和关键词过滤)
+        filtered_records = self._filter_records(records, status_filter, keyword)
+
+        # 格式化
+        items = [self._format_memory(record, source="faiss") for record in filtered_records]
+
+        return len(filtered_records), items
+
+    def _filter_records(
+        self,
+        records: List[Dict[str, Any]],
+        status_filter: str,
+        keyword: str
+    ) -> List[Dict[str, Any]]:
+        """
+        在内存中过滤记录 - 新增: 支持状态和关键词筛选
+        """
+        filtered = []
+
+        for record in records:
+            # metadata 现在已经是字典
+            metadata = record.get("metadata", {})
+
+            # 状态过滤
+            if status_filter and status_filter != "all":
+                record_status = metadata.get("status", "active")
+                if record_status != status_filter:
+                    continue
+
+            # 关键词过滤 (搜索 content 和 memory_content)
+            if keyword:
+                content = record.get("content", "")
+                memory_content = metadata.get("memory_content", "")
+                keyword_lower = keyword.lower()
+
+                if (keyword_lower not in content.lower() and
+                    keyword_lower not in memory_content.lower()):
+                    continue
+
+            filtered.append(record)
+
+        return filtered
 
     async def _get_memory_detail(self, memory_id: str) -> Optional[Dict[str, Any]]:
-        if self.memory_storage:
-            record = await self.memory_storage.get_memory_by_memory_id(memory_id)
-            if record:
-                return self._format_memory(record, source="storage")
-
-        # fallback: 尝试按文档ID查询
+        """
+        获取单个记忆详情 - 修复: 统一使用 Faiss 文档存储
+        """
+        # 尝试按文档ID查询
         try:
             doc_id = int(memory_id)
         except ValueError:
-            return None
+            # 如果不是整数,尝试按 memory_id 查询
+            doc_id = None
 
         try:
-            docs = await self.faiss_manager.db.document_storage.get_documents(
-                ids=[doc_id]
-            )
-        except Exception as exc:  # pragma: no cover
-            logger.error(f"查询文档存储失败: {exc}")
-            return None
+            if doc_id is not None:
+                # 按整数 ID 查询
+                docs = await self.faiss_manager.db.document_storage.get_documents(
+                    ids=[doc_id]
+                )
+            else:
+                # 按 memory_id 查询 (在 metadata 中)
+                all_docs = await self.faiss_manager.get_memories_paginated(
+                    page_size=10000, offset=0
+                )
+                docs = [
+                    doc for doc in all_docs
+                    if doc.get("metadata", {}).get("memory_id") == memory_id
+                ]
 
-        if not docs:
-            return None
+            if not docs:
+                return None
 
-        return self._format_memory(docs[0], source="faiss")
+            # metadata 已经是字典,直接返回
+            return self._format_memory(docs[0], source="faiss")
+
+        except Exception as exc:
+            logger.error(f"查询记忆详情失败: {exc}", exc_info=True)
+            return None
 
     def _format_memory(self, raw: Dict[str, Any], source: str) -> Dict[str, Any]:
         if source == "storage":
@@ -502,7 +545,10 @@ class WebUIServer:
                 "raw_json": memory_json,
             }
 
-        metadata = safe_parse_metadata(raw.get("metadata"))
+        # Faiss source 的格式化 (修复: metadata 现在已经是字典)
+        metadata = raw.get("metadata", {})  # ✅ 已经是字典,不需要 safe_parse_metadata
+
+        # 优先使用 metadata.memory_content,fallback 到 content
         summary = metadata.get("memory_content") or raw.get("content") or ""
         importance = metadata.get("importance")
         event_type = metadata.get("event_type")
@@ -529,15 +575,9 @@ class WebUIServer:
         }
 
     async def _gather_statistics(self) -> Tuple[int, Dict[str, int]]:
-        if self.memory_storage:
-            total = await self.memory_storage.count_memories()
-            counts = {
-                "active": await self.memory_storage.count_memories(status="active"),
-                "archived": await self.memory_storage.count_memories(status="archived"),
-                "deleted": await self.memory_storage.count_memories(status="deleted"),
-            }
-            return total, counts
-
+        """
+        统计记忆数量 - 修复: 统一使用 Faiss 文档存储
+        """
         total = await self.faiss_manager.count_total_memories()
         counts = await self._collect_status_counts()
         return total, counts
