@@ -60,11 +60,14 @@ class WebUIServer:
         self._server: Optional[uvicorn.Server] = None
         self._server_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._nuke_task: Optional[asyncio.Task] = None
 
         self.memory_storage: Optional[MemoryStorage] = None
         self._storage_prepared = False
+        self._pending_nuke: Optional[Dict[str, Any]] = None
+        self._nuke_lock = asyncio.Lock()
 
-        self._app = FastAPI(title="LivingMemory 控制台", version="1.1.0")
+        self._app = FastAPI(title="LivingMemory 控制台", version="1.3.0")
         self._setup_routes()
 
     # ------------------------------------------------------------------
@@ -125,6 +128,14 @@ class WebUIServer:
             await self._server_task
         self._server = None
         self._server_task = None
+        if self._nuke_task and not self._nuke_task.done():
+            self._nuke_task.cancel()
+            try:
+                await self._nuke_task
+            except asyncio.CancelledError:
+                pass
+        self._nuke_task = None
+        self._pending_nuke = None
         self._cleanup_task = None
         logger.info("WebUI 已停止")
 
@@ -386,6 +397,39 @@ class WebUIServer:
                 "deleted_memory_count": deleted_memories,
             }
 
+        @self._app.post("/api/memories/nuke")
+        async def schedule_memory_nuke(
+            payload: Optional[Dict[str, Any]] = None,
+            token: str = Depends(self._auth_dependency()),
+        ):
+            delay = 30
+            if payload and "delay" in payload:
+                try:
+                    delay = int(payload["delay"])
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST, detail="delay 参数无效"
+                    )
+            return await self._schedule_nuke(delay)
+
+        @self._app.get("/api/memories/nuke")
+        async def get_memory_nuke_status(
+            token: str = Depends(self._auth_dependency()),
+        ):
+            return await self._get_pending_nuke()
+
+        @self._app.delete("/api/memories/nuke/{operation_id}")
+        async def cancel_memory_nuke(
+            operation_id: str,
+            token: str = Depends(self._auth_dependency()),
+        ):
+            cancelled = await self._cancel_nuke(operation_id)
+            if not cancelled:
+                raise HTTPException(
+                    status.HTTP_404_NOT_FOUND, detail="当前没有匹配的核爆任务"
+                )
+            return {"detail": "已取消核爆任务", "operation_id": operation_id}
+
         @self._app.get("/api/stats")
         async def stats(token: str = Depends(self._auth_dependency())):
             total, status_counts = await self._gather_statistics()
@@ -415,32 +459,122 @@ class WebUIServer:
         keyword: str,
         load_all: bool,
     ) -> Tuple[int, list]:
-        # 修复: 统一使用 Faiss 文档存储,移除 MemoryStorage 分支
-        # (因为插件主逻辑使用 documents 表,而 memories 表可能为空)
+        try:
+            total, records = await self._query_faiss_memories(
+                offset=offset,
+                page_size=page_size,
+                status_filter=status_filter,
+                keyword=keyword,
+                load_all=load_all,
+            )
+        except Exception as exc:
+            logger.error(f"使用优化查询获取记忆失败，将回退基础实现: {exc}", exc_info=True)
+            total, records = await self._fetch_memories_fallback(
+                offset=offset,
+                page_size=page_size,
+                status_filter=status_filter,
+                keyword=keyword,
+                load_all=load_all,
+            )
 
-        # 获取总数
-        total = await self.faiss_manager.count_total_memories()
+        items = [self._format_memory(record, source="faiss") for record in records]
+        return total, items
 
-        # 确定抓取大小
-        if load_all:
-            fetch_size = max(total, 1) if total > 0 else 1000
-            fetch_offset = 0
-        else:
-            fetch_size = page_size
-            fetch_offset = offset
+    async def _query_faiss_memories(
+        self,
+        offset: int,
+        page_size: int,
+        status_filter: str,
+        keyword: str,
+        load_all: bool,
+    ) -> Tuple[int, List[Dict[str, Any]]]:
+        doc_storage = getattr(self.faiss_manager.db, "document_storage", None)
+        connection = getattr(doc_storage, "connection", None)
+        if connection is None:
+            raise RuntimeError("Document storage connection unavailable")
 
-        # 获取记录
+        conditions: List[str] = []
+        params: List[Any] = []
+
+        status_value = (status_filter or "").strip().lower()
+        if status_value and status_value != "all":
+            conditions.append("LOWER(COALESCE(json_extract(metadata, '$.status'), 'active')) = ?")
+            params.append(status_value)
+
+        keyword_value = (keyword or "").strip()
+        if keyword_value:
+            keyword_param = f"%{keyword_value.lower()}%"
+            conditions.append("("
+                "LOWER(text) LIKE ? OR "
+                "LOWER(COALESCE(json_extract(metadata, '$.memory_content'), '')) LIKE ? OR "
+                "LOWER(COALESCE(json_extract(metadata, '$.memory_id'), '')) LIKE ?"
+                ")")
+            params.extend([keyword_param, keyword_param, keyword_param])
+
+        where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        count_sql = f"SELECT COUNT(*) FROM documents{where_clause}"
+        async with connection.execute(count_sql, params) as cursor:
+            row = await cursor.fetchone()
+        total = int(row[0]) if row and row[0] is not None else 0
+
+        query_sql = (
+            "SELECT id, text, metadata FROM documents"
+            f"{where_clause} ORDER BY id DESC"
+        )
+        query_params = list(params)
+        if not load_all and page_size > 0:
+            query_sql += " LIMIT ? OFFSET ?"
+            query_params.extend([page_size, offset])
+
+        async with connection.execute(query_sql, query_params) as cursor:
+            rows = await cursor.fetchall()
+
+        records: List[Dict[str, Any]] = []
+        for row in rows:
+            metadata_raw = row[2]
+            if isinstance(metadata_raw, str):
+                try:
+                    metadata = json.loads(metadata_raw)
+                except json.JSONDecodeError:
+                    metadata = {}
+            else:
+                metadata = metadata_raw or {}
+
+            records.append(
+                {
+                    "id": row[0],
+                    "content": row[1],
+                    "metadata": metadata,
+                }
+            )
+
+        return total, records
+
+    async def _fetch_memories_fallback(
+        self,
+        offset: int,
+        page_size: int,
+        status_filter: str,
+        keyword: str,
+        load_all: bool,
+    ) -> Tuple[int, List[Dict[str, Any]]]:
+        total_available = await self.faiss_manager.count_total_memories()
+        fetch_size = max(total_available, page_size if page_size else 0, 1)
+
         records = await self.faiss_manager.get_memories_paginated(
-            page_size=fetch_size, offset=fetch_offset
+            page_size=fetch_size, offset=0
         )
 
-        # 应用过滤 (修复: 添加状态和关键词过滤)
         filtered_records = self._filter_records(records, status_filter, keyword)
+        total_filtered = len(filtered_records)
 
-        # 格式化
-        items = [self._format_memory(record, source="faiss") for record in filtered_records]
+        if load_all:
+            return total_filtered, filtered_records
 
-        return len(filtered_records), items
+        start = max(0, offset)
+        end = start + page_size if page_size else total_filtered
+        return total_filtered, filtered_records[start:end]
 
     def _filter_records(
         self,
@@ -599,6 +733,135 @@ class WebUIServer:
         except Exception as exc:
             logger.error(f"统计记忆状态失败: {exc}", exc_info=True)
         return counts
+
+    def _serialize_nuke_status(
+        self,
+        payload: Optional[Dict[str, Any]],
+        now: Optional[float] = None,
+        already_pending: bool = False,
+    ) -> Dict[str, Any]:
+        if not payload:
+            return {"pending": False}
+
+        now = now or time.time()
+        execute_at = float(payload.get("execute_at", now))
+        seconds_left = max(0, int(round(execute_at - now)))
+        if already_pending:
+            detail = "A pending wipe is already counting down"
+        else:
+            detail = (
+                f"Wipe executes in {seconds_left} seconds"
+                if seconds_left
+                else "Wipe executing now"
+            )
+
+        return {
+            "pending": True,
+            "operation_id": payload.get("id"),
+            "execute_at": datetime.fromtimestamp(execute_at).isoformat(
+                sep=" ", timespec="seconds"
+            ),
+            "seconds_left": seconds_left,
+            "detail": detail,
+            "already_pending": already_pending,
+        }
+
+    async def _schedule_nuke(self, delay_seconds: int) -> Dict[str, Any]:
+        delay = max(5, min(int(delay_seconds), 600))
+        task_to_cancel: Optional[asyncio.Task] = None
+        pending_snapshot: Dict[str, Any]
+
+        async with self._nuke_lock:
+            now = time.time()
+            if self._pending_nuke and self._pending_nuke.get("status") == "scheduled":
+                return self._serialize_nuke_status(self._pending_nuke, now, True)
+
+            if self._nuke_task and not self._nuke_task.done():
+                task_to_cancel = self._nuke_task
+
+            operation_id = secrets.token_urlsafe(8)
+            execute_at = now + delay
+            pending = {
+                "id": operation_id,
+                "created_at": now,
+                "execute_at": execute_at,
+                "status": "scheduled",
+            }
+            self._pending_nuke = pending
+            self._nuke_task = asyncio.create_task(self._run_nuke(operation_id, delay))
+            pending_snapshot = dict(pending)
+
+        if task_to_cancel:
+            task_to_cancel.cancel()
+            try:
+                await task_to_cancel
+            except asyncio.CancelledError:
+                pass
+
+        return self._serialize_nuke_status(pending_snapshot, time.time())
+
+    async def _get_pending_nuke(self) -> Dict[str, Any]:
+        async with self._nuke_lock:
+            pending = self._pending_nuke
+            if not pending or pending.get("status") != "scheduled":
+                return {"pending": False}
+            snapshot = dict(pending)
+        return self._serialize_nuke_status(snapshot)
+
+    async def _cancel_nuke(self, operation_id: str) -> bool:
+        task: Optional[asyncio.Task] = None
+        async with self._nuke_lock:
+            if not self._pending_nuke or self._pending_nuke.get("id") != operation_id:
+                return False
+            task = self._nuke_task
+            self._pending_nuke = None
+            self._nuke_task = None
+
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        return True
+
+    async def _run_nuke(self, operation_id: str, delay: int):
+        try:
+            await asyncio.sleep(delay)
+            await self._execute_nuke(operation_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover
+            logger.error("Nuke job failed: %s", exc, exc_info=True)
+            async with self._nuke_lock:
+                if self._pending_nuke and self._pending_nuke.get("id") == operation_id:
+                    self._pending_nuke = None
+                self._nuke_task = None
+
+    async def _execute_nuke(self, operation_id: str):
+        async with self._nuke_lock:
+            if not self._pending_nuke or self._pending_nuke.get("id") != operation_id:
+                return
+            self._pending_nuke["status"] = "running"
+
+        vector_deleted = 0
+        storage_deleted = 0
+        try:
+            vector_deleted = await self.faiss_manager.wipe_all_memories()
+            if self.memory_storage:
+                storage_deleted = await self.memory_storage.delete_all_memories()
+            logger.warning(
+                "Memory wipe executed: removed %s vector records and %s structured records",
+                vector_deleted,
+                storage_deleted,
+            )
+        except Exception as exc:
+            logger.error("Memory wipe failed: %s", exc, exc_info=True)
+        finally:
+            async with self._nuke_lock:
+                if self._pending_nuke and self._pending_nuke.get("id") == operation_id:
+                    self._pending_nuke = None
+                self._nuke_task = None
 
     def _auth_dependency(self):
         async def dependency(request: Request) -> str:
