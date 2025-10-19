@@ -345,6 +345,22 @@ class FaissManager:
             
             raise RuntimeError(f"删除记忆失败: {e}") from e
 
+    async def wipe_all_memories(self) -> int:
+        """
+        清空所有记忆记录，返回删除的数量。
+        """
+        async with self.db.document_storage.connection.execute(
+            "SELECT id FROM documents"
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        doc_ids = [row[0] for row in rows]
+        if not doc_ids:
+            return 0
+
+        await self.delete_memories(doc_ids)
+        return len(doc_ids)
+
     async def update_memory(
         self,
         memory_id: Union[int, str],

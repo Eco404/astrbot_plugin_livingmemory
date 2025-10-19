@@ -264,3 +264,9 @@ class MemoryStorage:
         sql = "DELETE FROM memories WHERE memory_id IN ({})".format(placeholders)
         await self.connection.execute(sql, memory_ids)
         await self.connection.commit()
+
+    async def delete_all_memories(self) -> int:
+        """删除所有结构化记忆记录，返回删除数量。"""
+        cursor = await self.connection.execute("DELETE FROM memories")
+        await self.connection.commit()
+        return cursor.rowcount if cursor and cursor.rowcount is not None else 0
