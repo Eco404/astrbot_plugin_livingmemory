@@ -444,7 +444,7 @@ perf: 优化大规模数据的分页查询
 # 记录新功能、修复和改进
 
 # 3. 创建发布分支
-git checkout -b release/v1.2.0
+git checkout -b release/v1.3.0
 
 # 4. 运行完整测试套件
 pytest tests/ --cov=.
@@ -453,8 +453,8 @@ pytest tests/ --cov=.
 # 经过 Code Review 后合并到主分支
 
 # 6. 创建 Git Tag
-git tag -a v1.2.0 -m "Release v1.2.0: 添加分页与核爆功能"
-git push origin v1.2.0
+git tag -a v1.3.0 -m "Release v1.3.0: WebUI 分页与核爆增强"
+git push origin v1.3.0
 ```
 
 ## 🎯 扩展指南
