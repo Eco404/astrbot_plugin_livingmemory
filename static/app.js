@@ -480,6 +480,7 @@
       await apiRequest(`/api/memories/nuke/${state.nuke.operationId}`, {
         method: "DELETE",
       });
+      stopNukeCountdown();
       showToast("Memory wipe cancelled");
     } catch (error) {
       dom.nukeCancel.disabled = false;
@@ -512,8 +513,20 @@
       dom.nukeCancel.disabled = true;
 
       setTimeout(async () => {
-        await fetchAll();
-        showToast("所有记忆已被清除");
+        // 核爆动画完成后,清理状态,但不自动加载数据
+        stopNukeCountdown();
+        // 清空当前显示的数据
+        state.items = [];
+        state.total = 0;
+        state.page = 1;
+        renderEmptyTable("所有记忆已被清除,点击「刷新」或「加载全部」查看结果");
+        updatePagination();
+        // 更新统计信息显示为 0
+        dom.stats.total.textContent = "0";
+        dom.stats.active.textContent = "0";
+        dom.stats.archived.textContent = "0";
+        dom.stats.deleted.textContent = "0";
+        showToast("核爆完成!所有记忆已被清除");
       }, 4000); // 延长到4秒，等待核爆动画完成
     }, 1000);
   }
