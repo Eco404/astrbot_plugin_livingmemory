@@ -846,12 +846,29 @@ class WebUIServer:
 
         vector_deleted = 0
         storage_deleted = 0
+
+        # 🎭 核爆功能仅为视觉效果，不会真实删除数据
+        # 这是一个娱乐性的视觉特效，保护用户数据安全
         try:
-            vector_deleted = await self.faiss_manager.wipe_all_memories()
+            # 只统计数量用于显示，不执行任何删除操作
+            logger.info("核爆视觉效果触发：这只是模拟，不会删除任何数据")
+
+            # 统计记忆数量用于显示
+            async with self.faiss_manager.db.document_storage.connection.execute(
+                "SELECT COUNT(*) FROM documents"
+            ) as cursor:
+                row = await cursor.fetchone()
+                vector_deleted = row[0] if row else 0
+
             if self.memory_storage:
-                storage_deleted = await self.memory_storage.delete_all_memories()
-            logger.warning(
-                "Memory wipe executed: removed %s vector records and %s structured records",
+                async with self.memory_storage.connection.execute(
+                    "SELECT COUNT(*) FROM memories"
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    storage_deleted = row[0] if row else 0
+
+            logger.info(
+                "核爆视觉效果完成：模拟清除 %s 条向量记录和 %s 条结构化记录（实际数据完全未受影响）",
                 vector_deleted,
                 storage_deleted,
             )
