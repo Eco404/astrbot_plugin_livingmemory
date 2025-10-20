@@ -547,6 +547,319 @@ tbody tr.selected {
   }
 }
 
+/* ============================================
+   核爆视觉效果动画
+   ============================================ */
+
+/* 核爆容器 - 全屏遮罩层 */
+.nuke-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 9999;
+  pointer-events: none;
+  display: none;
+}
+
+.nuke-overlay.active {
+  display: block;
+  pointer-events: all;
+}
+
+/* 倒计时警告效果 - 红色闪烁 */
+.nuke-warning {
+  animation: warningPulse 1s ease-in-out infinite;
+}
+
+@keyframes warningPulse {
+  0%, 100% {
+    background: rgba(220, 38, 38, 0);
+    box-shadow: inset 0 0 0 0 rgba(220, 38, 38, 0);
+  }
+  50% {
+    background: rgba(220, 38, 38, 0.15);
+    box-shadow: inset 0 0 80px 20px rgba(220, 38, 38, 0.4);
+  }
+}
+
+/* 屏幕震动效果 */
+.screen-shake {
+  animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) infinite;
+}
+
+@keyframes shake {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  10% { transform: translate(-2px, 2px) rotate(-0.5deg); }
+  20% { transform: translate(2px, -2px) rotate(0.5deg); }
+  30% { transform: translate(-2px, -2px) rotate(-0.5deg); }
+  40% { transform: translate(2px, 2px) rotate(0.5deg); }
+  50% { transform: translate(-2px, 2px) rotate(-0.5deg); }
+  60% { transform: translate(2px, -2px) rotate(0.5deg); }
+  70% { transform: translate(-2px, -2px) rotate(-0.5deg); }
+  80% { transform: translate(2px, 2px) rotate(0.5deg); }
+  90% { transform: translate(-2px, 2px) rotate(-0.5deg); }
+}
+
+/* 核爆闪光效果 */
+.nuke-flash {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle at center, #ffffff 0%, #fff3cd 30%, transparent 70%);
+  opacity: 0;
+  animation: flash 1s ease-out forwards;
+}
+
+@keyframes flash {
+  0% { opacity: 0; transform: scale(0); }
+  10% { opacity: 1; transform: scale(0.5); }
+  30% { opacity: 0.9; transform: scale(1.5); }
+  100% { opacity: 0; transform: scale(3); }
+}
+
+/* 火球扩散效果 */
+.nuke-fireball {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100px;
+  height: 100px;
+  margin: -50px 0 0 -50px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%,
+    #fff 0%,
+    #ffeb3b 10%,
+    #ff9800 25%,
+    #ff5722 40%,
+    #d32f2f 60%,
+    #8b0000 80%,
+    transparent 100%);
+  box-shadow:
+    0 0 60px 30px rgba(255, 152, 0, 0.8),
+    0 0 120px 60px rgba(255, 87, 34, 0.6),
+    0 0 180px 90px rgba(211, 47, 47, 0.4);
+  animation: fireball 1.5s ease-out forwards;
+  opacity: 0;
+  animation-delay: 0.3s;
+}
+
+@keyframes fireball {
+  0% {
+    opacity: 0;
+    transform: scale(0);
+  }
+  20% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(15);
+  }
+}
+
+/* 冲击波效果 */
+.nuke-shockwave {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 50px;
+  height: 50px;
+  margin: -25px 0 0 -25px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 152, 0, 0.8);
+  animation: shockwave 1.2s ease-out forwards;
+  opacity: 0;
+  animation-delay: 0.5s;
+}
+
+.nuke-shockwave:nth-child(2) {
+  animation-delay: 0.7s;
+  border-color: rgba(255, 87, 34, 0.6);
+}
+
+.nuke-shockwave:nth-child(3) {
+  animation-delay: 0.9s;
+  border-color: rgba(211, 47, 47, 0.4);
+}
+
+@keyframes shockwave {
+  0% {
+    opacity: 0;
+    transform: scale(0);
+  }
+  10% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(30);
+    border-width: 0;
+  }
+}
+
+/* 烟雾效果 */
+.nuke-smoke {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(to top,
+    rgba(70, 70, 70, 0.9) 0%,
+    rgba(120, 120, 120, 0.6) 30%,
+    rgba(150, 150, 150, 0.3) 60%,
+    transparent 100%);
+  opacity: 0;
+  animation: smoke 2s ease-out forwards;
+  animation-delay: 1.2s;
+}
+
+@keyframes smoke {
+  0% {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+  50% {
+    opacity: 0.8;
+  }
+  100% {
+    opacity: 0.6;
+    transform: translateY(0);
+  }
+}
+
+/* 粒子消失效果 - 应用于表格行 */
+.particle-fade {
+  animation: particleFade 0.8s ease-out forwards;
+}
+
+@keyframes particleFade {
+  0% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    filter: blur(0);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.9) translateY(-10px);
+    filter: blur(2px);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.7) translateY(-30px) rotate(5deg);
+    filter: blur(8px);
+  }
+}
+
+/* 数据撕裂效果 */
+.data-glitch {
+  animation: glitch 0.3s linear infinite;
+}
+
+@keyframes glitch {
+  0% {
+    clip-path: inset(0 0 0 0);
+    transform: translate(0);
+  }
+  20% {
+    clip-path: inset(10% 0 80% 0);
+    transform: translate(-5px, 5px);
+  }
+  40% {
+    clip-path: inset(80% 0 10% 0);
+    transform: translate(5px, -5px);
+  }
+  60% {
+    clip-path: inset(40% 0 50% 0);
+    transform: translate(-3px, 3px);
+  }
+  80% {
+    clip-path: inset(50% 0 30% 0);
+    transform: translate(3px, -3px);
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+    transform: translate(0);
+  }
+}
+
+/* 灰烬飘落效果 */
+.ash-particle {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  background: rgba(150, 150, 150, 0.6);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: ashFall linear forwards;
+}
+
+@keyframes ashFall {
+  0% {
+    opacity: 0.8;
+    transform: translateY(0) translateX(0) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(100vh) translateX(var(--drift)) rotate(360deg);
+  }
+}
+
+/* 倒计时数字样式 - 放大警告 */
+.nuke-banner.critical {
+  animation: criticalPulse 0.5s ease-in-out infinite;
+  background: rgba(220, 38, 38, 0.2);
+  border-color: rgba(220, 38, 38, 0.5);
+}
+
+@keyframes criticalPulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 16px 30px -24px rgba(220, 38, 38, 0.65);
+  }
+  50% {
+    transform: scale(1.02);
+    box-shadow: 0 20px 40px -20px rgba(220, 38, 38, 0.85);
+  }
+}
+
+/* 倒计时文字放大 */
+.nuke-banner.critical #nuke-message {
+  font-size: 18px;
+  animation: textPulse 0.5s ease-in-out infinite;
+}
+
+@keyframes textPulse {
+  0%, 100% {
+    color: #b91c1c;
+  }
+  50% {
+    color: #dc2626;
+    text-shadow: 0 0 10px rgba(220, 38, 38, 0.5);
+  }
+}
+
+/* 界面淡入恢复 */
+.fade-in-recovery {
+  animation: fadeInRecovery 1.5s ease-in forwards;
+}
+
+@keyframes fadeInRecovery {
+  0% {
+    opacity: 0;
+    filter: blur(10px);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
 @media (max-width: 640px) {
   .nuke-banner {
     margin: 16px;

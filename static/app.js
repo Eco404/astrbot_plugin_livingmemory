@@ -496,25 +496,25 @@
     state.nuke.operationId = info.operation_id || null;
     state.nuke.secondsLeft = seconds;
 
-    updateNukeBanner();
+    updateNukeBannerWithEffects(); // 使用新的视觉效果函数
     dom.nukeButton.disabled = true;
 
     state.nuke.timer = setInterval(() => {
       if (state.nuke.secondsLeft > 0) {
         state.nuke.secondsLeft -= 1;
-        updateNukeBanner();
+        updateNukeBannerWithEffects(); // 使用新的视觉效果函数
         return;
       }
 
       clearInterval(state.nuke.timer);
       state.nuke.timer = null;
-      updateNukeBanner();
+      updateNukeBannerWithEffects(); // 使用新的视觉效果函数
       dom.nukeCancel.disabled = true;
 
       setTimeout(async () => {
         await fetchAll();
-        showToast("All memories have been cleared");
-      }, 1500);
+        showToast("所有记忆已被清除");
+      }, 4000); // 延长到4秒，等待核爆动画完成
     }, 1000);
   }
 
@@ -526,6 +526,10 @@
     state.nuke.active = false;
     state.nuke.operationId = null;
     state.nuke.secondsLeft = 0;
+
+    // 清除所有视觉效果
+    clearNukeVisualEffects();
+
     if (dom.nukeBanner) {
       dom.nukeBanner.classList.add("hidden");
     }
@@ -537,22 +541,6 @@
     }
     if (dom.nukeButton) {
       dom.nukeButton.disabled = false;
-    }
-  }
-
-  function updateNukeBanner() {
-    if (!state.nuke.active || !dom.nukeBanner) {
-      return;
-    }
-    dom.nukeBanner.classList.remove("hidden");
-    const seconds = Math.max(0, state.nuke.secondsLeft);
-    const message =
-      seconds > 0
-        ? `All memories will be erased in ${seconds}s. Cancel now to abort.`
-        : "Erasing all memories... please keep this window open.";
-    dom.nukeMessage.textContent = message;
-    if (dom.nukeCancel) {
-      dom.nukeCancel.disabled = seconds === 0;
     }
   }
 
@@ -655,6 +643,190 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
+  }
+
+  // ============================================
+  // 核爆视觉效果函数
+  // ============================================
+
+  /**
+   * 触发完整的核爆视觉效果序列
+   */
+  function triggerNukeVisualEffects() {
+    const overlay = document.getElementById("nuke-overlay");
+    const app = document.getElementById("app");
+    const tableBody = document.getElementById("memories-body");
+
+    if (!overlay || !app) return;
+
+    // 1. 激活核爆遮罩层
+    overlay.classList.add("active");
+
+    // 2. 添加屏幕震动效果
+    app.classList.add("screen-shake");
+
+    // 3. 数据表格粒子化消失
+    if (tableBody) {
+      const rows = tableBody.querySelectorAll("tr");
+      rows.forEach((row, index) => {
+        setTimeout(() => {
+          row.classList.add("particle-fade");
+        }, index * 50); // 每行延迟50ms
+      });
+    }
+
+    // 4. 添加数据撕裂效果到所有卡片
+    const cards = document.querySelectorAll(".card");
+    setTimeout(() => {
+      cards.forEach((card) => {
+        card.classList.add("data-glitch");
+      });
+    }, 800);
+
+    // 5. 生成灰烬飘落粒子
+    setTimeout(() => {
+      createAshParticles();
+    }, 1500);
+
+    // 6. 停止所有动画效果
+    setTimeout(() => {
+      app.classList.remove("screen-shake");
+      cards.forEach((card) => {
+        card.classList.remove("data-glitch");
+      });
+    }, 3000);
+
+    // 7. 移除核爆遮罩层，添加界面恢复动画
+    setTimeout(() => {
+      overlay.classList.remove("active");
+      app.classList.add("fade-in-recovery");
+
+      // 移除恢复动画类
+      setTimeout(() => {
+        app.classList.remove("fade-in-recovery");
+      }, 1500);
+    }, 3500);
+  }
+
+  /**
+   * 创建灰烬飘落粒子效果
+   */
+  function createAshParticles() {
+    const overlay = document.getElementById("nuke-overlay");
+    if (!overlay) return;
+
+    const particleCount = 50; // 粒子数量
+
+    for (let i = 0; i < particleCount; i++) {
+      const particle = document.createElement("div");
+      particle.className = "ash-particle";
+
+      // 随机位置
+      particle.style.left = `${Math.random() * 100}%`;
+      particle.style.top = `${Math.random() * 20}%`;
+
+      // 随机飘移距离
+      const drift = (Math.random() - 0.5) * 200; // -100px 到 100px
+      particle.style.setProperty("--drift", `${drift}px`);
+
+      // 随机动画时长
+      const duration = 2 + Math.random() * 3; // 2-5秒
+      particle.style.animationDuration = `${duration}s`;
+
+      // 随机延迟
+      const delay = Math.random() * 0.5; // 0-0.5秒
+      particle.style.animationDelay = `${delay}s`;
+
+      overlay.appendChild(particle);
+
+      // 动画结束后移除粒子
+      setTimeout(() => {
+        particle.remove();
+      }, (duration + delay) * 1000);
+    }
+  }
+
+  /**
+   * 更新倒计时横幅 - 添加视觉警告效果
+   */
+  function updateNukeBannerWithEffects() {
+    if (!state.nuke.active || !dom.nukeBanner) {
+      return;
+    }
+
+    const overlay = document.getElementById("nuke-overlay");
+    const seconds = Math.max(0, state.nuke.secondsLeft);
+
+    // 显示横幅
+    dom.nukeBanner.classList.remove("hidden");
+
+    // 更新倒计时文本
+    const message =
+      seconds > 0
+        ? `所有记忆将在 ${seconds} 秒后被抹除。立即取消以中止核爆！`
+        : "正在抹除所有记忆... 请保持窗口打开。";
+    dom.nukeMessage.textContent = message;
+
+    // 禁用/启用取消按钮
+    if (dom.nukeCancel) {
+      dom.nukeCancel.disabled = seconds === 0;
+    }
+
+    // 添加视觉警告效果
+    if (seconds > 0 && seconds <= 30) {
+      // 倒计时阶段 - 红色闪烁警告
+      if (!overlay.classList.contains("nuke-warning")) {
+        overlay.classList.add("nuke-warning");
+      }
+
+      // 最后10秒 - 加强警告
+      if (seconds <= 10) {
+        dom.nukeBanner.classList.add("critical");
+
+        // 最后5秒 - 震动效果
+        if (seconds <= 5) {
+          const app = document.getElementById("app");
+          if (app && !app.classList.contains("screen-shake")) {
+            app.classList.add("screen-shake");
+          }
+        }
+      }
+    }
+
+    // 倒计时结束 - 触发核爆效果
+    if (seconds === 0) {
+      // 移除警告效果
+      overlay.classList.remove("nuke-warning");
+      dom.nukeBanner.classList.remove("critical");
+
+      // 触发完整核爆视觉效果
+      triggerNukeVisualEffects();
+    }
+  }
+
+  /**
+   * 清除所有核爆视觉效果
+   */
+  function clearNukeVisualEffects() {
+    const overlay = document.getElementById("nuke-overlay");
+    const app = document.getElementById("app");
+    const cards = document.querySelectorAll(".card");
+
+    if (overlay) {
+      overlay.classList.remove("active", "nuke-warning");
+    }
+
+    if (app) {
+      app.classList.remove("screen-shake", "fade-in-recovery");
+    }
+
+    cards.forEach((card) => {
+      card.classList.remove("data-glitch");
+    });
+
+    if (dom.nukeBanner) {
+      dom.nukeBanner.classList.remove("critical");
+    }
   }
 
   document.addEventListener("DOMContentLoaded", init);
