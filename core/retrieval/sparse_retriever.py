@@ -141,17 +141,33 @@ class SparseRetriever:
         logger.info("Sparse retriever initialized")
     
     def _preprocess_query(self, query: str) -> str:
-        """预处理查询"""
+        """
+        预处理查询，包括分词和安全转义。
+
+        Args:
+            query: 原始查询字符串
+
+        Returns:
+            str: 处理后的安全查询字符串
+        """
         query = query.strip()
-        
+
         # 中文分词
         if self.use_chinese_tokenizer and JIEBA_AVAILABLE:
             # 检查是否包含中文
             if any('\u4e00' <= char <= '\u9fff' for char in query):
                 tokens = jieba.cut_for_search(query)
                 query = " ".join(tokens)
-        
-        query = query.replace('"', ' ') # 将内部的双引号替换为空格
+
+        # FTS5 安全转义: 双引号需要转义为两个双引号
+        # 移除可能导致语法错误的特殊FTS5操作符
+        query = query.replace('"', '""')  # FTS5转义规则
+
+        # 移除可能的FTS5特殊字符和操作符
+        # FTS5特殊字符: * (通配符), ^ (列过滤), NEAR, AND, OR, NOT
+        # 为了安全，我们将查询作为短语搜索，禁用这些操作符
+        query = query.replace('*', ' ')  # 移除通配符
+        query = query.replace('^', ' ')  # 移除列过滤符
 
         return query
     

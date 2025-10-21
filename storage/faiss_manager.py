@@ -306,43 +306,62 @@ class FaissManager:
 
     async def delete_memories(self, doc_ids: List[int]):
         """
-        批量删除一组记忆，使用事务确保数据一致性。
+        批量删除一组记忆，使用改进的事务策略确保数据一致性。
 
         Args:
             doc_ids (List[int]): 需要删除的文档 ID 列表。
+
+        Raises:
+            RuntimeError: 删除失败时抛出异常
         """
         if not doc_ids:
             return
 
         # 开始事务
         await self.db.document_storage.connection.execute("BEGIN")
-        
-        faiss_deleted = False
+
+        faiss_backup_needed = False
+        sqlite_deleted = False
+
         try:
-            # 首先从 SQLite 中删除（更容易回滚）
+            # 步骤1: 先从 SQLite 中删除（支持回滚）
             placeholders = ",".join("?" for _ in doc_ids)
             sql = f"DELETE FROM documents WHERE id IN ({placeholders})"
             await self.db.document_storage.connection.execute(sql, doc_ids)
-            
-            # 然后从 Faiss 索引中删除
-            self.db.embedding_storage.index.remove_ids(np.array(doc_ids, dtype=np.int64))
-            await self.db.embedding_storage.save_index()
-            faiss_deleted = True
-            
-            # 提交事务
+            sqlite_deleted = True
+
+            # 步骤2: 从 Faiss 索引中删除（不支持回滚）
+            try:
+                self.db.embedding_storage.index.remove_ids(np.array(doc_ids, dtype=np.int64))
+                await self.db.embedding_storage.save_index()
+                faiss_backup_needed = True
+            except Exception as faiss_error:
+                # Faiss操作失败，回滚SQLite
+                logger.error(f"Faiss索引删除失败: {faiss_error}")
+                await self.db.document_storage.connection.rollback()
+                raise RuntimeError(f"Faiss索引删除失败，已回滚数据库操作: {faiss_error}") from faiss_error
+
+            # 步骤3: 提交事务
             await self.db.document_storage.connection.commit()
             logger.info(f"成功删除 {len(doc_ids)} 条记忆")
-            
+
         except Exception as e:
-            logger.error(f"删除记忆时发生错误: {e}")
-            
-            # 回滚SQLite事务
-            await self.db.document_storage.connection.rollback()
-            
-            # 如果Faiss已经删除但SQLite失败，需要恢复Faiss（这是不完美的，但比数据不一致好）
-            if faiss_deleted:
-                logger.warning("Faiss索引已删除但SQLite回滚，数据可能不一致。建议重建索引。")
-            
+            logger.error(f"删除记忆时发生错误: {e}", exc_info=True)
+
+            # 回滚SQLite事务（如果尚未提交）
+            if not sqlite_deleted or not faiss_backup_needed:
+                try:
+                    await self.db.document_storage.connection.rollback()
+                    logger.info("已回滚数据库事务")
+                except Exception as rollback_error:
+                    logger.error(f"回滚事务失败: {rollback_error}")
+            else:
+                # SQLite和Faiss都已修改但提交失败 - 严重不一致
+                logger.critical(
+                    f"数据不一致警告: SQLite和Faiss索引都已修改但事务提交失败。"
+                    f"受影响的ID: {doc_ids}。强烈建议执行 /lmem sparse_rebuild 重建索引。"
+                )
+
             raise RuntimeError(f"删除记忆失败: {e}") from e
 
     async def wipe_all_memories(self) -> int:
@@ -425,21 +444,28 @@ class FaissManager:
             updated_fields = []
             
             # 1. 更新内容和向量
-            if content is not None and content != original_doc["content"]:
+            # 注意: documents表的文本列名是'text'而非'content'
+            original_content = original_doc.get("text", original_doc.get("content", ""))
+            if content is not None and content != original_content:
                 # 重新计算向量
                 embedding = await self.db.embedding_provider.embed_query(content)
-                
-                # 更新数据库
+
+                # 更新数据库 - 使用正确的列名'text'
                 await self.db.document_storage.connection.execute(
-                    "UPDATE documents SET content = ?, embedding = ? WHERE id = ?",
-                    (content, embedding.tobytes(), original_doc["id"]),
+                    "UPDATE documents SET text = ? WHERE id = ?",
+                    (content, original_doc["id"]),
                 )
-                
-                # 更新 Faiss 索引
-                self.db.embedding_storage.index.remove_ids(np.array([original_doc["id"]], dtype=np.int64))
-                self.db.embedding_storage.index.add(embedding.reshape(1, -1))
+
+                # 更新 Faiss 索引 - 先删除旧向量，再添加新向量（带ID关联）
+                doc_id = original_doc["id"]
+                self.db.embedding_storage.index.remove_ids(np.array([doc_id], dtype=np.int64))
+                # 使用 add_with_ids 确保向量ID与文档ID一致
+                self.db.embedding_storage.index.add_with_ids(
+                    embedding.reshape(1, -1),
+                    np.array([doc_id], dtype=np.int64)
+                )
                 await self.db.embedding_storage.save_index()
-                
+
                 updated_fields.append("content")
             
             # 2. 更新元数据字段
