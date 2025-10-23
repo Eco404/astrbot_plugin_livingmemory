@@ -34,6 +34,8 @@ class ForgettingAgent:
         self.config = config
         self.faiss_manager = faiss_manager
         self._task: Optional[asyncio.Task] = None
+        self._manual_task: Optional[asyncio.Task] = None
+        self._operation_lock = asyncio.Lock()
 
         # 记录配置信息
         enabled = config.get("enabled", True)
@@ -68,6 +70,34 @@ class ForgettingAgent:
             except asyncio.CancelledError:
                 logger.info("遗忘代理后台任务已成功取消。")
         self._task = None
+
+    async def trigger_manual_run(self) -> Dict[str, Any]:
+        """手动触发遗忘任务的公共接口,使用锁防止竞态条件。
+
+        Returns:
+            Dict[str, Any]: 包含 'success' 和 'message' 的响应字典
+        """
+        async with self._operation_lock:
+            # 检查是否有正在运行的手动任务
+            if self._manual_task and not self._manual_task.done():
+                return {
+                    "success": False,
+                    "message": "遗忘任务正在运行中,请稍后再试"
+                }
+
+            try:
+                logger.info("手动触发遗忘代理任务...")
+                await self._prune_memories()
+                return {
+                    "success": True,
+                    "message": "遗忘代理任务执行完毕"
+                }
+            except Exception as e:
+                logger.error(f"手动触发遗忘任务失败: {e}", exc_info=True)
+                return {
+                    "success": False,
+                    "message": f"遗忘任务执行失败: {e}"
+                }
 
     async def _run_periodically(self):
         """后台任务的循环体。"""

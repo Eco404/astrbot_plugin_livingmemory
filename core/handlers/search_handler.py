@@ -15,7 +15,10 @@ from .base_handler import BaseHandler
 
 class SearchHandler(BaseHandler):
     """搜索管理业务逻辑处理器"""
-    
+
+    # 搜索结果数量限制常量
+    MAX_SEARCH_RESULTS = 50
+
     def __init__(self, context: Context, config: Dict[str, Any], recall_engine=None, sparse_retriever=None):
         super().__init__(context, config)
         self.recall_engine = recall_engine
@@ -29,6 +32,16 @@ class SearchHandler(BaseHandler):
         """搜索记忆"""
         if not self.recall_engine:
             return self.create_response(False, "回忆引擎尚未初始化")
+
+        # 验证 k 值
+        if k > self.MAX_SEARCH_RESULTS:
+            return self.create_response(
+                False,
+                f"返回数量不能超过 {self.MAX_SEARCH_RESULTS} (当前: {k})"
+            )
+
+        if k < 1:
+            return self.create_response(False, "返回数量必须至少为 1")
 
         try:
             results = await self.recall_engine.recall(self.context, query, k=k)
@@ -56,6 +69,16 @@ class SearchHandler(BaseHandler):
         """测试稀疏检索功能"""
         if not self.sparse_retriever:
             return self.create_response(False, "稀疏检索器未启用")
+
+        # 验证 k 值
+        if k > self.MAX_SEARCH_RESULTS:
+            return self.create_response(
+                False,
+                f"返回数量不能超过 {self.MAX_SEARCH_RESULTS} (当前: {k})"
+            )
+
+        if k < 1:
+            return self.create_response(False, "返回数量必须至少为 1")
 
         try:
             results = await self.sparse_retriever.search(query=query, limit=k)
