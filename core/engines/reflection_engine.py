@@ -41,6 +41,8 @@ class ReflectionEngine:
         self, history_text: str, persona_prompt: Optional[str]
     ) -> List[MemoryEvent]:
         """第一阶段：从对话历史中批量提取记忆事件。"""
+        logger.debug(f"开始提取记忆事件，对话历史长度: {len(history_text)} 字符")
+
         system_prompt = self._build_event_extraction_prompt()
         persona_section = (
             f"\n**重要：**在分析时请代入以下人格，但是应该秉持着记录互动者的原则：\n<persona>{persona_prompt}</persona>\n"
@@ -49,31 +51,57 @@ class ReflectionEngine:
         )
         user_prompt = f"{persona_section}下面是你需要分析的对话历史：\n{history_text}"
 
-        response = await self.llm_provider.text_chat(
-            prompt=user_prompt, system_prompt=system_prompt, json_mode=True
-        )
+        logger.debug(f"使用人格提示: {'是' if persona_prompt else '否'}")
+
+        try:
+            logger.debug("正在调用 LLM 进行事件提取...")
+            response = await self.llm_provider.text_chat(
+                prompt=user_prompt, system_prompt=system_prompt, json_mode=True
+            )
+            logger.debug(f"LLM 响应完成，返回内容长度: {len(response.completion_text)} 字符")
+        except Exception as e:
+            logger.error(f"调用 LLM 提取事件时发生异常: {e}", exc_info=True)
+            return []
 
         json_text = extract_json_from_response(response.completion_text.strip())
         if not json_text:
-            logger.warning("LLM 提取事件返回为空。")
+            logger.warning("⚠️ LLM 提取事件返回为空，可能对话内容不包含有意义的记忆事件")
+            logger.debug(f"LLM 原始响应: {response.completion_text[:500]}...")
             return []
-        logger.debug(f"提取到的记忆事件: {json_text}")
+        logger.debug(f"成功提取 JSON 响应，长度: {len(json_text)} 字符")
+        logger.debug(f"提取到的记忆事件原始数据: {json_text[:1000]}...")
 
         try:
             extracted_data = _LLMExtractionEventList.model_validate_json(json_text)
+            logger.debug(f"JSON 验证成功，提取到 {len(extracted_data.events)} 个事件")
+
             # 转换为 MemoryEvent 对象列表
             # 注意：LLM 返回的是 _LLMExtractionEvent，其 id 字段对应 MemoryEvent 的 temp_id
             memory_events = []
-            for event in extracted_data.events:
+            for idx, event in enumerate(extracted_data.events):
                 event_dict = event.model_dump()
                 # 将 'id' 字段重命名为 'temp_id' 以匹配 MemoryEvent 模型
                 if "id" in event_dict:
-                    event_dict["temp_id"] = event_dict.pop("id")
+                    temp_id = event_dict.pop("id")
+                    event_dict["temp_id"] = temp_id
+                    logger.debug(f"事件 {idx+1}: temp_id={temp_id}, 类型={event_dict.get('event_type', 'N/A')}, 内容长度={len(event_dict.get('memory_content', ''))}")
                 memory_events.append(MemoryEvent(**event_dict))
+
+            logger.info(f"✅ 成功转换 {len(memory_events)} 个记忆事件对象")
             return memory_events
-        except (ValidationError, json.JSONDecodeError) as e:
+        except ValidationError as e:
             logger.error(
-                f"事件提取阶段JSON解析失败: {e}\n原始返回: {response.completion_text.strip()}",
+                f"❌ 事件提取阶段 Pydantic 验证失败: {e}\n"
+                f"验证错误详情: {e.errors()}\n"
+                f"原始返回: {response.completion_text.strip()[:1000]}...",
+                exc_info=True,
+            )
+            return []
+        except json.JSONDecodeError as e:
+            logger.error(
+                f"❌ 事件提取阶段 JSON 解析失败: {e}\n"
+                f"解析位置: 行 {e.lineno}, 列 {e.colno}\n"
+                f"原始返回: {response.completion_text.strip()[:1000]}...",
                 exc_info=True,
             )
             return []
@@ -83,7 +111,10 @@ class ReflectionEngine:
     ) -> Dict[str, float]:
         """第二阶段：对一批记忆事件进行批量评分。"""
         if not events:
+            logger.debug("事件列表为空，跳过评分阶段")
             return {}
+
+        logger.debug(f"开始评估 {len(events)} 个事件的重要性得分")
 
         system_prompt = self._build_evaluation_prompt()
 
@@ -91,8 +122,10 @@ class ReflectionEngine:
         memories_to_evaluate = [
             {"id": event.temp_id, "content": event.memory_content} for event in events
         ]
+        logger.debug(f"准备评估的事件ID列表: {[e.temp_id for e in events]}")
+
         persona_section = (
-            f"\n**重要：**在评估时请代入以下人格，这会影响你对“重要性”的判断：\n<persona>{persona_prompt}</persona>\n"
+            f"\n**重要：**在评估时请代入以下人格，这会影响你对‘重要性’的判断：\n<persona>{persona_prompt}</persona>\n"
             if persona_prompt
             else ""
         )
@@ -100,24 +133,52 @@ class ReflectionEngine:
             {"memories": memories_to_evaluate}, ensure_ascii=False, indent=2
         )
 
-        response = await self.llm_provider.text_chat(
-            prompt=user_prompt, system_prompt=system_prompt, json_mode=True
-        )
+        logger.debug(f"使用人格提示进行评分: {'是' if persona_prompt else '否'}")
+
+        try:
+            logger.debug("正在调用 LLM 进行重要性评分...")
+            response = await self.llm_provider.text_chat(
+                prompt=user_prompt, system_prompt=system_prompt, json_mode=True
+            )
+            logger.debug(f"LLM 评分响应完成，返回内容长度: {len(response.completion_text)} 字符")
+        except Exception as e:
+            logger.error(f"调用 LLM 评估分数时发生异常: {e}", exc_info=True)
+            return {}
 
         json_text = extract_json_from_response(response.completion_text.strip())
         if not json_text:
-            logger.warning("LLM 评估分数返回为空。")
+            logger.warning("⚠️ LLM 评估分数返回为空，无法为事件评分")
+            logger.debug(f"LLM 原始响应: {response.completion_text[:500]}...")
             return {}
+        logger.debug(f"成功提取评分 JSON 响应，长度: {len(json_text)} 字符")
         logger.debug(
-            f"评估分数: {json_text}，对应内容{[event.temp_id for event in events]}。"
+            f"评分数据预览: {json_text[:500]}..."
         )
 
         try:
             evaluated_data = _LLMScoreEvaluation.model_validate_json(json_text)
-            return evaluated_data.scores
-        except (ValidationError, json.JSONDecodeError) as e:
+            scores_dict = evaluated_data.scores
+            logger.debug(f"JSON 验证成功，收到 {len(scores_dict)} 个评分")
+
+            # 详细记录每个评分
+            for event_id, score in scores_dict.items():
+                logger.debug(f"事件 '{event_id}' 评分: {score:.3f}")
+
+            logger.info(f"✅ 成功评估 {len(scores_dict)} 个事件的重要性得分")
+            return scores_dict
+        except ValidationError as e:
             logger.error(
-                f"分数评估阶段JSON解析失败: {e}\n原始返回: {response.completion_text.strip()}",
+                f"❌ 分数评估阶段 Pydantic 验证失败: {e}\n"
+                f"验证错误详情: {e.errors()}\n"
+                f"原始返回: {response.completion_text.strip()[:1000]}...",
+                exc_info=True,
+            )
+            return {}
+        except json.JSONDecodeError as e:
+            logger.error(
+                f"❌ 分数评估阶段 JSON 解析失败: {e}\n"
+                f"解析位置: 行 {e.lineno}, 列 {e.colno}\n"
+                f"原始返回: {response.completion_text.strip()[:1000]}...",
                 exc_info=True,
             )
             return {}
@@ -130,41 +191,52 @@ class ReflectionEngine:
         persona_prompt: Optional[str] = None,
     ):
         """执行完整的两阶段反思、评估和存储流程。"""
+        logger.info(f"[{session_id}] 🧠 开始反思与存储流程")
+        logger.debug(f"[{session_id}] 对话历史条数: {len(conversation_history)}, 人格ID: {persona_id or '无'}")
+
         try:
             history_text = self._format_history_for_summary(conversation_history)
             if not history_text:
-                logger.debug("对话历史为空，跳过反思。")
+                logger.debug(f"[{session_id}] 对话历史为空，跳过反思")
                 return
+
+            logger.debug(f"[{session_id}] 格式化后的历史文本长度: {len(history_text)} 字符")
 
             # --- 第一阶段：提取事件 ---
-            logger.info(f"[{session_id}] 阶段1：开始批量提取记忆事件...")
+            logger.info(f"[{session_id}] 📝 阶段1：开始批量提取记忆事件...")
             extracted_events = await self._extract_events(history_text, persona_prompt)
             if not extracted_events:
-                logger.info(f"[{session_id}] 未能从对话中提取任何记忆事件。")
+                logger.info(f"[{session_id}] ℹ️ 未能从对话中提取任何记忆事件，本轮对话可能不包含值得记录的内容")
                 return
-            logger.info(f"[{session_id}] 成功提取 {len(extracted_events)} 个记忆事件。")
+            logger.info(f"[{session_id}] ✅ 成功提取 {len(extracted_events)} 个记忆事件")
 
             # --- 第二阶段：评估分数 ---
-            logger.info(f"[{session_id}] 阶段2：开始批量评估事件重要性...")
+            logger.info(f"[{session_id}] 🎯 阶段2：开始批量评估事件重要性...")
             scores = await self._evaluate_scores(extracted_events, persona_prompt)
-            logger.info(f"[{session_id}] 成功收到 {len(scores)} 个评分。")
+            if not scores:
+                logger.warning(f"[{session_id}] ⚠️ 评估阶段未返回任何分数，所有事件将被跳过")
+                return
+            logger.info(f"[{session_id}] ✅ 成功收到 {len(scores)} 个评分")
 
             # --- 第三阶段：合并与存储 ---
             threshold = self.config.get("importance_threshold", 0.5)
-            logger.info(f"[{session_id}] 阶段3：开始存储筛选，重要性阈值: {threshold}")
-            
+            logger.info(f"[{session_id}] 💾 阶段3：开始存储筛选，重要性阈值: {threshold}")
+
             stored_count = 0
             filtered_count = 0
+            missing_score_count = 0
             total_events = len(extracted_events)
-            
+
             # 详细记录所有事件的评分情况
-            logger.info(f"[{session_id}] 评分详情汇总:")
+            logger.info(f"[{session_id}] 📊 评分详情汇总:")
             for event in extracted_events:
                 score = scores.get(event.temp_id)
                 if score is None:
+                    missing_score_count += 1
                     logger.warning(
                         f"[{session_id}] ❌ 事件 '{event.temp_id}' 未找到对应的评分，跳过存储"
                     )
+                    logger.debug(f"[{session_id}] 未评分事件内容: {event.memory_content[:100]}...")
                     filtered_count += 1
                     continue
 
@@ -172,45 +244,64 @@ class ReflectionEngine:
                 logger.info(f"[{session_id}] 📊 事件 '{event.temp_id}': 得分={score:.3f}, 阈值={threshold:.3f}")
 
                 if event.importance_score >= threshold:
-                    # MemoryEvent 的 id 将由存储后端自动生成，这里不需要手动创建
-                    # 我们只需要传递完整的元数据
-                    event_metadata = event.model_dump()
+                    try:
+                        # MemoryEvent 的 id 将由存储后端自动生成，这里不需要手动创建
+                        # 我们只需要传递完整的元数据
+                        event_metadata = event.model_dump()
 
-                    # add_memory 返回的是新插入记录的整数 ID
-                    inserted_id = await self.faiss_manager.add_memory(
-                        content=event.memory_content,
-                        importance=event.importance_score,
-                        session_id=session_id,
-                        persona_id=persona_id,
-                        metadata=event_metadata,
-                    )
-                    stored_count += 1
-                    logger.info(
-                        f"[{session_id}] ✅ 存储记忆事件 (数据库ID: {inserted_id}, 临时ID: {event.temp_id}), 得分: {event.importance_score:.3f} >= {threshold:.3f}"
-                    )
-                    logger.debug(f"[{session_id}] 存储内容预览: {event.memory_content[:100]}...")
+                        # add_memory 返回的是新插入记录的整数 ID
+                        inserted_id = await self.faiss_manager.add_memory(
+                            content=event.memory_content,
+                            importance=event.importance_score,
+                            session_id=session_id,
+                            persona_id=persona_id,
+                            metadata=event_metadata,
+                        )
+                        stored_count += 1
+                        logger.info(
+                            f"[{session_id}] ✅ 存储记忆事件 (数据库ID: {inserted_id}, 临时ID: {event.temp_id}), "
+                            f"得分: {event.importance_score:.3f} >= {threshold:.3f}, "
+                            f"类型: {event.event_type}"
+                        )
+                        logger.debug(f"[{session_id}] 存储内容预览: {event.memory_content[:100]}...")
+                    except Exception as store_error:
+                        logger.error(
+                            f"[{session_id}] ❌ 存储记忆事件 '{event.temp_id}' 时发生错误: {store_error}",
+                            exc_info=True
+                        )
+                        filtered_count += 1
                 else:
                     filtered_count += 1
                     logger.info(
-                        f"[{session_id}] ❌ 过滤记忆事件 '{event.temp_id}', 得分: {event.importance_score:.3f} < {threshold:.3f}"
+                        f"[{session_id}] ⬇️ 过滤记忆事件 '{event.temp_id}', 得分: {event.importance_score:.3f} < {threshold:.3f}"
                     )
-                    logger.debug(f"[{session_id}] 被过滤内容: {event.memory_content}")
+                    logger.debug(f"[{session_id}] 被过滤内容: {event.memory_content[:200]}...")
 
             # 最终统计信息
             logger.info(f"[{session_id}] 🏁 反思存储完成统计:")
-            logger.info(f"[{session_id}] - 总提取事件数: {total_events}")
-            logger.info(f"[{session_id}] - 成功存储数量: {stored_count}")
-            logger.info(f"[{session_id}] - 过滤丢弃数量: {filtered_count}")
-            logger.info(f"[{session_id}] - 存储率: {(stored_count/total_events)*100:.1f}%" if total_events > 0 else f"[{session_id}] - 存储率: 0%")
-            
+            logger.info(f"[{session_id}]   📝 总提取事件数: {total_events}")
+            logger.info(f"[{session_id}]   ✅ 成功存储数量: {stored_count}")
+            logger.info(f"[{session_id}]   ❌ 过滤丢弃数量: {filtered_count}")
+            if missing_score_count > 0:
+                logger.warning(f"[{session_id}]   ⚠️ 缺失评分数量: {missing_score_count}")
+            logger.info(f"[{session_id}]   📊 存储率: {(stored_count/total_events)*100:.1f}%" if total_events > 0 else f"[{session_id}]   📊 存储率: 0%")
+
             if stored_count > 0:
                 logger.info(f"[{session_id}] ✅ 成功存储 {stored_count} 个新的记忆事件")
             else:
-                logger.warning(f"[{session_id}] ⚠️ 没有记忆事件达到存储阈值 {threshold}，可能需要调整配置")
+                logger.warning(
+                    f"[{session_id}] ⚠️ 没有记忆事件达到存储阈值 {threshold}，"
+                    f"可能需要调整 importance_threshold 配置参数"
+                )
 
         except Exception as e:
             logger.error(
-                f"[{session_id}] 在执行反思与存储任务时发生严重错误: {e}", exc_info=True
+                f"[{session_id}] ❌ 在执行反思与存储任务时发生严重错误: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            logger.error(
+                f"[{session_id}] 错误上下文: 对话历史长度={len(conversation_history)}, "
+                f"人格ID={persona_id or '无'}"
             )
 
     def _build_event_extraction_prompt(self) -> str:

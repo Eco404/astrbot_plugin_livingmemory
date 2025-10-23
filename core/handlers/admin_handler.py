@@ -15,11 +15,12 @@ from .base_handler import BaseHandler
 class AdminHandler(BaseHandler):
     """管理员业务逻辑处理器"""
     
-    def __init__(self, context: Context, config: Dict[str, Any], faiss_manager=None, forgetting_agent=None, session_manager=None):
+    def __init__(self, context: Context, config: Dict[str, Any], faiss_manager=None, forgetting_agent=None, session_manager=None, recall_engine=None):
         super().__init__(context, config)
         self.faiss_manager = faiss_manager
         self.forgetting_agent = forgetting_agent
         self.session_manager = session_manager
+        self.recall_engine = recall_engine
     
     async def process(self, *args, **kwargs) -> Dict[str, Any]:
         """处理请求的抽象方法实现"""
@@ -55,21 +56,43 @@ class AdminHandler(BaseHandler):
             return self.create_response(False, "遗忘代理尚未初始化")
 
         try:
-            await self.forgetting_agent._prune_memories()
-            return self.create_response(True, "遗忘代理任务执行完毕")
+            result = await self.forgetting_agent.trigger_manual_run()
+            return self.create_response(result["success"], result["message"])
         except Exception as e:
-            logger.error(f"遗忘代理任务执行失败: {e}", exc_info=True)
-            return self.create_response(False, f"遗忘代理任务执行失败: {e}")
+            logger.error(f"调用遗忘代理失败: {e}", exc_info=True)
+            return self.create_response(False, f"调用遗忘代理失败: {e}")
 
     async def set_search_mode(self, mode: str) -> Dict[str, Any]:
         """设置检索模式"""
         valid_modes = ["hybrid", "dense", "sparse"]
         if mode not in valid_modes:
-            return self.create_response(False, f"无效的模式，请使用: {', '.join(valid_modes)}")
+            return self.create_response(False, f"无效的模式,请使用: {', '.join(valid_modes)}")
 
-        # 注意：这个方法需要 recall_engine 实例，暂时通过 config 传递
-        # 实际使用时需要在调用此方法前传入 recall_engine
-        return self.create_response(True, f"检索模式已设置为: {mode}")
+        # 更新配置
+        if "recall_engine" not in self.config:
+            self.config["recall_engine"] = {}
+
+        old_mode = self.config["recall_engine"].get("retrieval_mode", "hybrid")
+        self.config["recall_engine"]["retrieval_mode"] = mode
+
+        # 同步到 RecallEngine 实例
+        if self.recall_engine:
+            try:
+                self.recall_engine.retrieval_mode = mode
+                if hasattr(self.recall_engine, 'config'):
+                    self.recall_engine.config["retrieval_mode"] = mode
+                logger.info(f"检索模式已从 '{old_mode}' 更新为: {mode}")
+            except Exception as e:
+                logger.error(f"同步检索模式到 RecallEngine 时出错: {e}", exc_info=True)
+                return self.create_response(False, f"配置已更新,但引擎同步失败: {e}")
+        else:
+            logger.warning("RecallEngine 尚未初始化,仅更新配置")
+
+        return self.create_response(
+            True,
+            f"检索模式已从 '{old_mode}' 更新为: {mode}\n"
+            f"💡 注意: 此更改仅在当前会话有效,重启后将恢复为配置文件中的设置"
+        )
 
     async def get_config_summary(self, action: str = "show") -> Dict[str, Any]:
         """获取配置摘要或验证配置"""

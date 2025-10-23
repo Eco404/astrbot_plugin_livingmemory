@@ -14,7 +14,10 @@ from .base_handler import BaseHandler
 
 class FusionHandler(BaseHandler):
     """融合策略业务逻辑处理器"""
-    
+
+    # 搜索结果数量限制常量
+    MAX_SEARCH_RESULTS = 50
+
     def __init__(self, context: Context, config: Dict[str, Any], recall_engine=None):
         super().__init__(context, config)
         self.recall_engine = recall_engine
@@ -69,7 +72,17 @@ class FusionHandler(BaseHandler):
         """测试融合策略效果"""
         if not self.recall_engine:
             return self.create_response(False, "回忆引擎尚未初始化")
-        
+
+        # 验证 k 值
+        if k > self.MAX_SEARCH_RESULTS:
+            return self.create_response(
+                False,
+                f"返回数量不能超过 {self.MAX_SEARCH_RESULTS} (当前: {k})"
+            )
+
+        if k < 1:
+            return self.create_response(False, "返回数量必须至少为 1")
+
         try:
             # 执行搜索
             session_id = await self.context.conversation_manager.get_curr_conversation_id(None)
@@ -171,14 +184,14 @@ class FusionHandler(BaseHandler):
             if strategy in strategy_params and key not in strategy_params[strategy]:
                 return self.create_response(False, f"参数 {key} 不适用于策略 {strategy}")
             
-            # 权重和检查（对于需要权重的策略）
+            # 权重和检查(对于需要权重的策略)
             if key in ["dense_weight", "sparse_weight"]:
-                other_key = "sparse_weight" if key == "dense_weight" else "dense_weight"
-                other_value = self.config["fusion"].get(other_key, 0.3 if other_key == "sparse_weight" else 0.7)
-                
-                # 如果设置了新的权重，检查和是否超过1.0
-                if key + other_key in [k for k in strategy_params.get(strategy, []) if k in ["dense_weight", "sparse_weight"]]:
+                # 检查策略是否使用权重参数
+                if strategy in ["weighted", "convex", "rank_fusion", "score_fusion", "cascade", "adaptive"]:
+                    other_key = "sparse_weight" if key == "dense_weight" else "dense_weight"
+                    other_value = self.config["fusion"].get(other_key, 0.3 if other_key == "sparse_weight" else 0.7)
                     total_weight = param_value + other_value
+
                     if total_weight > 1.0:
                         return self.create_response(False, f"权重总和不能超过 1.0 (当前总和: {total_weight:.2f})")
             

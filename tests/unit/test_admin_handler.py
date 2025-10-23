@@ -19,12 +19,15 @@ class TestAdminHandler:
         self.mock_faiss_manager = Mock()
         self.mock_forgetting_agent = Mock()
         self.mock_session_manager = Mock()
+        self.mock_recall_engine = Mock()
+        self.mock_recall_engine.config = {}
         self.handler = AdminHandler(
             self.mock_context,
             TEST_CONFIG,
             self.mock_faiss_manager,
             self.mock_forgetting_agent,
-            self.mock_session_manager
+            self.mock_session_manager,
+            self.mock_recall_engine
         )
     
     @pytest.mark.asyncio
@@ -97,15 +100,19 @@ class TestAdminHandler:
     @pytest.mark.asyncio
     async def test_run_forgetting_agent_success(self):
         """测试运行遗忘代理（成功）"""
-        self.mock_forgetting_agent._prune_memories = AsyncMock()
-        
+        # 使用新的公共方法
+        self.mock_forgetting_agent.trigger_manual_run = AsyncMock(return_value={
+            "success": True,
+            "message": "遗忘代理任务执行完毕"
+        })
+
         result = await self.handler.run_forgetting_agent()
-        
+
         assert result["success"] is True
         assert "遗忘代理任务执行完毕" in result["message"]
-        
+
         # 验证调用
-        self.mock_forgetting_agent._prune_memories.assert_called_once()
+        self.mock_forgetting_agent.trigger_manual_run.assert_called_once()
     
     @pytest.mark.asyncio
     async def test_run_forgetting_agent_no_agent(self):
@@ -120,20 +127,51 @@ class TestAdminHandler:
     @pytest.mark.asyncio
     async def test_run_forgetting_agent_exception(self):
         """测试运行遗忘代理异常处理"""
-        self.mock_forgetting_agent._prune_memories = AsyncMock(side_effect=Exception("遗忘代理错误"))
-        
+        # 使用新的公共方法返回失败结果
+        self.mock_forgetting_agent.trigger_manual_run = AsyncMock(return_value={
+            "success": False,
+            "message": "遗忘任务执行失败: 遗忘代理错误"
+        })
+
         result = await self.handler.run_forgetting_agent()
-        
+
         assert result["success"] is False
-        assert "遗忘代理任务执行失败" in result["message"]
+        assert "遗忘任务执行失败" in result["message"]
     
     @pytest.mark.asyncio
     async def test_set_search_mode_valid(self):
         """测试设置搜索模式（有效模式）"""
-        result = await self.handler.set_search_mode("hybrid")
-        
+        result = await self.handler.set_search_mode("dense")
+
         assert result["success"] is True
-        assert "检索模式已设置为: hybrid" in result["message"]
+        assert "检索模式已从 'hybrid' 更新为: dense" in result["message"]
+
+        # 验证配置更新
+        assert self.handler.config["recall_engine"]["retrieval_mode"] == "dense"
+
+        # 验证引擎同步
+        assert self.mock_recall_engine.retrieval_mode == "dense"
+        assert self.mock_recall_engine.config["retrieval_mode"] == "dense"
+
+    @pytest.mark.asyncio
+    async def test_set_search_mode_valid_without_engine(self):
+        """测试设置搜索模式（无引擎）"""
+        handler = AdminHandler(
+            self.mock_context,
+            TEST_CONFIG.copy(),
+            self.mock_faiss_manager,
+            self.mock_forgetting_agent,
+            self.mock_session_manager,
+            None  # 没有 recall_engine
+        )
+
+        result = await handler.set_search_mode("sparse")
+
+        assert result["success"] is True
+        assert "检索模式已从 'hybrid' 更新为: sparse" in result["message"]
+
+        # 验证配置更新
+        assert handler.config["recall_engine"]["retrieval_mode"] == "sparse"
     
     @pytest.mark.asyncio
     async def test_set_search_mode_invalid(self):

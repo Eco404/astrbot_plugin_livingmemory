@@ -223,7 +223,7 @@ class LivingMemoryPlugin(Star):
             # 初始化业务逻辑处理器
             self.memory_handler = MemoryHandler(self.context, self.config, self.faiss_manager)
             self.search_handler = SearchHandler(self.context, self.config, self.recall_engine, self.sparse_retriever)
-            self.admin_handler = AdminHandler(self.context, self.config, self.faiss_manager, self.forgetting_agent, self.session_manager)
+            self.admin_handler = AdminHandler(self.context, self.config, self.faiss_manager, self.forgetting_agent, self.session_manager, self.recall_engine)
             self.fusion_handler = FusionHandler(self.context, self.config, self.recall_engine)
 
             # 启动 WebUI（如启用）

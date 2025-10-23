@@ -124,40 +124,69 @@ class SparseRetriever:
         self.fts_manager = FTSManager(db_path)
         self.enabled = self.config.get("enabled", True)
         self.use_chinese_tokenizer = self.config.get("use_chinese_tokenizer", JIEBA_AVAILABLE)
+
+        logger.info("SparseRetriever 初始化")
+        logger.info(f"  启用状态: {'是' if self.enabled else '否'}")
+        logger.info(f"  中文分词: {'是' if self.use_chinese_tokenizer else '否'} (jieba {'可用' if JIEBA_AVAILABLE else '不可用'})")
+        logger.info(f"  数据库路径: {db_path}")
         
     async def initialize(self):
         """初始化稀疏检索器"""
         if not self.enabled:
-            logger.info("Sparse retriever disabled")
+            logger.info("稀疏检索器已禁用，跳过初始化")
             return
-            
-        await self.fts_manager.initialize()
-        
+
+        logger.info("开始初始化稀疏检索器...")
+
+        try:
+            await self.fts_manager.initialize()
+            logger.info("✅ FTS5 索引初始化成功")
+        except Exception as e:
+            logger.error(f"❌ FTS5 索引初始化失败: {type(e).__name__}: {e}", exc_info=True)
+            raise
+
         # 如果启用中文分词，初始化 jieba
         if self.use_chinese_tokenizer and JIEBA_AVAILABLE:
+            logger.debug("jieba 中文分词已启用")
             # 可以添加自定义词典
             pass
-            
-        logger.info("Sparse retriever initialized")
+
+        logger.info("✅ 稀疏检索器初始化完成")
     
     def _preprocess_query(self, query: str) -> str:
-        """预处理查询"""
+        """
+        预处理查询，包括分词和安全转义。
+
+        Args:
+            query: 原始查询字符串
+
+        Returns:
+            str: 处理后的安全查询字符串
+        """
         query = query.strip()
-        
+
         # 中文分词
         if self.use_chinese_tokenizer and JIEBA_AVAILABLE:
             # 检查是否包含中文
             if any('\u4e00' <= char <= '\u9fff' for char in query):
                 tokens = jieba.cut_for_search(query)
                 query = " ".join(tokens)
-        
-        query = query.replace('"', ' ') # 将内部的双引号替换为空格
+
+        # FTS5 安全转义: 双引号需要转义为两个双引号
+        # 移除可能导致语法错误的特殊FTS5操作符
+        query = query.replace('"', '""')  # FTS5转义规则
+
+        # 移除可能的FTS5特殊字符和操作符
+        # FTS5特殊字符: * (通配符), ^ (列过滤), NEAR, AND, OR, NOT
+        # 为了安全，我们将查询作为短语搜索，禁用这些操作符
+        query = query.replace('*', ' ')  # 移除通配符
+        query = query.replace('^', ' ')  # 移除列过滤符
 
         return query
     
     async def search(
-        self, 
-        query: str, 
+        self,
+        query: str,
         limit: int = 50,
         session_id: Optional[str] = None,
         persona_id: Optional[str] = None,
@@ -165,29 +194,38 @@ class SparseRetriever:
     ) -> List[SparseResult]:
         """执行稀疏检索"""
         if not self.enabled:
+            logger.debug("稀疏检索器未启用，返回空结果")
             return []
-        
+
+        logger.debug(f"稀疏检索: query='{query[:50]}...', limit={limit}")
+
         try:
             # 预处理查询
             processed_query = self._preprocess_query(query)
-            logger.debug(f"Sparse search query: {processed_query}")
-            
+            logger.debug(f"  原始查询: '{query[:50]}...'")
+            logger.debug(f"  处理后查询: '{processed_query[:50]}...'")
+
             # 执行 FTS 搜索
             fts_results = await self.fts_manager.search(processed_query, limit)
-            
+
             if not fts_results:
+                logger.debug("  FTS 搜索无结果")
                 return []
-            
+
+            logger.debug(f"  FTS 返回 {len(fts_results)} 条原始结果")
+
             # 获取完整的文档信息
             doc_ids = [doc_id for doc_id, _ in fts_results]
+            logger.debug(f"  获取文档详情: {len(doc_ids)} 个 ID")
             documents = await self._get_documents(doc_ids)
-            
+            logger.debug(f"  成功获取 {len(documents)} 个文档")
+
             # 应用过滤器
             filtered_results = []
             for doc_id, bm25_score in fts_results:
                 if doc_id in documents:
                     doc = documents[doc_id]
-                    
+
                     # 检查元数据过滤器
                     if self._apply_filters(doc.get("metadata", {}), session_id, persona_id, metadata_filters):
                         result = SparseResult(
@@ -197,21 +235,31 @@ class SparseRetriever:
                             metadata=doc["metadata"]
                         )
                         filtered_results.append(result)
-            
+
+            logger.debug(f"  过滤后剩余 {len(filtered_results)} 条结果")
+
             # 归一化 BM25 分数（转换为 0-1）
             if filtered_results:
                 max_score = max(r.score for r in filtered_results)
                 min_score = min(r.score for r in filtered_results)
                 score_range = max_score - min_score if max_score != min_score else 1
-                
+
+                logger.debug(f"  归一化分数: min={min_score:.3f}, max={max_score:.3f}, range={score_range:.3f}")
+
                 for result in filtered_results:
+                    original_score = result.score
                     result.score = (result.score - min_score) / score_range
-            
-            logger.debug(f"Sparse search returned {len(filtered_results)} results")
+                    logger.debug(f"    ID={result.doc_id}: {original_score:.3f} -> {result.score:.3f}")
+
+            logger.info(f"✅ 稀疏检索完成，返回 {len(filtered_results)} 条结果")
             return filtered_results
-            
+
         except Exception as e:
-            logger.error(f"Sparse search error: {e}", exc_info=True)
+            logger.error(
+                f"❌ 稀疏检索失败: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            logger.error(f"  失败上下文: query='{query[:50]}...', limit={limit}")
             return []
     
     async def _get_documents(self, doc_ids: List[int]) -> Dict[int, Dict[str, Any]]:
@@ -259,5 +307,17 @@ class SparseRetriever:
     async def rebuild_index(self):
         """重建索引"""
         if not self.enabled:
+            logger.warning("稀疏检索器未启用，无法重建索引")
             return
-        await self.fts_manager.rebuild_index()
+
+        logger.info("🔄 开始重建 FTS5 索引...")
+
+        try:
+            await self.fts_manager.rebuild_index()
+            logger.info("✅ FTS5 索引重建成功")
+        except Exception as e:
+            logger.error(
+                f"❌ 重建 FTS5 索引失败: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            raise

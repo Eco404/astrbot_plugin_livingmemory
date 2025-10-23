@@ -306,10 +306,75 @@ class TestSearchHandler:
         }
         
         result = self.handler.format_sparse_results_for_display(mock_response)
-        
+
         assert "找到 1 条稀疏检索结果" in result
         assert "1. [ID: 1] Score: 0.800" in result
         assert "稀疏检索结果" in result
         # 不应该包含类型和重要性信息
         assert "类型:" not in result
         assert "重要性:" not in result
+
+    @pytest.mark.asyncio
+    async def test_search_memories_exceeds_max_results(self):
+        """测试搜索记忆超过最大结果数量限制"""
+        # 尝试搜索超过 MAX_SEARCH_RESULTS 的数量
+        k = SearchHandler.MAX_SEARCH_RESULTS + 1
+
+        result = await self.handler.search_memories("测试查询", k=k)
+
+        assert result["success"] is False
+        assert "返回数量不能超过" in result["message"]
+        assert str(SearchHandler.MAX_SEARCH_RESULTS) in result["message"]
+
+        # 验证没有调用 recall
+        self.mock_recall_engine.recall.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_search_memories_at_max_results(self):
+        """测试搜索记忆刚好达到最大结果数量"""
+        # 使用刚好等于 MAX_SEARCH_RESULTS 的数量
+        k = SearchHandler.MAX_SEARCH_RESULTS
+
+        mock_results = [
+            Mock(
+                data={"id": i, "text": f"测试记忆{i}", "metadata": '{"importance": 0.8}'},
+                similarity=0.9
+            )
+            for i in range(k)
+        ]
+
+        self.mock_recall_engine.recall = AsyncMock(return_value=mock_results)
+
+        result = await self.handler.search_memories("测试查询", k=k)
+
+        assert result["success"] is True
+        assert len(result["data"]) == k
+
+        # 验证调用 recall
+        self.mock_recall_engine.recall.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_search_memories_k_less_than_one(self):
+        """测试搜索记忆返回数量小于1"""
+        result = await self.handler.search_memories("测试查询", k=0)
+
+        assert result["success"] is False
+        assert "返回数量必须至少为 1" in result["message"]
+
+        # 验证没有调用 recall
+        self.mock_recall_engine.recall.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_test_sparse_search_exceeds_max_results(self):
+        """测试稀疏检索超过最大结果数量限制"""
+        # 尝试搜索超过 MAX_SEARCH_RESULTS 的数量
+        k = SearchHandler.MAX_SEARCH_RESULTS + 1
+
+        result = await self.handler.test_sparse_search("测试查询", k=k)
+
+        assert result["success"] is False
+        assert "返回数量不能超过" in result["message"]
+
+        # 验证没有调用 search
+        if self.mock_sparse_retriever.search:
+            self.mock_sparse_retriever.search.assert_not_called()

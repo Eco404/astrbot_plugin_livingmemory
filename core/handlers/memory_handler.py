@@ -16,7 +16,10 @@ from .base_handler import BaseHandler
 
 class MemoryHandler(BaseHandler):
     """记忆管理业务逻辑处理器"""
-    
+
+    # 内容长度限制常量
+    MAX_CONTENT_LENGTH = 10000  # 10KB
+
     def __init__(self, context: Context, config: Dict[str, Any], faiss_manager):
         super().__init__(context, config)
         self.faiss_manager = faiss_manager
@@ -40,8 +43,14 @@ class MemoryHandler(BaseHandler):
 
             # 解析字段和值
             updates = {}
-            
+
             if field == "content":
+                # 检查内容长度
+                if len(value) > self.MAX_CONTENT_LENGTH:
+                    return self.create_response(
+                        False,
+                        f"内容长度不能超过 {self.MAX_CONTENT_LENGTH} 字符 (当前: {len(value)})"
+                    )
                 updates["content"] = value
             elif field == "importance":
                 try:

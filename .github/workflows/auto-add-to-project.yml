@@ -1,0 +1,185 @@
+name: 自动添加到项目看板
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened]
+
+jobs:
+  add-to-project:
+    runs-on: ubuntu-latest
+
+    # 过滤条件：只处理带指定标签的 Issue 或 PR
+    if: |
+      contains(github.event.issue.labels.*.name, 'enhancement') ||
+      contains(github.event.issue.labels.*.name, 'feature') ||
+      contains(github.event.pull_request.labels.*.name, 'enhancement') ||
+      contains(github.event.pull_request.labels.*.name, 'feature')
+
+    steps:
+      - name: 添加到项目并移动到 Todo 列
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ADD_TO_PROJECT_TOKEN }}
+          script: |
+            const CONFIG = {
+              organization: 'lxfight-s-Astrbot-Plugins',  
+              projectNumber: 1,                            
+              statusFieldName: 'Status',
+              targetStatus: 'Todo',
+            };
+
+            // 1. 自动识别是 Issue 还是 PR
+            const contentId = context.payload.issue?.node_id || context.payload.pull_request?.node_id;
+            const number = context.payload.issue?.number || context.payload.pull_request?.number;
+            const type = context.payload.issue ? 'Issue' : 'PR';
+            const title = context.payload.issue?.title || context.payload.pull_request?.title;
+
+            console.log(`📋 处理 ${type} #${number}: ${title}`);
+
+            try {
+              // 2. 获取项目信息
+              console.log('🔍 查询项目信息...');
+              const projectQuery = `
+                query($org: String!, $number: Int!) {
+                  organization(login: $org) {
+                    projectV2(number: $number) {
+                      id
+                      title
+                      fields(first: 20) {
+                        nodes {
+                          ... on ProjectV2Field {
+                            id
+                            name
+                          }
+                          ... on ProjectV2SingleSelectField {
+                            id
+                            name
+                            options {
+                              id
+                              name
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `;
+              
+              const projectData = await github.graphql(projectQuery, {
+                org: CONFIG.organization,
+                number: CONFIG.projectNumber
+              });
+              
+              const project = projectData.organization.projectV2;
+              console.log(`✅ 找到项目: "${project.title}" (ID: ${project.id})`);
+              
+              // 3. 查找状态字段
+              const statusField = project.fields.nodes.find(
+                field => field.name === CONFIG.statusFieldName
+              );
+              
+              if (!statusField) {
+                const availableFields = project.fields.nodes.map(f => f.name).join(', ');
+                throw new Error(
+                  `❌ 未找到字段 "${CONFIG.statusFieldName}"。可用字段: ${availableFields}`
+                );
+              }
+              
+              console.log(`✅ 找到状态字段: "${statusField.name}"`);
+              
+              // 4. 查找目标状态选项
+              const availableStatuses = statusField.options.map(opt => opt.name);
+              console.log(`📋 可用状态: ${availableStatuses.join(', ')}`);
+              
+              const todoOption = statusField.options.find(
+                opt => opt.name === CONFIG.targetStatus
+              );
+              
+              if (!todoOption) {
+                throw new Error(
+                  `❌ 未找到状态 "${CONFIG.targetStatus}"。可用状态: ${availableStatuses.join(', ')}`
+                );
+              }
+              
+              console.log(`✅ 目标状态: "${todoOption.name}"`);
+              
+              // 5. 添加到项目
+              console.log(`📌 添加 ${type} 到项目...`);
+              const addMutation = `
+                mutation($projectId: ID!, $contentId: ID!) {
+                  addProjectV2ItemById(input: {
+                    projectId: $projectId
+                    contentId: $contentId
+                  }) {
+                    item {
+                      id
+                    }
+                  }
+                }
+              `;
+              
+              const addResult = await github.graphql(addMutation, {
+                projectId: project.id,
+                contentId: contentId
+              });
+              
+              const itemId = addResult.addProjectV2ItemById.item.id;
+              console.log(`✅ 已添加到项目 (Item ID: ${itemId})`);
+              
+              // 6. 设置状态
+              console.log(`🔄 移动到 "${todoOption.name}" 列...`);
+              const updateMutation = `
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(
+                    input: {
+                      projectId: $projectId
+                      itemId: $itemId
+                      fieldId: $fieldId
+                      value: { 
+                        singleSelectOptionId: $optionId
+                      }
+                    }
+                  ) {
+                    projectV2Item {
+                      id
+                    }
+                  }
+                }
+              `;
+              
+              await github.graphql(updateMutation, {
+                projectId: project.id,
+                itemId: itemId,
+                fieldId: statusField.id,
+                optionId: todoOption.id
+              });
+              
+              // 7. 成功总结
+              console.log('');
+              console.log('🎉 ============================================');
+              console.log(`✅ ${type} #${number} 已成功添加到项目`);
+              console.log(`📊 项目: ${project.title}`);
+              console.log(`📍 状态: ${todoOption.name}`);
+              console.log(`🔗 查看: https://github.com/orgs/${CONFIG.organization}/projects/${CONFIG.projectNumber}`);
+              console.log('============================================');
+              
+            } catch (error) {
+              // 错误处理
+              console.error('');
+              console.error('❌ ============================================');
+              console.error('错误详情:');
+              console.error(error.message);
+              console.error('============================================');
+              console.error('');
+              console.error('💡 故障排查建议:');
+              console.error('1. 检查 Token 权限是否包含: project (read & write)');
+              console.error('2. 确认配置中的组织名称和项目编号是否正确');
+              console.error('3. 确认状态字段名称和目标状态名称是否与项目看板完全匹配（区分大小写）');
+              console.error('4. 访问项目看板检查字段设置');
+              console.error('');
+              
+              core.setFailed(error.message);
+            }
