@@ -885,66 +885,85 @@ tbody tr.selected {
 /* 响应式设计 - 手机适配 */
 @media (max-width: var(--mobile-breakpoint)) {
   /* 全局重置 */
+  * {
+    box-sizing: border-box;
+  }
+  
   html, body {
     overflow-x: hidden;
     height: 100%;
+    margin: 0;
+    padding: 0;
   }
   
   #app {
     min-height: 100vh;
     max-height: 100vh;
     overflow-y: auto;
+    width: 100%;
+    position: relative;
   }
   
   /* 登录页面适配 */
   #login-view.active {
-    padding: 12px;
+    padding: 8px;
     min-height: 100vh;
     box-sizing: border-box;
   }
   
   .panel {
     width: 100%;
-    max-width: 420px;
-    padding: 20px 16px 24px;
+    max-width: 100%;
+    padding: 16px 12px 20px;
     margin: 0 auto;
   }
   
   .title {
-    font-size: 20px;
+    font-size: 18px;
+    text-align: center;
   }
   
   /* 按钮大小适配 */
   button {
-    font-size: 13px;
-    padding: 8px 12px;
+    font-size: 12px;
+    padding: 6px 10px;
+    min-height: 32px;
   }
   
   button.primary {
-    margin-top: 12px;
+    margin-top: 10px;
+    width: 100%;
   }
   
   /* 输入框适配 */
   input,
   select {
-    font-size: 13px;
-    padding: 8px 10px;
+    font-size: 12px;
+    padding: 6px 8px;
+    width: 100%;
   }
   
-  /* 顶部导航栏适配 */
+  /* 顶部导航栏适配 - 压缩显示 */
   .top-bar {
     flex-direction: column;
-    align-items: stretch;
-    margin: 8px;
-    padding: 12px;
-    gap: 8px;
+    align-items: center;
+    margin: 4px;
+    padding: 8px;
+    gap: 6px;
     min-height: auto;
+    width: calc(100% - 8px);
+  }
+  
+  .brand {
+    width: 100%;
+    text-align: center;
   }
   
   .brand h1 {
-    font-size: 16px;
+    font-size: 14px;
     text-align: center;
     margin: 0;
+    line-height: 1.2;
   }
   
   .subtitle {
@@ -954,162 +973,231 @@ tbody tr.selected {
   .toolbar {
     flex-wrap: wrap;
     justify-content: center;
-    gap: 4px;
+    gap: 3px;
+    width: 100%;
   }
   
   .toolbar button {
-    font-size: 11px;
-    padding: 6px 8px;
-    min-width: 60px;
+    font-size: 10px;
+    padding: 4px 6px;
+    min-width: 50px;
+    min-height: 28px;
   }
   
   /* 核爆警告适配 */
   .nuke-banner {
-    margin: 0 8px 8px;
-    padding: 8px 12px;
-  }
-  
-  /* 内容区域适配 */
-  .content {
-    padding: 0 8px 16px;
-    gap: 8px;
-    height: calc(100vh - 200px); /* 限制内容区域最大高度 */
-    overflow-y: auto;
-  }
-  
-  /* 统计卡片适配 - 简化显示 */
-  .stats-card {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 8px;
-    padding: 12px;
-    margin-bottom: 4px;
-  }
-  
-  .stat {
-    gap: 4px;
-  }
-  
-  .stat .label {
+    margin: 0 4px 4px;
+    padding: 6px 8px;
     font-size: 11px;
   }
   
+  /* 内容区域适配 - 关键修复 */
+  .content {
+    padding: 0 4px 12px;
+    gap: 4px;
+    height: auto;
+    min-height: calc(100vh - 150px);
+    overflow-y: auto;
+    display: block;
+  }
+  
+  /* 统计卡片适配 - 关键修复 */
+  .stats-card {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 4px;
+    padding: 8px;
+    margin-bottom: 4px;
+    width: 100%;
+  }
+  
+  .stat {
+    gap: 2px;
+    padding: 4px;
+  }
+  
+  .stat .label {
+    font-size: 10px;
+    line-height: 1.1;
+  }
+  
   .stat .value {
-    font-size: 14px;
+    font-size: 12px;
+    line-height: 1.2;
   }
   
   /* 控制卡片适配 */
   .controls-card {
-    gap: 8px;
-    padding: 12px;
+    gap: 4px;
+    padding: 8px;
     margin-bottom: 4px;
+    width: 100%;
   }
   
   .filter-group {
     min-width: auto;
-    gap: 6px;
+    gap: 4px;
     flex-direction: column;
   }
   
   .selection-group {
     justify-content: center;
-    gap: 8px;
+    gap: 4px;
+    flex-wrap: wrap;
   }
   
   /* 表格区域适配 - 关键修复 */
   .table-card {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
-    padding: 0;
-    max-height: 200px; /* 大幅减小表格高度 */
+    padding: 4px;
+    max-height: 180px;
     overflow-y: hidden;
     margin-bottom: 4px;
     flex-shrink: 0;
+    width: 100%;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+  }
+  
+  /* 表格包装器，确保表格内容可以滚动 */
+  .table-wrapper {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    width: 100%;
+    max-width: 100%;
   }
   
   table {
-    font-size: 11px;
-    min-width: 500px;
-    display: block;
+    font-size: 9px;
+    min-width: 400px; /* 减小最小宽度 */
+    width: 100%;
+    border-collapse: collapse;
   }
   
   thead {
-    display: table;
-    width: 100%;
-    table-layout: fixed;
+    background-color: rgba(30, 41, 59, 0.8);
+    position: sticky;
+    top: 0;
+    z-index: 10;
   }
   
   tbody {
     display: block;
     overflow-y: auto;
-    max-height: 160px;
+    max-height: 140px;
+    width: 100%;
   }
   
   tr {
     display: table;
     width: 100%;
     table-layout: fixed;
-    height: 40px;
+    height: 30px;
   }
   
   th,
   td {
-    padding: 6px 4px;
+    padding: 4px 2px;
     white-space: nowrap;
-    font-size: 10px;
+    font-size: 9px;
     overflow: hidden;
     text-overflow: ellipsis;
-    height: 40px;
+    height: 30px;
+    min-width: 40px;
   }
   
-  /* 隐藏不重要的列 */
+  /* 优化列宽 */
+  th:nth-child(1), /* 复选框 */
+  td:nth-child(1) {
+    width: 20px;
+    padding: 0 2px;
+  }
+  
+  th:nth-child(2), /* ID */
+  td:nth-child(2) {
+    width: 30px;
+  }
+  
+  th:nth-child(3), /* 摘要 */
+  td:nth-child(3) {
+    width: 120px;
+    max-width: 120px;
+  }
+  
+  th:nth-child(4), /* 类型 */
+  td:nth-child(4) {
+    width: 40px;
+  }
+  
   th:nth-child(5), /* 重要性 */
-  td:nth-child(5),
-  th:nth-child(8), /* 最后访问 */
-  td:nth-child(8) {
-    display: none;
+  td:nth-child(5) {
+    width: 40px;
+  }
+  
+  th:nth-child(6), /* 创建时间 */
+  td:nth-child(6) {
+    width: 60px;
+  }
+  
+  th:nth-child(7), /* 操作 */
+  td:nth-child(7) {
+    width: 50px;
+  }
+  
+  /* 让摘要内容自动换行，而不是保持单行 */
+  td:nth-child(3) {
+    white-space: normal;
+    word-break: break-word;
+    line-height: 1.1;
+    height: auto;
+    min-height: 30px;
   }
   
   /* 状态标签适配 */
   .status-pill {
-    padding: 2px 4px;
-    font-size: 9px;
+    padding: 1px 3px;
+    font-size: 8px;
   }
   
   /* 表格操作按钮适配 */
   .table-actions {
     gap: 2px;
     flex-wrap: wrap;
+    display: flex;
   }
   
   .table-actions button {
-    font-size: 10px;
-    padding: 2px 6px;
+    font-size: 8px;
+    padding: 1px 4px;
+    min-height: 20px;
   }
   
   /* 分页卡片适配 */
   .pagination-card {
     flex-direction: column;
-    gap: 8px;
-    padding: 10px;
+    gap: 4px;
+    padding: 6px;
     margin-top: 4px;
-    min-height: 80px;
+    min-height: 60px;
+    width: 100%;
   }
   
   .pager {
     flex-wrap: wrap;
     justify-content: center;
-    gap: 4px;
+    gap: 2px;
   }
   
   .pager button {
-    font-size: 11px;
-    padding: 6px 8px;
-    min-width: 40px;
+    font-size: 10px;
+    padding: 4px 6px;
+    min-width: 30px;
+    min-height: 24px;
   }
   
   #pagination-info {
-    font-size: 11px;
+    font-size: 10px;
     text-align: center;
+    margin: 2px 0;
   }
   
   .page-size {
@@ -1121,67 +1209,89 @@ tbody tr.selected {
     padding: 0;
     justify-content: center;
     overflow: hidden;
-    background: rgba(15, 23, 42, 0.8);
+    background: rgba(15, 23, 42, 0.9);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1000;
   }
   
   .drawer-content {
     width: 100%;
     height: 100vh;
-    padding: 16px 12px 20px;
+    padding: 12px 8px 16px;
     max-height: 100vh;
     overflow-y: auto;
     border-radius: 0;
     box-shadow: none;
+    background: #0f172a;
   }
   
   .drawer-content h2 {
-    font-size: 18px;
-    margin: 0 0 12px 0;
+    font-size: 16px;
+    margin: 0 0 8px 0;
+    text-align: center;
   }
   
   /* 详情JSON内容适配 - 关键修复 */
   .detail-json {
     flex: 1;
-    min-height: 120px;
+    min-height: 100px;
     overflow-x: auto;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    padding: 12px;
+    padding: 8px;
   }
   
   .detail-json pre {
-    font-size: 10px;
-    white-space: pre;
-    word-break: normal;
-    line-height: 1.3;
+    font-size: 8px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.2;
+    margin: 0;
   }
   
   /* 详情元数据适配 */
   .detail-meta {
-    gap: 8px;
+    gap: 4px;
   }
   
   .meta-label {
-    font-size: 10px;
+    font-size: 9px;
   }
   
   .meta-value {
-    font-size: 11px;
+    font-size: 10px;
     word-break: break-all;
   }
   
   /* Toast消息适配 */
   .toast {
-    bottom: 12px;
-    left: 12px;
-    right: 12px;
-    padding: 8px 12px;
-    font-size: 12px;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    padding: 6px 8px;
+    font-size: 11px;
   }
   
   /* 核爆覆盖层适配 */
   #nuke-overlay {
     width: 100vw;
     height: 100vh;
+  }
+  
+  /* 复选框适配 */
+  input[type="checkbox"] {
+    width: auto;
+    height: auto;
+  }
+  
+  /* 确保所有卡片都不会溢出屏幕 */
+  .card {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
   }
 }
