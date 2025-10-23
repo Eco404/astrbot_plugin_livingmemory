@@ -273,7 +273,7 @@ async function handleLogin(e) {
     
     const data = await response.json();
     
-    if (response.ok && data.success) {
+    if (response.ok && data.token) {
       state.token = data.token;
       localStorage.setItem('lm_token', data.token);
       dom.passwordInput.value = '';
@@ -330,7 +330,9 @@ async function loadRecentMemories() {
     
     if (response.ok) {
       const data = await response.json();
-      renderMemoriesList(data, dom.recentMemories, true);
+      // 使用data.memories（兼容字段）或data.items（原字段）
+      const memories = data.memories || data.items || [];
+      renderMemoriesList(memories, dom.recentMemories, true);
     } else {
       handleAuthError(response);
     }
@@ -370,9 +372,12 @@ async function loadMemories(reset = false) {
     if (response.ok) {
       const data = await response.json();
       
-      if (data.memories && data.memories.length > 0) {
-        state.memories = [...state.memories, ...data.memories];
-        state.hasMore = data.hasMore;
+      // 优先使用data.memories，其次使用data.items
+      const newMemories = data.memories || data.items || [];
+      
+      if (newMemories.length > 0) {
+        state.memories = [...state.memories, ...newMemories];
+        state.hasMore = data.has_more || false;
         state.page++;
         renderMemoriesList(state.memories, dom.memoriesList);
       } else if (state.page === 1) {
