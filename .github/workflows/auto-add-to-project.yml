@@ -26,7 +26,7 @@ jobs:
             const CONFIG = {
               organization: 'lxfight-s-Astrbot-Plugins',  
               projectNumber: 1,                            
-              statusFieldName: 'No Status',
+              statusFieldName: 'Status',
               targetStatus: 'Todo',
             };
 
