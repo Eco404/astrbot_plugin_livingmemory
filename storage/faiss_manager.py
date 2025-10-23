@@ -59,40 +59,55 @@ class FaissManager:
         Returns:
             int: 插入的记忆在数据库中的主键 ID。
         """
-        # 如果传入了完整的 metadata (来自新的 Event-based 流程)，直接使用
-        if metadata:
-            # 确保基础字段存在
-            metadata.setdefault("importance", importance)
-            metadata.setdefault("session_id", session_id)
-            metadata.setdefault("persona_id", persona_id)
+        logger.debug(f"准备添加记忆: 长度={len(content)}, 重要性={importance:.3f}, session={session_id}")
 
-            # 时间戳现在应该是 datetime 对象，直接转换为 float
-            ts_obj = metadata.get("timestamp")
-            if ts_obj and hasattr(ts_obj, "timestamp"):
-                timestamp_float = ts_obj.timestamp()
-                metadata["create_time"] = timestamp_float
-                metadata["last_access_time"] = timestamp_float
+        try:
+            # 如果传入了完整的 metadata (来自新的 Event-based 流程)，直接使用
+            if metadata:
+                # 确保基础字段存在
+                metadata.setdefault("importance", importance)
+                metadata.setdefault("session_id", session_id)
+                metadata.setdefault("persona_id", persona_id)
+
+                # 时间戳现在应该是 datetime 对象，直接转换为 float
+                ts_obj = metadata.get("timestamp")
+                if ts_obj and hasattr(ts_obj, "timestamp"):
+                    timestamp_float = ts_obj.timestamp()
+                    metadata["create_time"] = timestamp_float
+                    metadata["last_access_time"] = timestamp_float
+                    logger.debug(f"  使用事件时间戳: {timestamp_float}")
+                else:
+                    # 后备方案
+                    current_timestamp = time.time()
+                    metadata.setdefault("create_time", current_timestamp)
+                    metadata.setdefault("last_access_time", current_timestamp)
+                    logger.debug(f"  使用当前时间戳: {current_timestamp}")
             else:
-                # 后备方案
+                # 兼容旧的或简单的调用方式
                 current_timestamp = time.time()
-                metadata.setdefault("create_time", current_timestamp)
-                metadata.setdefault("last_access_time", current_timestamp)
-        else:
-            # 兼容旧的或简单的调用方式
-            current_timestamp = time.time()
-            metadata = {
-                "importance": importance,
-                "create_time": current_timestamp,
-                "last_access_time": current_timestamp,
-                "session_id": session_id,
-                "persona_id": persona_id,
-            }
+                metadata = {
+                    "importance": importance,
+                    "create_time": current_timestamp,
+                    "last_access_time": current_timestamp,
+                    "session_id": session_id,
+                    "persona_id": persona_id,
+                }
+                logger.debug(f"  创建简单元数据，时间戳: {current_timestamp}")
 
-        # 确保元数据中的所有 datetime 对象都被序列化为字符串
-        serialized_metadata = json.loads(self.datetime_encoder.encode(metadata))
-        
-        inserted_id = await self.db.insert(content=content, metadata=serialized_metadata)
-        return inserted_id
+            # 确保元数据中的所有 datetime 对象都被序列化为字符串
+            serialized_metadata = json.loads(self.datetime_encoder.encode(metadata))
+
+            inserted_id = await self.db.insert(content=content, metadata=serialized_metadata)
+            logger.info(f"✅ 成功添加记忆 ID={inserted_id}, 内容长度={len(content)}, 重要性={importance:.3f}")
+            return inserted_id
+
+        except Exception as e:
+            logger.error(
+                f"❌ 添加记忆失败: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            logger.error(f"  失败上下文: content_len={len(content)}, importance={importance}, session={session_id}")
+            raise
 
     async def search_memory(
         self,
@@ -113,24 +128,41 @@ class FaissManager:
         Returns:
             List[Result]: 检索到的记忆列表。
         """
-        metadata_filters = {}
-        if session_id:
-            metadata_filters["session_id"] = session_id
-        if persona_id:
-            metadata_filters["persona_id"] = persona_id
+        logger.debug(f"搜索记忆: query='{query[:50]}...', k={k}, session={session_id or '无'}, persona={persona_id or '无'}")
 
-        # 从数据库检索，fetch_k 可以设置得比 k 大，以便有更多结果用于后续处理
-        results = await self.db.retrieve(
-            query=query, k=k, fetch_k=k * 2, metadata_filters=metadata_filters
-        )
+        try:
+            metadata_filters = {}
+            if session_id:
+                metadata_filters["session_id"] = session_id
+            if persona_id:
+                metadata_filters["persona_id"] = persona_id
 
-        if results:
-            # 更新被访问记忆的 last_access_time
-            # FaissVecDB 返回的 Result.data['id'] 才是我们需要的整数 ID
-            accessed_ids = [res.data["id"] for res in results]
-            await self.update_memory_access_time(accessed_ids)
+            if metadata_filters:
+                logger.debug(f"  应用过滤器: {metadata_filters}")
 
-        return results
+            # 从数据库检索，fetch_k 可以设置得比 k 大，以便有更多结果用于后续处理
+            results = await self.db.retrieve(
+                query=query, k=k, fetch_k=k * 2, metadata_filters=metadata_filters
+            )
+
+            logger.debug(f"  检索返回 {len(results)} 条结果")
+
+            if results:
+                # 更新被访问记忆的 last_access_time
+                # FaissVecDB 返回的 Result.data['id'] 才是我们需要的整数 ID
+                accessed_ids = [res.data["id"] for res in results]
+                logger.debug(f"  更新 {len(accessed_ids)} 条记忆的访问时间")
+                await self.update_memory_access_time(accessed_ids)
+
+            return results
+
+        except Exception as e:
+            logger.error(
+                f"❌ 搜索记忆失败: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            logger.error(f"  失败上下文: query='{query[:50]}...', k={k}")
+            return []
 
     async def update_memory_access_time(self, doc_ids: List[int]):
         """

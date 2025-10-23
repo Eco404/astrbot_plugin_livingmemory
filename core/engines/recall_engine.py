@@ -34,13 +34,20 @@ class RecallEngine:
         self.config = config
         self.faiss_manager = faiss_manager
         self.sparse_retriever = sparse_retriever
-        
+
         # 初始化结果融合器
         fusion_config = config.get("fusion", {})
         fusion_strategy = fusion_config.get("strategy", "rrf")
         self.result_fusion = ResultFusion(strategy=fusion_strategy, config=fusion_config)
-        
-        logger.info("RecallEngine 初始化成功。")
+
+        # 记录配置信息
+        retrieval_mode = config.get("retrieval_mode", "hybrid")
+        top_k = config.get("top_k", 5)
+        logger.info(f"RecallEngine 初始化成功")
+        logger.info(f"  检索模式: {retrieval_mode}")
+        logger.info(f"  默认返回数量: {top_k}")
+        logger.info(f"  融合策略: {fusion_strategy}")
+        logger.info(f"  稀疏检索器: {'已启用' if sparse_retriever else '未启用'}")
 
     async def recall(
         self,
@@ -65,23 +72,43 @@ class RecallEngine:
         top_k = k if k is not None else self.config.get("top_k", 5)
         retrieval_mode = self.config.get("retrieval_mode", "hybrid")  # hybrid, dense, sparse
 
+        logger.info(f"🔍 开始召回记忆")
+        logger.debug(f"  查询内容: {query[:100]}{'...' if len(query) > 100 else ''}")
+        logger.debug(f"  检索模式: {retrieval_mode}")
+        logger.debug(f"  目标数量: {top_k}")
+        logger.debug(f"  会话ID: {session_id or '无'}")
+        logger.debug(f"  人格ID: {persona_id or '无'}")
+
         # 分析查询特征（用于自适应策略）
         query_info = self.result_fusion.analyze_query(query)
-        logger.debug(f"Query analysis: {query_info}")
+        logger.debug(f"  查询分析: 长度={query_info.get('length', 0)}, 关键词数={len(query_info.get('keywords', []))}")
 
-        # 根据检索模式执行搜索
-        if retrieval_mode == "hybrid" and self.sparse_retriever:
-            # 混合检索
-            logger.debug("使用混合检索模式...")
-            return await self._hybrid_search(context, query, session_id, persona_id, top_k, query_info)
-        elif retrieval_mode == "sparse" and self.sparse_retriever:
-            # 纯稀疏检索
-            logger.debug("使用稀疏检索模式...")
-            return await self._sparse_search(query, session_id, persona_id, top_k)
-        else:
-            # 纯密集检索（默认）
-            logger.debug("使用密集检索模式...")
-            return await self._dense_search(context, query, session_id, persona_id, top_k)
+        try:
+            # 根据检索模式执行搜索
+            if retrieval_mode == "hybrid" and self.sparse_retriever:
+                # 混合检索
+                logger.info("📊 使用混合检索模式 (密集向量 + 稀疏关键词)")
+                results = await self._hybrid_search(context, query, session_id, persona_id, top_k, query_info)
+            elif retrieval_mode == "sparse" and self.sparse_retriever:
+                # 纯稀疏检索
+                logger.info("🔤 使用稀疏检索模式 (BM25)")
+                results = await self._sparse_search(query, session_id, persona_id, top_k)
+            else:
+                # 纯密集检索（默认）
+                logger.info("🎯 使用密集检索模式 (向量相似度)")
+                results = await self._dense_search(context, query, session_id, persona_id, top_k)
+
+            logger.info(f"✅ 召回完成，返回 {len(results)} 条记忆")
+            if results:
+                logger.debug(f"  最高相似度: {results[0].similarity:.3f}")
+                logger.debug(f"  最低相似度: {results[-1].similarity:.3f}")
+
+            return results
+
+        except Exception as e:
+            logger.error(f"❌ 召回记忆时发生错误: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"  错误上下文: query='{query[:50]}...', mode={retrieval_mode}, k={top_k}")
+            return []
 
     async def _hybrid_search(
         self,
@@ -93,59 +120,78 @@ class RecallEngine:
         query_info: Dict[str, Any]
     ) -> List[Result]:
         """执行混合检索"""
+        logger.debug(f"混合检索: 目标数量={k}, 每路检索={k*2}")
+
         # 并行执行密集和稀疏检索
         import asyncio
-        
-        # 密集检索
-        dense_task = self.faiss_manager.search_memory(
-            query=query, k=k*2, session_id=session_id, persona_id=persona_id
-        )
-        
-        # 稀疏检索
-        sparse_task = self.sparse_retriever.search(
-            query=query, limit=k*2, session_id=session_id, persona_id=persona_id
-        )
-        
-        # 等待两个检索完成
-        dense_results, sparse_results = await asyncio.gather(dense_task, sparse_task, return_exceptions=True)
-        
-        # 处理异常
-        if isinstance(dense_results, Exception):
-            logger.error(f"密集检索失败: {dense_results}")
-            dense_results = []
-        if isinstance(sparse_results, Exception):
-            logger.error(f"稀疏检索失败: {sparse_results}")
-            sparse_results = []
-        
-        logger.debug(f"Dense results: {len(dense_results)}, Sparse results: {len(sparse_results)}")
-        
-        # 融合结果
-        fused_results = self.result_fusion.fuse(
-            dense_results=dense_results,
-            sparse_results=sparse_results,
-            k=k,
-            query_info=query_info
-        )
-        
-        # 转换回 Result 格式
-        final_results = []
-        for result in fused_results:
-            final_results.append(Result(
-                data={
-                    "id": result.doc_id,
-                    "text": result.content,
-                    "metadata": result.metadata
-                },
-                similarity=result.final_score
-            ))
-        
-        # 应用传统的加权重排（如果需要）
-        strategy = self.config.get("recall_strategy", "weighted")
-        if strategy == "weighted":
-            logger.debug("对混合检索结果应用加权重排...")
-            final_results = self._rerank_by_weighted_score(context, final_results)
-        
-        return final_results
+
+        try:
+            # 密集检索
+            logger.debug("  启动密集检索任务...")
+            dense_task = self.faiss_manager.search_memory(
+                query=query, k=k*2, session_id=session_id, persona_id=persona_id
+            )
+
+            # 稀疏检索
+            logger.debug("  启动稀疏检索任务...")
+            sparse_task = self.sparse_retriever.search(
+                query=query, limit=k*2, session_id=session_id, persona_id=persona_id
+            )
+
+            # 等待两个检索完成
+            dense_results, sparse_results = await asyncio.gather(dense_task, sparse_task, return_exceptions=True)
+
+            # 处理异常
+            if isinstance(dense_results, Exception):
+                logger.error(f"❌ 密集检索失败: {type(dense_results).__name__}: {dense_results}")
+                dense_results = []
+            else:
+                logger.debug(f"  密集检索返回: {len(dense_results)} 条结果")
+
+            if isinstance(sparse_results, Exception):
+                logger.error(f"❌ 稀疏检索失败: {type(sparse_results).__name__}: {sparse_results}")
+                sparse_results = []
+            else:
+                logger.debug(f"  稀疏检索返回: {len(sparse_results)} 条结果")
+
+            if not dense_results and not sparse_results:
+                logger.warning("⚠️ 混合检索两路均无结果")
+                return []
+
+            # 融合结果
+            logger.debug(f"  开始融合结果，策略: {self.result_fusion.strategy}")
+            fused_results = self.result_fusion.fuse(
+                dense_results=dense_results,
+                sparse_results=sparse_results,
+                k=k,
+                query_info=query_info
+            )
+            logger.debug(f"  融合完成，返回 {len(fused_results)} 条结果")
+
+            # 转换回 Result 格式
+            final_results = []
+            for result in fused_results:
+                final_results.append(Result(
+                    data={
+                        "id": result.doc_id,
+                        "text": result.content,
+                        "metadata": result.metadata
+                    },
+                    similarity=result.final_score
+                ))
+
+            # 应用传统的加权重排（如果需要）
+            strategy = self.config.get("recall_strategy", "weighted")
+            if strategy == "weighted":
+                logger.debug("  应用加权重排 (相似度+重要性+新近度)...")
+                final_results = self._rerank_by_weighted_score(context, final_results)
+                logger.debug(f"  重排完成，最终返回 {len(final_results)} 条结果")
+
+            return final_results
+
+        except Exception as e:
+            logger.error(f"❌ 混合检索过程发生异常: {type(e).__name__}: {e}", exc_info=True)
+            return []
 
     async def _dense_search(
         self,
@@ -156,21 +202,33 @@ class RecallEngine:
         k: int
     ) -> List[Result]:
         """执行密集检索"""
-        results = await self.faiss_manager.search_memory(
-            query=query, k=k, session_id=session_id, persona_id=persona_id
-        )
-        
-        if not results:
+        logger.debug(f"密集检索: k={k}")
+
+        try:
+            results = await self.faiss_manager.search_memory(
+                query=query, k=k, session_id=session_id, persona_id=persona_id
+            )
+
+            if not results:
+                logger.debug("  密集检索无结果")
+                return []
+
+            logger.debug(f"  密集检索返回 {len(results)} 条结果")
+
+            # 应用重排
+            strategy = self.config.get("recall_strategy", "weighted")
+            if strategy == "weighted":
+                logger.debug("  应用加权重排 (相似度+重要性+新近度)...")
+                reranked = self._rerank_by_weighted_score(context, results)
+                logger.debug(f"  重排完成，返回 {len(reranked)} 条结果")
+                return reranked
+            else:
+                logger.debug(f"  使用 '{strategy}' 策略，直接返回原始结果")
+                return results
+
+        except Exception as e:
+            logger.error(f"❌ 密集检索过程发生异常: {type(e).__name__}: {e}", exc_info=True)
             return []
-        
-        # 应用重排
-        strategy = self.config.get("recall_strategy", "weighted")
-        if strategy == "weighted":
-            logger.debug("使用 'weighted' 策略进行重排...")
-            return self._rerank_by_weighted_score(context, results)
-        else:
-            logger.debug("使用 'similarity' 策略，直接返回结果。")
-            return results
 
     async def _sparse_search(
         self,
@@ -180,23 +238,36 @@ class RecallEngine:
         k: int
     ) -> List[Result]:
         """执行稀疏检索"""
-        sparse_results = await self.sparse_retriever.search(
-            query=query, limit=k, session_id=session_id, persona_id=persona_id
-        )
-        
-        # 转换为 Result 格式
-        results = []
-        for result in sparse_results:
-            results.append(Result(
-                data={
-                    "id": result.doc_id,
-                    "text": result.content,
-                    "metadata": result.metadata
-                },
-                similarity=result.score
-            ))
-        
-        return results
+        logger.debug(f"稀疏检索: k={k}")
+
+        try:
+            sparse_results = await self.sparse_retriever.search(
+                query=query, limit=k, session_id=session_id, persona_id=persona_id
+            )
+
+            if not sparse_results:
+                logger.debug("  稀疏检索无结果")
+                return []
+
+            logger.debug(f"  稀疏检索返回 {len(sparse_results)} 条结果")
+
+            # 转换为 Result 格式
+            results = []
+            for result in sparse_results:
+                results.append(Result(
+                    data={
+                        "id": result.doc_id,
+                        "text": result.content,
+                        "metadata": result.metadata
+                    },
+                    similarity=result.score
+                ))
+
+            return results
+
+        except Exception as e:
+            logger.error(f"❌ 稀疏检索过程发生异常: {type(e).__name__}: {e}", exc_info=True)
+            return []
 
     def _rerank_by_weighted_score(
         self, context: Context, results: List[Result]
