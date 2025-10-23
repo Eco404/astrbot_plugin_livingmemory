@@ -257,13 +257,6 @@ class WebUIServer:
             if not index_path.exists():
                 raise HTTPException(status.HTTP_404_NOT_FOUND, detail="前端文件缺失")
             return HTMLResponse(index_path.read_text(encoding="utf-8"))
-            
-        @self._app.get("/mobile", response_class=HTMLResponse)
-        async def serve_mobile():
-            mobile_path = static_dir / "mobile.html"
-            if not mobile_path.exists():
-                raise HTTPException(status.HTTP_404_NOT_FOUND, detail="移动端前端文件缺失")
-            return HTMLResponse(mobile_path.read_text(encoding="utf-8"))
 
         @self._app.post("/api/login")
         async def login(request: Request, payload: Dict[str, Any]):
@@ -312,15 +305,19 @@ class WebUIServer:
             token: str = Depends(self._auth_dependency()),
         ):
             query = request.query_params
-            keyword = query.get("keyword", "").strip() or query.get("search", "").strip()
+            keyword = query.get("keyword", "").strip()
             status_filter = query.get("status", "all").strip() or "all"
             load_all = query.get("all", "false").lower() == "true"
-            
-            # 支持移动版的分页参数
-            page = max(1, int(query.get("page", 1)))
-            page_size = query.get("page_size") or query.get("limit", "20")
-            page_size = min(200, max(1, int(page_size))) if page_size else 50
-            offset = (page - 1) * page_size
+
+            if load_all:
+                page = 1
+                page_size = 0
+                offset = 0
+            else:
+                page = max(1, int(query.get("page", 1)))
+                page_size = query.get("page_size")
+                page_size = min(200, max(1, int(page_size))) if page_size else 50
+                offset = (page - 1) * page_size
 
             try:
                 total, items = await self._fetch_memories(
@@ -340,19 +337,13 @@ class WebUIServer:
             has_more = False if load_all else offset + len(items) < total
             effective_page_size = page_size if page_size else len(items)
 
-            # 同时支持原版本和移动版本的响应格式
-            response = {
+            return {
                 "items": items,
                 "page": page,
                 "page_size": effective_page_size,
                 "total": total,
                 "has_more": has_more,
             }
-            
-            # 为移动版添加兼容性字段
-            response["memories"] = items
-            
-            return response
 
         @self._app.get("/api/memories/{memory_id}")
         async def memory_detail(
@@ -448,133 +439,13 @@ class WebUIServer:
                 else 0
             )
 
-            # 构建兼容移动版的统计数据响应
-            response = {
-                "total": total,
+            return {
                 "total_memories": total,
                 "status_breakdown": status_counts,
                 "active_sessions": active_sessions,
                 "session_timeout": self.session_timeout,
             }
-            
-            # 为移动版添加简化的状态计数
-            response["active"] = status_counts.get("active", 0)
-            response["archived"] = status_counts.get("archived", 0)
-            response["deleted"] = status_counts.get("deleted", 0)
 
-            return response
-
-        @self._app.post("/api/memories/{memory_id}/archive")
-        async def archive_memory(
-            memory_id: str,
-            token: str = Depends(self._auth_dependency())
-        ):
-            try:
-                # 更新记忆状态为已归档
-                memory = await self._get_memory_detail(memory_id)
-                if not memory:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND, detail="未找到记忆记录")
-                
-                # 归档操作（根据实际实现调整）
-                if self.memory_storage:
-                    success = await self.memory_storage.update_memory_status(
-                        memory.get("memory_id", memory_id), "archived"
-                    )
-                else:
-                    # 回退实现，如果有必要
-                    success = True
-                
-                if success:
-                    return {"success": True, "message": "记忆已归档"}
-                else:
-                    raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="归档失败")
-                    
-            except Exception as exc:
-                logger.error(f"归档记忆失败: {exc}", exc_info=True)
-                raise HTTPException(
-                    status.HTTP_500_INTERNAL_SERVER_ERROR, detail="归档失败"
-                ) from exc
-                
-        @self._app.post("/api/memories/{memory_id}/delete")
-        async def delete_memory(
-            memory_id: str,
-            token: str = Depends(self._auth_dependency())
-        ):
-            try:
-                # 执行删除操作
-                memory = await self._get_memory_detail(memory_id)
-                if not memory:
-                    raise HTTPException(status.HTTP_404_NOT_FOUND, detail="未找到记忆记录")
-                
-                # 构建删除请求
-                doc_ids = [int(memory.get("id"))] if memory.get("id") else []
-                memory_ids = [memory.get("memory_id")] if memory.get("memory_id") else []
-                
-                deleted_docs = 0
-                deleted_memories = 0
-                
-                if doc_ids:
-                    await self.faiss_manager.delete_memories(doc_ids)
-                    deleted_docs = len(doc_ids)
-                
-                if memory_ids and self.memory_storage:
-                    await self.memory_storage.delete_memories_by_memory_ids(memory_ids)
-                    deleted_memories = len(memory_ids)
-                
-                if deleted_docs > 0 or deleted_memories > 0:
-                    return {"success": True, "message": "记忆已删除"}
-                else:
-                    raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="删除失败")
-                    
-            except HTTPException:
-                raise
-            except Exception as exc:
-                logger.error(f"删除记忆失败: {exc}", exc_info=True)
-                raise HTTPException(
-                    status.HTTP_500_INTERNAL_SERVER_ERROR, detail="删除失败"
-                ) from exc
-                
-        @self._app.get("/api/settings")
-        async def get_settings(
-            token: str = Depends(self._auth_dependency())
-        ):
-            try:
-                # 返回系统设置信息
-                storage_type = "自定义数据库" if self.memory_storage else "默认存储"
-                
-                return {
-                    "success": True,
-                    "timeout": self.session_timeout // 60,  # 转换为分钟
-                    "storage_type": storage_type,
-                    "version": "1.3.0"
-                }
-                
-            except Exception as exc:
-                logger.error(f"获取设置失败: {exc}", exc_info=True)
-                raise HTTPException(
-                    status.HTTP_500_INTERNAL_SERVER_ERROR, detail="获取设置失败"
-                ) from exc
-                
-        @self._app.post("/api/cache/clear")
-        async def clear_cache(
-            token: str = Depends(self._auth_dependency())
-        ):
-            try:
-                # 清除缓存逻辑（根据实际实现调整）
-                # 这里可以添加缓存清理的代码
-                
-                # 清理过期的tokens
-                async with self._token_lock:
-                    await self._cleanup_tokens_locked()
-                
-                return {"success": True, "message": "缓存已清除"}
-                
-            except Exception as exc:
-                logger.error(f"清除缓存失败: {exc}", exc_info=True)
-                raise HTTPException(
-                    status.HTTP_500_INTERNAL_SERVER_ERROR, detail="清除缓存失败"
-                ) from exc
-                
         @self._app.get("/api/health")
         async def health():
             return {"status": "ok"}
