@@ -884,164 +884,304 @@ tbody tr.selected {
 
 /* 响应式设计 - 手机适配 */
 @media (max-width: var(--mobile-breakpoint)) {
+  /* 全局重置 */
+  html, body {
+    overflow-x: hidden;
+    height: 100%;
+  }
+  
+  #app {
+    min-height: 100vh;
+    max-height: 100vh;
+    overflow-y: auto;
+  }
+  
   /* 登录页面适配 */
   #login-view.active {
-    padding: 16px;
+    padding: 12px;
+    min-height: 100vh;
+    box-sizing: border-box;
   }
   
   .panel {
     width: 100%;
     max-width: 420px;
-    padding: 28px 24px 32px;
+    padding: 20px 16px 24px;
+    margin: 0 auto;
   }
   
   .title {
-    font-size: 24px;
+    font-size: 20px;
   }
   
   /* 按钮大小适配 */
   button {
-    font-size: 14px;
-    padding: 10px 16px;
+    font-size: 13px;
+    padding: 8px 12px;
   }
   
   button.primary {
-    margin-top: 16px;
+    margin-top: 12px;
   }
   
   /* 输入框适配 */
   input,
   select {
-    font-size: 14px;
-    padding: 10px 12px;
+    font-size: 13px;
+    padding: 8px 10px;
   }
   
   /* 顶部导航栏适配 */
   .top-bar {
     flex-direction: column;
     align-items: stretch;
-    margin: 16px 16px 12px;
-    padding: 20px 16px;
-    gap: 16px;
+    margin: 8px;
+    padding: 12px;
+    gap: 8px;
+    min-height: auto;
   }
   
   .brand h1 {
-    font-size: 20px;
+    font-size: 16px;
+    text-align: center;
+    margin: 0;
+  }
+  
+  .subtitle {
+    display: none; /* 隐藏副标题，节省空间 */
   }
   
   .toolbar {
+    flex-wrap: wrap;
     justify-content: center;
-    gap: 8px;
+    gap: 4px;
+  }
+  
+  .toolbar button {
+    font-size: 11px;
+    padding: 6px 8px;
+    min-width: 60px;
+  }
+  
+  /* 核爆警告适配 */
+  .nuke-banner {
+    margin: 0 8px 8px;
+    padding: 8px 12px;
   }
   
   /* 内容区域适配 */
   .content {
-    padding: 0 16px 32px;
-    gap: 16px;
+    padding: 0 8px 16px;
+    gap: 8px;
+    height: calc(100vh - 200px); /* 限制内容区域最大高度 */
+    overflow-y: auto;
   }
   
-  .card {
-    padding: 16px;
-  }
-  
-  /* 统计卡片适配 */
+  /* 统计卡片适配 - 简化显示 */
   .stats-card {
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    padding: 12px;
+    margin-bottom: 4px;
+  }
+  
+  .stat {
+    gap: 4px;
+  }
+  
+  .stat .label {
+    font-size: 11px;
   }
   
   .stat .value {
-    font-size: 18px;
+    font-size: 14px;
   }
   
   /* 控制卡片适配 */
   .controls-card {
-    gap: 16px;
+    gap: 8px;
+    padding: 12px;
+    margin-bottom: 4px;
   }
   
   .filter-group {
     min-width: auto;
+    gap: 6px;
+    flex-direction: column;
+  }
+  
+  .selection-group {
+    justify-content: center;
     gap: 8px;
   }
   
-  /* 表格区域适配 - 关键修复：添加水平滚动 */
+  /* 表格区域适配 - 关键修复 */
   .table-card {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     padding: 0;
+    max-height: 200px; /* 大幅减小表格高度 */
+    overflow-y: hidden;
+    margin-bottom: 4px;
+    flex-shrink: 0;
   }
   
   table {
-    font-size: 13px;
-    min-width: 600px; /* 确保表格有足够宽度，可以滚动 */
+    font-size: 11px;
+    min-width: 500px;
+    display: block;
+  }
+  
+  thead {
+    display: table;
+    width: 100%;
+    table-layout: fixed;
+  }
+  
+  tbody {
+    display: block;
+    overflow-y: auto;
+    max-height: 160px;
+  }
+  
+  tr {
+    display: table;
+    width: 100%;
+    table-layout: fixed;
+    height: 40px;
   }
   
   th,
   td {
-    padding: 10px 8px;
+    padding: 6px 4px;
     white-space: nowrap;
+    font-size: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    height: 40px;
+  }
+  
+  /* 隐藏不重要的列 */
+  th:nth-child(5), /* 重要性 */
+  td:nth-child(5),
+  th:nth-child(8), /* 最后访问 */
+  td:nth-child(8) {
+    display: none;
   }
   
   /* 状态标签适配 */
   .status-pill {
-    padding: 3px 8px;
-    font-size: 11px;
+    padding: 2px 4px;
+    font-size: 9px;
   }
   
-  /* 详情抽屉适配 */
+  /* 表格操作按钮适配 */
+  .table-actions {
+    gap: 2px;
+    flex-wrap: wrap;
+  }
+  
+  .table-actions button {
+    font-size: 10px;
+    padding: 2px 6px;
+  }
+  
+  /* 分页卡片适配 */
+  .pagination-card {
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    margin-top: 4px;
+    min-height: 80px;
+  }
+  
+  .pager {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px;
+  }
+  
+  .pager button {
+    font-size: 11px;
+    padding: 6px 8px;
+    min-width: 40px;
+  }
+  
+  #pagination-info {
+    font-size: 11px;
+    text-align: center;
+  }
+  
+  .page-size {
+    justify-content: center;
+  }
+  
+  /* 详情抽屉适配 - 全屏显示 */
   .drawer {
     padding: 0;
     justify-content: center;
+    overflow: hidden;
+    background: rgba(15, 23, 42, 0.8);
   }
   
   .drawer-content {
     width: 100%;
-    height: 100%;
-    padding: 24px 20px 28px;
-    max-height: calc(100vh - 40px);
+    height: 100vh;
+    padding: 16px 12px 20px;
+    max-height: 100vh;
+    overflow-y: auto;
+    border-radius: 0;
+    box-shadow: none;
   }
   
-  /* 详情JSON内容适配 - 确保JSON内容可以水平滚动 */
+  .drawer-content h2 {
+    font-size: 18px;
+    margin: 0 0 12px 0;
+  }
+  
+  /* 详情JSON内容适配 - 关键修复 */
   .detail-json {
     flex: 1;
-    min-height: 200px;
+    min-height: 120px;
     overflow-x: auto;
+    overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+    padding: 12px;
   }
   
   .detail-json pre {
-    font-size: 12px;
+    font-size: 10px;
     white-space: pre;
     word-break: normal;
+    line-height: 1.3;
+  }
+  
+  /* 详情元数据适配 */
+  .detail-meta {
+    gap: 8px;
+  }
+  
+  .meta-label {
+    font-size: 10px;
+  }
+  
+  .meta-value {
+    font-size: 11px;
+    word-break: break-all;
+  }
+  
+  /* Toast消息适配 */
+  .toast {
+    bottom: 12px;
+    left: 12px;
+    right: 12px;
+    padding: 8px 12px;
+    font-size: 12px;
   }
   
   /* 核爆覆盖层适配 */
   #nuke-overlay {
     width: 100vw;
     height: 100vh;
-  }
-  
-  .nuke-banner {
-    margin: 0 16px 12px;
-    padding: 12px 16px;
-  }
-  
-  /* 分页卡片适配 */
-  .pagination-card {
-    flex-direction: column;
-    gap: 12px;
-  }
-  
-  .pager {
-    flex-wrap: wrap;
-    justify-content: center;
-  }
-  
-  /* Toast消息适配 */
-  .toast {
-    bottom: 20px;
-    left: 20px;
-    right: 20px;
-    padding: 12px 16px;
   }
 }
