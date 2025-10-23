@@ -419,24 +419,32 @@
   }
 
   function openDetailDrawer(item) {
-    dom.detail.memoryId.textContent = item.memory_id || item.doc_id || "--";
-    dom.detail.source.textContent =
-      item.source === "storage" ? "自定义存储" : "向量存储";
-    dom.detail.status.textContent = item.status || "--";
-    dom.detail.importance.textContent =
-      item.importance !== undefined && item.importance !== null
-        ? Number(item.importance).toFixed(2)
-        : "--";
-    dom.detail.type.textContent = item.memory_type || "--";
-    dom.detail.created.textContent = item.created_at || "--";
-    dom.detail.access.textContent = item.last_access || "--";
-    dom.detail.json.textContent = item.raw_json || JSON.stringify(item.raw, null, 2);
+  dom.detail.memoryId.textContent = item.memory_id || item.doc_id || "--";
+  dom.detail.source.textContent =
+    item.source === "storage" ? "自定义存储" : "向量存储";
+  dom.detail.status.textContent = item.status || "--";
+  dom.detail.importance.textContent =
+    item.importance !== undefined && item.importance !== null
+      ? Number(item.importance).toFixed(2)
+      : "--";
+  dom.detail.type.textContent = item.memory_type || "--";
+  dom.detail.created.textContent = item.created_at || "--";
+  dom.detail.access.textContent = item.last_access || "--";
+  dom.detail.json.textContent = item.raw_json || JSON.stringify(item.raw, null, 2);
+  // 确保动画流畅显示
+  dom.drawer.style.display = "flex";
+  setTimeout(() => {
     dom.drawer.classList.remove("hidden");
-  }
+  }, 10);
+}
 
   function closeDetailDrawer() {
-    dom.drawer.classList.add("hidden");
-  }
+  // 先添加hidden类触发动画，然后在动画结束后完全隐藏
+  dom.drawer.classList.add("hidden");
+  setTimeout(() => {
+    // 确保动画流畅完成
+  }, 300);
+}
 
   async function initNukeStatus() {
     if (!state.token) {

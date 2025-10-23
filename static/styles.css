@@ -12,6 +12,7 @@
   --shadow: 0 18px 32px -24px rgba(15, 23, 42, 0.4);
   --radius-lg: 18px;
   --radius-md: 12px;
+  --mobile-breakpoint: 768px;
 }
 
 *,
@@ -193,6 +194,233 @@ button.danger-outline:hover:not(:disabled) {
   border-radius: var(--radius-lg);
   border: 1px solid rgba(37, 99, 235, 0.18);
   box-shadow: var(--shadow);
+}
+
+/* 响应式设计 - 手机适配 */
+@media (max-width: var(--mobile-breakpoint)) {
+  /* 登录页面适配 */
+  #login-view.active {
+    padding: 16px;
+  }
+  
+  .panel {
+    width: 100%;
+    max-width: 420px;
+    padding: 28px 24px 32px;
+  }
+  
+  .title {
+    font-size: 24px;
+  }
+  
+  /* 按钮大小适配 */
+  button {
+    font-size: 14px;
+    padding: 10px 16px;
+  }
+  
+  button.primary {
+    margin-top: 16px;
+  }
+  
+  /* 输入框适配 */
+  input,
+  select {
+    font-size: 14px;
+    padding: 10px 12px;
+  }
+  
+  /* 表格行适配 */
+  th,
+  td {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+  
+  .table-actions button {
+    font-size: 12px;
+    padding: 5px 8px;
+  }
+  
+  /* 详情页适配 */
+  .detail-meta {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  
+  /* Toast提示适配 */
+  .toast {
+    bottom: 16px;
+    right: 16px;
+    left: 16px;
+    padding: 12px 16px;
+    font-size: 14px;
+  }
+  
+  /* 状态标签适配 */
+  .status-pill {
+    font-size: 11px;
+    padding: 3px 8px;
+  }
+  .top-bar {
+    flex-direction: column;
+    margin: 16px 16px 12px;
+    padding: 18px 20px;
+    gap: 16px;
+  }
+  
+  .toolbar {
+    justify-content: center;
+    gap: 8px;
+  }
+  
+  .toolbar button {
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+  
+  .content {
+    padding: 0 16px 24px;
+    gap: 12px;
+  }
+  
+  .brand h1 {
+    font-size: 20px;
+    text-align: center;
+  }
+  
+  .subtitle {
+    text-align: center;
+  }
+  
+  .card {
+    padding: 18px;
+  }
+  
+  .controls-card {
+    flex-direction: column;
+    gap: 16px;
+    align-items: stretch;
+  }
+  
+  .filter-group {
+    min-width: auto;
+    flex-wrap: wrap;
+  }
+  
+  .filter-group input,
+  .filter-group select {
+    flex: 1;
+    min-width: 120px;
+  }
+  
+  .stats-card {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+  
+  .stat .value {
+    font-size: 20px;
+  }
+  
+  .table-card {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch; /* 增加iOS上的平滑滚动 */
+    position: relative;
+  }
+  
+  table {
+    min-width: 640px;
+  }
+  
+  /* 为小屏幕添加表格标题提示 */
+  .table-card::before {
+    content: '←→ 滑动查看完整表格';
+    display: none;
+    text-align: center;
+    padding: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    background: var(--surface-alt);
+    border-bottom: 1px solid var(--border);
+  }
+  
+  @media (max-width: 480px) {
+    .table-card::before {
+      display: block;
+    }
+  }
+  
+  .drawer {
+    padding: 0;
+    align-items: flex-end;
+  }
+  
+  .drawer-content {
+    width: 100%;
+    height: 90%;
+    max-height: none;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    padding: 24px 20px 28px;
+    box-shadow: 0 -8px 32px rgba(15, 23, 42, 0.15);
+    transform: translateY(0);
+    transition: transform 0.3s ease;
+  }
+  
+  /* 移动端抽屉关闭时的动画 */
+  .drawer.hidden .drawer-content {
+    transform: translateY(100%);
+  }
+  
+  .drawer.hidden {
+    display: flex;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+  
+  .drawer:not(.hidden) {
+    opacity: 1;
+    transition: opacity 0.3s ease;
+  }
+  
+  .drawer-content {
+    width: 100%;
+    height: 100%;
+    padding: 24px 20px 28px;
+    max-height: calc(100vh - 40px);
+  }
+  
+  /* 详情JSON内容适配 */
+  .detail-json {
+    flex: 1;
+    min-height: 200px;
+  }
+  
+  .detail-json pre {
+    font-size: 12px;
+  }
+  
+  /* 核爆覆盖层适配 */
+  #nuke-overlay {
+    width: 100vw;
+    height: 100vh;
+  }
+  
+  .nuke-banner {
+    margin: 0 16px 12px;
+    padding: 12px 16px;
+  }
+  
+  .pagination-card {
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .pager {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
 }
 
 .brand h1 {
