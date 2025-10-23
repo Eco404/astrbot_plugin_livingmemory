@@ -12,6 +12,7 @@
   --shadow: 0 18px 32px -24px rgba(15, 23, 42, 0.4);
   --radius-lg: 18px;
   --radius-md: 12px;
+  --mobile-breakpoint: 768px;
 }
 
 *,
@@ -878,5 +879,169 @@ tbody tr.selected {
 
   .detail-meta {
     grid-template-columns: 1fr;
+  }
+}
+
+/* 响应式设计 - 手机适配 */
+@media (max-width: var(--mobile-breakpoint)) {
+  /* 登录页面适配 */
+  #login-view.active {
+    padding: 16px;
+  }
+  
+  .panel {
+    width: 100%;
+    max-width: 420px;
+    padding: 28px 24px 32px;
+  }
+  
+  .title {
+    font-size: 24px;
+  }
+  
+  /* 按钮大小适配 */
+  button {
+    font-size: 14px;
+    padding: 10px 16px;
+  }
+  
+  button.primary {
+    margin-top: 16px;
+  }
+  
+  /* 输入框适配 */
+  input,
+  select {
+    font-size: 14px;
+    padding: 10px 12px;
+  }
+  
+  /* 顶部导航栏适配 */
+  .top-bar {
+    flex-direction: column;
+    align-items: stretch;
+    margin: 16px 16px 12px;
+    padding: 20px 16px;
+    gap: 16px;
+  }
+  
+  .brand h1 {
+    font-size: 20px;
+  }
+  
+  .toolbar {
+    justify-content: center;
+    gap: 8px;
+  }
+  
+  /* 内容区域适配 */
+  .content {
+    padding: 0 16px 32px;
+    gap: 16px;
+  }
+  
+  .card {
+    padding: 16px;
+  }
+  
+  /* 统计卡片适配 */
+  .stats-card {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  
+  .stat .value {
+    font-size: 18px;
+  }
+  
+  /* 控制卡片适配 */
+  .controls-card {
+    gap: 16px;
+  }
+  
+  .filter-group {
+    min-width: auto;
+    gap: 8px;
+  }
+  
+  /* 表格区域适配 - 关键修复：添加水平滚动 */
+  .table-card {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 0;
+  }
+  
+  table {
+    font-size: 13px;
+    min-width: 600px; /* 确保表格有足够宽度，可以滚动 */
+  }
+  
+  th,
+  td {
+    padding: 10px 8px;
+    white-space: nowrap;
+  }
+  
+  /* 状态标签适配 */
+  .status-pill {
+    padding: 3px 8px;
+    font-size: 11px;
+  }
+  
+  /* 详情抽屉适配 */
+  .drawer {
+    padding: 0;
+    justify-content: center;
+  }
+  
+  .drawer-content {
+    width: 100%;
+    height: 100%;
+    padding: 24px 20px 28px;
+    max-height: calc(100vh - 40px);
+  }
+  
+  /* 详情JSON内容适配 - 确保JSON内容可以水平滚动 */
+  .detail-json {
+    flex: 1;
+    min-height: 200px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  
+  .detail-json pre {
+    font-size: 12px;
+    white-space: pre;
+    word-break: normal;
+  }
+  
+  /* 核爆覆盖层适配 */
+  #nuke-overlay {
+    width: 100vw;
+    height: 100vh;
+  }
+  
+  .nuke-banner {
+    margin: 0 16px 12px;
+    padding: 12px 16px;
+  }
+  
+  /* 分页卡片适配 */
+  .pagination-card {
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .pager {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  
+  /* Toast消息适配 */
+  .toast {
+    bottom: 20px;
+    left: 20px;
+    right: 20px;
+    padding: 12px 16px;
   }
 }
