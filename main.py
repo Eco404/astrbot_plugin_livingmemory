@@ -261,6 +261,10 @@ class LivingMemoryPlugin(Star):
                 webui_config,
                 self.faiss_manager,
                 self.session_manager,
+                self.recall_engine,
+                self.reflection_engine,
+                self.forgetting_agent,
+                self.sparse_retriever,
             )
             await self.webui_server.start()
         except Exception as e:
@@ -283,16 +287,16 @@ class LivingMemoryPlugin(Star):
     async def _wait_for_initialization(self, timeout: float = 30.0) -> bool:
         """
         等待插件初始化完成。
-        
+
         Args:
             timeout: 超时时间（秒）
-            
+
         Returns:
             bool: 是否初始化成功
         """
         if self._initialization_complete:
             return True
-            
+
         if self._initialization_task:
             try:
                 await asyncio.wait_for(self._initialization_task, timeout=timeout)
@@ -303,8 +307,60 @@ class LivingMemoryPlugin(Star):
             except Exception as e:
                 logger.error(f"等待插件初始化时发生错误: {e}")
                 return False
-        
+
         return False
+
+    def _get_webui_url(self) -> Optional[str]:
+        """
+        获取 WebUI 访问地址。
+
+        Returns:
+            str: WebUI URL，如果未启用则返回 None
+        """
+        webui_config = self.config.get("webui_settings", {})
+        if not webui_config.get("enabled") or not self.webui_server:
+            return None
+
+        host = webui_config.get("host", "127.0.0.1")
+        port = webui_config.get("port", 8080)
+
+        if host in ["0.0.0.0", ""]:
+            return f"http://127.0.0.1:{port}"
+        else:
+            return f"http://{host}:{port}"
+
+    def _build_deprecation_message(self, feature_name: str, webui_features: list) -> str:
+        """
+        构建废弃命令的统一引导消息。
+
+        Args:
+            feature_name: 功能名称
+            webui_features: WebUI 功能列表
+
+        Returns:
+            str: 格式化的消息
+        """
+        webui_url = self._get_webui_url()
+
+        if webui_url:
+            features_text = "\n".join([f"  • {feature}" for feature in webui_features])
+            message = (
+                "⚠️ 此命令已废弃\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"请使用 WebUI {feature_name}。\n\n"
+                f"🌐 访问地址: {webui_url}\n\n"
+                f"💡 WebUI {feature_name}功能：\n"
+                f"{features_text}\n"
+            )
+        else:
+            message = (
+                "⚠️ 此命令已废弃\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"请启用并使用 WebUI {feature_name}。\n\n"
+                "使用 /lmem webui 查看如何启用 WebUI。"
+            )
+
+        return message
 
     def _initialize_providers(self):
         """
@@ -521,92 +577,153 @@ class LivingMemoryPlugin(Star):
 
     @permission_type(PermissionType.ADMIN)
     @lmem_group.command("run_forgetting_agent")
+    @deprecated("请使用 WebUI 系统管理页面", version="1.4.0")
     @handle_command_errors
-    @require_handlers("admin_handler")
     async def run_forgetting_agent(self, event: AstrMessageEvent):
-        """[管理员] 手动触发一次遗忘代理的清理任务。"""
-        yield event.plain_result("正在后台手动触发遗忘代理任务...")
-        result = await self.admin_handler.run_forgetting_agent()
-        yield event.plain_result(result["message"])
+        """[管理员] 手动触发一次遗忘代理的清理任务（已废弃）。
+
+        此命令已废弃，请使用 WebUI 的系统管理页面。
+        使用 /lmem webui 查看访问地址。
+        """
+        if not await self._wait_for_initialization():
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+
+        message = self._build_deprecation_message(
+            "系统管理页面",
+            [
+                "实时显示清理进度",
+                "查看上次运行时间和结果",
+                "配置遗忘策略参数",
+                "可视化衰减曲线"
+            ]
+        )
+        yield event.plain_result(message)
 
     @permission_type(PermissionType.ADMIN)
     @lmem_group.command("sparse_rebuild")
+    @deprecated("请使用 WebUI 系统管理页面", version="1.4.0")
     @handle_command_errors
-    @require_handlers("search_handler")
     async def lmem_sparse_rebuild(self, event: AstrMessageEvent):
-        """[管理员] 重建稀疏检索索引。"""
-        result = await self.search_handler.rebuild_sparse_index()
-        yield event.plain_result(result["message"])
+        """[管理员] 重建稀疏检索索引（已废弃）。
+
+        此命令已废弃，请使用 WebUI 的系统管理页面。
+        使用 /lmem webui 查看访问地址。
+        """
+        if not await self._wait_for_initialization():
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+
+        message = self._build_deprecation_message(
+            "系统管理页面",
+            [
+                "实时显示重建进度",
+                "查看索引状态和文档数",
+                "查看最后更新时间",
+                "批量索引管理操作"
+            ]
+        )
+        yield event.plain_result(message)
 
     @permission_type(PermissionType.ADMIN)
     @lmem_group.command("search_mode")
+    @deprecated("请使用 WebUI 配置页面", version="1.4.0")
     @handle_command_errors
-    @require_handlers("admin_handler")
-    async def lmem_search_mode(self, event: AstrMessageEvent, mode: str):
-        """[管理员] 设置检索模式。
+    async def lmem_search_mode(self, event: AstrMessageEvent):
+        """[管理员] 设置检索模式（已废弃）。
 
-        用法: /lmem search_mode <mode>
-
-        模式:
-          hybrid - 混合检索（默认）
-          dense - 纯密集检索
-          sparse - 纯稀疏检索
+        此命令已废弃，请使用 WebUI 的配置页面。
+        使用 /lmem webui 查看访问地址。
         """
-        result = await self.admin_handler.set_search_mode(mode)
-        yield event.plain_result(result["message"])
+        if not await self._wait_for_initialization():
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+
+        message = self._build_deprecation_message(
+            "配置页面",
+            [
+                "可视化选择检索模式",
+                "调整 Top-K 参数",
+                "配置召回策略",
+                "实时查看配置效果"
+            ]
+        )
+        yield event.plain_result(message)
 
     @permission_type(PermissionType.ADMIN)
     @lmem_group.command("sparse_test")
+    @deprecated("请使用 WebUI 调试工具页面", version="1.4.0")
     @handle_command_errors
-    @require_handlers("search_handler")
-    async def lmem_sparse_test(self, event: AstrMessageEvent, query: str, k: int = 5):
-        """[管理员] 测试稀疏检索功能。"""
-        result = await self.search_handler.test_sparse_search(query, k)
-        yield event.plain_result(self.search_handler.format_sparse_results_for_display(result))
+    async def lmem_sparse_test(self, event: AstrMessageEvent):
+        """[管理员] 测试稀疏检索功能（已废弃）。
+
+        此命令已废弃，请使用 WebUI 的调试工具页面。
+        使用 /lmem webui 查看访问地址。
+        """
+        if not await self._wait_for_initialization():
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+
+        message = self._build_deprecation_message(
+            "调试工具页面",
+            [
+                "多模式并排对比",
+                "性能指标分析",
+                "结果差异高亮",
+                "可视化性能图表"
+            ]
+        )
+        yield event.plain_result(message)
 
     @permission_type(PermissionType.ADMIN)
     @lmem_group.command("edit")
+    @deprecated("请使用 WebUI 进行记忆编辑操作", version="1.4.0")
     @handle_command_errors
-    @require_handlers("memory_handler")
-    async def lmem_edit(self, event: AstrMessageEvent, memory_id: str, field: str, value: str, reason: str = ""):
-        """[管理员] 编辑记忆内容或元数据。
+    async def lmem_edit(self, event: AstrMessageEvent):
+        """[管理员] 编辑记忆内容或元数据（已废弃）。
 
-        用法: /lmem edit <id> <字段> <值> [原因]
-
-        字段:
-          content - 记忆内容
-          importance - 重要性评分 (0.0-1.0)
-          type - 事件类型 (FACT/PREFERENCE/GOAL/OPINION/RELATIONSHIP/OTHER)
-          status - 状态 (active/archived/deleted)
-
-        示例:
-          /lmem edit 123 content 这是新的记忆内容 修正了错误信息
-          /lmem edit 123 importance 0.9 提高重要性
-          /lmem edit 123 type PREFERENCE 重新分类
-          /lmem edit 123 status archived 项目已完成
+        此命令已废弃，请使用 WebUI 的记忆编辑功能。
+        使用 /lmem webui 查看访问地址。
         """
-        result = await self.memory_handler.edit_memory(memory_id, field, value, reason)
-        yield event.plain_result(result["message"])
+        if not await self._wait_for_initialization():
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+
+        message = self._build_deprecation_message(
+            "记忆编辑页面",
+            [
+                "可视化表单，支持实时验证",
+                "查看完整的更新历史记录",
+                "批量编辑多条记忆",
+                "支持更丰富的字段编辑"
+            ]
+        )
+        yield event.plain_result(message)
 
     @permission_type(PermissionType.ADMIN)
     @lmem_group.command("info")
+    @deprecated("请使用 WebUI 查看记忆详情", version="1.4.0")
     @handle_command_errors
-    @require_handlers("memory_handler")
-    async def lmem_info(self, event: AstrMessageEvent, memory_id: str, full: bool = False):
-        """[管理员] 查看记忆详细信息。
+    async def lmem_info(self, event: AstrMessageEvent):
+        """[管理员] 查看记忆详细信息（已废弃）。
 
-        用法:
-          /lmem info <id>           # 显示基本信息和编辑指引
-          /lmem info <id> --full    # 显示完整更新历史
-
-        显示记忆的完整信息，包括内容、元数据、更新历史和编辑指引。
+        此命令已废弃，请使用 WebUI 的记忆详情页。
+        使用 /lmem webui 查看访问地址。
         """
-        result = await self.memory_handler.get_memory_info(
-            memory_id,
-            show_edit_guide=True,
-            full_history=full
+        if not await self._wait_for_initialization():
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+
+        message = self._build_deprecation_message(
+            "记忆详情页",
+            [
+                "可视化展示记忆完整信息",
+                "查看更新历史和时间线",
+                "直接编辑记忆内容",
+                "查看关联记忆和社区信息"
+            ]
         )
-        yield event.plain_result(self.memory_handler.format_memory_info_for_display(result))
+        yield event.plain_result(message)
 
     @permission_type(PermissionType.ADMIN)
     @lmem_group.command("update")
@@ -702,6 +819,108 @@ class LivingMemoryPlugin(Star):
         yield event.plain_result(f"🔍 测试融合策略，查询: '{query}', 返回数量: {k}")
         result = await self.fusion_handler.test_fusion_strategy(query, k)
         yield event.plain_result(self.fusion_handler.format_fusion_test_for_display(result))
+
+    @permission_type(PermissionType.ADMIN)
+    @lmem_group.command("webui")
+    @handle_command_errors
+    async def lmem_webui(self, event: AstrMessageEvent):
+        """[管理员] 显示 WebUI 访问信息。
+
+        用法: /lmem webui
+
+        显示 WebUI 控制台的访问地址、状态和功能说明。
+        """
+        # 等待初始化完成
+        if not await self._wait_for_initialization():
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+
+        webui_config = self.config.get("webui_settings", {})
+
+        if not webui_config.get("enabled"):
+            message = (
+                "⚠️ WebUI 控制台未启用\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "请在配置文件中启用 WebUI：\n\n"
+                "webui_settings:\n"
+                "  enabled: true\n"
+                "  access_password: \"test-token\"\n"
+                "  host: \"127.0.0.1\"\n"
+                "  port: 8080\n\n"
+                "配置完成后重新加载插件即可使用。"
+            )
+            yield event.plain_result(message)
+            return
+
+        if not self.webui_server:
+            yield event.plain_result("⚠️ WebUI 控制台启动失败，请检查配置和日志。")
+            return
+
+        host = webui_config.get("host", "127.0.0.1")
+        port = webui_config.get("port", 8080)
+
+        # 构建访问地址
+        if host in ["0.0.0.0", ""]:
+            access_url = f"http://127.0.0.1:{port}"
+        else:
+            access_url = f"http://{host}:{port}"
+
+        message = (
+            "🌐 LivingMemory WebUI 控制台\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📍 访问地址: {access_url}\n"
+            "🔐 登录密码: 请查看配置文件中的 webui_settings.access_password\n\n"
+            "💡 WebUI 功能说明：\n"
+            "  • 📝 记忆管理 - 浏览、搜索、编辑、删除记忆\n"
+            "  • 📊 统计分析 - 查看记忆分布和系统状态\n"
+            "  • ⚙️ 配置管理 - 调整检索策略和融合算法\n"
+            "  • 🛠️ 调试工具 - 测试检索效果和策略对比\n"
+            "  • 🗂️ 批量操作 - 批量编辑、归档、导出记忆\n"
+            "  • 🔧 系统管理 - 触发遗忘代理、重建索引\n\n"
+            "📖 提示：使用 WebUI 可以更直观地管理记忆系统。"
+        )
+
+        yield event.plain_result(message)
+
+    @permission_type(PermissionType.ADMIN)
+    @lmem_group.command("help")
+    @handle_command_errors
+    async def lmem_help(self, event: AstrMessageEvent):
+        """[管理员] 显示帮助信息。
+
+        用法: /lmem help
+
+        显示核心命令列表和 WebUI 使用指引。
+        """
+        message = (
+            "📚 LivingMemory 命令帮助\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🔧 核心命令：\n"
+            "  /lmem status\n"
+            "    查看记忆库状态（总数、类型分布等）\n\n"
+            "  /lmem search <query> [k]\n"
+            "    搜索记忆，k 为返回数量（默认3条）\n"
+            "    示例: /lmem search 用户喜好 5\n\n"
+            "  /lmem forget <id>\n"
+            "    删除指定ID的记忆（紧急删除）\n"
+            "    示例: /lmem forget 123\n\n"
+            "  /lmem webui\n"
+            "    显示 WebUI 访问信息和功能说明\n\n"
+            "  /lmem help\n"
+            "    显示本帮助信息\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🌐 高级功能请使用 WebUI 控制台\n\n"
+            "使用 /lmem webui 查看 WebUI 访问地址。\n"
+            "WebUI 提供以下高级功能：\n"
+            "  • 记忆编辑和批量管理\n"
+            "  • 配置检索策略和融合算法\n"
+            "  • 测试和调试检索效果\n"
+            "  • 系统维护和索引管理\n"
+            "  • 统计分析和可视化\n\n"
+            "💡 提示：命令行适合快速查询，WebUI 适合深度管理。"
+        )
+
+        yield event.plain_result(message)
 
     async def terminate(self):
         """
