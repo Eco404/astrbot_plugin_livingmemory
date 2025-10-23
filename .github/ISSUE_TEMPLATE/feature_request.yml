@@ -1,0 +1,45 @@
+name: 💡 功能建议
+description: 提交新功能想法
+title: "[功能] "
+labels: ["enhancement", "需求"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你的建议！请详细描述你的想法。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 功能描述
+      description: 这个功能要实现什么？
+      placeholder: 例如：希望能导出 CSV 格式的数据
+    validations:
+      required: true
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景
+      description: 为什么需要这个功能？
+      placeholder: 描述具体的使用场景
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 优先级
+      options:
+        - P0 - 紧急
+        - P1 - 重要
+        - P2 - 普通
+        - P3 - 可选
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: 确认事项
+      options:
+        - label: 我已搜索过现有 Issue，确认这是新需求
+          required: true
