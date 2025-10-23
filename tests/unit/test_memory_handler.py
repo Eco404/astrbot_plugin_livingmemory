@@ -346,5 +346,40 @@ class TestMemoryHandler:
         }
         
         result = self.handler.format_memory_history_for_display(mock_response)
-        
+
         assert "🔄 暂无更新记录" in result
+
+    @pytest.mark.asyncio
+    async def test_edit_memory_content_exceeds_max_length(self):
+        """测试编辑记忆内容超过最大长度限制"""
+        # 创建一个超过 MAX_CONTENT_LENGTH 的内容
+        long_content = "a" * (MemoryHandler.MAX_CONTENT_LENGTH + 1)
+
+        result = await self.handler.edit_memory("123", "content", long_content, "超长内容")
+
+        assert result["success"] is False
+        assert "内容长度不能超过" in result["message"]
+        assert str(MemoryHandler.MAX_CONTENT_LENGTH) in result["message"]
+
+        # 验证没有调用 update_memory
+        self.mock_faiss_manager.update_memory.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_edit_memory_content_at_max_length(self):
+        """测试编辑记忆内容刚好达到最大长度"""
+        # 创建一个刚好等于 MAX_CONTENT_LENGTH 的内容
+        max_content = "a" * MemoryHandler.MAX_CONTENT_LENGTH
+
+        mock_result = {
+            "success": True,
+            "message": "更新成功",
+            "updated_fields": ["content"]
+        }
+        self.mock_faiss_manager.update_memory = AsyncMock(return_value=mock_result)
+
+        result = await self.handler.edit_memory("123", "content", max_content, "最大长度内容")
+
+        assert result["success"] is True
+
+        # 验证调用 update_memory
+        self.mock_faiss_manager.update_memory.assert_called_once()
