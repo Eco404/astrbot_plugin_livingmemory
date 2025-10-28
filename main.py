@@ -1,122 +1,62 @@
 # -*- coding: utf-8 -*-
 """
 main.py - LivingMemory 插件主文件
-负责插件注册、初始化所有引擎、绑定事件钩子以及管理生命周期。
+负责插件注册、初始化MemoryEngine、绑定事件钩子以及管理生命周期。
+简化版 - 只包含5个核心指令
 """
 
 import asyncio
 import os
-import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional, Dict, Any
 
 # AstrBot API
-from astrbot.api.event import filter, AstrMessageEvent,MessageChain
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.event.filter import PermissionType, permission_type
 from astrbot.api.star import Context, Star, register, StarTools
-from astrbot.api.provider import (
-    LLMResponse,
-    ProviderRequest,
-    Provider,
-)
+from astrbot.api.provider import LLMResponse, ProviderRequest, Provider
 from astrbot.core.provider.provider import EmbeddingProvider
-
 from astrbot.api import logger
 from astrbot.core.db.vec_db.faiss_impl.vec_db import FaissVecDB
 
 # 插件内部模块
-from .storage.faiss_manager import FaissManager
+from .core.memory_engine import MemoryEngine
 from .storage.db_migration import DBMigration
-from .core.engines.recall_engine import RecallEngine
-from .core.commands import require_handlers, handle_command_errors, deprecated
-from .core.engines.reflection_engine import ReflectionEngine
-from .core.engines.forgetting_agent import ForgettingAgent
-from .core.retrieval import SparseRetriever
-from .core.utils import get_persona_id, format_memories_for_injection, get_now_datetime, retry_on_failure, OperationContext, safe_parse_metadata
+from .storage.conversation_store import ConversationStore
+from .core.conversation_manager import ConversationManager
+from .core.memory_processor import MemoryProcessor
+from .core.utils import (
+    get_persona_id,
+    format_memories_for_injection,
+    OperationContext,
+)
 from .core.config_validator import validate_config, merge_config_with_defaults
-from .core.handlers import MemoryHandler, SearchHandler, AdminHandler, FusionHandler
 from .webui import WebUIServer
-
-# 会话管理器类，替代全局字典
-class SessionManager:
-    def __init__(self, max_sessions: int = 1000, session_ttl: int = 3600):
-        """
-        Args:
-            max_sessions: 最大会话数量
-            session_ttl: 会话生存时间（秒）
-        """
-        self._sessions: Dict[str, Dict[str, Any]] = {}
-        self._access_times: Dict[str, float] = {}
-        self.max_sessions = max_sessions
-        self.session_ttl = session_ttl
-        
-    def get_session(self, session_id: str) -> Dict[str, Any]:
-        """获取会话数据，如果不存在则创建"""
-        current_time = time.time()
-        
-        # 清理过期会话
-        self._cleanup_expired_sessions(current_time)
-        
-        if session_id not in self._sessions:
-            self._sessions[session_id] = {"history": [], "round_count": 0}
-            
-        self._access_times[session_id] = current_time
-        return self._sessions[session_id]
-        
-    def _cleanup_expired_sessions(self, current_time: float):
-        """清理过期的会话"""
-        expired_sessions = []
-        for session_id, last_access in self._access_times.items():
-            if current_time - last_access > self.session_ttl:
-                expired_sessions.append(session_id)
-                
-        for session_id in expired_sessions:
-            self._sessions.pop(session_id, None)
-            self._access_times.pop(session_id, None)
-            
-        # 如果会话数量超过限制，删除最旧的会话
-        if len(self._sessions) > self.max_sessions:
-            # 按访问时间排序，删除最旧的
-            sorted_sessions = sorted(self._access_times.items(), key=lambda x: x[1])
-            sessions_to_remove = sorted_sessions[:len(self._sessions) - self.max_sessions]
-            
-            for session_id, _ in sessions_to_remove:
-                self._sessions.pop(session_id, None)
-                self._access_times.pop(session_id, None)
-                
-    def reset_session(self, session_id: str):
-        """重置指定会话"""
-        if session_id in self._sessions:
-            self._sessions[session_id] = {"history": [], "round_count": 0}
-            self._access_times[session_id] = time.time()
-            
-    def get_session_count(self) -> int:
-        """获取当前会话数量"""
-        return len(self._sessions)
 
 
 @register(
     "LivingMemory",
     "lxfight",
     "一个拥有动态生命周期的智能长期记忆插件。",
-    "1.4.0",
+    "2.0.0",
     "https://github.com/lxfight/astrbot_plugin_livingmemory",
 )
 class LivingMemoryPlugin(Star):
     def __init__(self, context: Context, config: Dict[str, Any]):
         super().__init__(context)
         self.context = context
-        
+
         # 验证和标准化配置
         try:
             merged_config = merge_config_with_defaults(config)
             self.config_obj = validate_config(merged_config)
-            self.config = self.config_obj.model_dump()  # 保持向后兼容
+            self.config = self.config_obj.model_dump()
             logger.info("插件配置验证成功")
         except Exception as e:
             logger.error(f"配置验证失败，使用默认配置: {e}")
             from .core.config_validator import get_default_config
+
             self.config = get_default_config()
             self.config_obj = validate_config(self.config)
 
@@ -124,46 +64,27 @@ class LivingMemoryPlugin(Star):
         self.embedding_provider: Optional[EmbeddingProvider] = None
         self.llm_provider: Optional[Provider] = None
         self.db: Optional[FaissVecDB] = None
-        self.faiss_manager: Optional[FaissManager] = None
-        self.sparse_retriever: Optional[SparseRetriever] = None
-        self.recall_engine: Optional[RecallEngine] = None
-        self.reflection_engine: Optional[ReflectionEngine] = None
-        self.forgetting_agent: Optional[ForgettingAgent] = None
+        self.memory_engine: Optional[MemoryEngine] = None
+        self.memory_processor: Optional[MemoryProcessor] = None
         self.db_migration: Optional[DBMigration] = None
-        
-        # 初始化业务逻辑处理器
-        self.memory_handler: Optional[MemoryHandler] = None
-        self.search_handler: Optional[SearchHandler] = None
-        self.admin_handler: Optional[AdminHandler] = None
-        self.fusion_handler: Optional[FusionHandler] = None
-        
+        self.conversation_manager: Optional[ConversationManager] = None
+
         # 初始化状态标记
         self._initialization_complete = False
         self._initialization_lock = asyncio.Lock()
-        
-        # 会话管理器
-        session_config = self.config.get("session_manager", {})
-        self.session_manager = SessionManager(
-            max_sessions=session_config.get("max_sessions", 1000),
-            session_ttl=session_config.get("session_ttl", 3600)
-        )
 
         # WebUI 服务句柄
         self.webui_server: Optional[WebUIServer] = None
-        
-        # 在 __init__ 阶段直接启动初始化任务
-        # AstrBot 会确保在插件 __init__ 时已经完全启动
+
+        # 启动初始化任务
         asyncio.create_task(self._initialize_plugin())
 
     async def _initialize_plugin(self):
-        """
-        执行插件的异步初始化。
-        因为插件是在 AstrBot 启动后才被加载的，所以可以直接初始化。
-        """
+        """执行插件的异步初始化"""
         async with self._initialization_lock:
             if self._initialization_complete:
                 return
-                
+
         logger.info("开始初始化 LivingMemory 插件...")
         try:
             # 1. 初始化 Provider
@@ -172,7 +93,7 @@ class LivingMemoryPlugin(Star):
                 logger.error("Provider 初始化失败，插件无法正常工作。")
                 return
 
-            # 2. 初始化数据库和管理器
+            # 2. 初始化数据库
             data_dir = StarTools.get_data_dir()
             db_path = os.path.join(data_dir, "livingmemory.db")
             index_path = os.path.join(data_dir, "livingmemory.index")
@@ -180,63 +101,74 @@ class LivingMemoryPlugin(Star):
             await self.db.initialize()
             logger.info(f"数据库已初始化。数据目录: {data_dir}")
 
-            # 2.3. 初始化数据库迁移管理器
+            # 3. 初始化数据库迁移管理器
             self.db_migration = DBMigration(db_path)
-            
-            # 2.4. 检查并执行数据库迁移（在初始化稀疏检索器之前）
+
+            # 4. 检查并执行数据库迁移
             migration_config = self.config.get("migration_settings", {})
             if migration_config.get("auto_migrate", True):
                 await self._check_and_migrate_database()
 
-            # 2.5. 初始化稀疏检索器（带停用词管理）
-            sparse_config = self.config.get("sparse_retriever", {})
-            if sparse_config.get("enabled", True):
-                self.sparse_retriever = SparseRetriever(db_path, sparse_config)
-                await self.sparse_retriever.initialize()
-            else:
-                self.sparse_retriever = None
+            # 5. 初始化MemoryEngine（新的统一记忆引擎）
+            # 创建停用词目录
+            stopwords_dir = os.path.join(data_dir, "stopwords")
+            os.makedirs(stopwords_dir, exist_ok=True)
 
-            # 2.6. 初始化 FaissManager（传入 sparse_retriever 用于文档同步）
-            self.faiss_manager = FaissManager(
-                self.db,
-                sparse_retriever=self.sparse_retriever,
-                config=self.config
+            memory_engine_config = {
+                "rrf_k": self.config.get("fusion_strategy", {}).get("rrf_k", 60),
+                "decay_rate": self.config.get("importance_decay", {}).get(
+                    "decay_rate", 0.01
+                ),
+                "importance_weight": self.config.get("recall_engine", {}).get(
+                    "importance_weight", 1.0
+                ),
+                "fallback_enabled": self.config.get("recall_engine", {}).get(
+                    "fallback_to_vector", True
+                ),
+                "cleanup_days_threshold": self.config.get("forgetting_agent", {}).get(
+                    "cleanup_days_threshold", 30
+                ),
+                "cleanup_importance_threshold": self.config.get(
+                    "forgetting_agent", {}
+                ).get("cleanup_importance_threshold", 0.3),
+                "stopwords_path": stopwords_dir,  # 传递停用词目录
+            }
+
+            self.memory_engine = MemoryEngine(
+                db_path=db_path,
+                faiss_db=self.db,
+                llm_provider=self.llm_provider,
+                config=memory_engine_config,
             )
+            await self.memory_engine.initialize()
+            logger.info("✅ MemoryEngine 已初始化")
 
-            # 2.7. 共享停用词管理器（如果稀疏检索器已初始化）
-            if self.sparse_retriever and self.sparse_retriever.stopwords_manager:
-                await self.faiss_manager.initialize_stopwords(
-                    self.sparse_retriever.stopwords_manager
-                )
-                logger.info("✅ FaissManager 已共享停用词管理器")
+            # 6. 初始化 ConversationManager（高级会话管理器）
+            conversation_db_path = os.path.join(data_dir, "conversations.db")
+            conversation_store = ConversationStore(conversation_db_path)
+            await conversation_store.initialize()
 
-            # 3. 初始化三大核心引擎
-            self.recall_engine = RecallEngine(
-                self.config.get("recall_engine", {}), 
-                self.faiss_manager,
-                self.sparse_retriever
+            session_config = self.config.get("session_manager", {})
+            self.conversation_manager = ConversationManager(
+                store=conversation_store,
+                max_cache_size=session_config.get("max_sessions", 100),
+                context_window_size=session_config.get("context_window_size", 50),
+                session_ttl=session_config.get("session_ttl", 3600),
             )
-            self.reflection_engine = ReflectionEngine(
-                self.config.get("reflection_engine", {}),
-                self.llm_provider,
-                self.faiss_manager,
-            )
-            self.forgetting_agent = ForgettingAgent(
-                self.context,
-                self.config.get("forgetting_agent", {}),
-                self.faiss_manager,
-            )
+            logger.info("✅ ConversationManager 已初始化")
 
-            # 4. 启动后台任务
-            await self.forgetting_agent.start()
+            # 6.6. 初始化 MemoryProcessor（记忆处理器）
+            self.memory_processor = MemoryProcessor(self.llm_provider)
+            logger.info("✅ MemoryProcessor 已初始化")
 
-            # 初始化业务逻辑处理器
-            self.memory_handler = MemoryHandler(self.context, self.config, self.faiss_manager)
-            self.search_handler = SearchHandler(self.context, self.config, self.recall_engine, self.sparse_retriever)
-            self.admin_handler = AdminHandler(self.context, self.config, self.faiss_manager, self.forgetting_agent, self.session_manager, self.recall_engine)
-            self.fusion_handler = FusionHandler(self.context, self.config, self.recall_engine)
+            # 6.5. 异步初始化 TextProcessor（加载停用词）
+            if self.memory_engine and hasattr(
+                self.memory_engine.text_processor, "async_init"
+            ):
+                await self.memory_engine.text_processor.async_init()
+                logger.info("✅ TextProcessor 停用词已加载")
 
-            # 启动 WebUI（如启用）
+            # 7. 启动 WebUI（如启用）
             await self._start_webui()
 
             # 标记初始化完成
@@ -250,86 +182,73 @@ class LivingMemoryPlugin(Star):
             self._initialization_complete = False
 
     async def _check_and_migrate_database(self):
-        """
-        检查并执行数据库迁移
-        """
+        """检查并执行数据库迁移"""
         try:
             if not self.db_migration:
                 logger.warning("数据库迁移管理器未初始化")
                 return
-            
-            # 检查是否需要迁移
+
             needs_migration = await self.db_migration.needs_migration()
-            
+
             if not needs_migration:
                 logger.info("✅ 数据库版本已是最新，无需迁移")
                 return
-            
+
             logger.info("🔄 检测到旧版本数据库，开始自动迁移...")
-            
-            # 获取迁移配置
+
             migration_config = self.config.get("migration_settings", {})
-            
-            # 创建备份（如果配置启用）
+
             if migration_config.get("create_backup", True):
                 backup_path = await self.db_migration.create_backup()
                 if backup_path:
                     logger.info(f"✅ 数据库备份已创建: {backup_path}")
                 else:
                     logger.warning("⚠️ 数据库备份失败，但将继续迁移")
-            
-            # 执行迁移（此时sparse_retriever尚未初始化，将在迁移完成后初始化）
-            # 注意：这里传入None，因为稀疏检索器还未初始化
-            # 实际的FTS索引重建会在稀疏检索器初始化后自动触发
+
             result = await self.db_migration.migrate(
-                sparse_retriever=None,
-                progress_callback=None
+                sparse_retriever=None, progress_callback=None
             )
-            
+
             if result.get("success"):
                 logger.info(f"✅ {result.get('message')}")
                 logger.info(f"   耗时: {result.get('duration', 0):.2f}秒")
             else:
                 logger.error(f"❌ 数据库迁移失败: {result.get('message')}")
-                
+
         except Exception as e:
             logger.error(f"数据库迁移检查失败: {e}", exc_info=True)
 
     async def _start_webui(self):
-        """
-        根据配置启动 WebUI 控制台。
-        """
-        webui_config = self.config.get("webui_settings", {}) if isinstance(self.config, dict) else {}
+        """根据配置启动 WebUI 控制台"""
+        webui_config = self.config.get("webui_settings", {})
         if not webui_config.get("enabled"):
             return
         if self.webui_server:
             return
-        if not self.faiss_manager:
-            logger.warning("WebUI 控制台启动失败：记忆管理器尚未初始化")
-            return
-        if not webui_config.get("access_password"):
-            logger.error("WebUI 控制台已启用但未配置入口密码，已跳过启动")
-            return
 
         try:
+            # 导入WebUI服务器
+            from .webui.server import WebUIServer
+
+            # 创建WebUI服务器实例（传递 ConversationManager）
             self.webui_server = WebUIServer(
-                webui_config,
-                self.faiss_manager,
-                self.session_manager,
-                self.recall_engine,
-                self.reflection_engine,
-                self.forgetting_agent,
-                self.sparse_retriever,
+                memory_engine=self.memory_engine,
+                config=webui_config,
+                conversation_manager=self.conversation_manager,
             )
+
+            # 启动WebUI服务器
             await self.webui_server.start()
+
+            logger.info(
+                f"✅ WebUI 已启动: http://{webui_config.get('host', '127.0.0.1')}:{webui_config.get('port', 8080)}"
+            )
         except Exception as e:
             logger.error(f"启动 WebUI 控制台失败: {e}", exc_info=True)
             self.webui_server = None
 
     async def _stop_webui(self):
-        """
-        停止 WebUI 控制台。
-        """
+        """停止 WebUI 控制台"""
         if not self.webui_server:
             return
         try:
@@ -340,35 +259,21 @@ class LivingMemoryPlugin(Star):
             self.webui_server = None
 
     async def _wait_for_initialization(self, timeout: float = 30.0) -> bool:
-        """
-        等待插件初始化完成。
-
-        Args:
-            timeout: 超时时间（秒）
-
-        Returns:
-            bool: 是否初始化成功
-        """
+        """等待插件初始化完成"""
         if self._initialization_complete:
             return True
 
-        # 等待初始化锁释放，表示初始化完成或失败
         start_time = time.time()
         while not self._initialization_complete:
             if time.time() - start_time > timeout:
                 logger.error(f"插件初始化超时（{timeout}秒）")
                 return False
             await asyncio.sleep(0.1)
-        
+
         return self._initialization_complete
 
     def _get_webui_url(self) -> Optional[str]:
-        """
-        获取 WebUI 访问地址。
-
-        Returns:
-            str: WebUI URL，如果未启用则返回 None
-        """
+        """获取 WebUI 访问地址"""
         webui_config = self.config.get("webui_settings", {})
         if not webui_config.get("enabled") or not self.webui_server:
             return None
@@ -381,43 +286,8 @@ class LivingMemoryPlugin(Star):
         else:
             return f"http://{host}:{port}"
 
-    def _build_deprecation_message(self, feature_name: str, webui_features: list) -> str:
-        """
-        构建废弃命令的统一引导消息。
-
-        Args:
-            feature_name: 功能名称
-            webui_features: WebUI 功能列表
-
-        Returns:
-            str: 格式化的消息
-        """
-        webui_url = self._get_webui_url()
-
-        if webui_url:
-            features_text = "\n".join([f"  • {feature}" for feature in webui_features])
-            message = (
-                "⚠️ 此命令已废弃\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"请使用 WebUI {feature_name}。\n\n"
-                f"🌐 访问地址: {webui_url}\n\n"
-                f"💡 WebUI {feature_name}功能：\n"
-                f"{features_text}\n"
-            )
-        else:
-            message = (
-                "⚠️ 此命令已废弃\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"请启用并使用 WebUI {feature_name}。\n\n"
-                "使用 /lmem webui 查看如何启用 WebUI。"
-            )
-
-        return message
-
     def _initialize_providers(self):
-        """
-        初始化 Embedding 和 LLM provider。
-        """
+        """初始化 Embedding 和 LLM provider"""
         # 初始化 Embedding Provider
         emb_id = self.config.get("provider_settings", {}).get("embedding_provider_id")
         if emb_id:
@@ -426,7 +296,6 @@ class LivingMemoryPlugin(Star):
                 logger.info(f"成功从配置加载 Embedding Provider: {emb_id}")
 
         if not self.embedding_provider:
-            # 检查是否有可用的embedding provider
             embedding_providers = self.context.provider_manager.embedding_provider_insts
             if embedding_providers:
                 self.embedding_provider = embedding_providers[0]
@@ -434,7 +303,6 @@ class LivingMemoryPlugin(Star):
                     f"未指定 Embedding Provider，使用默认的: {self.embedding_provider.provider_config.get('id')}"
                 )
             else:
-                # 如果没有可用的embedding provider，则无法继续
                 self.embedding_provider = None
                 logger.error("没有可用的 Embedding Provider，插件将无法使用。")
 
@@ -450,58 +318,94 @@ class LivingMemoryPlugin(Star):
 
     @filter.on_llm_request()
     async def handle_memory_recall(self, event: AstrMessageEvent, req: ProviderRequest):
-        """
-        [事件钩子] 在 LLM 请求前，查询并注入长期记忆。
-        """
-        # 等待初始化完成
+        """[事件钩子] 在 LLM 请求前，查询并注入长期记忆"""
         if not await self._wait_for_initialization():
             logger.warning("插件未完成初始化，跳过记忆召回。")
             return
-            
-        if not self.recall_engine:
-            logger.debug("回忆引擎尚未初始化，跳过记忆召回。")
+
+        if not self.memory_engine:
+            logger.debug("记忆引擎尚未初始化，跳过记忆召回。")
             return
 
         try:
-            session_id = (
-                await self.context.conversation_manager.get_curr_conversation_id(
-                    event.unified_msg_origin
-                )
-            )
-            
+            # 修复：直接使用 event.session_id，与其他地方保持一致
+            session_id = event.session_id
+            logger.debug(f"[DEBUG-Recall] 获取到 session_id: {session_id}")
+
             async with OperationContext("记忆召回", session_id):
                 # 根据配置决定是否进行过滤
                 filtering_config = self.config.get("filtering_settings", {})
-                use_persona_filtering = filtering_config.get("use_persona_filtering", True)
-                use_session_filtering = filtering_config.get("use_session_filtering", True)
+                use_persona_filtering = filtering_config.get(
+                    "use_persona_filtering", True
+                )
+                use_session_filtering = filtering_config.get(
+                    "use_session_filtering", True
+                )
 
                 persona_id = await get_persona_id(self.context, event)
 
                 recall_session_id = session_id if use_session_filtering else None
                 recall_persona_id = persona_id if use_persona_filtering else None
 
-                # 使用 RecallEngine 进行智能回忆，带重试机制
-                recalled_memories = await retry_on_failure(
-                    self.recall_engine.recall,
-                    self.context, req.prompt, recall_session_id, recall_persona_id,
-                    max_retries=1,  # 记忆召回失败影响较小，只重试1次
-                    backoff_factor=0.5,
-                    exceptions=(Exception,)
+                # 使用 MemoryEngine 进行智能回忆
+                logger.info(
+                    f"[{session_id}] 开始记忆召回，查询='{req.prompt[:50]}...'，top_k={self.config.get('recall_engine', {}).get('top_k', 5)}"
+                )
+
+                recalled_memories = await self.memory_engine.search_memories(
+                    query=req.prompt,
+                    k=self.config.get("recall_engine", {}).get("top_k", 5),
+                    session_id=recall_session_id,
+                    persona_id=recall_persona_id,
                 )
 
                 if recalled_memories:
-                    # 格式化并注入记忆
-                    memory_str = format_memories_for_injection(recalled_memories)
-                    req.system_prompt = memory_str + "\n" + req.system_prompt
                     logger.info(
-                        f"[{session_id}] 成功向 System Prompt 注入 {len(recalled_memories)} 条记忆。"
+                        f"[{session_id}] 检索到 {len(recalled_memories)} 条记忆"
                     )
 
-                # 管理会话历史
-                session_data = self.session_manager.get_session(session_id)
-                session_data["history"].append(
-                    {"role": "user", "content": req.prompt}
-                )
+                    # 格式化并注入记忆
+                    memory_list = [
+                        {
+                            "content": mem.content,
+                            "score": mem.final_score,
+                            "metadata": {
+                                "importance": mem.metadata.get("importance", 0.5)
+                            },
+                        }
+                        for mem in recalled_memories
+                    ]
+
+                    # 输出详细的记忆信息
+                    for i, mem in enumerate(recalled_memories, 1):
+                        logger.debug(
+                            f"[{session_id}] 记忆 #{i}: 得分={mem.final_score:.3f}, "
+                            f"重要性={mem.metadata.get('importance', 0.5):.2f}, "
+                            f"内容={mem.content[:100]}..."
+                        )
+
+                    memory_str = format_memories_for_injection(memory_list)
+                    logger.info(
+                        f"[{session_id}] 格式化后的记忆字符串长度={len(memory_str)}"
+                    )
+                    logger.debug(
+                        f"[{session_id}] 注入的记忆内容（前500字符）:\n{memory_str[:500]}"
+                    )
+
+                    req.system_prompt = memory_str + "\n" + req.system_prompt
+                    logger.info(
+                        f"[{session_id}] ✅ 成功向 System Prompt 注入 {len(recalled_memories)} 条记忆"
+                    )
+                else:
+                    logger.info(f"[{session_id}] 未找到相关记忆")
+
+                # 使用 ConversationManager 添加用户消息
+                if self.conversation_manager:
+                    await self.conversation_manager.add_message_from_event(
+                        event=event,
+                        role="user",
+                        content=req.prompt,
+                    )
 
         except Exception as e:
             logger.error(f"处理 on_llm_request 钩子时发生错误: {e}", exc_info=True)
@@ -510,88 +414,237 @@ class LivingMemoryPlugin(Star):
     async def handle_memory_reflection(
         self, event: AstrMessageEvent, resp: LLMResponse
     ):
-        """
-        [事件钩子] 在 LLM 响应后，检查是否需要进行反思和记忆存储。
-        """
-        # 等待初始化完成
+        """[事件钩子] 在 LLM 响应后，检查是否需要进行反思和记忆存储"""
+        logger.debug(
+            f"[DEBUG-Reflection] 进入 handle_memory_reflection，resp.role={resp.role}"
+        )
+
         if not await self._wait_for_initialization():
             logger.warning("插件未完成初始化，跳过记忆反思。")
             return
-            
-        if not self.reflection_engine or resp.role != "assistant":
-            logger.debug("反思引擎尚未初始化或响应不是助手角色，跳过反思。")
+
+        if (
+            not self.memory_engine
+            or not self.conversation_manager
+            or resp.role != "assistant"
+        ):
+            logger.debug(
+                f"[DEBUG-Reflection] 跳过反思 - memory_engine={self.memory_engine is not None}, "
+                f"conversation_manager={self.conversation_manager is not None}, "
+                f"resp.role={resp.role}"
+            )
             return
 
         try:
-            session_id = (
-                await self.context.conversation_manager.get_curr_conversation_id(
-                    event.unified_msg_origin
-                )
-            )
+            # 修复：直接使用 event.session_id，与 add_message_from_event 保持一致
+            session_id = event.session_id
+            logger.debug(f"[DEBUG-Reflection] 获取到 session_id: {session_id}")
             if not session_id:
+                logger.warning("[DEBUG-Reflection] session_id 为空，跳过反思")
                 return
 
-            # 添加助手响应到历史并增加轮次计数
-            current_session = self.session_manager.get_session(session_id)
-            current_session["history"].append(
-                {"role": "assistant", "content": resp.completion_text}
+            # 使用 ConversationManager 添加助手响应
+            await self.conversation_manager.add_message_from_event(
+                event=event,
+                role="assistant",
+                content=resp.completion_text,
             )
-            current_session["round_count"] += 1
+            logger.debug(f"[DEBUG-Reflection] [{session_id}] 已添加助手响应消息")
+
+            # 获取会话信息
+            session_info = await self.conversation_manager.get_session_info(session_id)
+            logger.debug(
+                f"[DEBUG-Reflection] [{session_id}] session_info: {session_info}"
+            )
+            if not session_info:
+                logger.warning(
+                    f"[DEBUG-Reflection] [{session_id}] session_info 为 None，跳过反思"
+                )
+                return
 
             # 检查是否满足总结条件
             trigger_rounds = self.config.get("reflection_engine", {}).get(
                 "summary_trigger_rounds", 10
             )
-            logger.debug(
-                f"[{session_id}] 当前轮次: {current_session['round_count']}, 触发轮次: {trigger_rounds}"
+            logger.info(
+                f"[DEBUG-Reflection] [{session_id}] 配置的 summary_trigger_rounds: {trigger_rounds}"
             )
-            if current_session["round_count"] >= trigger_rounds:
+
+            # 修复：基于对话轮数而非消息条数触发总结
+            # 每轮对话 = 1条user消息 + 1条assistant消息 = 2条消息
+            # 例如：trigger_rounds=5 表示每5轮对话触发，即每10条消息触发
+            message_count = session_info.message_count
+            conversation_rounds = message_count // 2  # 计算对话轮数
+
+            logger.info(
+                f"[DEBUG-Reflection] [{session_id}] 当前消息数: {message_count}, "
+                f"对话轮数: {conversation_rounds}, 触发阈值(轮数): {trigger_rounds}"
+            )
+            logger.info(
+                f"[DEBUG-Reflection] [{session_id}] 触发条件检查: "
+                f"conversation_rounds >= trigger_rounds = {conversation_rounds >= trigger_rounds}, "
+                f"conversation_rounds % trigger_rounds == 0 = {conversation_rounds % trigger_rounds == 0}"
+            )
+
+            # 每达到 trigger_rounds 轮对话的倍数时进行反思
+            if (
+                conversation_rounds >= trigger_rounds
+                and conversation_rounds % trigger_rounds == 0
+            ):
                 logger.info(
-                    f"[{session_id}] 对话达到 {trigger_rounds} 轮，启动反思任务。"
+                    f"[{session_id}] 🔄 对话轮数达到 {conversation_rounds} 轮（消息数={message_count}），启动记忆反思任务"
                 )
 
-                history_to_reflect = list(current_session["history"])
-                # 重置会话
-                self.session_manager.reset_session(session_id)
+                # ====== 滑动窗口逻辑 ======
+                # 计算保留的上下文消息数（保留最近的2-4轮对话）
+                context_keep_rounds = max(2, trigger_rounds // 3)  # 至少保留2轮
+                context_keep_messages = context_keep_rounds * 2  # 每轮2条消息
+
+                # 获取上次总结的位置
+                last_summarized_index = (
+                    await self.conversation_manager.get_session_metadata(
+                        session_id, "last_summarized_index", 0
+                    )
+                )
+
+                # 计算本次需要总结的消息范围
+                total_messages = session_info.message_count
+                end_index = total_messages - context_keep_messages
+                start_index = last_summarized_index
+
+                logger.info(
+                    f"🔄 [{session_id}] 滑动窗口总结: "
+                    f"消息范围 [{start_index}:{end_index}]/{total_messages}, "
+                    f"保留上下文 {context_keep_messages} 条（{context_keep_rounds} 轮）"
+                )
+
+                # 检查是否有足够的新消息需要总结
+                if end_index <= start_index:
+                    logger.debug(
+                        f"[{session_id}] 没有足够的新消息需要总结 "
+                        f"(start={start_index}, end={end_index})"
+                    )
+                    return
+
+                # 获取需要总结的消息
+                history_messages = await self.conversation_manager.get_messages_range(
+                    session_id=session_id, start_index=start_index, end_index=end_index
+                )
+
+                logger.info(
+                    f"[{session_id}] 获取到 {len(history_messages)} 条消息用于总结 "
+                    f"(索引 {start_index} 到 {end_index})"
+                )
+                logger.debug(
+                    f"[{session_id}] 历史消息预览: "
+                    f"{[f'{m.role}:{m.content[:30]}...' for m in history_messages[:3]]}"
+                )
 
                 persona_id = await get_persona_id(self.context, event)
 
-                # 获取人格提示词
-                persona_prompt = None
-                filtering_config = self.config.get("filtering_settings", {})
-                if filtering_config.get("use_persona_filtering", True) and persona_id:
-                    list_personas = self.context.provider_manager.personas
-                    # 获取当前人格的提示词
-                    for persona_obj in list_personas:
-                        if persona_obj.get("name") == persona_id:
-                            persona_prompt = persona_obj.get("prompt")
-                            break
-
-                # 创建后台任务进行反思和存储
-                logger.debug(
-                    f"正在处理反思任务，session_id: {session_id}, persona_id: {persona_id}"
-                )
-                
-                async def reflection_task():
-                    async with OperationContext("记忆反思", session_id):
+                # 创建后台任务进行存储
+                async def storage_task():
+                    async with OperationContext("记忆存储", session_id):
                         try:
-                            # 使用重试机制执行反思
-                            await retry_on_failure(
-                                self.reflection_engine.reflect_and_store,
-                                conversation_history=history_to_reflect,
+                            # 判断是否为群聊
+                            is_group_chat = bool(
+                                history_messages[0].group_id
+                                if history_messages
+                                else False
+                            )
+
+                            logger.info(
+                                f"[{session_id}] 开始处理记忆，类型={'群聊' if is_group_chat else '私聊'}"
+                            )
+
+                            # 使用 MemoryProcessor 处理对话历史,生成结构化记忆
+                            if self.memory_processor:
+                                try:
+                                    logger.info(
+                                        f"[{session_id}] 调用 MemoryProcessor 处理 {len(history_messages)} 条消息"
+                                    )
+                                    (
+                                        content,
+                                        metadata,
+                                        importance,
+                                    ) = await self.memory_processor.process_conversation(
+                                        messages=history_messages,
+                                        is_group_chat=is_group_chat,
+                                    )
+                                    logger.info(
+                                        f"[{session_id}] ✅ 已使用LLM生成结构化记忆, "
+                                        f"主题={metadata.get('topics', [])}, "
+                                        f"情感={metadata.get('sentiment', 'neutral')}, "
+                                        f"重要性={importance:.2f}"
+                                    )
+                                    logger.debug(
+                                        f"[{session_id}] 记忆内容（前200字符）: {content[:200]}"
+                                    )
+                                except Exception as e:
+                                    logger.error(
+                                        f"[{session_id}] ❌ LLM处理失败,使用降级方案: {e}",
+                                        exc_info=True,
+                                    )
+                                    # 降级方案:简单文本拼接
+                                    content = "\n".join(
+                                        [
+                                            f"{msg.role}: {msg.content}"
+                                            for msg in history_messages
+                                        ]
+                                    )
+                                    metadata = {"fallback": True}
+                                    importance = 0.7
+                                    logger.info(
+                                        f"[{session_id}] 使用降级方案，内容长度={len(content)}"
+                                    )
+                            else:
+                                # 如果 MemoryProcessor 未初始化,使用简单文本拼接
+                                logger.warning(
+                                    f"[{session_id}] MemoryProcessor未初始化,使用简单文本拼接"
+                                )
+                                content = "\n".join(
+                                    [
+                                        f"{msg.role}: {msg.content}"
+                                        for msg in history_messages
+                                    ]
+                                )
+                                metadata = {"fallback": True}
+                                importance = 0.7
+
+                            # 添加到记忆引擎
+                            logger.info(
+                                f"[{session_id}] 准备存储记忆: 重要性={importance:.2f}, "
+                                f"内容长度={len(content)}, metadata={list(metadata.keys())}"
+                            )
+
+                            await self.memory_engine.add_memory(
+                                content=content,
                                 session_id=session_id,
                                 persona_id=persona_id,
-                                persona_prompt=persona_prompt,
-                                max_retries=2,  # 重试2次
-                                backoff_factor=1.0,
-                                exceptions=(Exception,)  # 捕获所有异常重试
+                                importance=importance,
+                                metadata=metadata,
+                            )
+
+                            logger.info(
+                                f"[{session_id}] ✅ 成功存储对话记忆（{len(history_messages)}条消息，重要性={importance:.2f}）"
+                            )
+
+                            # 更新已总结的位置
+                            await self.conversation_manager.update_session_metadata(
+                                session_id, "last_summarized_index", end_index
+                            )
+                            logger.info(
+                                f"[{session_id}] 📌 更新滑动窗口位置: last_summarized_index = {end_index}"
                             )
                         except Exception as e:
-                            logger.error(f"[{session_id}] 反思任务最终失败: {e}", exc_info=True)
-                
-                asyncio.create_task(reflection_task())
+                            logger.error(
+                                f"[{session_id}] 存储记忆失败: {e}", exc_info=True
+                            )
+
+                asyncio.create_task(storage_task())
 
         except Exception as e:
+            logger.error(f"处理 on_llm_response 钩子时发生错误: {e}", exc_info=True)
             logger.error(f"处理 on_llm_response 钩子时发生错误: {e}", exc_info=True)
 
     # --- 命令处理 ---
@@ -600,293 +653,237 @@ class LivingMemoryPlugin(Star):
         """长期记忆管理命令组 /lmem"""
         pass
 
+    def _get_session_id(self, event: AstrMessageEvent) -> str:
+        """从event获取session_id的辅助方法"""
+        # 修复：直接使用 event.session_id，避免不一致问题
+        return event.session_id or "default"
+
     @permission_type(PermissionType.ADMIN)
     @lmem_group.command("status")
-    @handle_command_errors
-    @require_handlers("admin_handler")
     async def lmem_status(self, event: AstrMessageEvent):
-        """[管理员] 查看当前记忆库的状态。"""
-        result = await self.admin_handler.get_memory_status()
-        yield event.plain_result(self.admin_handler.format_status_for_display(result))
-
-    @permission_type(PermissionType.ADMIN)
-    @lmem_group.command("search")
-    @handle_command_errors
-    @require_handlers("search_handler")
-    async def lmem_search(self, event: AstrMessageEvent, query: str, k: int = 3):
-        """[管理员] 手动搜索记忆。"""
-        result = await self.search_handler.search_memories(query, k)
-        yield event.plain_result(self.search_handler.format_search_results_for_display(result))
-
-    @permission_type(PermissionType.ADMIN)
-    @lmem_group.command("forget")
-    @handle_command_errors
-    @require_handlers("admin_handler")
-    async def lmem_forget(self, event: AstrMessageEvent, doc_id: int):
-        """[管理员] 强制删除一条指定整数 ID 的记忆。"""
-        result = await self.admin_handler.delete_memory(doc_id)
-        yield event.plain_result(result["message"])
-
-
-    @permission_type(PermissionType.ADMIN)
-    @lmem_group.command("config")
-    @handle_command_errors
-    @require_handlers("admin_handler")
-    async def lmem_config(self, event: AstrMessageEvent, action: str = "show"):
-        """[管理员] 查看或验证配置。
-
-        用法: /lmem config [show|validate]
-
-        动作:
-          show - 显示当前配置
-          validate - 验证配置有效性
-        """
-        result = await self.admin_handler.get_config_summary(action)
-        if action == "show":
-            yield event.plain_result(self.admin_handler.format_config_summary_for_display(result))
-        else:
-            yield event.plain_result(result["message"])
-
-    @permission_type(PermissionType.ADMIN)
-    @lmem_group.command("fusion")
-    @handle_command_errors
-    @require_handlers("fusion_handler")
-    async def lmem_fusion(self, event: AstrMessageEvent):
-        """[管理员] 查看检索融合配置。
-
-        用法: /lmem fusion
-
-        显示当前融合配置信息。融合策略已固定为RRF (Reciprocal Rank Fusion)。
-        """
-        result = await self.fusion_handler.manage_fusion_strategy("show")
-        yield event.plain_result(self.fusion_handler.format_fusion_config_for_display(result))
-
-    @permission_type(PermissionType.ADMIN)
-    @lmem_group.command("test_fusion")
-    @handle_command_errors
-    @require_handlers("fusion_handler")
-    async def lmem_test_fusion(self, event: AstrMessageEvent, query: str, k: int = 5):
-        """[管理员] 测试RRF融合策略的效果。
-
-        用法: /lmem test_fusion <查询> [返回数量]
-
-        这个命令会使用RRF融合策略进行搜索，并显示详细的结果信息。
-        """
-        yield event.plain_result(f"🔍 测试RRF融合策略，查询: '{query}', 返回数量: {k}")
-        result = await self.fusion_handler.test_fusion_strategy(query, k)
-        yield event.plain_result(self.fusion_handler.format_fusion_test_for_display(result))
-
-    @permission_type(PermissionType.ADMIN)
-    @lmem_group.command("migrate")
-    @handle_command_errors
-    async def lmem_migrate(self, event: AstrMessageEvent, action: str = "status"):
-        """[管理员] 数据库迁移管理。
-
-        用法: /lmem migrate [status|run|info]
-
-        动作:
-          status - 查看迁移状态
-          run - 手动执行迁移
-          info - 查看迁移详细信息
-        """
+        """[管理员] 显示记忆系统状态"""
         if not await self._wait_for_initialization():
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
 
-        if not self.db_migration:
-            yield event.plain_result("❌ 数据库迁移管理器未初始化")
+        if not self.memory_engine:
+            yield event.plain_result("❌ 记忆引擎未初始化")
             return
 
         try:
-            if action == "status":
-                needs_migration = await self.db_migration.needs_migration()
-                current_version = await self.db_migration.get_db_version()
-                
-                if needs_migration:
-                    message = (
-                        f"⚠️ 数据库需要迁移\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"当前版本: v{current_version}\n"
-                        f"最新版本: v{self.db_migration.CURRENT_VERSION}\n\n"
-                        f"使用 /lmem migrate run 执行迁移"
-                    )
-                else:
-                    message = (
-                        f"✅ 数据库版本已是最新\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"当前版本: v{current_version}"
-                    )
-                yield event.plain_result(message)
+            stats = await self.memory_engine.get_statistics()
 
-            elif action == "run":
-                yield event.plain_result("🔄 开始执行数据库迁移，请稍候...")
-                
-                # 创建备份
-                backup_path = await self.db_migration.create_backup()
-                if backup_path:
-                    yield event.plain_result(f"✅ 备份已创建: {backup_path}")
-                
-                # 执行迁移
-                result = await self.db_migration.migrate(
-                    sparse_retriever=self.sparse_retriever,
-                    progress_callback=None
+            # 格式化时间
+            last_update = "从未"
+            if stats.get("newest_memory"):
+                last_update = datetime.fromtimestamp(stats["newest_memory"]).strftime(
+                    "%Y-%m-%d %H:%M:%S"
                 )
-                
-                if result.get("success"):
-                    message = (
-                        f"✅ {result.get('message')}\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"从版本: v{result.get('from_version')}\n"
-                        f"到版本: v{result.get('to_version')}\n"
-                        f"耗时: {result.get('duration', 0):.2f}秒"
-                    )
-                else:
-                    message = f"❌ {result.get('message')}"
-                
-                yield event.plain_result(message)
 
-            elif action == "info":
-                info = await self.db_migration.get_migration_info()
-                
-                history_text = ""
-                if info.get("migration_history"):
-                    history_text = "\n\n📜 迁移历史:\n"
-                    for record in info["migration_history"][:5]:
-                        history_text += f"  v{record['version']} - {record['migrated_at'][:10]} ({record['duration']:.2f}s)\n"
-                
-                message = (
-                    f"📊 数据库迁移信息\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"当前版本: v{info.get('current_version')}\n"
-                    f"最新版本: v{info.get('latest_version')}\n"
-                    f"需要迁移: {'是' if info.get('needs_migration') else '否'}\n"
-                    f"数据库路径: {info.get('db_path')}"
-                    f"{history_text}"
-                )
-                yield event.plain_result(message)
-            
-            else:
-                yield event.plain_result(f"❌ 未知的动作: {action}\n使用 status、run 或 info")
+            # 计算数据库大小
+            db_size = 0
+            if os.path.exists(self.memory_engine.db_path):
+                db_size = os.path.getsize(self.memory_engine.db_path) / (1024 * 1024)
 
+            session_count = len(stats.get("sessions", {}))
+
+            message = f"""📊 LivingMemory 状态报告
+
+🔢 总记忆数: {stats["total_memories"]}
+👥 会话数: {session_count}
+⏰ 最后更新: {last_update}
+💾 数据库: {db_size:.2f} MB
+
+使用 /lmem search <关键词> 搜索记忆
+使用 /lmem webui 访问管理界面"""
+
+            yield event.plain_result(message)
         except Exception as e:
-            logger.error(f"执行迁移命令失败: {e}", exc_info=True)
-            yield event.plain_result(f"❌ 执行失败: {str(e)}")
+            logger.error(f"获取状态失败: {e}", exc_info=True)
+            yield event.plain_result(f"❌ 获取状态失败: {str(e)}")
 
     @permission_type(PermissionType.ADMIN)
-    @lmem_group.command("webui")
-    @handle_command_errors
-    async def lmem_webui(self, event: AstrMessageEvent):
-        """[管理员] 显示 WebUI 访问信息。
-
-        用法: /lmem webui
-
-        显示 WebUI 控制台的访问地址、状态和功能说明。
-        """
-        # 等待初始化完成
+    @lmem_group.command("search")
+    async def lmem_search(self, event: AstrMessageEvent, query: str, k: int = 5):
+        """[管理员] 搜索记忆"""
         if not await self._wait_for_initialization():
             yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
 
-        webui_config = self.config.get("webui_settings", {})
+        if not self.memory_engine:
+            yield event.plain_result("❌ 记忆引擎未初始化")
+            return
 
-        if not webui_config.get("enabled"):
-            message = (
-                "⚠️ WebUI 控制台未启用\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                "请在配置文件中启用 WebUI：\n\n"
-                "webui_settings:\n"
-                "  enabled: true\n"
-                "  access_password: \"test-token\"\n"
-                "  host: \"127.0.0.1\"\n"
-                "  port: 8080\n\n"
-                "配置完成后重新加载插件即可使用。"
+        try:
+            session_id = self._get_session_id(event)
+            results = await self.memory_engine.search_memories(
+                query=query, k=k, session_id=session_id
             )
+
+            if not results:
+                yield event.plain_result(f"🔍 未找到与 '{query}' 相关的记忆")
+                return
+
+            message = f"🔍 找到 {len(results)} 条相关记忆:\n\n"
+            for i, result in enumerate(results, 1):
+                score = result.final_score
+                content = (
+                    result.content[:100] + "..."
+                    if len(result.content) > 100
+                    else result.content
+                )
+                message += f"{i}. [得分:{score:.2f}] {content}\n"
+                message += f"   ID: {result.doc_id}\n\n"
+
             yield event.plain_result(message)
+        except Exception as e:
+            logger.error(f"搜索失败: {e}", exc_info=True)
+            yield event.plain_result(f"❌ 搜索失败: {str(e)}")
+
+    @permission_type(PermissionType.ADMIN)
+    @lmem_group.command("forget")
+    async def lmem_forget(self, event: AstrMessageEvent, doc_id: int):
+        """[管理员] 删除指定记忆"""
+        if not await self._wait_for_initialization():
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
             return
 
-        if not self.webui_server:
-            yield event.plain_result("⚠️ WebUI 控制台启动失败，请检查配置和日志。")
+        if not self.memory_engine:
+            yield event.plain_result("❌ 记忆引擎未初始化")
             return
 
-        host = webui_config.get("host", "127.0.0.1")
-        port = webui_config.get("port", 8080)
+        try:
+            success = await self.memory_engine.delete_memory(doc_id)
+            if success:
+                yield event.plain_result(f"✅ 已删除记忆 #{doc_id}")
+            else:
+                yield event.plain_result(f"❌ 删除失败，记忆 #{doc_id} 不存在")
+        except Exception as e:
+            logger.error(f"删除失败: {e}", exc_info=True)
+            yield event.plain_result(f"❌ 删除失败: {str(e)}")
 
-        # 构建访问地址
-        if host in ["0.0.0.0", ""]:
-            access_url = f"http://127.0.0.1:{port}"
+    @permission_type(PermissionType.ADMIN)
+    @lmem_group.command("webui")
+    async def lmem_webui(self, event: AstrMessageEvent):
+        """[管理员] 显示WebUI访问信息"""
+        if not await self._wait_for_initialization():
+            yield event.plain_result("插件尚未完成初始化，请稍后再试。")
+            return
+
+        webui_url = self._get_webui_url()
+
+        if not webui_url:
+            message = """⚠️ WebUI 功能暂未启用
+
+🚧 WebUI 正在适配新的 MemoryEngine 架构
+📝 预计在下一个版本中恢复
+
+💡 当前可用功能:
+• /lmem status - 查看系统状态
+• /lmem search - 搜索记忆
+• /lmem forget - 删除记忆"""
         else:
-            access_url = f"http://{host}:{port}"
+            message = f"""🌐 LivingMemory WebUI
 
-        message = (
-            "🌐 LivingMemory WebUI 控制台\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📍 访问地址: {access_url}\n"
-            "🔐 登录密码: 请查看配置文件中的 webui_settings.access_password\n\n"
-            "💡 WebUI 功能说明：\n"
-            "  • 📝 记忆管理 - 浏览、搜索、编辑、删除记忆\n"
-            "  • 📊 统计分析 - 查看记忆分布和系统状态\n"
-            "  • ⚙️ 配置管理 - 调整检索策略和融合算法\n"
-            "  • 🛠️ 调试工具 - 测试检索效果和策略对比\n"
-            "  • 🗂️ 批量操作 - 批量编辑、归档、导出记忆\n"
-            "  • 🔧 系统管理 - 触发遗忘代理、重建索引\n\n"
-            "📖 提示：使用 WebUI 可以更直观地管理记忆系统。"
-        )
+访问地址: {webui_url}
+
+💡 WebUI功能:
+• 📝 记忆编辑与管理
+• 📊 可视化统计分析
+• ⚙️ 高级配置管理
+• 🔧 系统调试工具
+• 💾 数据迁移管理
+
+在WebUI中可以进行更复杂的操作!"""
 
         yield event.plain_result(message)
 
     @permission_type(PermissionType.ADMIN)
     @lmem_group.command("help")
-    @handle_command_errors
     async def lmem_help(self, event: AstrMessageEvent):
-        """[管理员] 显示帮助信息。
+        """[管理员] 显示帮助信息"""
+        message = """📖 LivingMemory 使用指南
 
-        用法: /lmem help
+🔹 核心指令:
+/lmem status              查看系统状态
+/lmem search <关键词> [数量]  搜索记忆(默认5条)
+/lmem forget <ID>          删除指定记忆
+/lmem webui               打开WebUI管理界面
+/lmem help                显示此帮助
 
-        显示核心命令列表和 WebUI 使用指引。
-        """
-        message = (
-            "📚 Living Memory 核心指令\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📊 信息查询:\n"
-            "  /lmem status\n"
-            "    查看记忆库状态\n\n"
-            "  /lmem search <query> [k]\n"
-            "    搜索记忆(k为返回数量,默认3)\n"
-            "    示例: /lmem search 用户喜好 5\n\n"
-            "  /lmem config [show|validate]\n"
-            "    查看或验证配置\n\n"
-            "🔧 系统管理:\n"
-            "  /lmem forget <id>\n"
-            "    删除指定记忆\n"
-            "    示例: /lmem forget 123\n\n"
-            "  /lmem migrate [status|run|info]\n"
-            "    数据库迁移管理\n\n"
-            "  /lmem fusion\n"
-            "    查看当前融合策略配置\n\n"
-            "  /lmem test_fusion <query> [k]\n"
-            "    测试融合策略效果\n"
-            "    示例: /lmem test_fusion 测试查询 5\n\n"
-            "🌐 Web界面:\n"
-            "  /lmem webui\n"
-            "    查看WebUI访问信息\n\n"
-            "  /lmem help\n"
-            "    显示此帮助信息\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "💡 提示: 更多高级功能(记忆编辑、详细信息、系统设置等)\n"
-            "   请使用 WebUI 界面进行管理\n\n"
-            "使用 /lmem webui 查看访问地址"
-        )
+💡 使用建议:
+• 日常查询使用 search 指令
+• 复杂管理使用 WebUI 界面
+• 记忆会自动保存对话内容
+• 使用 forget 删除敏感信息
+
+📚 更多信息: https://github.com/lxfight/astrbot_plugin_livingmemory"""
 
         yield event.plain_result(message)
 
     async def terminate(self):
-        """
-        插件停止时的清理逻辑。
-        """
+        """插件停止时的清理逻辑"""
         logger.info("LivingMemory 插件正在停止...")
-        await self._stop_webui()
-        if self.forgetting_agent:
-            await self.forgetting_agent.stop()
+
+        # 停止并清理 WebUI 服务器
+        if self.webui_server:
+            try:
+                logger.info("正在停止 WebUI 服务器...")
+
+                # 停止定期清理任务
+                if (
+                    hasattr(self.webui_server, "_cleanup_task")
+                    and self.webui_server._cleanup_task
+                ):
+                    if not self.webui_server._cleanup_task.done():
+                        self.webui_server._cleanup_task.cancel()
+                        try:
+                            await self.webui_server._cleanup_task
+                        except asyncio.CancelledError:
+                            pass
+
+                # 停止 uvicorn 服务器
+                if hasattr(self.webui_server, "_server") and self.webui_server._server:
+                    self.webui_server._server.should_exit = True
+
+                if (
+                    hasattr(self.webui_server, "_server_task")
+                    and self.webui_server._server_task
+                ):
+                    try:
+                        await self.webui_server._server_task
+                    except (asyncio.CancelledError, KeyboardInterrupt, Exception):
+                        # 忽略任务取消和中断异常
+                        pass
+
+                # 清理引用
+                if hasattr(self.webui_server, "_server"):
+                    self.webui_server._server = None
+                if hasattr(self.webui_server, "_server_task"):
+                    self.webui_server._server_task = None
+                if hasattr(self.webui_server, "_cleanup_task"):
+                    self.webui_server._cleanup_task = None
+
+                self.webui_server = None
+                logger.info("✅ WebUI 服务器已停止")
+
+            except Exception as e:
+                logger.error(f"停止 WebUI 服务器时出错: {e}", exc_info=True)
+                self.webui_server = None
+
+        # 关闭 ConversationManager（会自动关闭 ConversationStore）
+        if self.conversation_manager and self.conversation_manager.store:
+            await self.conversation_manager.store.close()
+            logger.info("✅ ConversationManager 已关闭")
+
+        # 关闭 MemoryEngine
+        if self.memory_engine:
+            await self.memory_engine.close()
+            logger.info("✅ MemoryEngine 已关闭")
+
+        # 关闭 FaissVecDB
         if self.db:
             await self.db.close()
+            logger.info("✅ FaissVecDB 已关闭")
+
         logger.info("LivingMemory 插件已成功停止。")
