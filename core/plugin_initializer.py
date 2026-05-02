@@ -217,7 +217,7 @@ class PluginInitializer:
         # 初始化 Embedding Provider
         emb_id = self.config_manager.get("provider_settings.embedding_provider_id")
         if emb_id:
-            provider = self.context.get_provider_by_id(emb_id)
+            provider = self._get_provider_by_id(emb_id, silent=silent)
             if provider and isinstance(provider, EmbeddingProvider):
                 self.embedding_provider = provider
                 if not silent:
@@ -245,7 +245,7 @@ class PluginInitializer:
         self.llm_provider = None
         llm_id = self.config_manager.get("provider_settings.llm_provider_id")
         if llm_id:
-            provider = self.context.get_provider_by_id(llm_id)
+            provider = self._get_provider_by_id(llm_id, silent=silent)
             if provider and isinstance(provider, Provider):
                 self.llm_provider = provider
                 if not silent:
@@ -257,6 +257,9 @@ class PluginInitializer:
 
         if not self.llm_provider:
             try:
+                if silent and not self.context.get_all_providers():
+                    self.llm_provider = None
+                    return
                 default_provider = self.context.get_using_provider()
                 if default_provider and not isinstance(default_provider, Provider):
                     if not silent:
@@ -272,6 +275,18 @@ class PluginInitializer:
                 if not silent:
                     logger.debug(f"获取默认 LLM Provider 失败: {e}")
                 self.llm_provider = None
+
+    def _get_provider_by_id(self, provider_id: str, *, silent: bool):
+        """静默检查阶段绕过会打印 warning 的 AstrBot 查询接口。"""
+        if not provider_id:
+            return None
+        if not silent:
+            return self.context.get_provider_by_id(provider_id)
+        provider_manager = getattr(self.context, "provider_manager", None)
+        inst_map = getattr(provider_manager, "inst_map", None)
+        if isinstance(inst_map, dict):
+            return inst_map.get(provider_id)
+        return None
 
     async def _complete_initialization(self):
         """完成完整的初始化流程"""
@@ -368,6 +383,30 @@ class PluginInitializer:
                 ),
                 "graph_max_facts": self.config_manager.get(
                     "graph_memory.max_facts_per_memory", 8
+                ),
+                "index_rebuild_batch_size": self.config_manager.get(
+                    "index_rebuild_settings.batch_size", 50
+                ),
+                "index_rebuild_embedding_batch_size": self.config_manager.get(
+                    "index_rebuild_settings.embedding_batch_size", 8
+                ),
+                "index_rebuild_tasks_limit": self.config_manager.get(
+                    "index_rebuild_settings.tasks_limit", 1
+                ),
+                "index_rebuild_max_retries": self.config_manager.get(
+                    "index_rebuild_settings.max_retries", 5
+                ),
+                "index_rebuild_retry_base_delay": self.config_manager.get(
+                    "index_rebuild_settings.retry_base_delay", 30.0
+                ),
+                "index_rebuild_batch_delay": self.config_manager.get(
+                    "index_rebuild_settings.batch_delay", 5.0
+                ),
+                "index_rebuild_request_delay": self.config_manager.get(
+                    "index_rebuild_settings.request_delay", 5.0
+                ),
+                "index_rebuild_max_failure_ratio": self.config_manager.get(
+                    "index_rebuild_settings.max_failure_ratio", 0.02
                 ),
             }
 
@@ -624,7 +663,19 @@ class PluginInitializer:
                 logger.info("注意: 向量检索功能将暂时不可用，直到重新导入记忆数据。")
 
         except Exception as e:
-            logger.error(f"检查索引维度时出错: {e}", exc_info=True)
+            quarantine_path = f"{index_path}.corrupt_{int(time.time())}"
+            try:
+                os.replace(index_path, quarantine_path)
+                logger.error(
+                    f"FAISS 索引文件不可读，已隔离坏文件: {quarantine_path}。"
+                    "系统将创建空索引，并在初始化后尝试分批重建。",
+                    exc_info=True,
+                )
+            except Exception:
+                logger.error(
+                    f"检查索引维度时出错，且隔离坏索引失败: {e}",
+                    exc_info=True,
+                )
 
     async def stop_scheduler(self) -> None:
         """停止衰减调度器"""
