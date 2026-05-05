@@ -1,3 +1,9 @@
+<div align="center">
+
+[中文](README.md) | [English](README_en.md) | [Русский](README_ru.md)
+
+</div>
+
 # LivingMemory - 动态生命周期记忆插件
 
 **版本**: v2.1.9 | **作者**: lxfight | **许可证**: AGPLv3
