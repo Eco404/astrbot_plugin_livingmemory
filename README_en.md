@@ -156,9 +156,9 @@ pytest --cov=core tests/
 
 ### Documentation
 
-- [API Documentation](docs/API.md): Detailed API reference
-- [Architecture Documentation](docs/ARCHITECTURE.md): System architecture description
-- [Developer Guide](docs/DEVELOPMENT.md): Development and contribution guidelines
+- [API Documentation](docs/API_en.md): Detailed API reference
+- [Architecture Documentation](docs/ARCHITECTURE_en.md): System architecture description
+- [Developer Guide](docs/DEVELOPMENT_en.md): Development and contribution guidelines
 
 ---
 
