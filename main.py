@@ -24,7 +24,7 @@ from .webui import WebUIServer
 @register(
     "LivingMemory",
     "lxfight",
-    "一个拥有动态生命周期的智能长期记忆插件。",
+    "An intelligent long-term memory plugin with a dynamic lifecycle for AstrBot.",
     "2.0.0",
     "https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory",
 )

@@ -1,18 +1,18 @@
 {
   "provider_settings": {
-    "description": "模型提供商",
-    "hint": "配置记忆系统使用的 AI 模型",
+    "description": "Model Provider",
+    "hint": "Configure the AI model used by the memory system",
     "type": "object",
     "items": {
       "embedding_provider_id": {
-        "description": "Embedding 模型 ID",
-        "hint": "用于生成记忆向量的 Embedding 模型 ID。留空使用 AstrBot 默认。可在 AstrBot 后台「LLM 配置」中查看已有的 Embedding Provider ID（如 openai_embedding）。",
+        "description": "Embedding Model ID",
+        "hint": "Embedding model ID for generating memory vectors. Leave empty to use AstrBot default. Check existing Embedding Provider IDs in AstrBot admin panel (e.g., openai_embedding)",
         "type": "string",
         "default": ""
       },
       "llm_provider_id": {
-        "description": "LLM 模型 ID",
-        "hint": "用于总结对话、评估记忆重要性的大语言模型 ID。留空使用 AstrBot 默认。推荐使用推理能力较强的模型。",
+        "description": "LLM Model ID",
+        "hint": "LLM model ID for summarizing conversations and evaluating memory importance. Leave empty to use AstrBot default. Models with strong reasoning capabilities are recommended",
         "type": "string",
         "_special": "select_provider",
         "default": ""
@@ -20,100 +20,100 @@
     }
   },
   "webui_settings": {
-    "description": "WebUI 管理面板",
-    "hint": "启用后可通过浏览器可视化管理记忆和会话",
+    "description": "WebUI Admin Panel",
+    "hint": "Enable visual memory and session management via browser",
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用 WebUI",
-        "hint": "开启后可通过浏览器访问记忆管理面板。",
+        "description": "Enable WebUI",
+        "hint": "Enable browser-based memory management panel",
         "type": "bool",
         "default": false
       },
       "host": {
-        "description": "监听地址",
-        "hint": "127.0.0.1 仅本机访问；0.0.0.0 允许局域网访问。",
+        "description": "Listen Address",
+        "hint": "127.0.0.1 for localhost only; 0.0.0.0 to allow LAN access",
         "type": "string",
         "default": "127.0.0.1"
       },
       "port": {
-        "description": "监听端口",
-        "hint": "WebUI 服务端口，确保不与 AstrBot 主端口（默认 6185）冲突。",
+        "description": "Listen Port",
+        "hint": "WebUI service port, ensure it doesn't conflict with AstrBot main port (default 6185)",
         "type": "int",
         "default": 8888
       },
       "access_password": {
-        "description": "访问密码",
-        "hint": "登录 WebUI 所需密码。留空时系统自动生成随机密码并在日志中提示。建议手动设置。",
+        "description": "Access Password",
+        "hint": "Password required for WebUI login. Leave empty for auto-generated random password (shown in logs). Manual setup recommended",
         "type": "string",
         "obvious_hint": true,
         "default": ""
       },
       "session_timeout": {
-        "description": "登录会话超时（秒）",
-        "hint": "登录后的有效时长，超时需重新登录。默认 3600（1 小时）。",
+        "description": "Login Session Timeout (seconds)",
+        "hint": "Session validity after login, requires re-login after timeout. Default 3600 (1 hour)",
         "type": "int",
         "default": 3600
       }
     }
   },
   "session_manager": {
-    "description": "会话管理",
-    "hint": "管理用户会话状态和对话历史的缓存行为",
+    "description": "Session Management",
+    "hint": "Manage user session state and conversation history caching behavior",
     "type": "object",
     "items": {
       "max_sessions": {
-        "description": "最大缓存会话数",
-        "hint": "内存中同时保留的最大会话数（LRU 淘汰）。超出后最久未使用的会话从缓存移除，但数据仍保存在数据库中。",
+        "description": "Max Cached Sessions",
+        "hint": "Maximum number of sessions kept in memory (LRU eviction). Least recently used sessions are removed from cache but remain in database",
         "type": "int",
         "default": 100
       },
       "session_ttl": {
-        "description": "会话空闲超时（秒）",
-        "hint": "会话超过此时间无活动后从缓存移除。默认 3600（1 小时）。",
+        "description": "Session Idle Timeout (seconds)",
+        "hint": "Sessions are removed from cache after being inactive for this duration. Default 3600 (1 hour)",
         "type": "int",
         "default": 3600
       },
       "context_window_size": {
-        "description": "上下文窗口大小（条）",
-        "hint": "传给 LLM 的最大历史消息条数。越大上下文越丰富，但消耗 token 越多。建议 20-100。",
+        "description": "Context Window Size (messages)",
+        "hint": "Maximum historical messages sent to LLM. Larger values provide richer context but consume more tokens. Recommended: 20-100",
         "type": "int",
         "default": 50
       }
     }
   },
   "recall_engine": {
-    "description": "记忆召回",
-    "hint": "控制记忆检索和注入到对话的行为",
+    "description": "Memory Recall",
+    "hint": "Control memory retrieval and injection into conversations",
     "type": "object",
     "items": {
       "top_k": {
-        "description": "单次召回数量",
-        "hint": "每次检索返回的最相关记忆条数。建议 3-10。",
+        "description": "Single Recall Count",
+        "hint": "Number of most relevant memories returned per retrieval. Recommended: 3-10",
         "type": "int",
         "default": 5
       },
       "max_k": {
-        "description": "主动检索最大数量",
-        "hint": "Agent 主动调用长期记忆检索工具时允许返回的最大记忆条数。用于限制工具单次召回规模，建议 5-10。",
+        "description": "Max Proactive Retrieval Count",
+        "hint": "Maximum memories returned when agent proactively calls long-term memory retrieval. Recommended: 5-10",
         "type": "int",
         "default": 10
       },
       "importance_weight": {
-        "description": "重要性权重",
-        "hint": "混合评分中记忆重要性的占比系数。值越大，重要性高的记忆越优先被召回。",
+        "description": "Importance Weight",
+        "hint": "Weight coefficient for memory importance in hybrid scoring. Higher values prioritize more important memories",
         "type": "float",
         "default": 1.0
       },
       "fallback_to_vector": {
-        "description": "降级到纯向量检索",
-        "hint": "混合检索失败或结果为空时，自动降级为纯向量检索。建议开启。",
+        "description": "Fallback to Pure Vector Retrieval",
+        "hint": "Automatically fall back to pure vector retrieval when hybrid retrieval fails or returns empty. Recommended",
         "type": "bool",
         "default": true
       },
       "injection_method": {
-        "description": "记忆注入位置",
-        "hint": "记忆注入到 LLM 请求的位置。user_message_before：作为用户消息前缀；system_prompt：追加到系统提示词；user_message_after：作为用户消息后缀；fake_tool_call：伪造工具调用消息对注入到对话历史，使 LLM 自然地理解这是检索结果。",
+        "description": "Memory Injection Position",
+        "hint": "Position where memories are injected into LLM request. user_message_before: as user message prefix; system_prompt: append to system prompt; user_message_after: as user message suffix; fake_tool_call: inject as fake tool call messages into conversation history",
         "type": "string",
         "default": "user_message_before",
         "options": [
@@ -124,238 +124,238 @@
         ]
       },
       "auto_remove_injected": {
-        "description": "自动清除旧注入片段",
-        "hint": "注入新记忆前自动删除历史中已注入的旧记忆片段，避免重复累积和 token 浪费。建议开启。",
+        "description": "Auto-remove Old Injection Fragments",
+        "hint": "Automatically delete previously injected memory fragments before injecting new ones to avoid duplication and token waste. Recommended",
         "type": "bool",
         "default": true
       }
     }
   },
   "importance_decay": {
-    "description": "重要性衰减",
-    "hint": "随时间逐步降低旧记忆的重要性，防止旧信息长期占据高权重",
+    "description": "Importance Decay",
+    "hint": "Gradually reduce old memory importance over time to prevent outdated information from maintaining high weight",
     "type": "object",
     "items": {
       "decay_rate": {
-        "description": "每日衰减率",
-        "hint": "每天对记忆重要性的衰减比例。0.01 表示每天降低 1%。设为 0 可禁用衰减。",
+        "description": "Daily Decay Rate",
+        "hint": "Daily decay ratio for memory importance. 0.01 means 1% decrease per day. Set to 0 to disable",
         "type": "float",
         "default": 0.01
       }
     }
   },
   "fusion_strategy": {
-    "description": "检索融合策略",
-    "hint": "BM25 和向量检索结果的融合参数（内部使用 RRF 算法）",
+    "description": "Retrieval Fusion Strategy",
+    "hint": "Fusion parameters for BM25 and vector retrieval results (internally uses RRF algorithm)",
     "type": "object",
     "items": {
       "rrf_k": {
-        "description": "RRF 融合参数 k",
-        "hint": "值越小越强调排名靠前的结果，值越大融合越平滑。推荐 30-120，默认 60。",
+        "description": "RRF Fusion Parameter k",
+        "hint": "Smaller values emphasize top-ranked results, larger values produce smoother fusion. Recommended: 30-120, default 60",
         "type": "int",
         "default": 60
       }
     }
   },
   "filtering_settings": {
-    "description": "记忆隔离设置",
+    "description": "Memory Isolation Settings",
     "type": "object",
     "items": {
       "use_persona_filtering": {
-        "description": "按人格隔离记忆",
-        "hint": "开启后只召回与当前人格相关的记忆，不同人格的记忆互不干扰。",
+        "description": "Filter by Persona",
+        "hint": "Only recall memories related to current persona when enabled. Different personas don't interfere",
         "type": "bool",
         "default": true
       },
       "use_session_filtering": {
-        "description": "按会话隔离记忆",
-        "hint": "开启后每个会话的记忆独立存储，不同会话之间不共享记忆。",
+        "description": "Filter by Session",
+        "hint": "Each session's memories are stored independently when enabled. Sessions don't share memories",
         "type": "bool",
         "default": true
       }
     }
   },
   "reflection_engine": {
-    "description": "记忆生成设置",
-    "hint": "控制何时触发对话总结并生成记忆",
+    "description": "Memory Generation Settings",
+    "hint": "Control when to trigger conversation summarization and memory generation",
     "type": "object",
     "items": {
       "summary_trigger_rounds": {
-        "description": "总结触发轮次",
-        "hint": "累计对话达到该轮次（一问一答为一轮）后触发总结并写入记忆。",
+        "description": "Summary Trigger Rounds",
+        "hint": "Trigger summarization and memory writing after this many conversation rounds (one Q&A pair = one round)",
         "type": "int",
         "default": 10
       }
     }
   },
   "graph_memory": {
-    "description": "图记忆双路检索",
-    "hint": "启用后会同时维护文档路和图路，两边都支持关键词与向量检索，再统一融合召回结果。",
+    "description": "Graph Memory Dual-Route Retrieval",
+    "hint": "When enabled, maintains both document route and graph route, both supporting keyword and vector retrieval, with unified fusion of recall results",
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用图记忆检索",
-        "hint": "开启后自动构建图节点、边和图向量索引。建议开启。",
+        "description": "Enable Graph Memory Retrieval",
+        "hint": "Automatically build graph nodes, edges and vector indexes when enabled. Recommended",
         "type": "bool",
         "default": true
       },
       "document_route_weight": {
-        "description": "文档路权重",
-        "hint": "文档路融合分数在最终双路排序中的占比。",
+        "description": "Document Route Weight",
+        "hint": "Document route fusion score weight in final dual-route ranking",
         "type": "float",
         "default": 0.65
       },
       "graph_route_weight": {
-        "description": "图路权重",
-        "hint": "图路融合分数在最终双路排序中的占比。",
+        "description": "Graph Route Weight",
+        "hint": "Graph route fusion score weight in final dual-route ranking",
         "type": "float",
         "default": 0.35
       },
       "cross_route_bonus": {
-        "description": "双路命中加分",
-        "hint": "同一记忆同时被文档路和图路命中时增加的额外分数。",
+        "description": "Dual-Route Hit Bonus",
+        "hint": "Extra score added when same memory is hit by both document and graph routes",
         "type": "float",
         "default": 0.08
       },
       "expansion_limit": {
-        "description": "图邻居扩展上限",
-        "hint": "图关键词检索时从命中节点扩展到邻居条目的最大候选数。",
+        "description": "Graph Neighbor Expansion Limit",
+        "hint": "Maximum candidate entries when expanding from hit node to neighbors in graph keyword retrieval",
         "type": "int",
         "default": 24
       },
       "max_topics_per_memory": {
-        "description": "单记忆最大主题数",
-        "hint": "从一条记忆中最多提取多少个 topics 节点。",
+        "description": "Max Topics Per Memory",
+        "hint": "Maximum topics nodes extracted from one memory",
         "type": "int",
         "default": 6
       },
       "max_participants_per_memory": {
-        "description": "单记忆最大参与者数",
-        "hint": "从一条记忆中最多提取多少个 participants 节点。",
+        "description": "Max Participants Per Memory",
+        "hint": "Maximum participants nodes extracted from one memory",
         "type": "int",
         "default": 8
       },
       "max_facts_per_memory": {
-        "description": "单记忆最大事实数",
-        "hint": "从一条记忆中最多提取多少条 key_facts 进入图索引。",
+        "description": "Max Facts Per Memory",
+        "hint": "Maximum key_facts extracted from one memory into graph index",
         "type": "int",
         "default": 8
       }
     }
   },
   "migration_settings": {
-    "description": "数据库迁移",
-    "hint": "控制插件启动时的数据库版本升级行为",
+    "description": "Database Migration",
+    "hint": "Control database version upgrade behavior on plugin startup",
     "type": "object",
     "items": {
       "auto_migrate": {
-        "description": "自动迁移",
-        "hint": "插件启动时自动检测并升级旧版本数据库。建议保持开启。",
+        "description": "Auto Migration",
+        "hint": "Automatically detect and upgrade old database versions on plugin startup. Recommended",
         "type": "bool",
         "default": true
       },
       "create_backup": {
-        "description": "迁移前自动备份",
-        "hint": "执行数据库迁移前自动创建备份文件，防止迁移失败导致数据丢失。建议保持开启。",
+        "description": "Auto Backup Before Migration",
+        "hint": "Automatically create backup before migration to prevent data loss. Recommended",
         "type": "bool",
         "default": true
       }
     }
   },
   "index_rebuild_settings": {
-    "description": "索引重建",
-    "hint": "控制 /lmem rebuild-index 的分批大小、Embedding 请求速率和失败容忍度。低配云服务器建议保持较小并发。",
+    "description": "Index Rebuild",
+    "hint": "Control batch size, Embedding request rate and failure tolerance for /lmem rebuild-index. Low-end servers should keep lower concurrency",
     "type": "object",
     "items": {
       "batch_size": {
-        "description": "读取批量",
-        "hint": "每批从 documents 表读取的记忆条数。越大内存峰值越高、失败时影响的条数越多，建议 25-100。",
+        "description": "Read Batch Size",
+        "hint": "Number of memories read per batch from documents table. Larger values increase memory peak and failure impact. Recommended: 25-100",
         "type": "int",
         "default": 50
       },
       "embedding_batch_size": {
-        "description": "Embedding 批量",
-        "hint": "单次 Embedding API 请求包含的文本数量。服务商 TPM 限流严格时继续调小。",
+        "description": "Embedding Batch Size",
+        "hint": "Number of texts per Embedding API request. Reduce if provider has strict TPM limits",
         "type": "int",
         "default": 8
       },
       "tasks_limit": {
-        "description": "Embedding 并发",
-        "hint": "批量 Embedding 内部并发上限。为避免触发 API 限流，默认 1。",
+        "description": "Embedding Concurrency",
+        "hint": "Internal concurrency limit for batch Embedding. Default 1 to avoid API rate limits",
         "type": "int",
         "default": 1
       },
       "max_retries": {
-        "description": "批次重试次数",
-        "hint": "单个 Embedding 批次失败后的最大重试次数。",
+        "description": "Batch Retry Count",
+        "hint": "Maximum retries after an Embedding batch failure",
         "type": "int",
         "default": 5
       },
       "retry_base_delay": {
-        "description": "重试等待秒数",
-        "hint": "批次失败后的指数退避基础等待时间。遇到 429/TPM 限流时会至少等待 30 秒。",
+        "description": "Retry Wait Seconds",
+        "hint": "Exponential backoff base wait time after batch failure. At least 30 seconds for 429/TPM rate limits",
         "type": "float",
         "default": 30.0
       },
       "batch_delay": {
-        "description": "读取批次间隔秒数",
-        "hint": "每个 documents 读取批次之间的额外等待时间，用于主动降低整体重建速率。",
+        "description": "Read Batch Interval Seconds",
+        "hint": "Extra wait between document read batches to actively reduce overall rebuild rate",
         "type": "float",
         "default": 5.0
       },
       "request_delay": {
-        "description": "Embedding 请求间隔秒数",
-        "hint": "每个 Embedding API 子请求之间的等待时间。频繁触发 429/TPM 时优先增大此项。",
+        "description": "Embedding Request Interval Seconds",
+        "hint": "Wait time between Embedding API sub-requests. Increase if frequently hitting 429/TPM",
         "type": "float",
         "default": 5.0
       },
       "max_failure_ratio": {
-        "description": "允许失败比例",
-        "hint": "全量向量重建时，失败比例不超过该值才允许切换新索引。0.02 表示最多允许 2% 失败。",
+        "description": "Allowed Failure Ratio",
+        "hint": "During full vector rebuild, only switch to new index if failure ratio doesn't exceed this. 0.02 means max 2% failure allowed",
         "type": "float",
         "default": 0.02
       }
     }
   },
   "backup_settings": {
-    "description": "定期备份",
-    "hint": "每日自动备份记忆数据库，防止数据意外丢失",
+    "description": "Scheduled Backup",
+    "hint": "Automatically backup memory database daily to prevent accidental data loss",
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用每日自动备份",
-        "hint": "每日衰减任务执行后自动备份数据库。建议开启。",
+        "description": "Enable Daily Auto Backup",
+        "hint": "Automatically backup database after daily decay task. Recommended",
         "type": "bool",
         "default": true
       },
       "keep_days": {
-        "description": "备份保留天数",
-        "hint": "超过该天数的旧备份文件将被自动删除。默认保留 7 天。",
+        "description": "Backup Retention Days",
+        "hint": "Old backups beyond this many days are automatically deleted. Default: 7 days",
         "type": "int",
         "default": 7
       }
     }
   },
   "forgetting_agent": {
-    "description": "自动清理设置",
-    "hint": "定期清理时间久远且重要性低的旧记忆，控制记忆库规模",
+    "description": "Auto-Cleanup Settings",
+    "hint": "Periodically clean up old memories with low importance to control memory database size",
     "type": "object",
     "items": {
       "auto_cleanup_enabled": {
-        "description": "启用每日自动清理",
-        "hint": "每日重要性衰减后自动清理符合条件的旧记忆。",
+        "description": "Enable Daily Auto Cleanup",
+        "hint": "Automatically clean up eligible old memories after daily importance decay",
         "type": "bool",
         "default": true
       },
       "cleanup_days_threshold": {
-        "description": "清理天数阈值（天）",
-        "hint": "记忆创建超过该天数后进入清理候选。需同时满足重要性低于阈值才会被删除。",
+        "description": "Cleanup Age Threshold (days)",
+        "hint": "Memories older than this enter cleanup candidacy. Must also have importance below threshold to be deleted",
         "type": "int",
         "default": 30
       },
       "cleanup_importance_threshold": {
-        "description": "清理重要性阈值",
-        "hint": "重要性低于该值的旧记忆才会被清理。0.3 表示重要性低于 30% 的记忆。",
+        "description": "Cleanup Importance Threshold",
+        "hint": "Only old memories with importance below this value are cleaned up. 0.3 means below 30% importance",
         "type": "float",
         "default": 0.3
       }
