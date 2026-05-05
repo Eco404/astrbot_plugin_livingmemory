@@ -1,3 +1,9 @@
+<div align="center">
+
+[中文](DEVELOPMENT.md) | [English](DEVELOPMENT_en.md) | [Русский](DEVELOPMENT_ru.md)
+
+</div>
+
 # LivingMemory 开发者指南
 
 **版本**: v2.0.0

@@ -1,3 +1,9 @@
+<div align="center">
+
+[中文](ARCHITECTURE.md) | [English](ARCHITECTURE_en.md) | [Русский](ARCHITECTURE_ru.md)
+
+</div>
+
 # LivingMemory 架构文档
 
 **版本**: v2.0.0

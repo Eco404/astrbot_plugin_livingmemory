@@ -1,3 +1,9 @@
+<div align="center">
+
+[中文](API.md) | [English](API_en.md) | [Русский](API_ru.md)
+
+</div>
+
 # LivingMemory API 文档
 
 **版本**: v2.0.0
