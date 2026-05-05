@@ -6,8 +6,8 @@
 
 # LivingMemory API Documentation
 
-**Version**: v2.0.0
-**Last Updated**: 2025-12-17
+**Version**: v2.2.10
+**Last Updated**: 2026-04-28
 
 ---
 
@@ -260,6 +260,28 @@ Handle `/lmem search` command, search memories.
 - `query`: Search query
 - `k`: Number of results to return
 
+##### `async handle_summarize(event: AstrMessageEvent)`
+
+Handle `/lmem summarize` command, trigger immediate memory summarization for the current session.
+
+**Parameters**:
+- `event`: AstrBot message event
+
+##### `async handle_rebuild_graph(event: AstrMessageEvent)`
+
+Handle `/lmem rebuild-graph` command, rebuild graph memory indexes (backfill graph data for old memories).
+
+**Parameters**:
+- `event`: AstrBot message event
+
+##### `async handle_cleanup(event: AstrMessageEvent, mode: str = "preview")`
+
+Handle `/lmem cleanup [preview|exec]` command, clean up memory injection fragments from historical messages.
+
+**Parameters**:
+- `event`: AstrBot message event
+- `mode`: Mode, `preview` (default) or `exec`
+
 ---
 
 ## Agent Tools
@@ -328,6 +350,44 @@ Handle `/lmem reset` command, reset the current session's memory context.
 ##### `async handle_help(event: AstrMessageEvent)`
 
 Handle `/lmem help` command, display help information.
+
+---
+
+## Utility Components
+
+### FakeToolCallFormatter (`core/utils/`)
+
+Formats memories as a fake LLM tool call message, compatible with Agent / Tool Loop mode.
+
+#### `format_memories_for_fake_tool_call(memories: list, max_token_budget: int) -> list`
+
+**Parameters**:
+- `memories`: Memory list (containing content, score, importance, etc.)
+- `max_token_budget`: Maximum token budget; automatically truncates if exceeded
+
+**Returns**: A list of messages with `tool_calls` and `tool` roles, ready for direct injection into the AstrBot conversation context.
+
+**Characteristics**:
+- Uses a fixed prefix `fake_recall_` as the call_id, making it easy for `EventHandler` to automatically clean up before each new turn
+- Memory content is placed in the tool return as JSON, avoiding pollution of user-visible text
+
+---
+
+### AutoBackup (`storage/`)
+
+Scheduled automatic backup subsystem.
+
+#### `async run_backup_cycle()`
+
+Executes one backup cycle: checks if backup time is due → creates a `.db` backup → cleans up expired files.
+
+**Configuration** (via `ConfigManager`):
+- `backup.enabled`: Whether auto-backup is enabled
+- `backup.interval_hours`: Backup interval in hours
+- `backup.retention_days`: Retention period in days
+- `backup.directory`: Backup directory path
+
+**Returns**: `{"success": bool, "backup_path": str | None, "error": str | None}`
 
 ---
 
@@ -457,5 +517,5 @@ except DatabaseError as e:
 
 ---
 
-**Document Version**: v2.0.0
-**Last Updated**: 2025-12-17
+**Document Version**: v2.2.10
+**Last Updated**: 2026-04-28

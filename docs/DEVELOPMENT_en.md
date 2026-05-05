@@ -6,8 +6,8 @@
 
 # LivingMemory Developer Guide
 
-**Version**: v2.0.0
-**Last Updated**: 2025-12-17
+**Version**: v2.2.10
+**Last Updated**: 2026-04-28
 
 ---
 
@@ -80,9 +80,16 @@ astrbot_plugin_livingmemory/
 │   └── ...
 ├── storage/                        # Storage layer
 │   ├── conversation_store.py       # Conversation storage
-│   └── db_migration.py             # Database migration
+│   ├── db_migration.py             # Database migration
+│   └── backup_manager.py           # Scheduled auto-backup manager
 ├── webui/                          # Web management interface
 │   └── server.py                   # FastAPI server
+├── static/                         # Static resources
+│   ├── index.html
+│   ├── styles.css
+│   ├── app.js
+│   ├── graph-ui.js                 # 3D knowledge graph renderer
+│   └── i18n.js                     # Internationalization engine
 ├── tests/                          # Test suite
 │   ├── conftest.py                 # pytest configuration
 │   ├── test_*.py                   # Unit tests
@@ -232,6 +239,79 @@ async def test_with_async_mock():
 
     result = await mock_obj.async_method()
     assert result == "test"
+```
+
+### New Feature Testing
+
+#### Fake Tool Call Injection Test
+
+```python
+# tests/test_event_handler.py
+from unittest.mock import Mock
+from core.utils import format_memories_for_fake_tool_call
+
+def test_format_memories_for_fake_tool_call():
+    """Test fake tool call formatting"""
+    memories = [
+        {"id": 1, "content": "User likes cats", "score": 0.9, "importance": 0.8}
+    ]
+    messages = format_memories_for_fake_tool_call(memories, max_token_budget=500)
+    
+    assert len(messages) == 2  # tool_calls + tool
+    assert messages[0]["role"] == "assistant"
+    assert "tool_calls" in messages[0]
+    assert messages[0]["tool_calls"][0]["id"].startswith("fake_recall_")
+    assert messages[1]["role"] == "tool"
+    assert "User likes cats" in messages[1]["content"]
+```
+
+#### Scheduled Auto-Backup Test
+
+```python
+# tests/test_backup.py
+import pytest
+from storage.backup_manager import BackupManager
+from core.base.config_manager import ConfigManager
+
+@pytest.mark.asyncio
+async def test_backup_cycle():
+    """Test backup cycle"""
+    config = ConfigManager({"backup": {"enabled": True, "interval_hours": 24, "retention_days": 7}})
+    bm = BackupManager(config)
+    
+    result = await bm.run_backup_cycle()
+    assert "success" in result
+    assert result["success"] is True or result["error"] is not None
+```
+
+#### Image Caption Memory Test
+
+```python
+# tests/test_event_handler.py
+async def test_image_caption_memory():
+    """Test storing image caption content into memory"""
+    event = Mock()
+    event.get_messages.return_value = [Mock(role="user", text="<image_caption>a cat</image_caption>")]
+    
+    # Trigger message processing
+    await event_handler.handle_all_group_messages(event)
+    
+    # Verify memory engine stored the image description
+    memories = await memory_engine.search_memories("cat")
+    assert any("a cat" in m["content"] for m in memories)
+```
+
+#### 3D Graph Frontend Test
+
+```bash
+# Manual 3D graph testing
+# 1. Start WebUI
+# 2. Open browser console
+# 3. Check if ForceGraph3D loaded successfully
+# 4. Verify node drag, zoom, and rotate work normally
+
+# Run frontend unit tests (if available)
+pytest tests/test_graph_ui.py
 ```
 
 ### Performance Testing
@@ -458,6 +538,14 @@ A:
 3. Add unit tests
 4. Update help documentation
 
+### Q: How to add a new language to the WebUI?
+
+A:
+1. Add a new language dictionary to the `TRANSLATIONS` object in `static/i18n.js`
+2. Ensure all `data-i18n` keys have corresponding translations
+3. Add a new option to the `<select>` in HTML
+4. Test auto-detection logic (`navigator.language`) and manual switching
+
 ### Q: How to debug initialization issues?
 
 A:
@@ -477,5 +565,5 @@ A:
 
 ---
 
-**Document Version**: v2.0.0
-**Last Updated**: 2025-12-17
+**Document Version**: v2.2.10
+**Last Updated**: 2026-04-28

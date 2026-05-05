@@ -25,7 +25,7 @@ from .webui import WebUIServer
     "LivingMemory",
     "lxfight",
     "An intelligent long-term memory plugin with a dynamic lifecycle for AstrBot.",
-    "2.0.0",
+    "2.2.10",
     "https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory",
 )
 class LivingMemoryPlugin(Star):

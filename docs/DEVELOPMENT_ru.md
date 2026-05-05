@@ -6,8 +6,8 @@
 
 # LivingMemory — Руководство разработчика
 
-**Версия**: v2.0.0
-**Дата обновления**: 2025-12-17
+**Версия**: v2.2.10
+**Дата обновления**: 2026-04-28
 
 ---
 
@@ -80,9 +80,16 @@ astrbot_plugin_livingmemory/
 │   └── ...
 ├── storage/                        # Слой хранения
 │   ├── conversation_store.py       # Хранилище разговоров
-│   └── db_migration.py             # Миграция базы данных
+│   ├── db_migration.py             # Миграция базы данных
+│   └── backup_manager.py           # Менеджер регулярного автобэкапа
 ├── webui/                          # Веб-интерфейс управления
 │   └── server.py                   # FastAPI-сервер
+├── static/                         # Статические ресурсы
+│   ├── index.html
+│   ├── styles.css
+│   ├── app.js
+│   ├── graph-ui.js                 # 3D-рендерер графа знаний
+│   └── i18n.js                     # Движок интернационализации
 ├── tests/                          # Набор тестов
 │   ├── conftest.py                 # Конфигурация pytest
 │   ├── test_*.py                   # Модульные тесты
@@ -232,6 +239,79 @@ async def test_with_async_mock():
 
     result = await mock_obj.async_method()
     assert result == "test"
+```
+
+### Тестирование новых функций
+
+#### Тест инъекции через поддельный вызов инструмента
+
+```python
+# tests/test_event_handler.py
+from unittest.mock import Mock
+from core.utils import format_memories_for_fake_tool_call
+
+def test_format_memories_for_fake_tool_call():
+    """Тест форматирования поддельного вызова инструмента"""
+    memories = [
+        {"id": 1, "content": "Пользователь любит кошек", "score": 0.9, "importance": 0.8}
+    ]
+    messages = format_memories_for_fake_tool_call(memories, max_token_budget=500)
+    
+    assert len(messages) == 2  # tool_calls + tool
+    assert messages[0]["role"] == "assistant"
+    assert "tool_calls" in messages[0]
+    assert messages[0]["tool_calls"][0]["id"].startswith("fake_recall_")
+    assert messages[1]["role"] == "tool"
+    assert "Пользователь любит кошек" in messages[1]["content"]
+```
+
+#### Тест регулярного автоматического бэкапа
+
+```python
+# tests/test_backup.py
+import pytest
+from storage.backup_manager import BackupManager
+from core.base.config_manager import ConfigManager
+
+@pytest.mark.asyncio
+async def test_backup_cycle():
+    """Тест цикла резервного копирования"""
+    config = ConfigManager({"backup": {"enabled": True, "interval_hours": 24, "retention_days": 7}})
+    bm = BackupManager(config)
+    
+    result = await bm.run_backup_cycle()
+    assert "success" in result
+    assert result["success"] is True or result["error"] is not None
+```
+
+#### Тест памяти описаний изображений
+
+```python
+# tests/test_event_handler.py
+async def test_image_caption_memory():
+    """Тест сохранения описания изображения в память"""
+    event = Mock()
+    event.get_messages.return_value = [Mock(role="user", text="<image_caption>кошка</image_caption>")]
+    
+    # Запуск обработки сообщения
+    await event_handler.handle_all_group_messages(event)
+    
+    # Проверка, что движок памяти сохранил описание
+    memories = await memory_engine.search_memories("кошка")
+    assert any("кошка" in m["content"] for m in memories)
+```
+
+#### Тест фронтенда 3D-графа
+
+```bash
+# Ручное тестирование 3D-графа
+# 1. Запустить WebUI
+# 2. Открыть консоль браузера
+# 3. Проверить, успешно ли загрузился ForceGraph3D
+# 4. Проверить перетаскивание узлов, масштабирование и вращение
+
+# Запуск модульных тестов фронтенда (если есть)
+pytest tests/test_graph_ui.py
 ```
 
 ### Тестирование производительности
@@ -458,6 +538,14 @@ Closes #123
 3. Добавить модульные тесты
 4. Обновить справочную документацию
 
+### В: Как добавить новый язык в WebUI?
+
+О:
+1. Добавить новый языковой словарь в объект `TRANSLATIONS` в `static/i18n.js`
+2. Убедиться, что все ключи `data-i18n` имеют соответствующие переводы
+3. Добавить новый пункт в `<select>` в HTML
+4. Протестировать логику автоматического определения (`navigator.language`) и ручного переключения
+
 ### В: Как отлаживать проблемы инициализации?
 
 О:
@@ -477,5 +565,5 @@ Closes #123
 
 ---
 
-**Версия документа**: v2.0.0
-**Дата последнего обновления**: 2025-12-17
+**Версия документа**: v2.2.10
+**Дата последнего обновления**: 2026-04-28

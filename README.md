@@ -6,7 +6,7 @@
 
 # LivingMemory — Intelligent Long-Term Memory Plugin with Dynamic Lifecycle
 
-**Version**: v2.1.9 | **Author**: lxfight | **License**: AGPLv3
+**Version**: v2.2.10 | **Author**: lxfight | **License**: AGPLv3
 
 ---
 
@@ -20,7 +20,12 @@
 - **Agent Proactive Recall**: Exposes the `recall_long_term_memory` tool so the Agent can choose when and with what keywords to recall, returning results directly to the tool context
 - **Auto-Forgetting**: Intelligent cleanup mechanism based on time and importance
 - **Data Safety**: Auto-backup before migration, index rebuild with backup rollback, and transaction-protected deletion
-- **WebUI Management**: Visual memory management interface
+- **Scheduled Auto-Backup**: Daily automatic backup of the memory database with configurable retention and cleanup
+- **Fake Tool Call Injection**: New memory-injection strategy that simulates a tool call, improving compatibility with agent/loop mode and making memory context indistinguishable from a real recall
+- **Image Caption Memory**: Automatically stores image descriptions (from AstrBot image captioning) into long-term memory, enabling recall of visual conversations
+- **3D Knowledge Graph WebUI**: Interactive 3D force-directed graph visualization of memory entities and relationships, supporting zoom, rotation, and node inspection
+- **Safe Batched Index Rebuild**: Rebuilds large indexes in small, atomic batches to avoid memory spikes and corruption; automatically rolls back on failure
+- **WebUI Management**: Visual memory management interface with bilingual support (EN/ZH) and dark mode
 
 ---
 
@@ -62,6 +67,7 @@ Configure through the AstrBot console's plugin configuration page:
 | `/lmem rebuild-index` | Rebuild indexes (fix index inconsistency) |
 | `/lmem rebuild-graph` | Rebuild graph memory indexes (backfill graph data for old memories) |
 | `/lmem webui` | View WebUI information |
+| `/lmem summarize` | Trigger immediate memory summarization for the current session |
 | `/lmem reset` | Reset the current session memory context |
 | `/lmem cleanup [preview\|exec]` | Clean up memory injection fragments in message history (default preview) |
 | `/lmem help` | Display help |
@@ -83,8 +89,8 @@ astrbot_plugin_livingmemory/
 │   ├── plugin_initializer.py        # Plugin initializer
 │   ├── event_handler.py             # Event handler
 │   └── command_handler.py           # Command handler
-├── storage/                         # Storage layer (DBMigration, ConversationStore)
-├── webui/                           # Web management interface
+├── storage/                         # Storage layer (DBMigration, ConversationStore, AutoBackup)
+├── webui/                           # Web management interface (2D table + 3D graph views)
 ├── tests/                           # Test suite
 └── docs/                            # Documentation
 ```
@@ -111,7 +117,15 @@ astrbot_plugin_livingmemory/
    - Unified command response format
    - Comprehensive error handling
 
-5. **ConfigManager**: Configuration management
+5. **FakeToolCallFormatter** (`core/utils/`): Formats memories as a fake LLM tool call
+   - Compatible with agent/loop execution modes
+   - Automatically cleaned up by `EventHandler` on each new turn
+
+6. **AutoBackup** (`storage/`): Scheduled background backup
+   - Daily cron-based backups with retention policy
+   - Automatic cleanup of expired backup files
+
+7. **ConfigManager**: Configuration management
    - Centralized configuration loading
    - Configuration validation
    - Nested key access

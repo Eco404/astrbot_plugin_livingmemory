@@ -6,7 +6,7 @@
 
 # LivingMemory - 动态生命周期记忆插件
 
-**版本**: v2.1.9 | **作者**: lxfight | **许可证**: AGPLv3
+**版本**: v2.2.10 | **作者**: lxfight | **许可证**: AGPLv3
 
 ---
 
@@ -20,7 +20,12 @@
 - **Agent 主动回忆**: 暴露 `recall_long_term_memory` 工具，Agent 可自行选择回忆时机与关键词，将结果直接带回工具上下文
 - **自动遗忘**: 基于时间和重要性的智能清理机制
 - **数据安全**: 迁移前自动备份、索引重建带备份回滚、删除操作带事务保护
-- **WebUI 管理**: 可视化记忆管理界面
+- **定时自动备份**: 每日自动备份记忆数据库，支持保留策略和过期清理
+- **伪造工具调用注入**: 新的记忆注入策略，模拟 LLM 工具调用，兼容 Agent / Tool Loop 模式，使记忆上下文与真实召回不可区分
+- **图片转述记忆**: 自动将 AstrBot 图片转述结果存入长期记忆，支持视觉对话的召回
+- **3D 知识图谱 WebUI**: 交互式 3D 力导向图可视化记忆实体与关系，支持缩放、旋转和节点查看
+- **安全分批索引重建**: 以小批量原子方式重建大型索引，防止内存溢出和损坏；失败时自动回滚
+- **WebUI 管理**: 可视化记忆管理界面，支持双语（中/英）和深色模式
 
 ---
 
@@ -62,6 +67,7 @@
 | `/lmem rebuild-index` | 重建索引（修复索引不一致） |
 | `/lmem rebuild-graph` | 重建图记忆索引（为旧记忆回填图数据） |
 | `/lmem webui` | 查看 WebUI 信息 |
+| `/lmem summarize` | 立即触发当前会话的记忆总结 |
 | `/lmem reset` | 重置当前会话记忆上下文 |
 | `/lmem cleanup [preview\|exec]` | 清理历史消息中的记忆注入片段（默认 preview 预演） |
 | `/lmem help` | 显示帮助 |
@@ -83,8 +89,8 @@ astrbot_plugin_livingmemory/
 │   ├── plugin_initializer.py        # 插件初始化器
 │   ├── event_handler.py             # 事件处理器
 │   └── command_handler.py           # 命令处理器
-├── storage/                         # 存储层（DBMigration、ConversationStore）
-├── webui/                           # Web 管理界面
+├── storage/                         # 存储层（DBMigration、ConversationStore、AutoBackup）
+├── webui/                           # Web 管理界面（表格 + 3D 图谱视图）
 ├── tests/                           # 测试套件
 └── docs/                            # 文档
 ```
@@ -111,7 +117,15 @@ astrbot_plugin_livingmemory/
    - 统一命令响应格式
    - 完善的错误处理
 
-5. **ConfigManager**: 配置管理
+5. **FakeToolCallFormatter** (`core/utils/`): 将记忆格式化为伪造的 LLM 工具调用
+   - 兼容 Agent / Tool Loop 执行模式
+   - 每轮由 `EventHandler` 自动清理
+
+6. **AutoBackup** (`storage/`): 定时后台备份
+   - 基于 cron 的每日备份与保留策略
+   - 自动清理过期备份文件
+
+7. **ConfigManager**: 配置管理
    - 集中配置加载
    - 配置验证
    - 嵌套键访问

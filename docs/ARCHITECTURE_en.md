@@ -6,8 +6,8 @@
 
 # LivingMemory Architecture Documentation
 
-**Version**: v2.0.0
-**Last Updated**: 2025-12-17
+**Version**: v2.2.10
+**Last Updated**: 2026-04-28
 
 ---
 
@@ -63,7 +63,8 @@ astrbot_plugin_livingmemory/
 │   │
 │   ├── utils/                       # Utilities layer
 │   │   ├── __init__.py
-│   │   └── stopwords_manager.py     # Stopwords manager
+│   │   ├── stopwords_manager.py     # Stopwords manager
+│   │   └── (FakeToolCallFormatter)   # Fake tool call formatter
 │   │
 │   ├── tools/                       # Agent tool layer
 │   │   ├── __init__.py
@@ -76,7 +77,8 @@ astrbot_plugin_livingmemory/
 ├── storage/                         # Storage layer
 │   ├── __init__.py
 │   ├── conversation_store.py       # Conversation storage
-│   └── db_migration.py             # Database migration
+│   ├── db_migration.py             # Database migration
+│   └── backup_manager.py           # Scheduled auto-backup manager
 │
 ├── webui/                           # Web management interface
 │   ├── __init__.py
@@ -86,7 +88,9 @@ astrbot_plugin_livingmemory/
 ├── static/                          # Static resources
 │   ├── index.html
 │   ├── styles.css
-│   └── app.js
+│   ├── app.js
+│   ├── graph-ui.js                  # 3D knowledge graph renderer
+│   └── i18n.js                      # Internationalization engine
 │
 ├── tests/                           # Test suite
 │   ├── conftest.py
@@ -197,15 +201,18 @@ astrbot_plugin_livingmemory/
 
 ### 7. Utilities Layer (utils/)
 
-**Responsibility**: Provide general utility functions.
+**Responsibility**: Provide general utility functions and formatters.
 
 **Components**:
 - `stopwords_manager.py`: Stopwords management.
-- Other utility functions.
+- `FakeToolCallFormatter` (`__init__.py`): Fake tool call formatter.
+  - Wraps memory content as `tool_calls` + `tool` message pairs.
+  - Uses a fixed prefix `fake_recall_` as the call_id, making it easy for `EventHandler` to clean up automatically.
+  - Supports token budget truncation to avoid exceeding context limits.
 
 **Dependencies**: base/
 
-**Depended upon**: processors/, retrieval/
+**Depended upon**: processors/, retrieval/, event_handler.py
 
 ---
 
@@ -224,15 +231,19 @@ astrbot_plugin_livingmemory/
 
 ### 9. Storage Layer (storage/)
 
-**Responsibility**: Data persistence.
+**Responsibility**: Data persistence and backup.
 
 **Components**:
 - `conversation_store.py`: Conversation data storage.
 - `db_migration.py`: Database migration.
+- `backup_manager.py`: Scheduled auto-backup manager.
+  - Interval-based backup scheduling (cron / asyncio sleep).
+  - Configurable retention policy (by days or count).
+  - Automatic retry and alerting on failure.
 
 **Dependencies**: base/, models/
 
-**Depended upon**: managers/conversation_manager
+**Depended upon**: managers/conversation_manager, plugin_initializer
 
 ---
 
@@ -363,6 +374,24 @@ Modules should only interact with their immediate dependencies:
 
 ---
 
+### WebUI Frontend Architecture
+
+**Files**:
+- `index.html`: Single-page app shell with language switcher and dark-mode toggle.
+- `app.js`: Main dashboard logic (memory table, search, pagination, CRUD).
+- `graph-ui.js`: 3D knowledge graph renderer.
+  - Force-directed graph based on `ForceGraph3D` (Three.js).
+  - Supports node drag, zoom, rotate, hover tooltips.
+  - Entity-type coloring: person, place, event, concept, other.
+  - Communicates with `app.js` via an event bus, sharing filter criteria.
+- `i18n.js`: Internationalization engine.
+  - Supports `zh` / `en` / `ru` (Russian as fallback).
+  - DOM translation based on `data-i18n` attributes.
+  - `localStorage` persistence + `navigator.language` auto-detection.
+- `styles.css`: Glassmorphism design system.
+
+---
+
 ## Extension Guide
 
 ### Adding a new processor
@@ -429,6 +458,15 @@ from ..processors import TextProcessor
 
 ## Version History
 
+### v2.2.10
+
+- **Fake Tool Call Injection**: Added fake tool call injection strategy, compatible with Agent / Tool Loop mode.
+- **Image Caption Memory**: Supports automatic storage of AstrBot image caption results into long-term memory.
+- **3D Knowledge Graph WebUI**: Added 3D force-directed graph visualization based on ForceGraph3D.
+- **Scheduled Auto-Backup**: Added scheduled auto-backup subsystem (`backup_manager.py`).
+- **Safe Batched Index Rebuild**: Index rebuild supports safe batched mode to avoid memory overflow.
+- **i18n**: WebUI added full internationalization support (Chinese/English/Russian); command responses fully translated to English.
+
 ### v2.0.0 (2025-12-17)
 
 - Reorganized directory structure.
@@ -445,5 +483,5 @@ from ..processors import TextProcessor
 
 ---
 
-**Document Version**: v2.0.0
-**Last Updated**: 2025-12-17
+**Document Version**: v2.2.10
+**Last Updated**: 2026-04-28
