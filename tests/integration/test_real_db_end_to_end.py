@@ -578,6 +578,8 @@ async def test_webui_messages_for_disabled_and_enabled_paths(real_db_stack):
     disabled_output = [msg async for msg in command_handler.handle_webui(event)]
     assert len(disabled_output) == 1
     assert "WebUI 功能当前未启用" in disabled_output[0]
+    assert "AstrBot 官方 WebUI" in disabled_output[0]
+    assert "Pages -> dashboard" in disabled_output[0]
     assert "webui.enabled=false" in disabled_output[0]
 
     command_handler.config_manager = ConfigManager(

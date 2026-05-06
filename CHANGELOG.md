@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [2.2.11] - 2026-05-06
+
 ### 新增
 - 新增 AstrBot 官方插件 Pages 管理界面支持：可在 AstrBot WebUI 的插件详情页直接进入 `dashboard` 页面，无需额外登录插件独立 WebUI。
 - 新增官方插件 Page 原生后端接口适配层，支持记忆统计、记忆列表、批量删除、记忆编辑、召回测试、知识图谱概览与图谱检索。
@@ -23,9 +25,13 @@
 - 修复 AstrBot 4.23.2 中 `documents_fts` 同名表冲突导致总结记忆存储失败的问题。
 - 将插件自有 FTS 表统一迁移为 `livingmemory_memories_fts` 与 `livingmemory_graph_entries_fts`，避免再次污染宿主数据库命名空间。
 - 新增 v6 数据库迁移：复制旧 `memories_fts` / `graph_entries_fts` 数据到前缀表，删除插件废弃 `documents_fts(search_text)`，保留 AstrBot 同名表。
+- 修复 `/lmem webui` 在旧版独立 WebUI 未启用时缺少兼容提示的问题，并恢复兼容入口访问地址文案。
+- 修复 `top_k=0` 私聊场景下消息存储优先级错误，避免错误写入事件默认文本。
+- 调整记忆注入格式，同时兼容英文提示模板与既有中文记忆条目标识。
 
 ### 测试
 - 补充 issue #102 回归测试，覆盖宿主 `documents_fts` 存在时 BM25 写入、旧 FTS 表前缀迁移、废弃插件冲突表清理。
+- 补充 `/lmem webui` 兼容提示、`top_k=0` 私聊存储、记忆注入格式兼容回归测试。
 
 ### 移除
 - 移除废弃的 `sparse_retriever` 实现与配置入口，统一使用文档路 BM25/向量检索、图路检索和 RRF 融合链路。

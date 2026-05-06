@@ -6,7 +6,7 @@
 
 # LivingMemory - Intelligent Long-Term Memory Plugin with Dynamic Lifecycle
 
-**Version**: v2.2.10 | **Author**: lxfight | **License**: AGPLv3
+**Version**: v2.2.11 | **Author**: lxfight | **License**: AGPLv3
 
 ---
 

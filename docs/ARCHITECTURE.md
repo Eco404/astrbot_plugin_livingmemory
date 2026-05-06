@@ -6,8 +6,8 @@
 
 # LivingMemory 架构文档
 
-**版本**: v2.2.10
-**更新日期**: 2026-04-28
+**版本**: v2.2.11
+**更新日期**: 2026-05-06
 
 ---
 
@@ -458,6 +458,13 @@ from ..processors import TextProcessor
 
 ## 版本历史
 
+### v2.2.11
+
+- **AstrBot 官方插件 Pages**: 支持从 AstrBot 官方 WebUI 插件页直接进入 `dashboard`
+- **旧版 WebUI 兼容**: 保留旧版独立 WebUI 兼容入口，并恢复兼容提示与访问地址文案
+- **top_k=0 召回安全性**: 修复关闭召回时私聊消息的存储优先级
+- **记忆注入格式兼容**: 同时兼容英文提示模板与既有中文记忆条目标识
+
 ### v2.2.10
 
 - **Fake Tool Call Injection**: 新增伪造工具调用注入策略，兼容 Agent / Tool Loop 模式
@@ -483,5 +490,5 @@ from ..processors import TextProcessor
 
 ---
 
-**文档版本**: v2.2.10
-**最后更新**: 2026-04-28
+**文档版本**: v2.2.11
+**最后更新**: 2026-05-06

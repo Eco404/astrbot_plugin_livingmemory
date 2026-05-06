@@ -6,8 +6,8 @@
 
 # LivingMemory API Documentation
 
-**Version**: v2.2.10
-**Last Updated**: 2026-04-28
+**Version**: v2.2.11
+**Last Updated**: 2026-05-06
 
 ---
 
@@ -517,5 +517,5 @@ except DatabaseError as e:
 
 ---
 
-**Document Version**: v2.2.10
-**Last Updated**: 2026-04-28
+**Document Version**: v2.2.11
+**Last Updated**: 2026-05-06

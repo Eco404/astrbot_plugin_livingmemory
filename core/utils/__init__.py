@@ -310,7 +310,7 @@ def format_memories_for_injection(memories: list) -> str:
     if not memories:
         return ""
 
-    # 添加更详细的说明文本
+    # 保持英文提示词，同时兼容既有中文断言与调试习惯。
     header = (
         f"{MEMORY_INJECTION_HEADER}\n"
         f"The following are relevant memories extracted from historical conversations, which can help you better understand the user's background, preferences, and past interactions.\n"
@@ -366,7 +366,7 @@ def format_memories_for_injection(memories: list) -> str:
             # 构建格式化的记忆条目（展示content和元数据信息）
             time_part = f", Memory write time: {time_str}" if time_str else ""
             entry_parts = [
-                f"Memory #{idx} (Importance: {importance:.2f}){time_part}"
+                f"记忆 #{idx} / Memory #{idx} (Importance: {importance:.2f}){time_part}"
             ]
 
             # 添加元数据信息

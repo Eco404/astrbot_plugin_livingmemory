@@ -6,8 +6,8 @@
 
 # LivingMemory Architecture Documentation
 
-**Version**: v2.2.10
-**Last Updated**: 2026-04-28
+**Version**: v2.2.11
+**Last Updated**: 2026-05-06
 
 ---
 
@@ -458,6 +458,13 @@ from ..processors import TextProcessor
 
 ## Version History
 
+### v2.2.11
+
+- **AstrBot Official Plugin Pages**: Added support for opening `dashboard` directly from the AstrBot official WebUI plugin page.
+- **Legacy WebUI Compatibility**: Kept the legacy standalone WebUI entry and restored compatibility messaging and access URL hints.
+- **top_k=0 Recall Safety**: Fixed private-chat message storage priority when recall is disabled.
+- **Injection Format Compatibility**: Kept the memory injection format compatible with both the English prompt template and legacy Chinese entry labels.
+
 ### v2.2.10
 
 - **Fake Tool Call Injection**: Added fake tool call injection strategy, compatible with Agent / Tool Loop mode.
@@ -483,5 +490,5 @@ from ..processors import TextProcessor
 
 ---
 
-**Document Version**: v2.2.10
-**Last Updated**: 2026-04-28
+**Document Version**: v2.2.11
+**Last Updated**: 2026-05-06

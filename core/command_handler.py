@@ -349,11 +349,14 @@ class CommandHandler:
         if not webui_url:
             message = """LivingMemory 管理界面
 
+WebUI 功能当前未启用（旧版独立 WebUI）。
+
 推荐入口:
 • 打开 AstrBot 官方 WebUI
 • 进入 插件 -> LivingMemory -> Pages -> dashboard
 
 兼容说明:
+• 官方插件页可直接复用 AstrBot 登录态
 • 旧版独立 WebUI 当前未启用
 • 可能原因:
   1. 配置中 webui.enabled=false
@@ -372,6 +375,7 @@ class CommandHandler:
 
 兼容入口:
 • 旧版独立 WebUI: {webui_url}
+• 访问地址: {webui_url}
 
 说明:
 • 官方插件页复用 AstrBot 登录态，无需再次登录

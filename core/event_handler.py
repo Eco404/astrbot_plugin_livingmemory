@@ -164,10 +164,16 @@ class EventHandler:
                 # 先提取用户消息（消息存储和召回都需要）
                 actual_query = self._get_event_message_str(event)
 
+                request_query = (
+                    prompt_text.strip() if isinstance(prompt_text, str) else ""
+                )
+
                 # 存储用户消息（仅私聊），无论是否启用召回都需要
                 is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
                 if not is_group and actual_query:
-                    message_to_store = await self._extract_message_content(event, req)
+                    message_to_store = request_query
+                    if not message_to_store:
+                        message_to_store = await self._extract_message_content(event, req)
                     if not message_to_store:
                         message_to_store = actual_query.strip()
                     await self.conversation_manager.add_message_from_event(

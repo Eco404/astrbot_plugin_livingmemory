@@ -207,6 +207,8 @@ async def test_handle_webui_when_disabled_returns_reason(handler, mock_event):
     messages = [msg async for msg in handler.handle_webui(mock_event)]
     assert len(messages) == 1
     assert "WebUI 功能当前未启用" in messages[0]
+    assert "AstrBot 官方 WebUI" in messages[0]
+    assert "Pages -> dashboard" in messages[0]
     assert "webui.enabled=false" in messages[0]
 
 
