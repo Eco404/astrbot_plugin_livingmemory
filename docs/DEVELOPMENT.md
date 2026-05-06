@@ -7,7 +7,7 @@
 # LivingMemory 开发者指南
 
 **版本**: v2.2.10
-**更新日期**: 2026-04-28
+**更新日期**: 2026-05-06
 
 ---
 
@@ -28,7 +28,7 @@
 ### 前置要求
 
 - Python 3.10+
-- AstrBot 开发环境
+- AstrBot 开发环境（若开发官方插件 Pages，要求 AstrBot >= 4.24.2）
 - Git
 
 ### 安装依赖
@@ -82,9 +82,11 @@ astrbot_plugin_livingmemory/
 │   ├── conversation_store.py       # 会话存储
 │   ├── db_migration.py             # 数据库迁移
 │   └── backup_manager.py           # 定时自动备份管理器
-├── webui/                          # Web管理界面
-│   └── server.py                   # FastAPI服务器
-├── static/                         # 静态资源
+├── pages/                           # AstrBot 官方插件 Pages 资源
+│   └── dashboard/                   # 官方插件页 dashboard
+├── webui/                           # 旧版独立 WebUI（兼容入口）
+│   └── server.py                    # FastAPI服务器
+├── static/                          # 旧版独立 WebUI 静态资源
 │   ├── index.html
 │   ├── styles.css
 │   ├── app.js
@@ -110,7 +112,17 @@ astrbot_plugin_livingmemory/
 | plugin_initializer.py | 插件初始化 | 所有核心模块 |
 | event_handler.py | 事件处理 | memory_engine, conversation_manager |
 | command_handler.py | 命令处理 | memory_engine, conversation_manager |
+| page_api.py | 官方插件 Page Web API 适配 | memory_engine, graph_store |
 | tools/ | Agent 工具封装 | memory_engine, config_manager |
+
+### 官方插件 Pages 开发说明
+
+- `pages/dashboard/` 用于 AstrBot 官方插件页入口，运行在受限 iframe 中
+- 前端必须通过 `window.AstrBotPluginPage` 与宿主 Dashboard 通信
+- 不要假设 `window.location.origin` 可用；sandbox iframe 可能返回 opaque origin
+- 不要裸用 `localStorage` / `sessionStorage`；必须容错处理 `SecurityError`
+- 后端路由通过 `context.register_web_api()` 注册，路由必须带插件名前缀
+- 旧版独立 WebUI 资源仍保留在 `webui/` 与 `static/`，用于兼容历史访问方式
 
 ---
 
@@ -256,7 +268,7 @@ def test_format_memories_for_fake_tool_call():
         {"id": 1, "content": "用户喜欢猫", "score": 0.9, "importance": 0.8}
     ]
     messages = format_memories_for_fake_tool_call(memories, max_token_budget=500)
-    
+
     assert len(messages) == 2  # tool_calls + tool
     assert messages[0]["role"] == "assistant"
     assert "tool_calls" in messages[0]
@@ -278,7 +290,7 @@ async def test_backup_cycle():
     """测试备份周期"""
     config = ConfigManager({"backup": {"enabled": True, "interval_hours": 24, "retention_days": 7}})
     bm = BackupManager(config)
-    
+
     result = await bm.run_backup_cycle()
     assert "success" in result
     assert result["success"] is True or result["error"] is not None
@@ -292,10 +304,10 @@ async def test_image_caption_memory():
     """测试图片转述内容存入记忆"""
     event = Mock()
     event.get_messages.return_value = [Mock(role="user", text="<image_caption>一只猫</image_caption>")]
-    
+
     # 触发消息处理
     await event_handler.handle_all_group_messages(event)
-    
+
     # 验证记忆库存储了图片描述
     memories = await memory_engine.search_memories("猫")
     assert any("一只猫" in m["content"] for m in memories)
@@ -566,4 +578,4 @@ A:
 ---
 
 **文档版本**: v2.2.10
-**最后更新**: 2026-04-28
+**最后更新**: 2026-05-06

@@ -4,7 +4,7 @@
 
 </div>
 
-# LivingMemory — Intelligent Long-Term Memory Plugin with Dynamic Lifecycle
+# LivingMemory - Intelligent Long-Term Memory Plugin with Dynamic Lifecycle
 
 **Version**: v2.2.10 | **Author**: lxfight | **License**: AGPLv3
 
@@ -12,20 +12,15 @@
 
 ## Core Features
 
-- **Hybrid Retrieval**: Combines BM25 sparse retrieval and Faiss vector retrieval using the RRF fusion algorithm
-- **Dual-Route Four-Mode Retrieval**: Simultaneously maintains document-route and graph-route retrieval, each supporting both keyword and vector search, then unified fusion ranking
-- **Intelligent Summarization**: Uses LLM to automatically summarize conversation history and generate structured memories
-- **Dual-Channel Summarization**: `canonical_summary` (fact-oriented, for retrieval) and `persona_summary` (persona-style, for injection) are decoupled and stored separately
-- **Session Isolation**: Supports memory isolation by persona and session
-- **Agent Proactive Recall**: Exposes the `recall_long_term_memory` tool so the Agent can choose when and with what keywords to recall, returning results directly to the tool context
-- **Auto-Forgetting**: Intelligent cleanup mechanism based on time and importance
-- **Data Safety**: Auto-backup before migration, index rebuild with backup rollback, and transaction-protected deletion
-- **Scheduled Auto-Backup**: Daily automatic backup of the memory database with configurable retention and cleanup
-- **Fake Tool Call Injection**: New memory-injection strategy that simulates a tool call, improving compatibility with agent/loop mode and making memory context indistinguishable from a real recall
-- **Image Caption Memory**: Automatically stores image descriptions (from AstrBot image captioning) into long-term memory, enabling recall of visual conversations
-- **3D Knowledge Graph WebUI**: Interactive 3D force-directed graph visualization of memory entities and relationships, supporting zoom, rotation, and node inspection
-- **Safe Batched Index Rebuild**: Rebuilds large indexes in small, atomic batches to avoid memory spikes and corruption; automatically rolls back on failure
-- **WebUI Management**: Visual memory management interface with bilingual support (EN/ZH) and dark mode
+- **Hybrid Retrieval**: Combines BM25 sparse retrieval and Faiss vector retrieval with RRF fusion.
+- **Dual-Route Four-Mode Retrieval**: Maintains both document and graph routes, each supporting keyword and vector retrieval before unified ranking.
+- **Intelligent Summarization**: Uses an LLM to summarize conversation history into structured memories.
+- **Dual-Channel Summarization**: Stores `canonical_summary` and `persona_summary` separately for retrieval and prompt injection.
+- **Session Isolation**: Supports persona-level and session-level memory isolation.
+- **Agent Proactive Recall**: Exposes `recall_long_term_memory` so agents can decide when to recall and which keywords to use.
+- **Auto-Forgetting**: Cleans up stale memories based on time and importance.
+- **Data Safety**: Includes automatic backup before migration, rollback on index rebuild failure, and transactional deletion.
+- **WebUI Management**: Supports both the AstrBot official plugin Pages dashboard and the legacy standalone WebUI compatibility entry.
 
 ---
 
@@ -33,17 +28,17 @@
 
 ### Installation
 
-Place the plugin folder in AstrBot's `data/plugins` directory. AstrBot will automatically install the dependencies.
+Place the plugin folder under AstrBot's `data/plugins` directory. AstrBot installs dependencies automatically.
 
 ### Configuration
 
-Configure through the AstrBot console's plugin configuration page:
+Configure the plugin from the AstrBot plugin configuration page.
 
-**Required Configuration**:
-- `embedding_provider_id`: Vector embedding model ID (leave empty to use the default)
-- `llm_provider_id`: Large language model ID (leave empty to use the default)
+**Required settings**:
+- `embedding_provider_id`: Embedding model ID. Leave empty to use the AstrBot default.
+- `llm_provider_id`: LLM model ID. Leave empty to use the AstrBot default.
 
-**WebUI Configuration**:
+**WebUI settings**:
 ```json
 {
   "webui_settings": {
@@ -55,26 +50,43 @@ Configure through the AstrBot console's plugin configuration page:
 }
 ```
 
+### AstrBot Version Requirement
+
+- The **AstrBot official plugin Pages dashboard** requires **AstrBot >= 4.24.2**.
+- The legacy standalone WebUI compatibility entry does not depend on plugin Pages and can still be opened through `/lmem webui`.
+
+### Management Entry
+
+Recommended entry:
+
+1. Open the AstrBot official WebUI.
+2. Go to `Plugins -> LivingMemory -> Pages -> dashboard`.
+
+Compatibility entry:
+
+- Run `/lmem webui`.
+- If the legacy standalone WebUI is enabled, open the returned URL.
+
 ---
 
 ## Commands
 
 | Command | Description |
 | :--- | :--- |
-| `/lmem status` | View memory library status |
-| `/lmem search <query> [k]` | Search memories (default 5 results) |
+| `/lmem status` | View memory status |
+| `/lmem search <query> [k]` | Search memories (default 5 items) |
 | `/lmem forget <id>` | Delete a specific memory |
-| `/lmem rebuild-index` | Rebuild indexes (fix index inconsistency) |
-| `/lmem rebuild-graph` | Rebuild graph memory indexes (backfill graph data for old memories) |
+| `/lmem rebuild-index` | Rebuild indexes |
+| `/lmem rebuild-graph` | Rebuild graph memory indexes |
 | `/lmem webui` | View WebUI information |
-| `/lmem summarize` | Trigger immediate memory summarization for the current session |
-| `/lmem reset` | Reset the current session memory context |
-| `/lmem cleanup [preview\|exec]` | Clean up memory injection fragments in message history (default preview) |
-| `/lmem help` | Display help |
+| `/lmem summarize` | Trigger immediate summarization for the current session |
+| `/lmem reset` | Reset current session memory context |
+| `/lmem cleanup [preview\|exec]` | Clean injected memory fragments from history |
+| `/lmem help` | Show help |
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ### Module Structure
 
@@ -82,74 +94,72 @@ Configure through the AstrBot console's plugin configuration page:
 astrbot_plugin_livingmemory/
 ├── main.py                          # Plugin registration and lifecycle management
 ├── core/
-│   ├── base/                        # Base components (config, constants, exceptions)
-│   ├── managers/                    # Core managers (MemoryEngine, ConversationManager)
-│   ├── retrieval/                   # Retrieval layer (document route, graph route, RRF fusion)
-│   ├── validators/                  # Validators (IndexValidator)
+│   ├── base/                        # Base components
+│   ├── managers/                    # Core managers
+│   ├── retrieval/                   # Retrieval layer
+│   ├── validators/                  # Validators
 │   ├── plugin_initializer.py        # Plugin initializer
 │   ├── event_handler.py             # Event handler
 │   └── command_handler.py           # Command handler
-├── storage/                         # Storage layer (DBMigration, ConversationStore, AutoBackup)
-├── webui/                           # Web management interface (2D table + 3D graph views)
+├── storage/                         # Storage layer
+├── pages/                           # AstrBot official plugin Pages assets
+├── webui/                           # Legacy standalone WebUI compatibility entry
 ├── tests/                           # Test suite
 └── docs/                            # Documentation
 ```
 
 ### Core Components
 
-1. **PluginInitializer**: Responsible for plugin initialization
-   - Non-blocking initialization mechanism
-   - Provider waiting and retry logic
+1. **PluginInitializer**
+   - Non-blocking initialization
+   - Provider wait and retry
    - Automatic database migration
 
-2. **EventHandler**: Handles event hooks
-   - Group chat message capture
+2. **EventHandler**
+   - Group message capture
    - Memory recall
    - Memory reflection
 
-3. **Agent Memory Tool**: Provides proactive recall capability for tool loop / agent mode
+3. **Agent Memory Tool**
    - Tool name: `recall_long_term_memory`
-   - Reuses existing session and persona isolation configuration
-   - Returns raw memory list without extra prompt injection
-   - Suitable for scenarios like "Do you still remember?", "What did I say before?", or "Help me recall"
+   - Reuses existing session and persona isolation
+   - Returns raw memory results without additional prompt injection
+   - Useful for recall and history lookup scenarios
 
-4. **CommandHandler**: Handles commands
-   - Unified command response format
-   - Comprehensive error handling
+4. **CommandHandler**
+   - Unified command responses
+   - Structured error handling
 
-5. **FakeToolCallFormatter** (`core/utils/`): Formats memories as a fake LLM tool call
-   - Compatible with agent/loop execution modes
-   - Automatically cleaned up by `EventHandler` on each new turn
+5. **PluginPageApi**
+   - Registers plugin page APIs through `register_web_api`
+   - Reuses the runtime memory engine and graph components
+   - Provides memory management, recall debugging, and graph queries for `pages/dashboard`
 
-6. **AutoBackup** (`storage/`): Scheduled background backup
-   - Daily cron-based backups with retention policy
-   - Automatic cleanup of expired backup files
-
-7. **ConfigManager**: Configuration management
+6. **ConfigManager**
    - Centralized configuration loading
    - Configuration validation
    - Nested key access
 
 ---
 
-## Agent Proactive Memory Recall
+## Agent Proactive Recall
 
-In addition to automatic memory recall, the plugin registers an LLM tool at runtime: `recall_long_term_memory`.
+Besides automatic recall, the plugin registers an LLM tool at runtime: `recall_long_term_memory`.
 
-Characteristics of this tool:
+Key characteristics:
 
-- The Agent can decide whether to recall long-term memories itself, rather than relying solely on the current round's message as the query
-- The tool's recall scope automatically inherits the current configuration's session isolation and persona isolation settings
-- Retrieval results are returned as tool outputs into the agent context and do not go through the memory prompt injection path again
-- More suitable when the user asks to "recall", "remember", or "what was mentioned before", or when references are ambiguous and historical context needs to be checked
+- The agent can decide whether to recall long-term memory instead of relying only on the current message as the query.
+- The recall scope automatically follows the current session and persona isolation settings.
+- Results are returned as tool output and do not pass through the prompt injection path again.
+- It is useful when the user asks to remember, recall, or retrieve earlier context.
 
-Recommended call strategy:
+Recommended strategy:
 
-- Prefer short keywords instead of copying the full user input
-- Prioritize recalling themes, entity names, preferences, agreements, or historical events — high-information words
-- If the first recall is not ideal, switch to a more specific or more abstract keyword and recall again
+- Prefer short keywords instead of copying the full user input.
+- Prioritize topics, entity names, preferences, agreements, and historical events.
+- If the first recall is not good enough, try a more specific or more abstract keyword.
 
-The returned result is a raw memory list, including memory content, relevance score, importance, and session/persona metadata, making it easy for the agent to judge which results are truly relevant
+Results are returned as raw memories with content, relevance score, importance, and session/persona metadata so the agent can decide what is relevant.
 
 ---
 
@@ -164,32 +174,32 @@ pytest tests/
 # Run a specific test
 pytest tests/test_config_manager.py
 
-# View coverage
+# Show coverage
 pytest --cov=core tests/
 ```
 
 ### Documentation
 
 - [API Documentation](docs/API_en.md): Detailed API reference
-- [Architecture Documentation](docs/ARCHITECTURE_en.md): System architecture description
-- [Developer Guide](docs/DEVELOPMENT_en.md): Development and contribution guidelines
+- [Architecture Documentation](docs/ARCHITECTURE_en.md): Architecture overview
+- [Developer Guide](docs/DEVELOPMENT_en.md): Development and contribution guide
 
 ---
 
-## Data Migration (v1.4.0-1.4.2)
+## Data Migration (v1.4.0-v1.4.2)
 
-If upgrading from v1.4.0-1.4.2, old data may not migrate automatically. Manual recovery steps:
+If you upgrade from v1.4.0-v1.4.2, old data may not migrate automatically. Manual recovery steps:
 
-1. Find the backup file: `data/plugin_data/astrbot_plugin_livingmemory/backups/livingmemory_backup_<timestamp>.db`
-2. Move that file to: `data/plugin_data/astrbot_plugin_livingmemory/`
-3. Rename it to: `livingmemory.db`
-4. Reload the plugin; the system will automatically load and process the data
+1. Locate the backup file: `data/plugin_data/astrbot_plugin_livingmemory/backups/livingmemory_backup_<timestamp>.db`
+2. Move it to `data/plugin_data/astrbot_plugin_livingmemory/`
+3. Rename it to `livingmemory.db`
+4. Reload the plugin. The system will load and process the data automatically.
 
 ---
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md)
+See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
