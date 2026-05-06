@@ -1,6 +1,6 @@
 # LivingMemory - 动态生命周期记忆插件
 
-**版本**: v2.1.9 | **作者**: lxfight | **许可证**: AGPLv3
+**版本**: v2.2.10 | **作者**: lxfight | **许可证**: AGPLv3
 
 ---
 
@@ -14,7 +14,7 @@
 - **Agent 主动回忆**: 暴露 `recall_long_term_memory` 工具，Agent 可自行选择回忆时机与关键词，将结果直接带回工具上下文
 - **自动遗忘**: 基于时间和重要性的智能清理机制
 - **数据安全**: 迁移前自动备份、索引重建带备份回滚、删除操作带事务保护
-- **WebUI 管理**: 可视化记忆管理界面
+- **WebUI 管理**: 同时支持 AstrBot 官方插件 Pages 管理界面与旧版独立 WebUI 兼容入口
 
 ---
 
@@ -43,6 +43,23 @@
   }
 }
 ```
+
+### AstrBot 版本要求
+
+- 使用 **AstrBot 官方插件 Pages 管理界面** 时，要求 **AstrBot >= 4.5.7**
+- 旧版独立 WebUI 兼容入口不依赖插件 Pages，可继续通过 `/lmem webui` 查看访问地址
+
+### 管理界面入口
+
+推荐入口：
+
+1. 打开 AstrBot 官方 WebUI
+2. 进入 `插件 -> LivingMemory -> Pages -> dashboard`
+
+兼容入口：
+
+- 执行 `/lmem webui`
+- 若旧版独立 WebUI 已启用，可按命令返回的地址访问
 
 ---
 
@@ -78,7 +95,8 @@ astrbot_plugin_livingmemory/
 │   ├── event_handler.py             # 事件处理器
 │   └── command_handler.py           # 命令处理器
 ├── storage/                         # 存储层（DBMigration、ConversationStore）
-├── webui/                           # Web 管理界面
+├── pages/                           # AstrBot 官方插件 Pages 资源
+├── webui/                           # 旧版独立 Web 管理界面（兼容入口）
 ├── tests/                           # 测试套件
 └── docs/                            # 文档
 ```
@@ -109,6 +127,11 @@ astrbot_plugin_livingmemory/
    - 集中配置加载
    - 配置验证
    - 嵌套键访问
+
+6. **PluginPageApi**: AstrBot 官方插件 Page 原生接口层
+   - 注册 `register_web_api` 路由
+   - 复用运行期记忆引擎与图谱组件
+   - 为 `pages/dashboard` 提供记忆管理、召回调试与图谱查询能力
 
 ---
 
