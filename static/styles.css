@@ -294,52 +294,177 @@ body::before {
   }
 }
 
-.login-theme-toggle {
-  position: fixed !important;
-  top: var(--space-4) !important;
-  right: var(--space-4) !important;
-  left: auto !important;
+.login-actions {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  display: flex;
+  gap: var(--space-3);
   z-index: 100;
-  padding: var(--space-3);
-  width: 2.75rem;
-  height: 2.75rem;
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--blur-md));
-  -webkit-backdrop-filter: blur(var(--blur-md));
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
+}
+
+.login-actions .btn-ghost {
+  padding: 0;
+  width: 3rem;
+  height: 3rem;
+  background: var(--bg-primary);
+  border: none;
+  border-radius: 50%;
   box-shadow: var(--shadow-md);
   transition: all var(--transition);
-}
-
-.login-theme-toggle:hover {
-  transform: scale(1.05);
-  box-shadow: var(--shadow-lg);
-  background: var(--bg-primary);
-}
-
-.login-theme-toggle svg {
-  width: 1.25rem;
-  height: 1.25rem;
-}
-
-#theme-toggle {
-  padding: var(--space-2);
-  width: 2.5rem;
-  height: 2.5rem;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform var(--transition-fast);
+  cursor: pointer;
+}
+
+.login-actions .btn-ghost:hover {
+  transform: scale(1.05);
+  box-shadow: var(--shadow-lg);
+  background: var(--bg-secondary);
+}
+
+.login-actions .btn-ghost svg {
+  width: 1.25rem;
+  height: 1.25rem;
+  color: var(--text-secondary);
+  transition: color var(--transition);
+}
+
+.login-actions .btn-ghost:hover svg {
+  color: var(--text-primary);
+}
+
+/* Language toggle */
+.language-dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.btn-ghost.language-toggle,
+.language-toggle {
+  padding: 0;
+  width: 3rem;
+  height: 3rem;
+  background: var(--bg-primary);
+  border: none !important;
+  border-radius: 50%;
+  box-shadow: var(--shadow-md);
+  transition: all var(--transition);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.btn-ghost.language-toggle:hover,
+.language-toggle:hover {
+  transform: scale(1.05) !important;
+  box-shadow: var(--shadow-lg);
+  background: var(--bg-secondary);
+  border: none !important;
+}
+
+.language-menu {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  min-width: 10rem;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15), 0 2px 8px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+  z-index: 200;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.language-menu.hidden {
+  opacity: 0;
+  transform: translateY(-0.5rem);
+  pointer-events: none;
+}
+
+.language-menu-item {
+  display: block;
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition), color var(--transition);
+}
+
+.language-menu-item:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.language-menu-item.active {
+  color: var(--primary);
+  font-weight: 600;
+  background: var(--bg-tertiary);
+}
+
+[data-theme="dark"] .language-menu {
+  background: rgba(30, 41, 59, 0.9);
+  border-color: rgba(148, 163, 184, 0.3);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+#theme-toggle {
+  padding: 0;
+  width: 3rem;
+  height: 3rem;
+  background: var(--bg-primary);
+  border: none;
+  border-radius: 50%;
+  box-shadow: var(--shadow-md);
+  transition: all var(--transition);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 
 #theme-toggle:hover {
-  transform: rotate(20deg);
+  transform: scale(1.05);
+  box-shadow: var(--shadow-lg);
+  background: var(--bg-secondary);
 }
 
 #theme-toggle svg {
   width: 1.25rem;
   height: 1.25rem;
+}
+
+/* Logout button — circular style matching Globe/Moon */
+#logout-button {
+  padding: 0 var(--space-4);
+  height: 3rem;
+  background: var(--bg-primary);
+  border: none;
+  border-radius: 1.5rem;
+  box-shadow: var(--shadow-md);
+  transition: all var(--transition);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+#logout-button:hover {
+  transform: scale(1.05);
+  box-shadow: var(--shadow-lg);
+  background: var(--bg-secondary);
 }
 
 .login-card {
@@ -1298,6 +1423,10 @@ body::before {
 
 .toast.error {
   background-color: var(--danger);
+}
+
+[data-theme="dark"] .toast {
+  color: #1e293b;
 }
 
 /* ============================================

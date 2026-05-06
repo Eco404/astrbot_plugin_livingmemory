@@ -121,7 +121,7 @@ class WebUIServer:
         self._lifecycle_lock = asyncio.Lock()
         self._server_error: BaseException | None = None
 
-        self._app = FastAPI(title="LivingMemory WebUI", version="2.0.0")
+        self._app = FastAPI(title="LivingMemory WebUI", version="2.2.10")
         self._setup_routes()
 
     # ------------------------------------------------------------------
