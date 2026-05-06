@@ -46,7 +46,7 @@
 
 ### AstrBot 版本要求
 
-- 使用 **AstrBot 官方插件 Pages 管理界面** 时，要求 **AstrBot >= 4.5.7**
+- 使用 **AstrBot 官方插件 Pages 管理界面** 时，要求 **AstrBot >= 4.24.2**
 - 旧版独立 WebUI 兼容入口不依赖插件 Pages，可继续通过 `/lmem webui` 查看访问地址
 
 ### 管理界面入口
