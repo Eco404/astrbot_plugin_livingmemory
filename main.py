@@ -16,7 +16,6 @@ from astrbot.api.star import Context, Star, StarTools, register
 from .core.base.config_manager import ConfigManager
 from .core.command_handler import CommandHandler
 from .core.event_handler import EventHandler
-from .core.page_api import PluginPageApi
 from .core.plugin_initializer import PluginInitializer
 from .core.tools import MemorySearchTool
 from .webui import WebUIServer
@@ -58,14 +57,35 @@ class LivingMemoryPlugin(Star):
         self._llm_tools_registered = False
         self._terminating = False
 
-        self.page_api = PluginPageApi(self)
+        self.page_api = None
 
-        # 注册官方插件 Page 原生 API
-        if hasattr(self.context, "register_web_api"):
-            self.page_api.register_routes()
+        self._register_official_page_api_if_available()
 
         # 启动非阻塞的初始化任务
         self._create_tracked_task(self._initialize_plugin())
+
+    def _register_official_page_api_if_available(self) -> None:
+        """按需注册官方插件页面 API，避免旧版 AstrBot 因导入失败而无法加载插件。"""
+        if not hasattr(self.context, "register_web_api"):
+            return
+
+        try:
+            from .core.page_api import PluginPageApi
+        except Exception as exc:
+            logger.warning(
+                f"官方插件页面 API 不可用，已跳过注册并保留旧版兼容模式: {exc}"
+            )
+            return
+
+        try:
+            self.page_api = PluginPageApi(self)
+            self.page_api.register_routes()
+        except Exception as exc:
+            self.page_api = None
+            logger.warning(
+                f"官方插件页面 API 注册失败，已跳过并保留旧版兼容模式: {exc}",
+                exc_info=True,
+            )
 
     def _create_tracked_task(self, coro) -> asyncio.Task:
         """创建并跟踪后台任务"""

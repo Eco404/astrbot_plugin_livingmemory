@@ -516,6 +516,7 @@
       return;
     }
     const count = state.selected.size;
+    const originalText = dom.deleteSelected.textContent;
 
     // 改进的确认对话框
     const confirmed = window.confirm(
@@ -551,7 +552,6 @@
     try {
       // 显示加载状态
       dom.deleteSelected.disabled = true;
-      const originalText = dom.deleteSelected.textContent;
       dom.deleteSelected.textContent = "删除中...";
 
       console.log("[删除] 准备删除记忆", { count: memoryIds.length, ids: memoryIds });
@@ -1287,10 +1287,14 @@
         body: { memory_id: memoryId, field, value, reason },
       });
 
+      if (!result.success) {
+        throw new Error(result.error || result.message || "更新失败");
+      }
+
       showToast(result.message || "更新成功");
       closeEditModal();
       closeDetailDrawer();
-      fetchMemories(); // 刷新列表
+      await fetchMemories(); // 刷新列表
     } catch (error) {
       showToast(error.message || "更新失败", true);
     } finally {
