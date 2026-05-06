@@ -7,6 +7,18 @@
 
 ## [Unreleased]
 
+### 新增
+- 新增 AstrBot 官方插件 Pages 管理界面支持：可在 AstrBot WebUI 的插件详情页直接进入 `dashboard` 页面，无需额外登录插件独立 WebUI。
+- 新增官方插件 Page 原生后端接口适配层，支持记忆统计、记忆列表、批量删除、记忆编辑、召回测试、知识图谱概览与图谱检索。
+
+### 兼容性
+- 官方插件 Pages 入口依赖 AstrBot 插件 Page / Bridge 能力，要求 AstrBot 版本 `>= 4.24.2`。
+- 保留旧版独立 WebUI 兼容入口；当宿主环境不支持官方插件 Pages 或仍需独立访问时，可继续使用 `/lmem webui` 提供的旧入口。
+
+### 优化
+- `/lmem webui` 命令输出改为优先引导用户进入 AstrBot 官方插件页，同时保留旧独立 WebUI 兼容说明。
+- 官方插件页面前端改为复用 AstrBot 登录态，并适配 sandbox iframe 环境下的 Bridge 请求、主题读取与页面初始化流程。
+
 ### 修复
 - 修复 AstrBot 4.23.2 中 `documents_fts` 同名表冲突导致总结记忆存储失败的问题。
 - 将插件自有 FTS 表统一迁移为 `livingmemory_memories_fts` 与 `livingmemory_graph_entries_fts`，避免再次污染宿主数据库命名空间。

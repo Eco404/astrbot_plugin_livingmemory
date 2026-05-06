@@ -347,29 +347,41 @@ class CommandHandler:
         webui_url = self._get_webui_url()
 
         if not webui_url:
-            message = """WebUI 功能当前未启用。
+            message = """LivingMemory 管理界面
 
-可能原因:
-1. 配置中 webui.enabled=false
-2. WebUI 服务启动失败（请查看日志）
+推荐入口:
+• 打开 AstrBot 官方 WebUI
+• 进入 插件 -> LivingMemory -> Pages -> dashboard
 
-当前可用功能:
+兼容说明:
+• 旧版独立 WebUI 当前未启用
+• 可能原因:
+  1. 配置中 webui.enabled=false
+  2. 旧 WebUI 服务启动失败（请查看日志）
+
+当前仍可使用命令:
 • /lmem status - 查看系统状态
 • /lmem search - 搜索记忆
 • /lmem forget - 删除记忆"""
         else:
-            message = f"""LivingMemory WebUI
+            message = f"""LivingMemory 管理界面
 
-访问地址: {webui_url}
+推荐入口:
+• 打开 AstrBot 官方 WebUI
+• 进入 插件 -> LivingMemory -> Pages -> dashboard
 
-WebUI 功能:
+兼容入口:
+• 旧版独立 WebUI: {webui_url}
+
+说明:
+• 官方插件页复用 AstrBot 登录态，无需再次登录
+• 旧版独立 WebUI 仅为兼容历史使用方式保留
+
+可在界面中执行:
 • 记忆编辑与管理
 • 可视化统计分析
-• 高级配置管理
-• 系统调试工具
-• 数据迁移管理
-
-可在 WebUI 中执行更复杂的管理操作。"""
+• 图谱浏览与召回调试
+• 数据迁移与索引维护"""
 
         yield event.plain_result(message)
 
