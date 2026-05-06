@@ -16,6 +16,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 from .core.base.config_manager import ConfigManager
 from .core.command_handler import CommandHandler
 from .core.event_handler import EventHandler
+from .core.page_api import PluginPageApi
 from .core.plugin_initializer import PluginInitializer
 from .core.tools import MemorySearchTool
 from .webui import WebUIServer
@@ -56,6 +57,12 @@ class LivingMemoryPlugin(Star):
         self._component_init_lock = asyncio.Lock()
         self._llm_tools_registered = False
         self._terminating = False
+
+        self.page_api = PluginPageApi(self)
+
+        # 注册官方插件 Page 原生 API
+        if hasattr(self.context, "register_web_api"):
+            self.page_api.register_routes()
 
         # 启动非阻塞的初始化任务
         self._create_tracked_task(self._initialize_plugin())
