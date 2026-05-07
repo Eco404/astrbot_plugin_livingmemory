@@ -54,6 +54,7 @@
     statusFilter: document.getElementById("status-filter"),
     applyFilter: document.getElementById("apply-filter"),
     selectAll: document.getElementById("select-all"),
+    selectAllTable: document.querySelector(".table-select-all"),
     deleteSelected: document.getElementById("delete-selected"),
     tableBody: document.getElementById("memories-body"),
     paginationInfo: document.getElementById("pagination-info"),
@@ -92,6 +93,9 @@
     dom.pageSize.addEventListener("change", onPageSizeChange);
     dom.applyFilter.addEventListener("click", applyFilters);
     dom.selectAll.addEventListener("change", toggleSelectAll);
+    if (dom.selectAllTable) {
+      dom.selectAllTable.addEventListener("change", toggleSelectAll);
+    }
     dom.deleteSelected.addEventListener("click", deleteSelectedMemories);
     dom.drawerClose.addEventListener("click", closeDetailDrawer);
     dom.nukeCancel.addEventListener("click", onNukeCancel);
@@ -385,6 +389,7 @@
       
       state.selected.clear();
       dom.selectAll.checked = false;
+      if (dom.selectAllTable) dom.selectAllTable.checked = false;
       dom.deleteSelected.disabled = true;
       renderTable();
       updatePagination();
@@ -465,7 +470,7 @@
             <td>${escapeHTML(item.last_access || "--")}</td>
               <td>
               <div class="table-actions">
-                <button class="ghost detail-btn" data-key="${escapeHTML(
+                <button class="btn-ghost detail-btn" data-key="${escapeHTML(
                   key
                 )}">${i18n.t("table.detail")}</button>
               </div>
@@ -539,12 +544,14 @@
     dom.deleteSelected.disabled = state.selected.size === 0;
     if (!state.items.length) {
       dom.selectAll.checked = false;
+      if (dom.selectAllTable) dom.selectAllTable.checked = false;
       return;
     }
     const allSelected = state.items.every((item) =>
       state.selected.has(getItemKey(item))
     );
     dom.selectAll.checked = allSelected;
+    if (dom.selectAllTable) dom.selectAllTable.checked = allSelected;
   }
 
   function applyFilters() {
@@ -703,6 +710,7 @@
       // 清空选择并刷新数据
       state.selected.clear();
       dom.selectAll.checked = false;
+      if (dom.selectAllTable) dom.selectAllTable.checked = false;
       await fetchMemories();
       await fetchStats();
     } catch (error) {
@@ -851,6 +859,7 @@
         
         // 重置选择状态
         dom.selectAll.checked = false;
+        if (dom.selectAllTable) dom.selectAllTable.checked = false;
         dom.deleteSelected.disabled = true;
         
         showToast(i18n.t("nuke.done"));
