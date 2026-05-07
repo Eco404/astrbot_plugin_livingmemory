@@ -107,3 +107,6 @@ docs/plugin.md
 docs/star_metadata.md
 docs/star.md
 AGENTS.md
+
+# Local testing
+mock_server.py
