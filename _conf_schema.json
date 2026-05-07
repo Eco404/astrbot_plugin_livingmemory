@@ -1,4 +1,11 @@
 {
+  "bot_language": {
+    "description": "机器人回复语言",
+    "hint": "设置插件命令和状态回复的语言。zh=中文（默认），en=English，ru=Русский。",
+    "type": "string",
+    "options": ["zh", "en", "ru"],
+    "default": "zh"
+  },
   "provider_settings": {
     "description": "模型提供商",
     "hint": "配置记忆系统使用的 AI 模型",

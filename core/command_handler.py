@@ -14,6 +14,7 @@ from .base.config_manager import ConfigManager
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
 from .validators.index_validator import IndexValidator
+from .i18n_backend import t, t_list
 
 
 class CommandHandler:
@@ -57,21 +58,18 @@ class CommandHandler:
         action: str, error: Exception, suggestions: list[str] | None = None
     ) -> str:
         """Format user-facing error message with actionable hints."""
-        message = [f"{action}失败。", f"错误详情: {error}"]
+        message = [t("error.format.action_failed", action=action), t("error.format.details", error=error)]
         if suggestions:
             message.append("")
-            message.append("建议排查:")
+            message.append(t("error.format.suggestions"))
             for index, suggestion in enumerate(suggestions, start=1):
-                message.append(f"{index}. {suggestion}")
+                message.append(t("error.format.suggestion_item", index=index, suggestion=suggestion))
         return "\n".join(message)
 
     @staticmethod
     def _component_not_ready_message(component: str, command: str) -> str:
         """Build a consistent component-not-ready response."""
-        return (
-            f"{command} 执行失败：{component}未初始化。\n"
-            "请先执行 /lmem status 检查插件状态；如状态异常请查看启动日志。"
-        )
+        return t("error.component_not_ready", component=component, command=command)
 
     async def handle_status(
         self, event: AstrMessageEvent
@@ -87,7 +85,7 @@ class CommandHandler:
             stats = await self.memory_engine.get_statistics()
 
             # 格式化时间
-            last_update = "从未"
+            last_update = t("common.never")
             if stats.get("newest_memory"):
                 last_update = datetime.fromtimestamp(stats["newest_memory"]).strftime(
                     "%Y-%m-%d %H:%M:%S"
@@ -100,29 +98,22 @@ class CommandHandler:
 
             session_count = len(stats.get("sessions", {}))
 
-            message = f"""LivingMemory 状态报告
-
-总记忆数: {stats["total_memories"]}
-会话数: {session_count}
-最后更新: {last_update}
-数据库大小: {db_size:.2f} MB
-
-可用操作:
-- /lmem search <关键词>
-- /lmem webui"""
+            message = t(
+                "status.report",
+                total=stats["total_memories"],
+                session_count=session_count,
+                last_update=last_update,
+                db_size=db_size,
+            )
 
             yield event.plain_result(message)
         except Exception as e:
             logger.error(f"获取状态失败: {e}", exc_info=True)
             yield event.plain_result(
                 self._format_error_message(
-                    "获取状态",
+                    t("status.action_name"),
                     e,
-                    [
-                        "确认数据库文件可读写",
-                        "确认记忆引擎已完成初始化",
-                        "查看日志中的异常堆栈定位具体模块",
-                    ],
+                    t_list("error.suggestions.status"),
                 )
             )
 
@@ -139,7 +130,7 @@ class CommandHandler:
         # 输入验证
         if not query or not query.strip():
             yield event.plain_result(
-                "查询关键词不能为空。示例: /lmem search 项目进度 5"
+                t("search.query_empty")
             )
             return
 
@@ -154,12 +145,11 @@ class CommandHandler:
 
             if not results:
                 yield event.plain_result(
-                    f"未找到与 '{query}' 相关的记忆。可尝试更短关键词，"
-                    "或调大返回数量参数 k。"
+                    t("search.no_results", query=query)
                 )
                 return
 
-            message = f"找到 {len(results)} 条相关记忆:\n\n"
+            message = t("search.header", count=len(results))
             for i, result in enumerate(results, 1):
                 score = result.final_score
                 content = (
@@ -169,14 +159,19 @@ class CommandHandler:
                 )
                 raw_breakdown = getattr(result, "score_breakdown", {})
                 breakdown = raw_breakdown if isinstance(raw_breakdown, dict) else {}
-                message += f"{i}. [得分:{score:.2f}] {content}\n"
-                message += f"   ID: {result.doc_id}\n\n"
-                message += (
-                    "   命中: "
-                    f"文档关键词={breakdown.get('document_keyword_score', 0.0):.2f}, "
-                    f"文档向量={breakdown.get('document_vector_score', 0.0):.2f}, "
-                    f"图关键词={breakdown.get('graph_keyword_score', 0.0):.2f}, "
-                    f"图向量={breakdown.get('graph_vector_score', 0.0):.2f}\n\n"
+                message += t(
+                    "search.item.score",
+                    index=i,
+                    score=score,
+                    content=content,
+                )
+                message += t("search.item.id", id=result.doc_id)
+                message += t(
+                    "search.item.breakdown",
+                    doc_kw=breakdown.get("document_keyword_score", 0.0),
+                    doc_vec=breakdown.get("document_vector_score", 0.0),
+                    graph_kw=breakdown.get("graph_keyword_score", 0.0),
+                    graph_vec=breakdown.get("graph_vector_score", 0.0),
                 )
 
             yield event.plain_result(message)
@@ -184,13 +179,9 @@ class CommandHandler:
             logger.error(f"搜索失败: {e}", exc_info=True)
             yield event.plain_result(
                 self._format_error_message(
-                    "搜索",
+                    t("search.action_name"),
                     e,
-                    [
-                        "确认关键词不为空且长度合理",
-                        "确认数据库和索引文件存在且可读写",
-                        "检查日志中是否有检索组件初始化失败信息",
-                    ],
+                    t_list("error.suggestions.search"),
                 )
             )
 
@@ -206,29 +197,24 @@ class CommandHandler:
 
         # 输入验证
         if doc_id < 0:
-            yield event.plain_result("记忆 ID 必须为非负整数。示例: /lmem forget 123")
+            yield event.plain_result(t("forget.id_invalid"))
             return
 
         try:
             success = await self.memory_engine.delete_memory(doc_id)
             if success:
-                yield event.plain_result(f"已删除记忆 #{doc_id}。")
+                yield event.plain_result(t("forget.success", id=doc_id))
             else:
                 yield event.plain_result(
-                    f"删除失败：记忆 #{doc_id} 不存在。\n"
-                    "请先使用 /lmem search 或 WebUI 确认记忆 ID。"
+                    t("forget.not_found", id=doc_id)
                 )
         except Exception as e:
             logger.error(f"删除失败: {e}", exc_info=True)
             yield event.plain_result(
                 self._format_error_message(
-                    "删除记忆",
+                    t("forget.action_name"),
                     e,
-                    [
-                        "确认记忆 ID 存在且属于当前可访问数据",
-                        "确认数据库未被其他进程长时间占用",
-                        "查看日志中的删除调用堆栈",
-                    ],
+                    t_list("error.suggestions.forget"),
                 )
             )
 
@@ -245,23 +231,23 @@ class CommandHandler:
             return
 
         try:
-            yield event.plain_result("开始检查索引状态...")
+            yield event.plain_result(t("rebuild_index.checking"))
 
             # 检查索引一致性
             status = await self.index_validator.check_consistency()
 
             if status.is_consistent and not status.needs_rebuild:
-                yield event.plain_result(f"索引状态正常: {status.reason}")
+                yield event.plain_result(t("rebuild_index.ok", reason=status.reason))
                 return
 
             # 显示当前状态
-            status_msg = f"""当前索引状态:
-• Documents表: {status.documents_count} 条
-• BM25索引: {status.bm25_count} 条
-• 向量索引: {status.vector_count} 条
-• 问题: {status.reason}
-
-开始重建索引..."""
+            status_msg = t(
+                "rebuild_index.status_template",
+                doc_count=status.documents_count,
+                bm25_count=status.bm25_count,
+                vec_count=status.vector_count,
+                reason=status.reason,
+            )
             yield event.plain_result(status_msg)
 
             # 执行重建
@@ -270,41 +256,36 @@ class CommandHandler:
             if result["success"]:
                 partial_notice = ""
                 if result.get("partial"):
-                    partial_notice = (
-                        "\n注意: 本次重建存在少量失败，失败率 "
-                        f"{result.get('failure_ratio', 0):.2%}，未超过安全阈值。"
-                        "可稍后再次执行 /lmem rebuild-index 补齐。"
+                    partial_notice = t(
+                        "rebuild_index.partial_notice",
+                        ratio=result.get("failure_ratio", 0),
                     )
-                result_msg = f"""索引重建完成。
-
-处理结果:
-• 成功: {result["processed"]} 条
-• 失败: {result["errors"]} 条
-• 总计: {result["total"]} 条
-• 向量处理模式: {result.get("vector_mode", "unknown")}
-• 新索引切换: {"是" if result.get("switched") else "否"}
-{partial_notice}
-
-现在可以继续使用召回功能。"""
+                switched_str = t("common.yes") if result.get("switched") else t("common.no")
+                result_msg = t(
+                    "rebuild_index.result_template",
+                    success=result["processed"],
+                    failed=result["errors"],
+                    total=result["total"],
+                    vector_mode=result.get("vector_mode", "unknown"),
+                    switched=switched_str,
+                    partial_notice=partial_notice,
+                )
                 yield event.plain_result(result_msg)
             else:
                 yield event.plain_result(
-                    "索引重建失败。\n"
-                    f"错误详情: {result.get('message', '未知错误')}\n"
-                    "请查看日志确认失败原因后重试 /lmem rebuild-index。"
+                    t(
+                        "rebuild_index.failed",
+                        message=result.get("message", t("common.unknown_error")),
+                    )
                 )
 
         except Exception as e:
             logger.error(f"重建索引失败: {e}", exc_info=True)
             yield event.plain_result(
                 self._format_error_message(
-                    "重建索引",
+                    t("rebuild_index.action_name"),
                     e,
-                    [
-                        "确认 Embedding Provider 已可用",
-                        "确认数据库文件与索引文件可读写",
-                        "根据日志定位失败文档后重试重建",
-                    ],
+                    t_list("error.suggestions.rebuild_index"),
                 )
             )
 
@@ -319,24 +300,22 @@ class CommandHandler:
             return
 
         try:
-            yield event.plain_result("开始重建图记忆索引，这可能需要一些时间...")
+            yield event.plain_result(t("rebuild_graph.starting"))
             result = await self.memory_engine.rebuild_graph_index()
             yield event.plain_result(
-                "图记忆重建完成。\n\n"
-                f"• 重建: {result.get('rebuilt', 0)} 条\n"
-                f"• 跳过: {result.get('skipped', 0)} 条"
+                t(
+                    "rebuild_graph.success",
+                    rebuilt=result.get("rebuilt", 0),
+                    skipped=result.get("skipped", 0),
+                )
             )
         except Exception as e:
             logger.error(f"重建图记忆失败: {e}", exc_info=True)
             yield event.plain_result(
                 self._format_error_message(
-                    "重建图记忆",
+                    t("rebuild_graph.action_name"),
                     e,
-                    [
-                        "确认图记忆功能已启用",
-                        "确认数据库与索引文件可读写",
-                        "查看日志定位具体失败文档",
-                    ],
+                    t_list("error.suggestions.rebuild_graph"),
                 )
             )
 
@@ -347,45 +326,9 @@ class CommandHandler:
         webui_url = self._get_webui_url()
 
         if not webui_url:
-            message = """LivingMemory 管理界面
-
-WebUI 功能当前未启用（旧版独立 WebUI）。
-
-推荐入口:
-• 打开 AstrBot 官方 WebUI
-• 进入 插件 -> LivingMemory -> Pages -> dashboard
-
-兼容说明:
-• 官方插件页可直接复用 AstrBot 登录态
-• 旧版独立 WebUI 当前未启用
-• 可能原因:
-  1. 配置中 webui.enabled=false
-  2. 旧 WebUI 服务启动失败（请查看日志）
-
-当前仍可使用命令:
-• /lmem status - 查看系统状态
-• /lmem search - 搜索记忆
-• /lmem forget - 删除记忆"""
+            message = t("webui.disabled")
         else:
-            message = f"""LivingMemory 管理界面
-
-推荐入口:
-• 打开 AstrBot 官方 WebUI
-• 进入 插件 -> LivingMemory -> Pages -> dashboard
-
-兼容入口:
-• 旧版独立 WebUI: {webui_url}
-• 访问地址: {webui_url}
-
-说明:
-• 官方插件页复用 AstrBot 登录态，无需再次登录
-• 旧版独立 WebUI 仅为兼容历史使用方式保留
-
-可在界面中执行:
-• 记忆编辑与管理
-• 可视化统计分析
-• 图谱浏览与召回调试
-• 数据迁移与索引维护"""
+            message = t("webui.enabled", url=webui_url)
 
         yield event.plain_result(message)
 
@@ -421,15 +364,21 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
 
             if unsummarized < 2:
                 yield event.plain_result(
-                    "当前没有需要总结的新对话。\n"
-                    f"当前消息总数: {actual_count}\n"
-                    f"已总结到消息序号: {last_summarized_index}"
+                    t(
+                        "summarize.no_new",
+                        total=actual_count,
+                        index=last_summarized_index,
+                    )
                 )
                 return
 
             yield event.plain_result(
-                f"开始手动总结记忆...\n"
-                f"消息范围: [{last_summarized_index}:{actual_count}]，共 {unsummarized} 条"
+                t(
+                    "summarize.starting",
+                    start=last_summarized_index,
+                    end=actual_count,
+                    count=unsummarized,
+                )
             )
 
             history_messages = await self.conversation_manager.get_messages_range(
@@ -440,8 +389,7 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
 
             if not history_messages:
                 yield event.plain_result(
-                    "获取消息失败：未读取到可总结的消息。\n"
-                    "请确认当前会话存在历史消息后重试。"
+                    t("summarize.fetch_failed")
                 )
                 return
 
@@ -498,23 +446,21 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
 
             topics = ", ".join(metadata.get("topics", [])) or "无"
             yield event.plain_result(
-                f"记忆总结完成。\n"
-                f"重要性: {importance:.2f}\n"
-                f"主题: {topics}\n"
-                f"已更新总结进度至第 {actual_count} 条消息"
+                t(
+                    "summarize.success",
+                    importance=importance,
+                    topics=topics,
+                    count=actual_count,
+                )
             )
 
         except Exception as e:
             logger.error(f"手动触发记忆总结失败: {e}", exc_info=True)
             yield event.plain_result(
                 self._format_error_message(
-                    "记忆总结",
+                    t("summarize.action_name"),
                     e,
-                    [
-                        "确认当前会话至少有 2 条未总结消息",
-                        "确认 LLM Provider 可正常响应",
-                        "检查日志中的 summary 处理堆栈",
-                    ],
+                    t_list("error.suggestions.summarize"),
                 )
             )
 
@@ -531,22 +477,15 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
         session_id = event.unified_msg_origin
         try:
             await self.conversation_manager.clear_session(session_id)
-            message = (
-                "当前会话的长期记忆上下文已重置。\n\n"
-                "下一次记忆总结将从现在开始，不会再包含之前的对话内容。"
-            )
+            message = t("reset.success")
             yield event.plain_result(message)
         except Exception as e:
             logger.error(f"手动重置记忆上下文失败: {e}", exc_info=True)
             yield event.plain_result(
                 self._format_error_message(
-                    "重置记忆上下文",
+                    t("reset.action_name"),
                     e,
-                    [
-                        "确认会话 ID 有效且会话存储可访问",
-                        "确认数据库未被占用",
-                        "查看日志中的 clear_session 调用堆栈",
-                    ],
+                    t_list("error.suggestions.reset"),
                 )
             )
 
@@ -556,16 +495,15 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
         """处理 /lmem cleanup 命令 - 清理 AstrBot 历史消息中的记忆注入片段"""
         session_id = event.unified_msg_origin
         try:
-            mode_text = "预演模式：" if dry_run else ""
+            mode_text = t("cleanup.mode_preview") if dry_run else t("cleanup.mode_exec")
             yield event.plain_result(
-                f"{mode_text}开始清理 AstrBot 历史消息中的记忆注入片段..."
+                t("cleanup.starting", mode_text=mode_text)
             )
 
             # 检查 context 是否可用
             if not self.context:
                 yield event.plain_result(
-                    "清理失败：无法访问 AstrBot Context。\n"
-                    "请确认插件运行在完整 AstrBot 上下文中后重试。"
+                    t("cleanup.context_unavailable")
                 )
                 return
 
@@ -574,7 +512,7 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
                 session_id
             )
             if not cid:
-                yield event.plain_result("当前会话没有对话历史，无需清理。")
+                yield event.plain_result(t("cleanup.no_history"))
                 return
 
             # 获取对话历史
@@ -582,7 +520,7 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
                 session_id, cid
             )
             if not conversation or not conversation.history:
-                yield event.plain_result("当前对话历史为空，无需清理。")
+                yield event.plain_result(t("cleanup.empty_history"))
                 return
 
             # 清理历史消息中的记忆注入片段
@@ -596,8 +534,7 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
                 history = json.loads(conversation.history)
             except json.JSONDecodeError:
                 yield event.plain_result(
-                    "解析对话历史失败：数据不是有效 JSON。\n"
-                    "请检查会话存储内容是否被外部工具修改。"
+                    t("cleanup.parse_failed")
                 )
                 return
 
@@ -671,15 +608,16 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
                 )
 
             # 格式化结果
-            message = f"""{mode_text}清理完成。
-
-统计信息:
-• 扫描消息: {stats["scanned"]} 条
-• 匹配记忆片段: {stats["matched"]} 条
-• 清理内容: {stats["cleaned"]} 条
-• 删除消息: {stats["deleted"]} 条
-
-{"这是预演模式，未实际修改数据。使用 /lmem cleanup exec 执行实际清理。" if dry_run else "AstrBot 对话历史已更新，记忆注入片段已清理。"}"""
+            notice = t("cleanup.notice_preview") if dry_run else t("cleanup.notice_exec")
+            message = t(
+                "cleanup.result_template",
+                mode_text=mode_text,
+                scanned=stats["scanned"],
+                matched=stats["matched"],
+                cleaned=stats["cleaned"],
+                deleted=stats["deleted"],
+                notice=notice,
+            )
 
             yield event.plain_result(message)
 
@@ -687,13 +625,9 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
             logger.error(f"清理历史消息失败: {e}", exc_info=True)
             yield event.plain_result(
                 self._format_error_message(
-                    "清理历史消息",
+                    t("cleanup.action_name"),
                     e,
-                    [
-                        "确认当前会话存在可读取的历史记录",
-                        "确认对话存储可读写",
-                        "查看日志中的 cleanup 调用堆栈",
-                    ],
+                    t_list("error.suggestions.cleanup"),
                 )
             )
 
@@ -701,36 +635,7 @@ WebUI 功能当前未启用（旧版独立 WebUI）。
         self, event: AstrMessageEvent
     ) -> AsyncGenerator[MessageEventResult, None]:
         """处理 /lmem help 命令"""
-        message = """LivingMemory 使用指南
-
-核心指令:
-/lmem status              查看系统状态
-/lmem search <关键词> [数量]  搜索记忆(默认5条)
-/lmem forget <ID>          删除指定记忆
-/lmem rebuild-index       重建索引（修复索引不一致）
-/lmem rebuild-graph       重建图记忆索引（回填旧记忆）
-/lmem webui               打开WebUI管理界面
-/lmem summarize           立即触发当前会话的记忆总结
-/lmem reset               重置当前会话记忆上下文
-/lmem cleanup [preview|exec] 清理历史消息中的记忆片段(默认preview预演)
-/lmem help                显示此帮助
-
-使用建议:
-• 日常查询使用 search 指令
-• 复杂管理使用 WebUI 界面
-• 记忆会自动保存对话内容
-• 使用 forget 删除敏感信息
-• 索引不一致时执行 rebuild-index
-• 启用图记忆后建议执行 rebuild-graph 回填旧数据
-• 更新插件后建议执行 cleanup 清理旧数据
-
-cleanup 命令示例:
-  /lmem cleanup          # 预演模式,仅显示统计
-  /lmem cleanup preview  # 同上
-  /lmem cleanup exec     # 执行实际清理
-
-更多信息: https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory"""
-
+        message = t("help.text")
         yield event.plain_result(message)
 
     def _get_webui_url(self) -> str | None:

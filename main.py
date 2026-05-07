@@ -14,6 +14,7 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 
 from .core.base.config_manager import ConfigManager
+from .core.i18n_backend import init as i18n_init, t
 from .core.command_handler import CommandHandler
 from .core.event_handler import EventHandler
 from .core.plugin_initializer import PluginInitializer
@@ -40,6 +41,9 @@ class LivingMemoryPlugin(Star):
 
         # 初始化配置管理器
         self.config_manager = ConfigManager(config)
+
+        # 初始化后端 i18n
+        i18n_init(config.get("bot_language", "zh"))
 
         # 初始化插件初始化器
         self.initializer = PluginInitializer(context, self.config_manager, data_dir)
@@ -183,8 +187,7 @@ class LivingMemoryPlugin(Star):
         if not await self._ensure_runtime_components():
             return (
                 False,
-                "插件核心组件未初始化。\n"
-                "请先执行 /lmem status 查看初始化状态；如仍失败，请检查启动日志中的异常堆栈。",
+                t("command.core_not_ready"),
             )
 
         return True, ""
@@ -236,34 +239,22 @@ class LivingMemoryPlugin(Star):
     def _get_initialization_status_message(self) -> str:
         """获取初始化状态的用户友好消息"""
         if self.initializer.is_initialized:
-            return "插件已就绪。可使用 /lmem help 查看可用命令。"
+            return t("init.ready")
         elif self.initializer.is_failed:
-            return (
-                "插件初始化失败。\n"
-                f"错误详情: {self.initializer.error_message or '未知错误'}\n\n"
-                "请检查:\n"
-                "1. Embedding Provider 是否已正确配置并可调用\n"
-                "2. LLM Provider 是否可用\n"
-                "3. 插件数据目录是否有读写权限\n"
-                "4. 启动日志中的异常堆栈信息"
+            return t(
+                "init.failed",
+                error=self.initializer.error_message or t("common.unknown_error"),
             )
         else:
-            return (
-                "插件正在后台初始化中。\n"
-                f"当前已尝试检查 Provider: {self.initializer._provider_check_attempts} 次\n\n"
-                "如果长时间未完成，请检查:\n"
-                "1. Embedding Provider 与 LLM Provider 配置\n"
-                "2. 其他插件是否阻塞初始化流程\n"
-                "3. 日志中是否出现 Provider 相关报错"
+            return t(
+                "init.in_progress",
+                attempts=self.initializer._provider_check_attempts,
             )
 
     @staticmethod
     def _command_handler_not_ready_message() -> str:
         """命令处理器未就绪时的提示"""
-        return (
-            "命令处理器尚未就绪，当前命令无法执行。\n"
-            "请先执行 /lmem status 查看插件状态；若持续失败，请检查初始化日志。"
-        )
+        return t("command.not_ready")
 
     # ==================== 事件钩子 ====================
 
