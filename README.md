@@ -38,6 +38,10 @@ Configure the plugin from the AstrBot plugin configuration page.
 - `embedding_provider_id`: Embedding model ID. Leave empty to use the AstrBot default.
 - `llm_provider_id`: LLM model ID. Leave empty to use the AstrBot default.
 
+**Memory injection compatibility**:
+- `fake_tool_call` automatically falls back to `user_message_before` for Gemini providers to avoid tool-message protocol incompatibility.
+- For DeepSeek V4 `thinking` mode, select `fake_tool_call_deepseek_v4` manually if you need fake-tool-call semantics.
+
 **WebUI settings**:
 ```json
 {

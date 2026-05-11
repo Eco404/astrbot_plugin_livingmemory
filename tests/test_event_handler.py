@@ -596,6 +596,7 @@ async def test_format_memories_for_fake_tool_call():
     # 验证 tool 消息格式
     assert tool_msg["role"] == "tool"
     assert tool_msg["tool_call_id"] == tc["id"]
+    assert tool_msg["name"] == "recall_long_term_memory"
     assert "Python" in tool_msg["content"]
     assert '"session_filtered": true' in tool_msg["content"]
     assert '"persona_filtered": false' in tool_msg["content"]
@@ -675,6 +676,7 @@ async def test_handle_memory_recall_injection_fake_tool_call(
     # 验证 tool 消息
     assert tool_msg["role"] == "tool"
     assert tool_msg["tool_call_id"] == assistant_msg["tool_calls"][0]["id"]
+    assert tool_msg["name"] == "recall_long_term_memory"
     assert '"session_filtered": true' in tool_msg["content"]
     assert '"persona_filtered": true' in tool_msg["content"]
     assert '"id": 99' in tool_msg["content"]
@@ -761,6 +763,327 @@ async def test_remove_fake_tool_call_preserves_real_tool_calls(handler):
     assert len(req.contexts) == 2
 
 
+def _make_recall_conversation_manager():
+    manager = Mock()
+    manager.add_message_from_event = AsyncMock()
+    manager.store = Mock()
+    manager.store.connection = None
+    return manager
+
+
+# ==================== Provider 注入兼容测试 ====================
+
+
+@pytest.mark.asyncio
+async def test_handle_memory_recall_fake_tool_call_fallback_on_gemini(
+    memory_engine,
+):
+    """Gemini 下配置 fake_tool_call 应自动降级为 user_message_before 注入。"""
+    gemini_provider = Mock()
+    gemini_provider.provider_config = {"type": "googlegenai_chat_completion"}
+    gemini_provider.get_model = Mock(return_value="gemini-2.5-pro")
+
+    context = Mock()
+    context.get_using_provider = Mock(return_value=gemini_provider)
+
+    h = EventHandler(
+        context=context,
+        config_manager=ConfigManager(
+            {
+                "recall_engine": {
+                    "top_k": 3,
+                    "injection_method": "fake_tool_call",
+                },
+                "reflection_engine": {"summary_trigger_rounds": 1},
+                "session_manager": {"max_messages_per_session": 100},
+            }
+        ),
+        memory_engine=memory_engine,
+        memory_processor=Mock(),
+        conversation_manager=_make_recall_conversation_manager(),
+    )
+
+    recalled = Mock(
+        content="用户喜欢吃火锅",
+        final_score=0.88,
+        metadata={"importance": 0.9, "create_time": 1700000000},
+    )
+    recalled.doc_id = 99
+    memory_engine.search_memories = AsyncMock(return_value=[recalled])
+
+    event = _make_event(group=False)
+    req = _make_req("今天吃什么")
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.event_handler.get_persona_id",
+        new_callable=AsyncMock,
+    ) as get_persona:
+        get_persona.return_value = "p1"
+        await h.handle_memory_recall(event, req)
+
+    assert len(req.contexts) == 0
+    assert req.system_prompt == ""
+    assert "用户喜欢吃火锅" in req.prompt
+    assert req.prompt.index("<RAG-Faiss-Memory>") < req.prompt.index("今天吃什么")
+
+
+@pytest.mark.asyncio
+async def test_handle_memory_recall_fake_tool_call_fetches_provider_for_fallback(
+    memory_engine,
+):
+    """fake_tool_call 模式应查询会话级 provider，以便执行兼容降级。"""
+    gemini_provider = Mock()
+    gemini_provider.provider_config = {"type": "googlegenai_chat_completion"}
+    gemini_provider.get_model = Mock(return_value="gemini-2.5-pro")
+
+    context = Mock()
+    context.get_using_provider = Mock(return_value=gemini_provider)
+
+    h = EventHandler(
+        context=context,
+        config_manager=ConfigManager(
+            {
+                "recall_engine": {
+                    "top_k": 3,
+                    "injection_method": "fake_tool_call",
+                },
+                "reflection_engine": {"summary_trigger_rounds": 1},
+                "session_manager": {"max_messages_per_session": 100},
+            }
+        ),
+        memory_engine=memory_engine,
+        memory_processor=Mock(),
+        conversation_manager=_make_recall_conversation_manager(),
+    )
+
+    recalled = Mock(
+        content="用户喜欢吃火锅",
+        final_score=0.88,
+        metadata={"importance": 0.9, "create_time": 1700000000},
+    )
+    recalled.doc_id = 99
+    memory_engine.search_memories = AsyncMock(return_value=[recalled])
+
+    event = _make_event(group=False)
+    req = _make_req("今天吃什么")
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.event_handler.get_persona_id",
+        new_callable=AsyncMock,
+    ) as get_persona:
+        get_persona.return_value = "p1"
+        await h.handle_memory_recall(event, req)
+
+    context.get_using_provider.assert_called_once_with(event.unified_msg_origin)
+
+
+@pytest.mark.asyncio
+async def test_handle_memory_recall_fake_tool_call_fallback_logs_once(
+    memory_engine,
+):
+    """Gemini fallback 应只记录一条 warning，避免重复日志。"""
+    gemini_provider = Mock()
+    gemini_provider.provider_config = {"type": "googlegenai_chat_completion"}
+    gemini_provider.get_model = Mock(return_value="gemini-2.5-pro")
+
+    context = Mock()
+    context.get_using_provider = Mock(return_value=gemini_provider)
+
+    h = EventHandler(
+        context=context,
+        config_manager=ConfigManager(
+            {
+                "recall_engine": {
+                    "top_k": 3,
+                    "injection_method": "fake_tool_call",
+                },
+                "reflection_engine": {"summary_trigger_rounds": 1},
+                "session_manager": {"max_messages_per_session": 100},
+            }
+        ),
+        memory_engine=memory_engine,
+        memory_processor=Mock(),
+        conversation_manager=_make_recall_conversation_manager(),
+    )
+
+    recalled = Mock(
+        content="用户喜欢吃火锅",
+        final_score=0.88,
+        metadata={"importance": 0.9, "create_time": 1700000000},
+    )
+    recalled.doc_id = 99
+    memory_engine.search_memories = AsyncMock(return_value=[recalled])
+
+    event = _make_event(group=False)
+    req = _make_req("今天吃什么")
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.event_handler.get_persona_id",
+        new_callable=AsyncMock,
+    ) as get_persona, patch(
+        "astrbot_plugin_livingmemory.core.event_handler.logger.warning"
+    ) as mock_warning:
+        get_persona.return_value = "p1"
+        await h.handle_memory_recall(event, req)
+
+    mock_warning.assert_called_once()
+    warning_text = mock_warning.call_args[0][0]
+    assert "fake_tool_call" in warning_text
+    assert "user_message_before" in warning_text
+
+
+@pytest.mark.asyncio
+async def test_format_memories_for_fake_tool_call_deepseek_v4():
+    """DeepSeek V4 转录格式应包含头尾标记、工具名和结果内容。"""
+    from astrbot_plugin_livingmemory.core.utils import (
+        format_memories_for_fake_tool_call_deepseek_v4,
+    )
+
+    result = format_memories_for_fake_tool_call_deepseek_v4(
+        [
+            {
+                "id": 101,
+                "content": "用户喜欢重庆火锅",
+                "score": 0.9,
+                "metadata": {"importance": 0.8, "create_time": 1700000000},
+                "timestamp": 1700000000,
+            }
+        ],
+        query="今天吃什么",
+        k=3,
+        session_filtered=False,
+        persona_filtered=True,
+    )
+
+    assert result
+    assert "<RAG-Faiss-Memory>" in result
+    assert "[DeepSeekV4-FakeToolCall-Replay]" in result
+    assert "assistant -> recall_long_term_memory(" in result
+    assert '"query": "今天吃什么"' in result
+    assert '"k": 3' in result
+    assert '"session_filtered": false' in result
+    assert '"persona_filtered": true' in result
+    assert "用户喜欢重庆火锅" in result
+    assert "</RAG-Faiss-Memory>" in result
+
+
+@pytest.mark.asyncio
+async def test_format_memories_for_fake_tool_call_deepseek_v4_empty():
+    """空记忆时 DeepSeek V4 转录应返回空字符串。"""
+    from astrbot_plugin_livingmemory.core.utils import (
+        format_memories_for_fake_tool_call_deepseek_v4,
+    )
+
+    result = format_memories_for_fake_tool_call_deepseek_v4([], query="test", k=5)
+    assert result == ""
+
+
+@pytest.mark.asyncio
+async def test_handle_memory_recall_injection_fake_tool_call_deepseek_v4(
+    memory_engine,
+):
+    """DeepSeek V4 模式应把转录内容注入到 prompt 前部。"""
+    context = Mock()
+
+    h = EventHandler(
+        context=context,
+        config_manager=ConfigManager(
+            {
+                "recall_engine": {
+                    "top_k": 3,
+                    "injection_method": "fake_tool_call_deepseek_v4",
+                },
+                "filtering_settings": {
+                    "use_session_filtering": False,
+                    "use_persona_filtering": True,
+                },
+                "reflection_engine": {"summary_trigger_rounds": 1},
+                "session_manager": {"max_messages_per_session": 100},
+            }
+        ),
+        memory_engine=memory_engine,
+        memory_processor=Mock(),
+        conversation_manager=_make_recall_conversation_manager(),
+    )
+
+    recalled = Mock(
+        content="用户喜欢吃火锅",
+        final_score=0.88,
+        metadata={"importance": 0.9, "create_time": 1700000000},
+    )
+    recalled.doc_id = 99
+    memory_engine.search_memories = AsyncMock(return_value=[recalled])
+
+    event = _make_event(group=False)
+    event.get_message_str = Mock(return_value="今天吃什么")
+    req = _make_req("今天吃什么")
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.event_handler.get_persona_id",
+        new_callable=AsyncMock,
+    ) as get_persona:
+        get_persona.return_value = "p1"
+        await h.handle_memory_recall(event, req)
+
+    context.get_using_provider.assert_not_called()
+    assert len(req.contexts) == 0
+    assert req.system_prompt == ""
+    assert req.prompt.endswith("今天吃什么")
+    assert req.prompt.index("[DeepSeekV4-FakeToolCall-Replay]") < req.prompt.index(
+        "今天吃什么"
+    )
+    assert '"session_filtered": false' in req.prompt
+    assert '"persona_filtered": true' in req.prompt
+    assert "用户喜欢吃火锅" in req.prompt
+
+
+@pytest.mark.asyncio
+async def test_handle_memory_recall_non_fake_modes_do_not_fetch_provider(
+    memory_engine,
+):
+    """普通注入模式不应获取 provider，避免无关异常影响 recall。"""
+    context = Mock()
+    context.get_using_provider = Mock(side_effect=RuntimeError("should not be called"))
+
+    h = EventHandler(
+        context=context,
+        config_manager=ConfigManager(
+            {
+                "recall_engine": {
+                    "top_k": 3,
+                    "injection_method": "user_message_before",
+                },
+                "reflection_engine": {"summary_trigger_rounds": 1},
+                "session_manager": {"max_messages_per_session": 100},
+            }
+        ),
+        memory_engine=memory_engine,
+        memory_processor=Mock(),
+        conversation_manager=_make_recall_conversation_manager(),
+    )
+
+    recalled = Mock(
+        content="用户喜欢吃火锅",
+        final_score=0.88,
+        metadata={"importance": 0.9, "create_time": 1700000000},
+    )
+    recalled.doc_id = 99
+    memory_engine.search_memories = AsyncMock(return_value=[recalled])
+
+    event = _make_event(group=False)
+    req = _make_req("今天吃什么")
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.event_handler.get_persona_id",
+        new_callable=AsyncMock,
+    ) as get_persona:
+        get_persona.return_value = "p1"
+        await h.handle_memory_recall(event, req)
+
+    context.get_using_provider.assert_not_called()
+    assert "用户喜欢吃火锅" in req.prompt
+
+
 # ==================== top_k=0 回归测试 ====================
 
 
@@ -768,9 +1091,6 @@ def _make_handler_with_top_k_0(
     memory_engine, memory_processor, conversation_manager
 ):
     """创建一个 top_k=0 的 EventHandler 用于回归测试。"""
-    from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
-    from astrbot_plugin_livingmemory.core.event_handler import EventHandler
-
     return EventHandler(
         context=Mock(),
         config_manager=ConfigManager(
@@ -787,9 +1107,13 @@ def _make_handler_with_top_k_0(
 
 
 @pytest.mark.asyncio
-async def test_top_k_0_skips_search_memories(memory_engine, memory_processor, conversation_manager):
+async def test_top_k_0_skips_search_memories(
+    memory_engine, memory_processor, conversation_manager
+):
     """top_k=0 时不应调用 memory_engine.search_memories()。"""
-    handler = _make_handler_with_top_k_0(memory_engine, memory_processor, conversation_manager)
+    handler = _make_handler_with_top_k_0(
+        memory_engine, memory_processor, conversation_manager
+    )
     event = _make_event(group=False)
     req = _make_req("hello world")
 
@@ -805,14 +1129,18 @@ async def test_top_k_0_skips_search_memories(memory_engine, memory_processor, co
 
 
 @pytest.mark.asyncio
-async def test_top_k_0_still_cleans_injected_memories(memory_engine, memory_processor, conversation_manager):
+async def test_top_k_0_still_cleans_injected_memories(
+    memory_engine, memory_processor, conversation_manager
+):
     """top_k=0 时仍应清理历史注入的旧记忆片段。"""
     from astrbot_plugin_livingmemory.core.base.constants import (
-        MEMORY_INJECTION_HEADER,
         MEMORY_INJECTION_FOOTER,
+        MEMORY_INJECTION_HEADER,
     )
 
-    handler = _make_handler_with_top_k_0(memory_engine, memory_processor, conversation_manager)
+    handler = _make_handler_with_top_k_0(
+        memory_engine, memory_processor, conversation_manager
+    )
     event = _make_event(group=False)
     req = _make_req("test query")
     req.system_prompt = (
@@ -832,9 +1160,13 @@ async def test_top_k_0_still_cleans_injected_memories(memory_engine, memory_proc
 
 
 @pytest.mark.asyncio
-async def test_top_k_0_still_stores_private_message(memory_engine, memory_processor, conversation_manager):
+async def test_top_k_0_still_stores_private_message(
+    memory_engine, memory_processor, conversation_manager
+):
     """top_k=0 时私聊场景仍应写入用户消息和消息数量控制。"""
-    handler = _make_handler_with_top_k_0(memory_engine, memory_processor, conversation_manager)
+    handler = _make_handler_with_top_k_0(
+        memory_engine, memory_processor, conversation_manager
+    )
     event = _make_event(group=False)
     req = _make_req("private message")
 
@@ -852,9 +1184,13 @@ async def test_top_k_0_still_stores_private_message(memory_engine, memory_proces
 
 
 @pytest.mark.asyncio
-async def test_top_k_0_does_not_store_group_message(memory_engine, memory_processor, conversation_manager):
+async def test_top_k_0_does_not_store_group_message(
+    memory_engine, memory_processor, conversation_manager
+):
     """top_k=0 时群聊场景不应写入用户消息（群聊由 handle_all_group_messages 负责）。"""
-    handler = _make_handler_with_top_k_0(memory_engine, memory_processor, conversation_manager)
+    handler = _make_handler_with_top_k_0(
+        memory_engine, memory_processor, conversation_manager
+    )
     event = _make_event(group=True)
     req = _make_req("group message")
 
