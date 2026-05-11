@@ -184,6 +184,51 @@ async def test_handle_all_group_messages_and_limit_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_enforce_message_limit_uses_cleanup_batch_size(
+    memory_engine, memory_processor, conversation_manager
+):
+    handler = EventHandler(
+        context=Mock(),
+        config_manager=ConfigManager(
+            {
+                "recall_engine": {"top_k": 3, "injection_method": "system_prompt"},
+                "reflection_engine": {"summary_trigger_rounds": 1},
+                "session_manager": {
+                    "max_messages_per_session": 100,
+                    "cleanup_batch_size": 20,
+                },
+            }
+        ),
+        memory_engine=memory_engine,
+        memory_processor=memory_processor,
+        conversation_manager=conversation_manager,
+    )
+
+    count_results = [101, 81]
+
+    async def _get_message_count(_session_id):
+        return count_results.pop(0)
+
+    conversation_manager.store.get_message_count = AsyncMock(
+        side_effect=_get_message_count
+    )
+    conversation_manager.get_session_metadata = AsyncMock(return_value=80)
+    cursor = Mock(rowcount=20)
+    conversation_manager.store.connection.execute = AsyncMock(return_value=cursor)
+
+    await handler._enforce_message_limit("test:private:sid-1")
+
+    delete_call = conversation_manager.store.connection.execute.await_args_list[0]
+    assert delete_call.args[1] == ("test:private:sid-1", 20)
+    conversation_manager.update_session_metadata.assert_awaited_with(
+        "test:private:sid-1", "last_summarized_index", 60
+    )
+    conversation_manager.invalidate_cache.assert_awaited_once_with(
+        "test:private:sid-1"
+    )
+
+
+@pytest.mark.asyncio
 async def test_handle_all_group_messages_skips_bot_own_messages(
     handler, conversation_manager
 ):

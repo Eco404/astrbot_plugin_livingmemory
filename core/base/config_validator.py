@@ -31,6 +31,12 @@ class SessionManagerConfig(BaseModel):
         le=10000,
         description="单会话最大消息数量(超出后自动删除旧消息)",
     )
+    cleanup_batch_size: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        description="历史消息超过上限后每次批量删除的旧已总结消息数",
+    )
 
 
 class RecallEngineConfig(BaseModel):

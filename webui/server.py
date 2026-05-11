@@ -120,6 +120,7 @@ class WebUIServer:
         self._cleanup_task: asyncio.Task | None = None
         self._lifecycle_lock = asyncio.Lock()
         self._server_error: BaseException | None = None
+        self._shutdown_timeout = float(config.get("shutdown_timeout", 5.0))
 
         self._app = FastAPI(title="LivingMemory WebUI", version="2.2.11")
         self._setup_routes()
@@ -206,7 +207,16 @@ class WebUIServer:
             self._server.should_exit = True
         if self._server_task:
             try:
-                await self._server_task
+                await asyncio.wait_for(self._server_task, self._shutdown_timeout)
+            except TimeoutError:
+                logger.warning(
+                    f"WebUI 停止超时，强制取消服务任务: {self.host}:{self.port}"
+                )
+                self._server_task.cancel()
+                try:
+                    await self._server_task
+                except asyncio.CancelledError:
+                    pass
             except asyncio.CancelledError:
                 pass
             except BaseException as e:
@@ -214,6 +224,7 @@ class WebUIServer:
         self._server = None
         self._server_task = None
         self._cleanup_task = None
+        self._server_error = None
         logger.info("WebUI 已停止")
 
     # ------------------------------------------------------------------
