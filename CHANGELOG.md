@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+## [2.2.12] - 2026-05-12
+
+### 新增
+- 新增配置 UI 与后端命令响应的英/俄双语国际化支持，适配 AstrBot 原生插件页面与命令输出。
+
+### 修复
+- 修复 MemoryProcessor 持有过期 LLM provider 引用时出现 `Cannot send a request, as the client has been closed` 的问题。
+- 修复 WebUI 生命周期与历史消息批量清理逻辑，避免重载和端口占用引发的异常。
+
 ## [2.2.11] - 2026-05-06
 
 ### 新增
