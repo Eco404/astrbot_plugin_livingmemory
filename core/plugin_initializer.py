@@ -438,9 +438,14 @@ class PluginInitializer:
             await self._repair_message_counts(conversation_store)
 
             # 初始化 MemoryProcessor
-            if not self.llm_provider or not isinstance(self.llm_provider, Provider):
-                raise ProviderNotReadyError("LLM Provider 未初始化或类型不正确")
-            self.memory_processor = MemoryProcessor(self.llm_provider, self.context)
+            # 注意：MemoryProcessor 不直接持有 llm_provider 实例引用，
+            # 而是在每次调用时通过 AstrBot 上下文动态解析 Provider，
+            # 以避免 AstrBot 重新创建 Provider 后旧实例的 httpx client 被关闭
+            # 导致的 "Cannot send a request, as the client has been closed" 错误。
+            llm_id = self.config_manager.get("provider_settings.llm_provider_id")
+            self.memory_processor = MemoryProcessor(
+                self.context, llm_provider_id=llm_id if llm_id else None
+            )
             logger.info("MemoryProcessor 已初始化")
 
             # 初始化索引验证器并自动重建索引

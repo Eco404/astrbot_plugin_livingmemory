@@ -23,19 +23,49 @@ class MemoryProcessor:
     支持私聊和群聊两种场景的不同处理策略。
     """
 
-    def __init__(self, llm_provider, context=None):
+    def __init__(self, context=None, llm_provider_id: str | None = None):
         """
         初始化记忆处理器
 
         Args:
-            llm_provider: LLM提供者实例(Provider类型)
             context: AstrBot上下文,用于获取人格管理器
+            llm_provider_id: 指定的LLM Provider ID,留空则使用AstrBot默认Provider
         """
-        self.llm_provider = llm_provider
         self.context = context
+        self.llm_provider_id = llm_provider_id
 
         # 加载提示词模板
         self._load_prompts()
+
+    def _get_current_llm_provider(self):
+        """动态解析LLM Provider以避免持有过期引用
+
+        AstrBot可能在运行期间重新创建Provider实例（例如配置变更后），
+        旧的Provider实例内部的httpx client会被关闭，导致
+        RuntimeError: Cannot send a request, as the client has been closed.
+        因此每次调用前都从AstrBot上下文重新获取当前有效的Provider。
+        """
+        if not self.context:
+            return None
+
+        # 优先使用配置中指定的Provider ID
+        if self.llm_provider_id:
+            try:
+                provider = self.context.get_provider_by_id(self.llm_provider_id)
+                if provider:
+                    return provider
+            except Exception:
+                pass
+
+        # 回退到AstrBot当前默认Provider
+        try:
+            provider = self.context.get_using_provider()
+            if provider:
+                return provider
+        except Exception:
+            pass
+
+        return None
 
     def _load_prompts(self) -> None:
         """从外部文件加载提示词模板"""
@@ -175,7 +205,10 @@ class MemoryProcessor:
         last_error = None
         for attempt in range(max_retries):
             try:
-                response = await self.llm_provider.text_chat(
+                provider = self._get_current_llm_provider()
+                if not provider:
+                    raise RuntimeError("LLM Provider 不可用")
+                response = await provider.text_chat(
                     prompt=prompt, system_prompt=system_prompt
                 )
                 return response.completion_text
