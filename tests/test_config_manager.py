@@ -16,6 +16,8 @@ def test_config_manager_loads_defaults() -> None:
     assert manager.get("recall_engine.top_k") == 5
     assert manager.get("fusion_strategy.rrf_k") == 60
     assert manager.get("session_manager.max_sessions") == 100
+    assert manager.get("session_manager.max_messages_per_session") == 1000
+    assert manager.get("session_manager.cleanup_batch_size") == 50
     assert manager.get("reflection_engine.save_original_conversation") is None
 
 

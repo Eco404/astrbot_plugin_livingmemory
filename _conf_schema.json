@@ -79,6 +79,18 @@
         "hint": "传给 LLM 的最大历史消息条数。越大上下文越丰富，但消耗 token 越多。建议 20-100。",
         "type": "int",
         "default": 50
+      },
+      "max_messages_per_session": {
+        "description": "单会话最大历史消息数",
+        "hint": "数据库中每个会话保留的历史消息上限。超过后只会删除已经完成总结的最旧消息，避免丢失未总结上下文。",
+        "type": "int",
+        "default": 1000
+      },
+      "cleanup_batch_size": {
+        "description": "历史消息批量清理数量",
+        "hint": "会话历史超过上限后，每次至少尝试删除的旧已总结消息数量。值过小会导致超限后每轮只删少量消息。",
+        "type": "int",
+        "default": 50
       }
     }
   },
