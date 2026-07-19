@@ -12,6 +12,17 @@ from .conversation_models import (
 )
 from .graph_models import ExtractedGraph, GraphEdge, GraphEntry, GraphNode
 from .memory_identity import MemorySpace, resolve_memory_space
+from .topic_memory import (
+    TopicAtomSource,
+    TopicLinkStatus,
+    TopicMaintenanceMode,
+    TopicMaintenanceRun,
+    TopicMaintenanceStatus,
+    TopicMemory,
+    TopicMemoryAtom,
+    TopicMemoryStatus,
+    TopicTimelineLink,
+)
 
 __all__ = [
     "MemoryEvent",
@@ -25,4 +36,13 @@ __all__ = [
     "ExtractedGraph",
     "MemorySpace",
     "resolve_memory_space",
+    "TopicAtomSource",
+    "TopicLinkStatus",
+    "TopicMaintenanceMode",
+    "TopicMaintenanceRun",
+    "TopicMaintenanceStatus",
+    "TopicMemory",
+    "TopicMemoryAtom",
+    "TopicMemoryStatus",
+    "TopicTimelineLink",
 ]

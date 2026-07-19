@@ -59,6 +59,25 @@ partially or not traceable instead of receiving fabricated provenance. These
 records remain in the `timeline` layer and do not change existing generation or
 retrieval behavior.
 
+### Derived Topic-memory storage (phase-two foundation)
+
+Topic memories are automatically derived from Timeline memories. This phase only
+introduces storage and provenance; generation and retrieval remain disabled.
+`topic_memories` stores generated snapshots and independent importance state,
+while `topic_memory_atoms` stores Topic-owned atoms without reusing or mutating
+Timeline atoms in `memory_atoms`.
+
+`topic_timeline_links` forms a bidirectional many-to-many index using stable UIDs
+and records source revisions, time clusters, semantic similarity, temporal
+affinity, and contribution weight. Nearby Timeline fragments can share one time
+cluster, so a long conversation is not treated as several independent votes.
+
+`topic_atom_sources` maps each Topic atom to a Timeline atom ID or content
+fingerprint. Editing a Timeline marks only dependent Topics stale for later
+targeted rebuilding. `topic_maintenance_runs` stores resumable cursors and live
+progress for full, incremental, and repair jobs. Topic snapshots use optimistic
+revisions and transactional replacement and have no manual WebUI editing path.
+
 ## Data safety
 
 | Scenario | Protection |

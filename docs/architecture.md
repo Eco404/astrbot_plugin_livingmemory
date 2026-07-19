@@ -57,6 +57,22 @@ LivingMemory 的运行时由事件钩子、记忆处理、检索融合、存储�
 历史记忆无法回填消息 ID 时会标记为部分或不可追溯，不会伪造来源。当前这些
 记忆仍属于 `timeline` 层；注册表和来源范围不会改变现有总结与召回行为。
 
+### Topic 派生记忆存储（阶段二基础）
+
+Topic 记忆是从 Timeline 记忆自动整理出的派生层，当前只建立存储和溯源结构，
+尚未启用自动构建与召回。`topic_memories` 保存 Topic 快照和独立的重要性状态，
+`topic_memory_atoms` 保存 Topic 自己的事实原子；它们不会复用或修改
+`memory_atoms` 中的 Timeline 原子。
+
+`topic_timeline_links` 通过稳定 UID 建立双向多对多关联，同时保存 Timeline 修订、
+时间簇、语义相似度、时间亲和度和贡献权重。多个时间相近的 Timeline 可以属于同一
+时间簇，因此维护算法不会把单次长对话产生的多个分片直接当成多次独立佐证。
+
+`topic_atom_sources` 进一步把 Topic 原子映射到 Timeline 原子 ID 或内容指纹。
+Timeline 被编辑后，关联 Topic 会先标记为过期，后续维护任务只需重建受影响的片段。
+`topic_maintenance_runs` 保存全量、增量和修复任务的游标与实时进度，支持中断恢复。
+Topic 更新采用修订号乐观锁和单事务快照替换，暂不提供 WebUI 手工编辑入口。
+
 ## 数据安全设计
 
 插件在高风险操作前尽量留下恢复点：
