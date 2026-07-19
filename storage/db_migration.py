@@ -17,13 +17,14 @@ from astrbot.api import logger
 
 from ..core.models.memory_identity import resolve_memory_space
 from .memory_identity_store import MemoryIdentityStore
+from .topic_memory_store import TopicMemoryStore
 
 
 class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = 9
+    CURRENT_VERSION = 10
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -36,6 +37,7 @@ class DBMigration:
         7: "Storage indexes and FTS optimization for graph and atom data",
         8: "Write-operation log and access-aware metadata indexes",
         9: "Stable timeline identity registry and source-span provenance",
+        10: "Derived topic-memory storage and Timeline provenance links",
     }
 
     def __init__(self, db_path: str):
@@ -250,6 +252,10 @@ class DBMigration:
                 # 从版本8升级到版本9
                 if current_version <= 8:
                     migration_steps.append(self._migrate_v8_to_v9)
+
+                # 从版本9升级到版本10
+                if current_version <= 9:
+                    migration_steps.append(self._migrate_v9_to_v10)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -923,6 +929,22 @@ class DBMigration:
 
             await db.commit()
         logger.info(f"v8 -> v9 迁移完成，共处理 {total} 条 Timeline 记忆")
+
+    async def _migrate_v9_to_v10(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ):
+        """Create the inactive Topic-memory storage foundation."""
+        logger.info("执行迁移步骤: v9 -> v10 (topic-memory storage foundation)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await MemoryIdentityStore.create_tables(db)
+            await TopicMemoryStore.create_tables(db)
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建 Topic 记忆存储结构", 1, 1)
+        logger.info("v9 -> v10 迁移完成，未生成或修改任何 Topic 记忆")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

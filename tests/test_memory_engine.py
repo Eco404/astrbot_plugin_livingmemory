@@ -13,6 +13,11 @@ import aiosqlite
 import pytest
 from astrbot_plugin_livingmemory.core.managers.memory_engine import MemoryEngine
 from astrbot_plugin_livingmemory.core.models.memory_atom import MemoryAtom
+from astrbot_plugin_livingmemory.core.models.topic_memory import (
+    TopicMemory,
+    TopicMemoryStatus,
+    TopicTimelineLink,
+)
 from astrbot_plugin_livingmemory.storage.atom_store import AtomStore
 
 
@@ -303,6 +308,24 @@ async def test_rewrite_memory_in_place_preserves_document_id(tmp_path: Path):
     )
     original = await engine.get_memory(memory_id)
     original_uid = original["metadata"]["memory_uid"]
+    topic = await engine.topic_memory_store.save_topic_snapshot(
+        TopicMemory(
+            topic_uid="topic-rewrite-test",
+            memory_space_id=original["metadata"]["memory_space_id"],
+            title="旧主题派生记忆",
+            summary="来自即将被修改的 Timeline。",
+        ),
+        atoms=[],
+        links=[
+            TopicTimelineLink(
+                topic_uid="topic-rewrite-test",
+                timeline_uid=original_uid,
+                time_cluster_key="cluster-1",
+            )
+        ],
+        atom_sources=[],
+    )
+    assert topic.status is TopicMemoryStatus.ACTIVE
 
     engine.hybrid_retriever.replace_memory_in_place = AsyncMock(return_value=True)
     engine.atom_store = Mock()
@@ -328,6 +351,9 @@ async def test_rewrite_memory_in_place_preserves_document_id(tmp_path: Path):
     rewrite_call = engine.hybrid_retriever.replace_memory_in_place.call_args
     assert rewrite_call.args[0] == memory_id
     assert rewrite_call.args[1] == "新事实"
+    stale_topic = await engine.topic_memory_store.get_topic(topic.topic_uid)
+    assert stale_topic is not None
+    assert stale_topic.status is TopicMemoryStatus.STALE
     assert rewrite_call.args[2]["revision"] == 2
     assert rewrite_call.args[2]["memory_uid"]
     assert rewrite_call.args[2]["memory_uid"] == original_uid

@@ -368,6 +368,44 @@ async def test_migrate_v8_to_v9_backfills_stable_identity_and_source_span(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_migrate_v9_to_v10_creates_empty_topic_foundation(tmp_path):
+    db_path = str(tmp_path / "topic_foundation.db")
+    await _create_legacy_db(
+        db_path,
+        [{"text": PRIVATE_MEMORY_LONG, "metadata": json.dumps(PRIVATE_METADATA_V2)}],
+    )
+    migration = DBMigration(db_path)
+    await migration._migrate_v8_to_v9(None)
+    await migration._migrate_v9_to_v10(None)
+    await migration._migrate_v9_to_v10(None)
+
+    expected_tables = {
+        "topic_memories",
+        "topic_memory_atoms",
+        "topic_timeline_links",
+        "topic_atom_sources",
+        "topic_maintenance_runs",
+    }
+    async with aiosqlite.connect(db_path) as db:
+        rows = await (
+            await db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        ).fetchall()
+        table_names = {str(row[0]) for row in rows}
+        topic_count = (
+            await (await db.execute("SELECT COUNT(*) FROM topic_memories")).fetchone()
+        )[0]
+        timeline_count = (
+            await (await db.execute("SELECT COUNT(*) FROM documents")).fetchone()
+        )[0]
+
+    assert expected_tables <= table_names
+    assert topic_count == 0
+    assert timeline_count == 1
+
+
+@pytest.mark.asyncio
 async def test_full_migration_v1_to_v4_with_real_data(tmp_path):
     """模拟真实 v1 数据库完整迁移到 v4，私聊和群聊各 3 条。"""
     db_path = str(tmp_path / "test.db")

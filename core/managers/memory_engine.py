@@ -19,6 +19,7 @@ from astrbot.api import logger
 from ...storage.atom_store import AtomStore
 from ...storage.graph_store import GraphStore
 from ...storage.memory_identity_store import MemoryIdentityStore
+from ...storage.topic_memory_store import TopicMemoryStore
 from ..managers.atom_lifecycle_manager import AtomLifecycleManager
 from ..managers.graph_memory_manager import GraphMemoryManager
 from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
@@ -140,6 +141,7 @@ class MemoryEngine:
         self.atom_lifecycle_manager = None
         self.atom_retriever = None
         self.memory_identity_store = MemoryIdentityStore(self.db_path)
+        self.topic_memory_store = TopicMemoryStore(self.db_path)
         self.db_connection = None
         self._search_cache_enabled = bool(self.config.get("search_cache_enabled", True))
         self._search_cache_ttl = float(
@@ -170,6 +172,7 @@ class MemoryEngine:
         # 2. 创建表结构
         await self._create_tables()
         await self.memory_identity_store.initialize()
+        await self.topic_memory_store.initialize()
 
         # 3. 初始化文本处理器
         stopwords_path = self.config.get("stopwords_path")
@@ -492,6 +495,33 @@ class MemoryEngine:
             fallback_session_id=metadata.get("session_id"),
             fallback_time=created_at,
         )
+
+    async def _mark_dependent_topics_stale(
+        self,
+        memory_uid: str | None,
+        *,
+        reason: str,
+    ) -> None:
+        """Invalidate derived Topics without making Timeline writes unavailable."""
+        if not memory_uid:
+            return
+        try:
+            affected = await self.topic_memory_store.mark_timeline_stale(memory_uid)
+            if affected:
+                logger.info(
+                    f"[TopicMemory] Timeline 变化已标记 {len(affected)} 个 Topic "
+                    f"待重建 (reason={reason})"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Topic is a derived layer. A bookkeeping failure must be visible but
+            # must not roll back a successfully persisted source memory.
+            logger.error(
+                f"[TopicMemory] 标记关联 Topic 失败 "
+                f"(memory_uid={memory_uid}, reason={reason})",
+                exc_info=True,
+            )
 
     def _serialize_atom_for_repair(self, atom: Any) -> dict[str, Any]:
         """Convert a MemoryAtom-like object into JSON-safe repair payload."""
@@ -962,6 +992,7 @@ class MemoryEngine:
 
             await self._create_write_ops_table()
             await MemoryIdentityStore.create_tables(self.db_connection)
+            await TopicMemoryStore.create_tables(self.db_connection)
 
             # 创建版本管理表
             await self.db_connection.execute("""
@@ -1618,6 +1649,10 @@ class MemoryEngine:
                 )
 
             await self._register_memory_identity(memory_id, replacement_metadata)
+            await self._mark_dependent_topics_stale(
+                str(replacement_metadata.get("memory_uid") or ""),
+                reason="timeline_rewritten_in_place",
+            )
 
             self._invalidate_search_cache()
             logger.info(f"[原位更新] 记忆及派生索引更新完成 (memory_id={memory_id})")
@@ -1712,6 +1747,10 @@ class MemoryEngine:
                 await self.delete_memory(new_memory_id)
                 await self._register_memory_identity(memory_id, current_metadata)
                 raise RuntimeError("旧记忆删除失败，已回滚新记忆")
+            await self._mark_dependent_topics_stale(
+                str(replacement_metadata.get("memory_uid") or ""),
+                reason="timeline_replaced",
+            )
             return new_memory_id
         except asyncio.CancelledError:
             raise
@@ -1740,6 +1779,7 @@ class MemoryEngine:
             bool: 是否删除成功
         """
 
+        registry_record = await self.memory_identity_store.get_by_document_id(memory_id)
         op_id = await self._start_write_op(
             "delete",
             {"memory_id": memory_id},
@@ -1810,6 +1850,10 @@ class MemoryEngine:
             )
 
         try:
+            await self._mark_dependent_topics_stale(
+                registry_record.memory_uid if registry_record else None,
+                reason="timeline_deleted",
+            )
             await self.memory_identity_store.delete_by_document_id(memory_id)
             await self._advance_write_op(op_id, "identity_deleted", memory_id=memory_id)
         except asyncio.CancelledError:
@@ -2175,6 +2219,14 @@ class MemoryEngine:
             batch_deleted = 0
 
             try:
+                registry_cursor = await self.db_connection.execute(
+                    f"SELECT memory_uid FROM memory_registry "
+                    f"WHERE document_id IN ({placeholders})",
+                    batch,
+                )
+                batch_memory_uids = [
+                    str(row["memory_uid"]) for row in await registry_cursor.fetchall()
+                ]
                 # 1. Batch delete from BM25 FTS
                 await self.db_connection.execute(
                     f"DELETE FROM livingmemory_memories_fts WHERE doc_id IN ({placeholders})",
@@ -2237,6 +2289,11 @@ class MemoryEngine:
                 )
 
                 # 5. Remove logical identities that still point at deleted IDs.
+                for memory_uid in batch_memory_uids:
+                    await self._mark_dependent_topics_stale(
+                        memory_uid,
+                        reason="timeline_batch_deleted",
+                    )
                 await self.memory_identity_store.delete_by_document_ids(batch)
                 await self._advance_write_op(
                     op_id,

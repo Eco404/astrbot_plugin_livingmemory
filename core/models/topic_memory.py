@@ -1,0 +1,138 @@
+"""Data contracts for the automatically maintained topic-memory layer."""
+
+from __future__ import annotations
+
+import time
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+
+class TopicMemoryStatus(str, Enum):
+    ACTIVE = "active"
+    STALE = "stale"
+    REBUILDING = "rebuilding"
+    ARCHIVED = "archived"
+    ERROR = "error"
+
+
+class TopicLinkStatus(str, Enum):
+    ACTIVE = "active"
+    STALE = "stale"
+
+
+class TopicMaintenanceMode(str, Enum):
+    FULL = "full"
+    INCREMENTAL = "incremental"
+    REPAIR = "repair"
+
+
+class TopicMaintenanceStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass(slots=True)
+class TopicMemory:
+    memory_space_id: str
+    title: str
+    summary: str
+    topic_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    revision: int = 0
+    status: TopicMemoryStatus = TopicMemoryStatus.ACTIVE
+    base_importance: float = 0.5
+    importance: float = 0.5
+    confidence: float = 0.7
+    started_at: float | None = None
+    ended_at: float | None = None
+    last_accessed_at: float | None = None
+    access_count: int = 0
+    decay_anchor_at: float | None = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TopicMemoryAtom:
+    topic_uid: str
+    atom_type: str
+    content: str
+    atom_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    canonical_content: str = ""
+    importance: float = 0.5
+    confidence: float = 0.7
+    status: str = "active"
+    event_started_at: float | None = None
+    event_ended_at: float | None = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TopicTimelineLink:
+    topic_uid: str
+    timeline_uid: str
+    time_cluster_key: str
+    contribution_weight: float = 1.0
+    semantic_similarity: float = 1.0
+    temporal_affinity: float = 1.0
+    source_timeline_revision: int = 1
+    topic_revision: int = 0
+    status: TopicLinkStatus = TopicLinkStatus.ACTIVE
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TopicAtomSource:
+    topic_atom_uid: str
+    timeline_uid: str
+    source_atom_id: int | None = None
+    source_atom_fingerprint: str | None = None
+    source_timeline_revision: int = 1
+    contribution_weight: float = 1.0
+    source_kind: str = "atom"
+    source_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TopicMaintenanceRun:
+    memory_space_id: str
+    mode: TopicMaintenanceMode
+    run_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    status: TopicMaintenanceStatus = TopicMaintenanceStatus.PENDING
+    cursor_memory_uid: str | None = None
+    total_items: int = 0
+    processed_items: int = 0
+    created_topics: int = 0
+    updated_topics: int = 0
+    failed_items: int = 0
+    started_at: float | None = None
+    completed_at: float | None = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    error: str | None = None
+    config: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+__all__ = [
+    "TopicAtomSource",
+    "TopicLinkStatus",
+    "TopicMaintenanceMode",
+    "TopicMaintenanceRun",
+    "TopicMaintenanceStatus",
+    "TopicMemory",
+    "TopicMemoryAtom",
+    "TopicMemoryStatus",
+    "TopicTimelineLink",
+]
