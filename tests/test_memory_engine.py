@@ -164,13 +164,40 @@ async def test_memory_engine_add_search_get_delete(tmp_path: Path):
         session_id="test:private:s1",
         persona_id="persona_1",
         importance=0.8,
-        metadata={"topics": ["饮食"]},
+        metadata={
+            "topics": ["饮食"],
+            "source_window": {
+                "session_id": "test:private:s1",
+                "first_message_id": 11,
+                "last_message_id": 12,
+                "start_index": 0,
+                "end_index": 2,
+                "started_at": 100.0,
+                "ended_at": 101.0,
+            },
+        },
     )
     assert memory_id > 0
 
     result = await engine.get_memory(memory_id)
     assert result is not None
     assert "苹果" in result["text"]
+    assert result["metadata"]["memory_uid"]
+    assert result["metadata"]["revision"] == 1
+    assert result["metadata"]["memory_layer"] == "timeline"
+    assert result["metadata"]["memory_space_id"].startswith("space-v1-")
+
+    registry = await engine.memory_identity_store.get_by_document_id(memory_id)
+    assert registry is not None
+    assert registry.memory_uid == result["metadata"]["memory_uid"]
+    assert registry.memory_space_id == result["metadata"]["memory_space_id"]
+    source_span = await engine.memory_identity_store.get_source_span(
+        registry.memory_uid
+    )
+    assert source_span is not None
+    assert source_span["first_message_id"] == 11
+    assert source_span["last_message_id"] == 12
+    assert source_span["traceability"] == "full"
 
     searched = await engine.search_memories(
         query="苹果",
@@ -184,6 +211,11 @@ async def test_memory_engine_add_search_get_delete(tmp_path: Path):
     ok_delete = await engine.delete_memory(memory_id)
     assert ok_delete is True
     assert await engine.get_memory(memory_id) is None
+    assert await engine.memory_identity_store.get_by_uid(registry.memory_uid) is None
+    assert (
+        await engine.memory_identity_store.get_source_span(registry.memory_uid)
+        is None
+    )
     await engine.close()
 
 
@@ -202,10 +234,21 @@ async def test_replace_memory_preserves_logical_uid_and_increments_revision(
         session_id="bot-a:FriendMessage:user-1",
         persona_id="p1",
         importance=0.6,
-        metadata={"topics": ["旧主题"], "key_facts": ["旧事实"]},
+        metadata={
+            "topics": ["旧主题"],
+            "key_facts": ["旧事实"],
+            "source_window": {
+                "session_id": "bot-a:FriendMessage:user-1",
+                "first_message_id": 21,
+                "last_message_id": 22,
+                "start_index": 0,
+                "end_index": 2,
+            },
+        },
     )
     old_memory = await engine.get_memory(old_id)
     old_create_time = old_memory["metadata"]["create_time"]
+    old_memory_uid = old_memory["metadata"]["memory_uid"]
 
     new_id = await engine.replace_memory(
         old_id,
@@ -228,8 +271,18 @@ async def test_replace_memory_preserves_logical_uid_and_increments_revision(
     assert replacement["metadata"]["revision"] == 2
     assert replacement["metadata"]["previous_id"] == old_id
     assert replacement["metadata"]["memory_uid"]
+    assert replacement["metadata"]["memory_uid"] == old_memory_uid
     assert replacement["metadata"]["key_facts"] == ["新事实"]
     assert replacement["metadata"]["create_time"] == old_create_time
+    registry = await engine.memory_identity_store.get_by_uid(old_memory_uid)
+    assert registry is not None
+    assert registry.document_id == new_id
+    assert registry.revision == 2
+    assert await engine.memory_identity_store.get_by_document_id(old_id) is None
+    source_span = await engine.memory_identity_store.get_source_span(old_memory_uid)
+    assert source_span is not None
+    assert source_span["first_message_id"] == 21
+    assert source_span["last_message_id"] == 22
     await engine.close()
 
 
@@ -248,6 +301,8 @@ async def test_rewrite_memory_in_place_preserves_document_id(tmp_path: Path):
         importance=0.5,
         metadata={"topics": ["旧主题"], "key_facts": ["旧事实"]},
     )
+    original = await engine.get_memory(memory_id)
+    original_uid = original["metadata"]["memory_uid"]
 
     engine.hybrid_retriever.replace_memory_in_place = AsyncMock(return_value=True)
     engine.atom_store = Mock()
@@ -275,8 +330,13 @@ async def test_rewrite_memory_in_place_preserves_document_id(tmp_path: Path):
     assert rewrite_call.args[1] == "新事实"
     assert rewrite_call.args[2]["revision"] == 2
     assert rewrite_call.args[2]["memory_uid"]
+    assert rewrite_call.args[2]["memory_uid"] == original_uid
     engine.atom_store.replace_by_parent.assert_awaited_once_with(memory_id, [])
     engine.graph_memory_manager.index_memory.assert_awaited_once()
+    registry = await engine.memory_identity_store.get_by_uid(original_uid)
+    assert registry is not None
+    assert registry.document_id == memory_id
+    assert registry.revision == 2
     await engine.close()
 
 

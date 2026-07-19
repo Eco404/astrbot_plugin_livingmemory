@@ -11,6 +11,7 @@ from .conversation_models import (
     serialize_to_json,
 )
 from .graph_models import ExtractedGraph, GraphEdge, GraphEntry, GraphNode
+from .memory_identity import MemorySpace, resolve_memory_space
 
 __all__ = [
     "MemoryEvent",
@@ -22,4 +23,6 @@ __all__ = [
     "GraphEdge",
     "GraphEntry",
     "ExtractedGraph",
+    "MemorySpace",
+    "resolve_memory_space",
 ]

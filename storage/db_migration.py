@@ -3,6 +3,9 @@
 """
 
 import asyncio
+import json
+import time
+import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,12 +15,15 @@ import aiosqlite
 
 from astrbot.api import logger
 
+from ..core.models.memory_identity import resolve_memory_space
+from .memory_identity_store import MemoryIdentityStore
+
 
 class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = 8
+    CURRENT_VERSION = 9
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -29,6 +35,7 @@ class DBMigration:
         6: "插件 FTS 表统一 livingmemory 前缀，旧 documents_fts 安全重命名备份",
         7: "Storage indexes and FTS optimization for graph and atom data",
         8: "Write-operation log and access-aware metadata indexes",
+        9: "Stable timeline identity registry and source-span provenance",
     }
 
     def __init__(self, db_path: str):
@@ -239,6 +246,10 @@ class DBMigration:
                 # 从版本7升级到版本8
                 if current_version <= 7:
                     migration_steps.append(self._migrate_v7_to_v8)
+
+                # 从版本8升级到版本9
+                if current_version <= 8:
+                    migration_steps.append(self._migrate_v8_to_v9)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -744,6 +755,174 @@ class DBMigration:
         except Exception as e:
             logger.error(f"v7 -> v8 迁移失败: {e}", exc_info=True)
             raise
+
+    async def _migrate_v8_to_v9(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ):
+        """Backfill stable timeline UIDs, registry rows, and source spans."""
+        logger.info("执行迁移步骤: v8 -> v9 (stable timeline identity)")
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await MemoryIdentityStore.create_tables(db)
+
+            if not await self._table_exists(db, "documents"):
+                await db.commit()
+                logger.info("未找到 documents 表，仅创建阶段一身份表")
+                return
+
+            cursor = await db.execute("PRAGMA table_info(documents)")
+            document_columns = {str(row[1]) for row in await cursor.fetchall()}
+            if "doc_id" not in document_columns:
+                await db.execute("ALTER TABLE documents ADD COLUMN doc_id TEXT")
+                await db.execute(
+                    "UPDATE documents SET doc_id = 'legacy-' || id WHERE doc_id IS NULL"
+                )
+
+            cursor = await db.execute(
+                "SELECT id, doc_id, metadata FROM documents ORDER BY id ASC"
+            )
+            rows = await cursor.fetchall()
+            total = len(rows)
+            used_uids: set[str] = set()
+            now = time.time()
+
+            def optional_int(value: Any) -> int | None:
+                try:
+                    return int(value) if value is not None else None
+                except (TypeError, ValueError):
+                    return None
+
+            def optional_float(value: Any) -> float | None:
+                try:
+                    return float(value) if value is not None else None
+                except (TypeError, ValueError):
+                    return None
+
+            for index, row in enumerate(rows, 1):
+                raw_metadata = row["metadata"]
+                try:
+                    metadata = (
+                        json.loads(raw_metadata)
+                        if isinstance(raw_metadata, str) and raw_metadata.strip()
+                        else raw_metadata
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+
+                physical_id = int(row["id"])
+                current_uid = str(metadata.get("memory_uid") or "").strip()
+                if not current_uid or current_uid in used_uids:
+                    stable_key = (
+                        f"livingmemory:v9:{physical_id}:{row['doc_id'] or ''}"
+                    )
+                    current_uid = str(uuid.uuid5(uuid.NAMESPACE_URL, stable_key))
+                used_uids.add(current_uid)
+
+                try:
+                    revision = max(1, int(metadata.get("revision", 1)))
+                except (TypeError, ValueError):
+                    revision = 1
+                memory_layer = str(metadata.get("memory_layer") or "timeline")
+                session_id = metadata.get("session_id")
+                persona_id = metadata.get("persona_id")
+                space = resolve_memory_space(session_id, persona_id)
+                created_at = optional_float(metadata.get("create_time")) or now
+                updated_at = optional_float(metadata.get("updated_at")) or created_at
+
+                metadata.update(
+                    {
+                        "memory_uid": current_uid,
+                        "revision": revision,
+                        "memory_layer": memory_layer,
+                        "memory_space_id": space.memory_space_id,
+                        "memory_space_version": 1,
+                    }
+                )
+                await db.execute(
+                    "UPDATE documents SET metadata = ? WHERE id = ?",
+                    (json.dumps(metadata, ensure_ascii=False), physical_id),
+                )
+                await db.execute(
+                    """
+                    INSERT INTO memory_registry (
+                        memory_uid, document_id, memory_layer, memory_space_id,
+                        revision, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)
+                    ON CONFLICT(memory_uid) DO UPDATE SET
+                        document_id = excluded.document_id,
+                        memory_layer = excluded.memory_layer,
+                        memory_space_id = excluded.memory_space_id,
+                        revision = excluded.revision,
+                        status = excluded.status,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        current_uid,
+                        physical_id,
+                        memory_layer,
+                        space.memory_space_id,
+                        revision,
+                        created_at,
+                        updated_at,
+                    ),
+                )
+
+                source = metadata.get("source_window")
+                source = source if isinstance(source, dict) else {}
+                first_message_id = optional_int(source.get("first_message_id"))
+                last_message_id = optional_int(source.get("last_message_id"))
+                if first_message_id is not None and last_message_id is not None:
+                    traceability = "full"
+                elif source:
+                    traceability = "partial"
+                else:
+                    traceability = "none"
+                await db.execute(
+                    """
+                    INSERT INTO memory_source_spans (
+                        memory_uid, session_id, first_message_id, last_message_id,
+                        start_index, end_index, started_at, ended_at, traceability,
+                        metadata, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(memory_uid) DO UPDATE SET
+                        session_id = excluded.session_id,
+                        first_message_id = excluded.first_message_id,
+                        last_message_id = excluded.last_message_id,
+                        start_index = excluded.start_index,
+                        end_index = excluded.end_index,
+                        started_at = excluded.started_at,
+                        ended_at = excluded.ended_at,
+                        traceability = excluded.traceability,
+                        metadata = excluded.metadata,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        current_uid,
+                        source.get("session_id") or session_id,
+                        first_message_id,
+                        last_message_id,
+                        optional_int(source.get("start_index")),
+                        optional_int(source.get("end_index")),
+                        optional_float(source.get("started_at")) or created_at,
+                        optional_float(source.get("ended_at")) or created_at,
+                        traceability,
+                        json.dumps(source, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+
+                if progress_callback and (index == total or index % 100 == 0):
+                    progress_callback("补齐稳定记忆身份", index, total)
+
+            await db.commit()
+        logger.info(f"v8 -> v9 迁移完成，共处理 {total} 条 Timeline 记忆")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

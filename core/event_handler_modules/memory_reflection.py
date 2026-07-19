@@ -382,6 +382,18 @@ class MemoryReflection:
                         "start_index": start_index,
                         "end_index": end_index,
                         "message_count": end_index - start_index,
+                        "first_message_id": (
+                            history_messages[0].id if history_messages else None
+                        ),
+                        "last_message_id": (
+                            history_messages[-1].id if history_messages else None
+                        ),
+                        "started_at": (
+                            history_messages[0].timestamp if history_messages else None
+                        ),
+                        "ended_at": (
+                            history_messages[-1].timestamp if history_messages else None
+                        ),
                     }
 
                     logger.info(

@@ -426,6 +426,18 @@ class CommandHandler:
                 "start_index": last_summarized_index,
                 "end_index": actual_count,
                 "message_count": actual_count - last_summarized_index,
+                "first_message_id": (
+                    history_messages[0].id if history_messages else None
+                ),
+                "last_message_id": (
+                    history_messages[-1].id if history_messages else None
+                ),
+                "started_at": (
+                    history_messages[0].timestamp if history_messages else None
+                ),
+                "ended_at": (
+                    history_messages[-1].timestamp if history_messages else None
+                ),
                 "triggered_by": "manual",
             }
 
