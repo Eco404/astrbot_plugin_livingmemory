@@ -9,6 +9,9 @@ from astrbot_plugin_livingmemory.core.models.conversation_models import (
     deserialize_from_json,
     serialize_to_json,
 )
+from astrbot_plugin_livingmemory.core.models.memory_identity import (
+    resolve_memory_space,
+)
 
 
 def test_message_roundtrip_and_format():
@@ -97,3 +100,17 @@ def test_json_helpers():
     assert isinstance(raw, str)
     assert deserialize_from_json(raw)["a"] == 1
     assert deserialize_from_json(None, default={}) == {}
+
+
+def test_memory_space_is_deterministic_and_strictly_isolated():
+    first = resolve_memory_space("bot-a:FriendMessage:user-1", "persona-a")
+    same = resolve_memory_space("bot-a:FriendMessage:user-1", "persona-a")
+    other_user = resolve_memory_space("bot-a:FriendMessage:user-2", "persona-a")
+    other_persona = resolve_memory_space("bot-a:FriendMessage:user-1", "persona-b")
+
+    assert first == same
+    assert first.chat_type == "private"
+    assert first.bot_account == "bot-a"
+    assert first.target_id == "user-1"
+    assert first.memory_space_id != other_user.memory_space_id
+    assert first.memory_space_id != other_persona.memory_space_id

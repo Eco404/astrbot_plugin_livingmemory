@@ -419,6 +419,10 @@ async def test_storage_task_writes_source_window(
     assert sw["start_index"] == 0
     assert sw["end_index"] == 2
     assert sw["message_count"] == 2
+    assert sw["first_message_id"] == 1
+    assert sw["last_message_id"] == 2
+    assert sw["started_at"] == messages[0].timestamp
+    assert sw["ended_at"] == messages[-1].timestamp
 
 
 @pytest.mark.asyncio

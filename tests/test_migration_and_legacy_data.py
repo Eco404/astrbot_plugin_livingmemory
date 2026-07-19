@@ -320,6 +320,54 @@ async def test_migrate_idempotent(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_migrate_v8_to_v9_backfills_stable_identity_and_source_span(tmp_path):
+    db_path = str(tmp_path / "identity.db")
+    metadata = {
+        **PRIVATE_METADATA_V2,
+        "source_window": {
+            **PRIVATE_METADATA_V2["source_window"],
+            "first_message_id": 101,
+            "last_message_id": 108,
+            "started_at": 1000.0,
+            "ended_at": 1100.0,
+        },
+    }
+    await _create_legacy_db(
+        db_path,
+        [{"text": PRIVATE_MEMORY_LONG, "metadata": json.dumps(metadata)}],
+    )
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v8_to_v9(None)
+    await migration._migrate_v8_to_v9(None)
+
+    records = await _get_all_metadata(db_path)
+    migrated = records[0]["metadata"]
+    assert migrated["memory_uid"]
+    assert migrated["revision"] == 1
+    assert migrated["memory_layer"] == "timeline"
+    assert migrated["memory_space_id"].startswith("space-v1-")
+
+    async with aiosqlite.connect(db_path) as db:
+        registry = await (
+            await db.execute(
+                "SELECT memory_uid, document_id, revision FROM memory_registry"
+            )
+        ).fetchall()
+        source = await (
+            await db.execute(
+                """
+                SELECT first_message_id, last_message_id, traceability
+                FROM memory_source_spans
+                """
+            )
+        ).fetchone()
+
+    assert registry == [(migrated["memory_uid"], records[0]["id"], 1)]
+    assert source == (101, 108, "full")
+
+
+@pytest.mark.asyncio
 async def test_full_migration_v1_to_v4_with_real_data(tmp_path):
     """模拟真实 v1 数据库完整迁移到 v4，私聊和群聊各 3 条。"""
     db_path = str(tmp_path / "test.db")

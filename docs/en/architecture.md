@@ -46,6 +46,19 @@ Document memories and graph memories are searched through two routes:
 | Graph nodes and edges | Entities and relationships extracted from memories, with cross-memory merging |
 | Memory atoms | Independent fact units with type, TTL, decay, and access reinforcement |
 
+### Timeline identity and source spans
+
+Every new memory receives a stable `memory_uid`, a monotonic `revision`, and a
+deterministic `memory_space_id`. The physical `documents.id` may change during a
+new-ID replacement, while `memory_registry` keeps the same logical UID mapped to
+the current document.
+
+`memory_source_spans` stores the session, message IDs, message indexes, and time
+range separately. Legacy memories without stable message evidence are marked as
+partially or not traceable instead of receiving fabricated provenance. These
+records remain in the `timeline` layer and do not change existing generation or
+retrieval behavior.
+
 ## Data safety
 
 | Scenario | Protection |

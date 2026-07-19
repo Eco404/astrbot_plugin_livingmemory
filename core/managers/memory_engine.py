@@ -18,9 +18,11 @@ from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
 from ...storage.graph_store import GraphStore
+from ...storage.memory_identity_store import MemoryIdentityStore
 from ..managers.atom_lifecycle_manager import AtomLifecycleManager
 from ..managers.graph_memory_manager import GraphMemoryManager
 from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
+from ..models.memory_identity import resolve_memory_space
 from ..processors.graph_extractor import GraphExtractor
 from ..processors.text_processor import TextProcessor
 from ..retrieval.atom_retriever import AtomRetriever
@@ -137,6 +139,7 @@ class MemoryEngine:
         self.atom_store = None
         self.atom_lifecycle_manager = None
         self.atom_retriever = None
+        self.memory_identity_store = MemoryIdentityStore(self.db_path)
         self.db_connection = None
         self._search_cache_enabled = bool(self.config.get("search_cache_enabled", True))
         self._search_cache_ttl = float(
@@ -166,6 +169,7 @@ class MemoryEngine:
 
         # 2. 创建表结构
         await self._create_tables()
+        await self.memory_identity_store.initialize()
 
         # 3. 初始化文本处理器
         stopwords_path = self.config.get("stopwords_path")
@@ -441,6 +445,54 @@ class MemoryEngine:
         self._search_cache_generation += 1
         self._search_cache.clear()
 
+    def _apply_stable_identity(
+        self,
+        metadata: dict[str, Any],
+        *,
+        session_id: str | None,
+        persona_id: str | None,
+    ) -> dict[str, Any]:
+        """Ensure every physical document carries a stable logical identity."""
+        normalized = dict(metadata)
+        normalized["memory_uid"] = str(
+            normalized.get("memory_uid") or uuid.uuid4()
+        )
+        try:
+            normalized["revision"] = max(1, int(normalized.get("revision", 1)))
+        except (TypeError, ValueError):
+            normalized["revision"] = 1
+        normalized["memory_layer"] = str(
+            normalized.get("memory_layer") or "timeline"
+        )
+        space = resolve_memory_space(session_id, persona_id)
+        normalized["memory_space_id"] = space.memory_space_id
+        normalized["memory_space_version"] = 1
+        return normalized
+
+    async def _register_memory_identity(
+        self,
+        document_id: int,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Persist the logical-to-physical mapping and optional source span."""
+        created_at = safe_float(metadata.get("create_time"), time.time())
+        updated_at = safe_float(metadata.get("updated_at"), created_at)
+        await self.memory_identity_store.upsert_memory(
+            memory_uid=str(metadata["memory_uid"]),
+            document_id=int(document_id),
+            memory_layer=str(metadata.get("memory_layer") or "timeline"),
+            memory_space_id=str(metadata["memory_space_id"]),
+            revision=int(metadata.get("revision", 1)),
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+        await self.memory_identity_store.upsert_source_span(
+            str(metadata["memory_uid"]),
+            metadata.get("source_window"),
+            fallback_session_id=metadata.get("session_id"),
+            fallback_time=created_at,
+        )
+
     def _serialize_atom_for_repair(self, atom: Any) -> dict[str, Any]:
         """Convert a MemoryAtom-like object into JSON-safe repair payload."""
         atom_type = getattr(atom, "atom_type", AtomType.UNKNOWN)
@@ -673,6 +725,14 @@ class MemoryEngine:
             )
             await self._advance_write_op(op_id, "graph_repaired", memory_id=memory_id)
 
+        metadata = self._apply_stable_identity(
+            metadata,
+            session_id=session_id,
+            persona_id=persona_id,
+        )
+        await self._register_memory_identity(int(memory_id), metadata)
+        await self._advance_write_op(op_id, "identity_repaired", memory_id=memory_id)
+
         await self._advance_write_op(
             op_id,
             "completed",
@@ -699,6 +759,7 @@ class MemoryEngine:
             await self.graph_memory_manager.delete_memory(int(memory_id))
         if self.atom_store is not None:
             await self.atom_store.delete_by_parent(int(memory_id))
+        await self.memory_identity_store.delete_by_document_id(int(memory_id))
 
         await self._advance_write_op(
             op_id,
@@ -741,6 +802,7 @@ class MemoryEngine:
 
         await self._delete_document_indexes_for_batch(memory_ids)
         await self._delete_graph_and_atoms_for_batch(memory_ids)
+        await self.memory_identity_store.delete_by_document_ids(memory_ids)
         await self._advance_write_op(
             op_id,
             "completed",
@@ -899,6 +961,7 @@ class MemoryEngine:
         """)
 
             await self._create_write_ops_table()
+            await MemoryIdentityStore.create_tables(self.db_connection)
 
             # 创建版本管理表
             await self.db_connection.execute("""
@@ -1036,6 +1099,16 @@ class MemoryEngine:
             else current_time
         )
         full_metadata["last_access_time"] = current_time
+        full_metadata = self._apply_stable_identity(
+            full_metadata,
+            session_id=session_id,
+            persona_id=persona_id,
+        )
+        await self._advance_write_op(
+            op_id,
+            "identity_prepared",
+            payload_patch={"metadata": full_metadata},
+        )
 
         # 通过混合检索器添加(会同时添加到BM25和向量索引)
         if self.hybrid_retriever is None:
@@ -1145,6 +1218,30 @@ class MemoryEngine:
                 "graph_skipped",
                 status="needs_repair" if needs_repair else "pending",
                 memory_id=doc_id,
+            )
+
+        try:
+            await self._register_memory_identity(doc_id, full_metadata)
+            await self._advance_write_op(
+                op_id,
+                "identity_registered",
+                status="needs_repair" if needs_repair else "pending",
+                memory_id=doc_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            needs_repair = True
+            await self._advance_write_op(
+                op_id,
+                "identity_failed",
+                status="needs_repair",
+                memory_id=doc_id,
+                error=str(e),
+            )
+            logger.error(
+                f"[MemoryEngine] 逻辑身份注册失败，已标记待修复 (memory_id={doc_id})",
+                exc_info=True,
             )
 
         if not needs_repair:
@@ -1369,6 +1466,21 @@ class MemoryEngine:
             # 合并元数据
             current_metadata.update(metadata_updates)
             current_metadata["updated_at"] = time.time()
+            current_metadata = self._apply_stable_identity(
+                current_metadata,
+                session_id=current_metadata.get("session_id"),
+                persona_id=current_metadata.get("persona_id"),
+            )
+            metadata_updates.update(
+                {
+                    "memory_uid": current_metadata["memory_uid"],
+                    "revision": current_metadata["revision"],
+                    "memory_layer": current_metadata["memory_layer"],
+                    "memory_space_id": current_metadata["memory_space_id"],
+                    "memory_space_version": current_metadata["memory_space_version"],
+                    "updated_at": current_metadata["updated_at"],
+                }
+            )
 
             # 【改进】使用增强的update_metadata确保三库同步
             if self.hybrid_retriever is None:
@@ -1386,6 +1498,7 @@ class MemoryEngine:
                         memory["text"],
                         current_metadata,
                     )
+                await self._register_memory_identity(memory_id, current_metadata)
                 self._invalidate_search_cache()
             else:
                 logger.error(f"[更新] 元数据更新失败 (memory_id={memory_id})")
@@ -1413,7 +1526,24 @@ class MemoryEngine:
             raise RuntimeError("混合检索器未初始化")
 
         current_metadata = self._safe_json_dict(current.get("metadata"))
+        current_metadata = self._apply_stable_identity(
+            current_metadata,
+            session_id=current_metadata.get("session_id"),
+            persona_id=current_metadata.get("persona_id"),
+        )
         replacement_metadata = dict(metadata or {})
+        for preserved_key in (
+            "session_id",
+            "persona_id",
+            "source_window",
+            "create_time",
+            "memory_layer",
+        ):
+            if (
+                preserved_key not in replacement_metadata
+                and preserved_key in current_metadata
+            ):
+                replacement_metadata[preserved_key] = current_metadata[preserved_key]
         replacement_metadata["memory_uid"] = current_metadata.get(
             "memory_uid"
         ) or str(uuid.uuid4())
@@ -1424,6 +1554,13 @@ class MemoryEngine:
         replacement_metadata["revision"] = current_revision + 1
         replacement_metadata["updated_at"] = time.time()
         replacement_metadata["importance"] = clamp_float(importance, default=0.5)
+        replacement_metadata = self._apply_stable_identity(
+            replacement_metadata,
+            session_id=replacement_metadata.get("session_id")
+            or current_metadata.get("session_id"),
+            persona_id=replacement_metadata.get("persona_id")
+            or current_metadata.get("persona_id"),
+        )
 
         old_content = str(current.get("text") or "")
         old_atoms: list = []
@@ -1452,6 +1589,7 @@ class MemoryEngine:
                         current_metadata,
                         old_atoms or None,
                     )
+                await self._register_memory_identity(memory_id, current_metadata)
             except Exception:
                 logger.error(
                     f"[原位更新] 回滚不完整 (memory_id={memory_id})",
@@ -1478,6 +1616,8 @@ class MemoryEngine:
                     replacement_metadata,
                     atoms,
                 )
+
+            await self._register_memory_identity(memory_id, replacement_metadata)
 
             self._invalidate_search_cache()
             logger.info(f"[原位更新] 记忆及派生索引更新完成 (memory_id={memory_id})")
@@ -1518,7 +1658,23 @@ class MemoryEngine:
             raise ValueError("记忆内容不能为空")
 
         current_metadata = self._safe_json_dict(current.get("metadata"))
+        current_metadata = self._apply_stable_identity(
+            current_metadata,
+            session_id=current_metadata.get("session_id"),
+            persona_id=current_metadata.get("persona_id"),
+        )
         replacement_metadata = dict(metadata or {})
+        for preserved_key in (
+            "session_id",
+            "persona_id",
+            "source_window",
+            "memory_layer",
+        ):
+            if (
+                preserved_key not in replacement_metadata
+                and preserved_key in current_metadata
+            ):
+                replacement_metadata[preserved_key] = current_metadata[preserved_key]
         replacement_metadata["memory_uid"] = current_metadata.get(
             "memory_uid"
         ) or str(uuid.uuid4())
@@ -1554,6 +1710,7 @@ class MemoryEngine:
                 raise RuntimeError("新记忆创建失败")
             if not await self.delete_memory(memory_id):
                 await self.delete_memory(new_memory_id)
+                await self._register_memory_identity(memory_id, current_metadata)
                 raise RuntimeError("旧记忆删除失败，已回滚新记忆")
             return new_memory_id
         except asyncio.CancelledError:
@@ -1568,6 +1725,8 @@ class MemoryEngine:
                         f"[替换] 回滚新记忆失败 (memory_id={new_memory_id})",
                         exc_info=True,
                     )
+            if await self.get_memory(memory_id):
+                await self._register_memory_identity(memory_id, current_metadata)
             raise
 
     async def delete_memory(self, memory_id: int) -> bool:
@@ -1647,6 +1806,25 @@ class MemoryEngine:
             needs_repair = True
             logger.error(
                 f"[MemoryEngine] 记忆原子删除失败，已标记待修复 (memory_id={memory_id})",
+                exc_info=True,
+            )
+
+        try:
+            await self.memory_identity_store.delete_by_document_id(memory_id)
+            await self._advance_write_op(op_id, "identity_deleted", memory_id=memory_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            await self._advance_write_op(
+                op_id,
+                "identity_delete_failed",
+                status="needs_repair",
+                memory_id=memory_id,
+                error=str(e),
+            )
+            needs_repair = True
+            logger.error(
+                f"[MemoryEngine] 逻辑身份删除失败，已标记待修复 (memory_id={memory_id})",
                 exc_info=True,
             )
 
@@ -2055,6 +2233,14 @@ class MemoryEngine:
                 await self._advance_write_op(
                     op_id,
                     "graph_atoms_deleted",
+                    payload_patch={"memory_ids": batch, "deleted_count": batch_deleted},
+                )
+
+                # 5. Remove logical identities that still point at deleted IDs.
+                await self.memory_identity_store.delete_by_document_ids(batch)
+                await self._advance_write_op(
+                    op_id,
+                    "identities_deleted",
                     payload_patch={"memory_ids": batch, "deleted_count": batch_deleted},
                 )
             except asyncio.CancelledError:
