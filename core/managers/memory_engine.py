@@ -36,6 +36,7 @@ from ..retrieval.hybrid_retriever import HybridResult, HybridRetriever
 from ..retrieval.rrf_fusion import RRFFusion
 from ..retrieval.vector_retriever import VectorRetriever
 from ..utils.number_utils import clamp_float, safe_float
+from .topic_maintenance_manager import TopicMaintenanceManager
 
 
 class MemoryEngine:
@@ -142,6 +143,10 @@ class MemoryEngine:
         self.atom_retriever = None
         self.memory_identity_store = MemoryIdentityStore(self.db_path)
         self.topic_memory_store = TopicMemoryStore(self.db_path)
+        self.topic_maintenance_manager = TopicMaintenanceManager(
+            self.db_path,
+            self.topic_memory_store,
+        )
         self.db_connection = None
         self._search_cache_enabled = bool(self.config.get("search_cache_enabled", True))
         self._search_cache_ttl = float(
@@ -998,7 +1003,7 @@ class MemoryEngine:
             await self.db_connection.execute("""
             CREATE TABLE IF NOT EXISTS db_version (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                version INTEGER NOT NULL,
+                version TEXT NOT NULL,
                 description TEXT,
                 migrated_at TEXT NOT NULL,
                 migration_duration_seconds REAL
@@ -1033,7 +1038,7 @@ class MemoryEngine:
                     VALUES (?, ?, ?, ?)
                 """,
                     (
-                        DBMigration.CURRENT_VERSION,
+                        DBMigration.storage_version(DBMigration.CURRENT_VERSION),
                         "初始版本 - 当前架构",
                         datetime.now(timezone.utc).isoformat(),
                         0.0,

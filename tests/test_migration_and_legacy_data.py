@@ -138,6 +138,43 @@ async def _get_all_metadata(db_path: str) -> list[dict]:
     return result
 
 
+def test_database_version_segments_do_not_use_float_ordering():
+    assert DBMigration.normalize_version("v9.02") == "9.2"
+    assert DBMigration.version_key("9.10") > DBMigration.version_key("9.2")
+    assert DBMigration.version_key(9) < DBMigration.version_key("9.1")
+    assert DBMigration.storage_version("9.2") == "v9.2"
+
+
+@pytest.mark.asyncio
+async def test_set_db_version_forces_text_in_legacy_integer_column(tmp_path):
+    db_path = str(tmp_path / "version_affinity.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE db_version (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version INTEGER NOT NULL,
+                description TEXT,
+                migrated_at TEXT NOT NULL,
+                migration_duration_seconds REAL
+            )
+            """
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration.set_db_version("9.10", "future test")
+    async with aiosqlite.connect(db_path) as db:
+        row = await (
+            await db.execute(
+                "SELECT version, typeof(version) FROM db_version ORDER BY id DESC LIMIT 1"
+            )
+        ).fetchone()
+
+    assert row == ("v9.10", "text")
+    assert await migration.get_db_version() == "9.10"
+
+
 # ===========================================================================
 # 一、迁移正确性测试
 # ===========================================================================
@@ -368,7 +405,7 @@ async def test_migrate_v8_to_v9_backfills_stable_identity_and_source_span(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_migrate_v9_to_v10_creates_empty_topic_foundation(tmp_path):
+async def test_migrate_v9_to_v9_1_creates_empty_topic_foundation(tmp_path):
     db_path = str(tmp_path / "topic_foundation.db")
     await _create_legacy_db(
         db_path,
@@ -376,8 +413,8 @@ async def test_migrate_v9_to_v10_creates_empty_topic_foundation(tmp_path):
     )
     migration = DBMigration(db_path)
     await migration._migrate_v8_to_v9(None)
-    await migration._migrate_v9_to_v10(None)
-    await migration._migrate_v9_to_v10(None)
+    await migration._migrate_v9_to_v9_1(None)
+    await migration._migrate_v9_to_v9_1(None)
 
     expected_tables = {
         "topic_memories",
@@ -403,6 +440,44 @@ async def test_migrate_v9_to_v10_creates_empty_topic_foundation(tmp_path):
     assert expected_tables <= table_names
     assert topic_count == 0
     assert timeline_count == 1
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_1_to_v9_2_creates_empty_candidate_scan_tables(tmp_path):
+    db_path = str(tmp_path / "candidate_foundation.db")
+    await _create_legacy_db(
+        db_path,
+        [{"text": PRIVATE_MEMORY_LONG, "metadata": json.dumps(PRIVATE_METADATA_V2)}],
+    )
+    migration = DBMigration(db_path)
+    await migration._migrate_v8_to_v9(None)
+    await migration._migrate_v9_to_v9_1(None)
+    await migration._migrate_v9_1_to_v9_2(None)
+    await migration._migrate_v9_1_to_v9_2(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+        item_count = (
+            await (
+                await db.execute("SELECT COUNT(*) FROM topic_maintenance_items")
+            ).fetchone()
+        )[0]
+        group_count = (
+            await (
+                await db.execute("SELECT COUNT(*) FROM topic_candidate_groups")
+            ).fetchone()
+        )[0]
+
+    assert {"topic_maintenance_items", "topic_candidate_groups"} <= tables
+    assert item_count == 0
+    assert group_count == 0
 
 
 @pytest.mark.asyncio

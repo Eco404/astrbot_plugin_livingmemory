@@ -20,6 +20,8 @@ from ..core.models.topic_memory import (
     TopicMemoryAtom,
     TopicMemoryStatus,
     TopicTimelineLink,
+    TimelineTopicCandidate,
+    TopicCandidateGroup,
 )
 
 
@@ -211,6 +213,60 @@ class TopicMemoryStore:
             """
             CREATE INDEX IF NOT EXISTS idx_topic_runs_space_status
             ON topic_maintenance_runs(memory_space_id, status, created_at DESC)
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topic_maintenance_items (
+                run_uid TEXT NOT NULL,
+                timeline_uid TEXT NOT NULL,
+                source_revision INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'processed',
+                time_cluster_key TEXT NOT NULL,
+                candidate_payload TEXT NOT NULL,
+                error TEXT,
+                processed_at REAL NOT NULL,
+                PRIMARY KEY(run_uid, timeline_uid),
+                FOREIGN KEY(run_uid) REFERENCES topic_maintenance_runs(run_uid)
+                    ON DELETE CASCADE,
+                FOREIGN KEY(timeline_uid) REFERENCES memory_registry(memory_uid)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_items_run_cluster
+            ON topic_maintenance_items(run_uid, time_cluster_key, status)
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topic_candidate_groups (
+                group_uid TEXT PRIMARY KEY,
+                run_uid TEXT NOT NULL,
+                group_index INTEGER NOT NULL,
+                memory_space_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                timeline_uids TEXT NOT NULL,
+                time_cluster_keys TEXT NOT NULL,
+                cohesion REAL NOT NULL DEFAULT 0.0,
+                started_at REAL,
+                ended_at REAL,
+                shared_signals TEXT NOT NULL DEFAULT '[]',
+                status TEXT NOT NULL DEFAULT 'preview',
+                created_at REAL NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(run_uid, group_index),
+                FOREIGN KEY(run_uid) REFERENCES topic_maintenance_runs(run_uid)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_candidate_groups_run
+            ON topic_candidate_groups(run_uid, group_index)
             """
         )
 
@@ -534,6 +590,7 @@ class TopicMemoryStore:
         *,
         status: TopicMaintenanceStatus | str | None = None,
         cursor_memory_uid: str | None = None,
+        total_items: int | None = None,
         processed_items: int | None = None,
         created_topics: int | None = None,
         updated_topics: int | None = None,
@@ -558,6 +615,7 @@ class TopicMemoryStore:
                 params.append(time.time())
         updates = {
             "cursor_memory_uid": cursor_memory_uid,
+            "total_items": total_items,
             "processed_items": processed_items,
             "created_topics": created_topics,
             "updated_topics": updated_topics,
@@ -586,6 +644,142 @@ class TopicMemoryStore:
                 )
             ).fetchone()
         return dict(row) if row else None
+
+    async def save_scan_items(
+        self,
+        run_uid: str,
+        candidates: list[TimelineTopicCandidate],
+    ) -> None:
+        """Persist one completed scanner batch for crash-safe resumption."""
+        if not candidates:
+            return
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                for candidate in candidates:
+                    await db.execute(
+                        """
+                        INSERT INTO topic_maintenance_items (
+                            run_uid, timeline_uid, source_revision, status,
+                            time_cluster_key, candidate_payload, processed_at
+                        ) VALUES (?, ?, ?, 'processed', ?, ?, ?)
+                        ON CONFLICT(run_uid, timeline_uid) DO UPDATE SET
+                            source_revision = excluded.source_revision,
+                            status = excluded.status,
+                            time_cluster_key = excluded.time_cluster_key,
+                            candidate_payload = excluded.candidate_payload,
+                            error = NULL,
+                            processed_at = excluded.processed_at
+                        """,
+                        (
+                            run_uid,
+                            candidate.memory_uid,
+                            int(candidate.source_revision),
+                            candidate.time_cluster_key,
+                            self._to_json(self._candidate_to_dict(candidate)),
+                            now,
+                        ),
+                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def get_scan_items(self, run_uid: str) -> list[TimelineTopicCandidate]:
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT i.candidate_payload
+                    FROM topic_maintenance_items i
+                    JOIN memory_registry r ON r.memory_uid = i.timeline_uid
+                    WHERE i.run_uid = ? AND i.status = 'processed'
+                      AND i.source_revision = r.revision
+                    ORDER BY i.processed_at, i.timeline_uid
+                    """,
+                    (run_uid,),
+                )
+            ).fetchall()
+        candidates: list[TimelineTopicCandidate] = []
+        for row in rows:
+            payload = self._from_json(row["candidate_payload"])
+            candidates.append(self._dict_to_candidate(payload))
+        return candidates
+
+    async def get_processed_timeline_uids(self, run_uid: str) -> set[str]:
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT i.timeline_uid
+                    FROM topic_maintenance_items i
+                    JOIN memory_registry r ON r.memory_uid = i.timeline_uid
+                    WHERE i.run_uid = ? AND i.status = 'processed'
+                      AND i.source_revision = r.revision
+                    """,
+                    (run_uid,),
+                )
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    async def replace_candidate_groups(
+        self,
+        run_uid: str,
+        groups: list[TopicCandidateGroup],
+    ) -> None:
+        """Atomically publish the deterministic preview for one scan run."""
+        async with self._connect() as db:
+            try:
+                await db.execute(
+                    "DELETE FROM topic_candidate_groups WHERE run_uid = ?",
+                    (run_uid,),
+                )
+                for group in groups:
+                    if group.run_uid != run_uid:
+                        raise ValueError("Candidate group belongs to another run")
+                    await db.execute(
+                        """
+                        INSERT INTO topic_candidate_groups (
+                            group_uid, run_uid, group_index, memory_space_id,
+                            label, timeline_uids, time_cluster_keys, cohesion,
+                            started_at, ended_at, shared_signals, status,
+                            created_at, metadata
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            group.group_uid,
+                            group.run_uid,
+                            int(group.group_index),
+                            group.memory_space_id,
+                            group.label,
+                            self._to_json(group.timeline_uids),
+                            self._to_json(group.time_cluster_keys),
+                            float(group.cohesion),
+                            group.started_at,
+                            group.ended_at,
+                            self._to_json(group.shared_signals),
+                            group.status,
+                            float(group.created_at),
+                            self._to_json(group.metadata),
+                        ),
+                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def list_candidate_groups(self, run_uid: str) -> list[TopicCandidateGroup]:
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT * FROM topic_candidate_groups
+                    WHERE run_uid = ? ORDER BY group_index
+                    """,
+                    (run_uid,),
+                )
+            ).fetchall()
+        return [self._row_to_candidate_group(row) for row in rows]
 
     async def _load_timeline_registry(
         self, db: aiosqlite.Connection, timeline_uids: set[str]
@@ -798,6 +992,74 @@ class TopicMemoryStore:
             decay_anchor_at=row["decay_anchor_at"],
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
+            metadata=TopicMemoryStore._from_json(row["metadata"]),
+        )
+
+    @staticmethod
+    def _candidate_to_dict(candidate: TimelineTopicCandidate) -> dict[str, Any]:
+        return {
+            "memory_uid": candidate.memory_uid,
+            "document_id": candidate.document_id,
+            "source_revision": candidate.source_revision,
+            "memory_space_id": candidate.memory_space_id,
+            "session_id": candidate.session_id,
+            "content": candidate.content,
+            "summary": candidate.summary,
+            "topics": candidate.topics,
+            "key_facts": candidate.key_facts,
+            "atom_fingerprints": candidate.atom_fingerprints,
+            "atom_contents": candidate.atom_contents,
+            "started_at": candidate.started_at,
+            "ended_at": candidate.ended_at,
+            "time_cluster_key": candidate.time_cluster_key,
+            "features": candidate.features,
+        }
+
+    @staticmethod
+    def _dict_to_candidate(payload: dict[str, Any]) -> TimelineTopicCandidate:
+        return TimelineTopicCandidate(
+            memory_uid=str(payload.get("memory_uid") or ""),
+            document_id=int(payload.get("document_id") or 0),
+            source_revision=max(1, int(payload.get("source_revision") or 1)),
+            memory_space_id=str(payload.get("memory_space_id") or ""),
+            session_id=payload.get("session_id"),
+            content=str(payload.get("content") or ""),
+            summary=str(payload.get("summary") or ""),
+            topics=[str(item) for item in payload.get("topics", [])],
+            key_facts=[str(item) for item in payload.get("key_facts", [])],
+            atom_fingerprints=[
+                str(item) for item in payload.get("atom_fingerprints", [])
+            ],
+            atom_contents=[str(item) for item in payload.get("atom_contents", [])],
+            started_at=payload.get("started_at"),
+            ended_at=payload.get("ended_at"),
+            time_cluster_key=str(payload.get("time_cluster_key") or ""),
+            features=(
+                payload.get("features", {})
+                if isinstance(payload.get("features"), dict)
+                else {}
+            ),
+        )
+
+    @staticmethod
+    def _row_to_candidate_group(row: aiosqlite.Row) -> TopicCandidateGroup:
+        timeline_uids = json.loads(row["timeline_uids"] or "[]")
+        time_cluster_keys = json.loads(row["time_cluster_keys"] or "[]")
+        shared_signals = json.loads(row["shared_signals"] or "[]")
+        return TopicCandidateGroup(
+            group_uid=str(row["group_uid"]),
+            run_uid=str(row["run_uid"]),
+            group_index=int(row["group_index"]),
+            memory_space_id=str(row["memory_space_id"]),
+            label=str(row["label"]),
+            timeline_uids=[str(item) for item in timeline_uids],
+            time_cluster_keys=[str(item) for item in time_cluster_keys],
+            cohesion=float(row["cohesion"]),
+            started_at=row["started_at"],
+            ended_at=row["ended_at"],
+            shared_signals=[str(item) for item in shared_signals],
+            status=str(row["status"]),
+            created_at=float(row["created_at"]),
             metadata=TopicMemoryStore._from_json(row["metadata"]),
         )
 
