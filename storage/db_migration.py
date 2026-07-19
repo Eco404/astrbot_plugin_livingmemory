@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = 10
+    CURRENT_VERSION = "9.2"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -37,19 +37,48 @@ class DBMigration:
         7: "Storage indexes and FTS optimization for graph and atom data",
         8: "Write-operation log and access-aware metadata indexes",
         9: "Stable timeline identity registry and source-span provenance",
-        10: "Derived topic-memory storage and Timeline provenance links",
+        "9.1": "Derived topic-memory storage and Timeline provenance links",
+        "9.2": "Resumable deterministic Topic candidate discovery",
     }
 
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.migration_lock = asyncio.Lock()
 
-    async def get_db_version(self) -> int:
+    @classmethod
+    def normalize_version(cls, version: Any) -> str:
+        """Return a canonical dotted version without using float arithmetic."""
+        text = str(version).strip().lower()
+        if text.startswith("v"):
+            text = text[1:]
+        parts = text.split(".")
+        if not parts or any(not part.isdigit() for part in parts):
+            raise ValueError(f"无效数据库版本号: {version}")
+        normalized = [str(int(part)) for part in parts]
+        while len(normalized) > 1 and normalized[-1] == "0":
+            normalized.pop()
+        return ".".join(normalized)
+
+    @classmethod
+    def version_key(cls, version: Any) -> tuple[int, ...]:
+        """Build a segment-wise comparison key (9.10 is newer than 9.2)."""
+        return tuple(int(part) for part in cls.normalize_version(version).split("."))
+
+    @classmethod
+    def storage_version(cls, version: Any) -> str:
+        """Force TEXT storage even in legacy INTEGER-affinity version columns."""
+        return f"v{cls.normalize_version(version)}"
+
+    @classmethod
+    def version_at_least(cls, version: Any, target: Any) -> bool:
+        return cls.version_key(version) >= cls.version_key(target)
+
+    async def get_db_version(self) -> str:
         """
         获取当前数据库版本
 
         Returns:
-            int: 数据库版本号，如果不存在版本表则返回1（旧版本）
+            str: 规范化数据库版本号，如果不存在版本表则返回 "1"
         """
         try:
             async with aiosqlite.connect(self.db_path) as db:
@@ -80,7 +109,7 @@ class DBMigration:
                             logger.info(
                                 f"检测到旧版本数据库（无版本表，有{doc_count}条数据），当前版本: 1"
                             )
-                            return 1
+                            return "1"
                         else:
                             # 空数据库，视为最新版本
                             logger.info(
@@ -99,15 +128,15 @@ class DBMigration:
                 row = await cursor.fetchone()
 
                 if row and len(row) > 0:
-                    version = row[0]
+                    version = self.normalize_version(row[0])
                     logger.info(f"当前数据库版本: {version}")
                     return version
                 else:
-                    return 1
+                    return "1"
 
         except Exception as e:
             logger.error(f"获取数据库版本失败: {e}", exc_info=True)
-            return 1
+            return "1"
 
     async def initialize_version_table(self):
         """初始化版本管理表"""
@@ -116,7 +145,7 @@ class DBMigration:
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS db_version (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        version INTEGER NOT NULL,
+                        version TEXT NOT NULL,
                         description TEXT,
                         migrated_at TEXT NOT NULL,
                         migration_duration_seconds REAL
@@ -129,7 +158,7 @@ class DBMigration:
             raise
 
     async def set_db_version(
-        self, version: int, description: str = "", duration: float = 0.0
+        self, version: str | int, description: str = "", duration: float = 0.0
     ):
         """
         设置数据库版本
@@ -146,10 +175,17 @@ class DBMigration:
                     INSERT INTO db_version (version, description, migrated_at, migration_duration_seconds)
                     VALUES (?, ?, ?, ?)
                 """,
-                    (version, description, datetime.now(timezone.utc).isoformat(), duration),
+                    (
+                        self.storage_version(version),
+                        description,
+                        datetime.now(timezone.utc).isoformat(),
+                        duration,
+                    ),
                 )
                 await db.commit()
-                logger.info(f"数据库版本已更新至: {version}")
+                logger.info(
+                    f"数据库版本已更新至: {self.normalize_version(version)}"
+                )
         except Exception as e:
             logger.error(f"设置数据库版本失败: {e}", exc_info=True)
             raise
@@ -162,7 +198,9 @@ class DBMigration:
             bool: True表示需要迁移
         """
         current_version = await self.get_db_version()
-        needs_migration = current_version < self.CURRENT_VERSION
+        needs_migration = self.version_key(current_version) < self.version_key(
+            self.CURRENT_VERSION
+        )
 
         if needs_migration:
             logger.warning(
@@ -196,7 +234,8 @@ class DBMigration:
                 # 获取当前版本
                 current_version = await self.get_db_version()
 
-                if current_version >= self.CURRENT_VERSION:
+                current_key = self.version_key(current_version)
+                if current_key >= self.version_key(self.CURRENT_VERSION):
                     return {
                         "success": True,
                         "message": "数据库已是最新版本，无需迁移",
@@ -222,40 +261,44 @@ class DBMigration:
                 migration_steps = []
 
                 # 从版本1升级到版本2
-                if current_version == 1:
+                if current_key == self.version_key("1"):
                     migration_steps.append(self._migrate_v1_to_v2)
 
                 # 从版本2升级到版本3
-                if current_version <= 2:
+                if current_key <= self.version_key("2"):
                     migration_steps.append(self._migrate_v2_to_v3)
 
                 # 从版本3升级到版本4
-                if current_version <= 3:
+                if current_key <= self.version_key("3"):
                     migration_steps.append(self._migrate_v3_to_v4)
 
                 # 从版本4升级到版本5
-                if current_version <= 4:
+                if current_key <= self.version_key("4"):
                     migration_steps.append(self._migrate_v4_to_v5)
 
                 # 从版本5升级到版本6
-                if current_version <= 5:
+                if current_key <= self.version_key("5"):
                     migration_steps.append(self._migrate_v5_to_v6)
 
                 # 从版本6升级到版本7
-                if current_version <= 6:
+                if current_key <= self.version_key("6"):
                     migration_steps.append(self._migrate_v6_to_v7)
 
                 # 从版本7升级到版本8
-                if current_version <= 7:
+                if current_key <= self.version_key("7"):
                     migration_steps.append(self._migrate_v7_to_v8)
 
                 # 从版本8升级到版本9
-                if current_version <= 8:
+                if current_key <= self.version_key("8"):
                     migration_steps.append(self._migrate_v8_to_v9)
 
-                # 从版本9升级到版本10
-                if current_version <= 9:
-                    migration_steps.append(self._migrate_v9_to_v10)
+                # 从版本9升级到版本9.1
+                if current_key <= self.version_key("9"):
+                    migration_steps.append(self._migrate_v9_to_v9_1)
+
+                # 从版本9.1升级到版本9.2
+                if current_key <= self.version_key("9.1"):
+                    migration_steps.append(self._migrate_v9_1_to_v9_2)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -930,12 +973,12 @@ class DBMigration:
             await db.commit()
         logger.info(f"v8 -> v9 迁移完成，共处理 {total} 条 Timeline 记忆")
 
-    async def _migrate_v9_to_v10(
+    async def _migrate_v9_to_v9_1(
         self,
         progress_callback: Callable[[str, int, int], None] | None,
     ):
         """Create the inactive Topic-memory storage foundation."""
-        logger.info("执行迁移步骤: v9 -> v10 (topic-memory storage foundation)")
+        logger.info("执行迁移步骤: v9 -> v9.1 (topic-memory storage foundation)")
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA busy_timeout = 10000")
             await db.execute("PRAGMA foreign_keys = ON")
@@ -944,7 +987,23 @@ class DBMigration:
             await db.commit()
         if progress_callback:
             progress_callback("创建 Topic 记忆存储结构", 1, 1)
-        logger.info("v9 -> v10 迁移完成，未生成或修改任何 Topic 记忆")
+        logger.info("v9 -> v9.1 迁移完成，未生成或修改任何 Topic 记忆")
+
+    async def _migrate_v9_1_to_v9_2(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ):
+        """Add resumable scan items and deterministic candidate previews."""
+        logger.info("执行迁移步骤: v9.1 -> v9.2 (Topic candidate discovery)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await MemoryIdentityStore.create_tables(db)
+            await TopicMemoryStore.create_tables(db)
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建 Topic 候选扫描结构", 1, 1)
+        logger.info("v9.1 -> v9.2 迁移完成，未执行扫描或生成正式 Topic")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

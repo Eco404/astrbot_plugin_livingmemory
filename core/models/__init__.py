@@ -22,6 +22,8 @@ from .topic_memory import (
     TopicMemoryAtom,
     TopicMemoryStatus,
     TopicTimelineLink,
+    TimelineTopicCandidate,
+    TopicCandidateGroup,
 )
 
 __all__ = [
@@ -45,4 +47,6 @@ __all__ = [
     "TopicMemoryAtom",
     "TopicMemoryStatus",
     "TopicTimelineLink",
+    "TimelineTopicCandidate",
+    "TopicCandidateGroup",
 ]

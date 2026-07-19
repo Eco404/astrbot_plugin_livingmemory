@@ -125,6 +125,47 @@ class TopicMaintenanceRun:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class TimelineTopicCandidate:
+    """Read-only Timeline projection used by deterministic Topic discovery."""
+
+    memory_uid: str
+    document_id: int
+    source_revision: int
+    memory_space_id: str
+    session_id: str | None
+    content: str
+    summary: str
+    topics: list[str] = field(default_factory=list)
+    key_facts: list[str] = field(default_factory=list)
+    atom_fingerprints: list[str] = field(default_factory=list)
+    atom_contents: list[str] = field(default_factory=list)
+    started_at: float | None = None
+    ended_at: float | None = None
+    time_cluster_key: str = ""
+    features: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TopicCandidateGroup:
+    """A deterministic proposal that must be reviewed by a later LLM stage."""
+
+    run_uid: str
+    group_index: int
+    memory_space_id: str
+    label: str
+    timeline_uids: list[str]
+    time_cluster_keys: list[str]
+    cohesion: float
+    group_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    started_at: float | None = None
+    ended_at: float | None = None
+    shared_signals: list[str] = field(default_factory=list)
+    status: str = "preview"
+    created_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 __all__ = [
     "TopicAtomSource",
     "TopicLinkStatus",
@@ -135,4 +176,6 @@ __all__ = [
     "TopicMemoryAtom",
     "TopicMemoryStatus",
     "TopicTimelineLink",
+    "TimelineTopicCandidate",
+    "TopicCandidateGroup",
 ]
