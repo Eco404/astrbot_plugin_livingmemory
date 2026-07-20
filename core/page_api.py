@@ -166,6 +166,12 @@ class PluginPageApi:
             "LivingMemory Page Topic detail",
         )
         register(
+            f"{PAGE_API_PREFIX}/topics/maintenance/unindexed",
+            self.list_unindexed_topic_timelines,
+            ["GET"],
+            "LivingMemory Page unindexed Timeline list",
+        )
+        register(
             f"{PAGE_API_PREFIX}/topics/build/start",
             self.start_topic_build,
             ["POST"],
@@ -331,6 +337,14 @@ class PluginPageApi:
         if error:
             return error
         return await self.topic_handler.get_topic_detail(ready["memory_engine"])
+
+    async def list_unindexed_topic_timelines(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.list_unindexed_timelines(
+            ready["memory_engine"]
+        )
 
     async def start_topic_build(self):
         ready, error = await self._ensure_plugin_ready()

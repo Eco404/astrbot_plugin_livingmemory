@@ -205,7 +205,7 @@
               <select id="topic-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
               <button class="btn btn-secondary btn-sm" id="topic-refresh" data-i18n="common.refresh">刷新</button>
               <button class="btn btn-primary btn-sm" id="topic-build-full" data-i18n="topic.fullBuild" disabled>全量构建</button>
-              <button class="btn btn-secondary btn-sm" id="topic-build-incremental" data-i18n="topic.incremental" disabled>增量维护（24h）</button>
+              <button class="btn btn-secondary btn-sm" id="topic-maintenance" data-i18n="topic.maintenance" disabled>维护</button>
             </div>
           </header>
           <div class="page-body topic-page-body">
@@ -369,6 +369,35 @@
           </button>
         </div>
         <div class="modal-body topic-detail-body" id="topic-detail-body"></div>
+      </div>
+    </div>
+
+    <!-- Topic Maintenance Panel -->
+    <div class="modal-overlay" id="topic-maintenance-overlay" aria-hidden="true">
+      <div class="modal topic-maintenance-modal" role="dialog" aria-modal="true" aria-labelledby="topic-maintenance-title" aria-describedby="topic-maintenance-intro">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-maintenance-title" data-i18n="topic.maintenanceTitle">Topic 维护</div>
+          <button class="modal-close" id="topic-maintenance-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="topic-maintenance-intro text-secondary" id="topic-maintenance-intro" data-i18n="topic.maintenanceIntro">检查尚未被活跃 Topic 以当前版本索引的 Timeline，确认后仅补建所选条目。</p>
+          <div class="topic-maintenance-toolbar">
+            <div id="topic-maintenance-status" class="text-secondary" aria-live="polite"></div>
+            <button class="btn btn-secondary btn-sm" id="topic-maintenance-detect" type="button" data-i18n="topic.detectUnindexed">重新检查</button>
+          </div>
+          <div class="topic-maintenance-selection hidden" id="topic-maintenance-selection">
+            <label class="topic-maintenance-select-all">
+              <input id="topic-maintenance-select-all" type="checkbox" checked>
+              <span data-i18n="topic.selectAllUnindexed">全选未索引 Timeline</span>
+            </label>
+            <span class="text-tertiary" id="topic-maintenance-selected-count"></span>
+          </div>
+          <div class="topic-maintenance-list" id="topic-maintenance-list"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="topic-maintenance-cancel" type="button" data-i18n="common.close">关闭</button>
+          <button class="btn btn-primary" id="topic-maintenance-submit" type="button" data-i18n="topic.maintenanceSubmit" disabled>开始增量补建</button>
+        </div>
       </div>
     </div>
 

@@ -162,6 +162,24 @@ class TopicHandler:
             logger.error("[PageAPI] 获取 Topic 详情失败", exc_info=True)
             return self.utils.error(str(exc))
 
+    async def list_unindexed_timelines(self, memory_engine) -> dict[str, Any]:
+        memory_space_id = self.utils.optional_text(request.args.get("memory_space_id"))
+        if not memory_space_id:
+            return self.utils.error("memory_space_id 不能为空")
+        try:
+            candidate_manager = memory_engine.topic_build_manager.candidate_manager
+            items = await candidate_manager.list_unindexed_timelines(memory_space_id)
+            return self.utils.ok(
+                {
+                    "memory_space_id": memory_space_id,
+                    "total": len(items),
+                    "items": items,
+                }
+            )
+        except Exception as exc:
+            logger.error("[PageAPI] 检测未索引 Timeline 失败", exc_info=True)
+            return self.utils.error(str(exc))
+
     async def start_build(self, memory_engine) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         if not memory_engine.topic_memory_enabled:
@@ -171,8 +189,26 @@ class TopicHandler:
         reset_topics = payload.get("reset_topics", False)
         if not isinstance(reset_topics, bool):
             return self.utils.error("reset_topics 必须是布尔值")
+        raw_timeline_uids = payload.get("timeline_uids")
+        timeline_uids: list[str] | None = None
+        if raw_timeline_uids is not None:
+            if not isinstance(raw_timeline_uids, list):
+                return self.utils.error("timeline_uids 必须是数组")
+            timeline_uids = list(
+                dict.fromkeys(
+                    str(value or "").strip()
+                    for value in raw_timeline_uids
+                    if str(value or "").strip()
+                )
+            )
+            if not timeline_uids:
+                return self.utils.error("请至少选择一条 Timeline")
+            if any(len(value) > 512 for value in timeline_uids):
+                return self.utils.error("timeline_uid 长度无效")
         resume_run = None
         if resume_run_uid:
+            if timeline_uids is not None:
+                return self.utils.error("断点续建不能重新指定 Timeline")
             if reset_topics:
                 return self.utils.error("断点续建不能同时清空 Topic")
             resume_run = await memory_engine.topic_memory_store.get_maintenance_run(
@@ -210,11 +246,19 @@ class TopicHandler:
             )
             since = payload.get("since")
             if mode is TopicMaintenanceMode.INCREMENTAL:
-                since = float(since) if since is not None else time.time() - 86400.0
+                since = (
+                    None
+                    if timeline_uids is not None
+                    else float(since)
+                    if since is not None
+                    else time.time() - 86400.0
+                )
         except (TypeError, ValueError):
             return self.utils.error("构建模式或 since 参数无效")
         if reset_topics and mode is not TopicMaintenanceMode.FULL:
             return self.utils.error("只有全量构建可以先清空 Topic")
+        if timeline_uids is not None and mode is not TopicMaintenanceMode.INCREMENTAL:
+            return self.utils.error("指定 Timeline 仅适用于增量补建")
 
         active_jobs = self._active_jobs()
         if active_jobs:
@@ -256,30 +300,41 @@ class TopicHandler:
                     else "candidate_scan"
                 )
             now = time.time()
-            if event_stage != job.get("stage"):
+            previous_stage = str(job.get("stage") or "")
+            if event_stage != previous_stage:
                 job["stage_started_at"] = now
             for key in self._PROGRESS_DETAIL_FIELDS:
                 job.pop(key, None)
+            event_current = int(
+                event.get("current", event.get("processed_items", 0)) or 0
+            )
+            event_total = int(
+                event.get("total", event.get("total_items", 0)) or 0
+            )
+            if event_stage == previous_stage:
+                event_current = max(int(job.get("current") or 0), event_current)
+                event_total = max(int(job.get("total") or 0), event_total)
             job.update(
                 {
                     "status": "running",
                     "stage": event_stage,
-                    "current": int(
-                        event.get("current", event.get("processed_items", 0)) or 0
-                    ),
-                    "total": int(
-                        event.get("total", event.get("total_items", 0)) or 0
-                    ),
+                    "current": event_current,
+                    "total": event_total,
                     "last_progress_at": now,
                 }
             )
             for key in self._PROGRESS_DETAIL_FIELDS:
                 if key in event and event[key] is not None:
                     job[key] = event[key]
-            job["overall_percent"] = self._overall_percent(
+            overall_percent = self._overall_percent(
                 event_stage,
                 int(job["current"]),
                 int(job["total"]),
+            )
+            job["overall_percent"] = (
+                max(float(job.get("overall_percent") or 0.0), overall_percent)
+                if event_stage == previous_stage
+                else overall_percent
             )
             if event.get("run_uid"):
                 job["run_uid"] = str(event["run_uid"])
@@ -297,6 +352,7 @@ class TopicHandler:
                         memory_space_id,
                         mode=mode,
                         since=since,
+                        timeline_uids=timeline_uids,
                         reset_topics=reset_topics,
                         progress_callback=progress,
                     )

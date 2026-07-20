@@ -4,6 +4,8 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import aiosqlite
 import pytest
@@ -33,6 +35,36 @@ from tests.test_topic_maintenance_manager import _create_timeline_db
 class _Response:
     def __init__(self, payload):
         self.completion_text = json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_selected_unindexed_build_does_not_expand_to_full_without_topics():
+    store = SimpleNamespace(list_topics=AsyncMock(return_value=[]))
+    candidate_manager = SimpleNamespace(
+        start_scan=AsyncMock(return_value={"run_uid": "run-selected"})
+    )
+    manager = TopicBuildManager(
+        ":memory:",
+        store,
+        candidate_manager,
+    )
+    manager.build_from_scan = AsyncMock(
+        return_value={"status": "completed", "run_uid": "run-selected"}
+    )
+
+    result = await manager.build_space(
+        "space-1",
+        mode=TopicMaintenanceMode.INCREMENTAL,
+        timeline_uids=["timeline-1", "timeline-2"],
+    )
+
+    assert result["status"] == "completed"
+    kwargs = candidate_manager.start_scan.await_args.kwargs
+    assert kwargs["mode"] is TopicMaintenanceMode.INCREMENTAL
+    assert kwargs["since"] is None
+    assert kwargs["timeline_uids"] == ["timeline-1", "timeline-2"]
+    assert kwargs["only_unindexed"] is True
+    store.list_topics.assert_awaited_once()
 
 
 class _GroundedLLM:

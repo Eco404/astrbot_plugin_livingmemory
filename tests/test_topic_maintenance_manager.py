@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import aiosqlite
 import pytest
@@ -16,6 +18,33 @@ from astrbot_plugin_livingmemory.storage.memory_identity_store import (
     MemoryIdentityStore,
 )
 from astrbot_plugin_livingmemory.storage.topic_memory_store import TopicMemoryStore
+
+
+@pytest.mark.asyncio
+async def test_selected_incremental_scan_persists_uid_scope_without_since():
+    store = SimpleNamespace(create_maintenance_run=AsyncMock())
+    manager = TopicMaintenanceManager(":memory:", store)
+    manager._count_timelines = AsyncMock(return_value=2)
+    manager.resume_scan = AsyncMock(return_value={"status": "completed"})
+
+    result = await manager.start_scan(
+        "space-1",
+        mode=TopicMaintenanceMode.INCREMENTAL,
+        timeline_uids=["timeline-2", "timeline-1", "timeline-2"],
+        only_unindexed=True,
+    )
+
+    assert result == {"status": "completed"}
+    run = store.create_maintenance_run.await_args.args[0]
+    assert run.config["since"] is None
+    assert run.config["timeline_uids"] == ["timeline-2", "timeline-1"]
+    assert run.config["only_unindexed"] is True
+    manager._count_timelines.assert_awaited_once_with(
+        "space-1",
+        since=None,
+        timeline_uids=["timeline-2", "timeline-1"],
+        only_unindexed=True,
+    )
 
 
 async def _create_timeline_db(tmp_path: Path) -> tuple[str, str]:

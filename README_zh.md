@@ -72,6 +72,7 @@
 **实验性 Topic 记忆**:
 - 开启 `topic_memory.enabled` 后，在 Topic 记忆页面执行一次全量构建；`topic_memory.auto_maintenance` 控制后续自动维护。
 - Topic 是自动派生的只读数据。应编辑来源 Timeline，关联 Topic 会被标记为待重建并自动更新。
+- Topic 页面的“维护”会检查活跃 Timeline 当前版本是否已有活跃 Topic 索引，列出缺失项并默认全选；确认后仅对选中 Timeline 增量补建，不再使用固定 24 小时时间窗口。
 - 宽候选组按 `topic_memory.fragment_extraction_batch_size`（默认 12）分批提取；大型 Topic 组件再按 `topic_memory.synthesis_batch_size`（默认 12）分层合成，最终仍归并为同一个 Topic。可在 Topic 页面查看当前组件、批次、调用序号和耗时。
 - `topic_memory.llm_concurrency` 控制候选组、组内批次和同层 Topic 合成的共享 LLM 并发上限，默认 2；设为 1 使用串行模式。提高并发前应确认 Provider 与上游 API 的速率限制。
 - `topic_memory.rerank_concurrency` 独立控制片段匹配阶段的 Rerank 请求并发上限，默认 1、范围 1–32；设为 1 使用串行模式。Cloudflare 返回 429 时应降低该值。
