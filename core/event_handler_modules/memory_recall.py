@@ -12,6 +12,7 @@ from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import TextPart
 
+from ..retrieval.recall_pipeline import RecallPipeline
 from ..utils import (
     OperationContext,
     format_memories_for_fake_tool_call,
@@ -38,6 +39,7 @@ class MemoryRecall:
         conversation_manager: "ConversationManager",
         message_utils: "MessageUtils",
         injection_adapter: "InjectionAdapter",
+        persona_resolver=None,
     ):
         """
         初始化记忆召回模块
@@ -56,6 +58,8 @@ class MemoryRecall:
         self.conversation_manager = conversation_manager
         self.message_utils = message_utils
         self.injection_adapter = injection_adapter
+        self.persona_resolver = persona_resolver or get_persona_id
+        self.recall_pipeline = RecallPipeline(memory_engine, config_manager)
 
     async def handle_memory_recall(
         self, event: AstrMessageEvent, req: ProviderRequest
@@ -151,52 +155,61 @@ class MemoryRecall:
                 # 3. 全局默认人格（最低）
                 # 注意：on_llm_request 钩子在 _ensure_persona_and_skills 之前触发，
                 # 因此不能直接依赖 req.system_prompt 已注入人格，需自行走完整优先级。
-                persona_id = await get_persona_id(self.context, event)
+                persona_id = await self.persona_resolver(self.context, event)
 
                 recall_session_id = session_id if use_session_filtering else None
                 recall_persona_id = persona_id if use_persona_filtering else None
 
-                # 使用原始用户输入作为召回关键字
-                query_for_search = actual_query
-
-                # 上下文扩展：拼接最近2轮对话作为查询，提升检索精准度
-                if self.config_manager.get(
-                    "recall_engine.inject_with_recent_context", False
-                ):
+                expansion_enabled = bool(
+                    self.config_manager.get(
+                        "recall_engine.inject_with_recent_context", False
+                    )
+                )
+                recent_messages: list[dict] = []
+                if expansion_enabled:
                     try:
-                        recent_messages = (
-                            await self.conversation_manager.get_context(
-                                session_id, max_messages=5
-                            )
+                        # get_context 实际按时间升序返回。使用原始结构保留 role，
+                        # RecallPipeline 会移除刚写入数据库的当前用户消息。
+                        recent_messages = await self.conversation_manager.get_context(
+                            session_id,
+                            max_messages=5,
+                            format_for_llm=False,
                         )
-                        if recent_messages and len(recent_messages) > 1:
-                            # recent_messages 按 timestamp DESC 排列（最新在前）
-                            # 跳过索引0（当前消息），取后续消息作为扩展上下文
-                            context_parts = []
-                            for msg in reversed(recent_messages[1:]):
-                                content = msg.get("content", "")
-                                if content and content.strip():
-                                    context_parts.append(content.strip())
-                            if context_parts:
-                                expanded = " | ".join(context_parts)
-                                query_for_search = expanded + " " + actual_query
-                                logger.info(
-                                    f"[{session_id}] 上下文扩展查询: "
-                                    f"{len(context_parts)}条历史消息 + 当前消息"
-                                )
                     except Exception as e:
                         logger.warning(f"[{session_id}] 获取上下文扩展失败: {e}")
 
-                # 执行记忆召回
-                logger.info(
-                    f"[{session_id}] 开始记忆召回，查询='{query_for_search[:80]}...'"
+                visible_start, visible_end = await self._visible_context_range(
+                    req,
+                    session_id,
+                    current_message_stored=bool(not is_group and actual_query),
                 )
-
-                recalled_memories = await self.memory_engine.search_memories(
-                    query=query_for_search,
-                    k=self.config_manager.get("recall_engine.top_k", 5),
+                assistant_mode = self.config_manager.get(
+                    "recall_engine.assistant_context_mode", "exclude"
+                )
+                recall_outcome = await self.recall_pipeline.search(
+                    current_query=actual_query,
+                    final_k=top_k,
                     session_id=recall_session_id,
                     persona_id=recall_persona_id,
+                    recent_messages=recent_messages,
+                    expansion_enabled=expansion_enabled,
+                    assistant_mode=assistant_mode,
+                    context_session_id=session_id,
+                    visible_message_start_index=visible_start,
+                    visible_message_end_index=visible_end,
+                    track_access=True,
+                )
+                recalled_memories = recall_outcome.results
+                branch_summary = ", ".join(
+                    f"{item.name}:{item.weight:.2f}"
+                    for item in recall_outcome.branches
+                )
+                logger.info(
+                    f"[{session_id}] 结构化记忆召回完成: 查询分支=[{branch_summary}], "
+                    f"候选={len(recall_outcome.candidates)}, "
+                    f"入选={len(recalled_memories)}, "
+                    f"阈值={recall_outcome.applied_threshold:.3f}, "
+                    f"上下文重叠过滤={recall_outcome.overlap_suppressed}"
                 )
 
                 if recalled_memories:
@@ -292,6 +305,32 @@ class MemoryRecall:
             raise
         except Exception as e:
             logger.error(f"处理 on_llm_request 钩子时发生错误: {e}", exc_info=True)
+
+    async def _visible_context_range(
+        self,
+        req: ProviderRequest,
+        session_id: str,
+        *,
+        current_message_stored: bool,
+    ) -> tuple[int | None, int | None]:
+        """Estimate the persisted message-index range already visible to the LLM."""
+        contexts = getattr(req, "contexts", None)
+        if not isinstance(contexts, list):
+            return None, None
+        visible_count = sum(
+            1
+            for item in contexts
+            if isinstance(item, dict) and item.get("role") in {"user", "assistant"}
+        )
+        if visible_count <= 0:
+            return None, None
+        try:
+            total = await self.conversation_manager.store.get_message_count(session_id)
+            end_index = max(0, int(total) - (1 if current_message_stored else 0))
+        except Exception as e:
+            logger.debug(f"[{session_id}] 无法计算当前上下文消息范围: {e}")
+            return None, None
+        return max(0, end_index - visible_count), end_index
 
     def _remove_injected_memories_from_context(
         self, req: ProviderRequest, session_id: str

@@ -3,7 +3,7 @@ config_validator.py - 配置验证模块
 提供配置验证和默认值管理功能。
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -71,6 +71,25 @@ class RecallEngineConfig(BaseModel):
     inject_with_recent_context: bool = Field(
         default=False,
         description="启用后使用最近2轮对话作为扩展查询关键词，提升检索精准度",
+    )
+    assistant_context_mode: Literal["exclude", "low_weight", "normal"] = Field(
+        default="exclude",
+        description="跨轮扩展时 Bot 回复的参与方式",
+    )
+    candidate_multiplier: int = Field(
+        default=3, ge=1, le=10, description="最终筛选前的候选数量倍率"
+    )
+    min_relevance_score: float = Field(
+        default=0.38, ge=0.0, le=1.0, description="自动召回最低相关度"
+    )
+    relative_score_floor: float = Field(
+        default=0.65, ge=0.0, le=1.0, description="相对最佳候选的最低比例"
+    )
+    mmr_lambda: float = Field(
+        default=0.72, ge=0.0, le=1.0, description="相关性与结果多样性的平衡"
+    )
+    context_overlap_suppression: bool = Field(
+        default=True, description="过滤来源仍位于当前原始上下文中的记忆"
     )
     search_cache_enabled: bool = Field(
         default=True, description="是否启用短期检索结果缓存"

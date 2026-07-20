@@ -402,7 +402,15 @@ def format_memories_for_injection(memories: list) -> str:
             # 添加关键事实
             key_facts = metadata.get("key_facts", [])
             if key_facts and isinstance(key_facts, list) and len(key_facts) > 0:
-                facts_str = "; ".join(str(f) for f in key_facts if f)
+                # v2 canonical content 通常已经由 summary + key_facts 组成。
+                # 只补充 content 中尚未出现的事实，避免每条记忆把相同事实注入两遍。
+                content_text = str(content or "")
+                missing_facts = [
+                    str(fact)
+                    for fact in key_facts
+                    if fact and str(fact) not in content_text
+                ]
+                facts_str = "; ".join(missing_facts)
                 if facts_str:
                     metadata_parts.append(f"Key facts: {facts_str}")
 

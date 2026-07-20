@@ -42,10 +42,18 @@ For very busy group chats, lower `context_window_size` or disable full group cap
 | `recall_engine.importance_weight` | `1.0` | Importance weight in final ranking |
 | `recall_engine.fallback_to_vector` | `true` | Falls back to vector search if hybrid retrieval fails |
 | `recall_engine.injection_method` | `extra_user_content` | Where or how recalled memories are injected |
-| `recall_engine.inject_with_recent_context` | `false` | Expands the query with recent conversation |
+| `recall_engine.inject_with_recent_context` | `false` | Searches the last two turns as auxiliary branches while keeping the current message primary |
+| `recall_engine.assistant_context_mode` | `exclude` | Excludes bot replies or searches them at low/normal weight |
+| `recall_engine.candidate_multiplier` | `3` | Candidate pool multiplier before filtering |
+| `recall_engine.min_relevance_score` | `0.38` | Minimum automatic-recall relevance; fewer than `top_k` results are allowed |
+| `recall_engine.relative_score_floor` | `0.65` | Minimum relevance relative to the best candidate in the turn |
+| `recall_engine.mmr_lambda` | `0.72` | Balance between relevance and result diversity |
+| `recall_engine.context_overlap_suppression` | `true` | Suppresses Timelines whose source messages remain in the raw context |
 | `recall_engine.search_cache_enabled` | `true` | Enables short-term retrieval caching |
 
 `extra_user_content` is the safest default. Gemini providers automatically fall back from `fake_tool_call` to `extra_user_content`. DeepSeek V4 thinking mode can now use normal `fake_tool_call` on recent AstrBot versions; the legacy `fake_tool_call_deepseek_v4` option is kept only as a compatibility alias and automatically falls back to `fake_tool_call`.
+
+With recent-context expansion enabled, recent user messages are searched as a separate lower-weight branch instead of being concatenated repeatedly into the current query. Keep `assistant_context_mode=exclude` to prevent bot paraphrases from amplifying keywords; use `low_weight` or `normal` only when the previous bot response is useful retrieval context.
 
 ## Memory isolation
 

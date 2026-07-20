@@ -9,6 +9,8 @@ from quart import request
 
 from astrbot.api import logger
 
+from ..retrieval.recall_pipeline import RecallPipeline
+
 if TYPE_CHECKING:
     from .utils import PageApiUtils
 
@@ -25,7 +27,12 @@ class RecallHandler:
         """
         self.utils = utils
 
-    async def test_recall(self, memory_engine) -> dict[str, Any]:
+    async def test_recall(
+        self,
+        memory_engine,
+        config_manager=None,
+        conversation_manager=None,
+    ) -> dict[str, Any]:
         """
         测试记忆召回功能
 
@@ -49,14 +56,38 @@ class RecallHandler:
 
         session_id = self.utils.optional_text(payload.get("session_id"))
 
+        expansion_enabled = self._config_value(
+            config_manager, "recall_engine.inject_with_recent_context", False
+        )
+        if "use_recent_context" in payload:
+            expansion_enabled = bool(payload.get("use_recent_context"))
+        assistant_mode = self._config_value(
+            config_manager, "recall_engine.assistant_context_mode", "exclude"
+        )
+        recent_messages: list[dict[str, Any]] = []
+        if expansion_enabled and session_id and conversation_manager is not None:
+            try:
+                recent_messages = await conversation_manager.get_context(
+                    session_id,
+                    max_messages=4,
+                    format_for_llm=False,
+                )
+            except Exception as exc:
+                logger.warning(f"[PageAPI] 读取召回测试上下文失败: {exc}")
+
         try:
             start_time = time.time()
-            results = await memory_engine.search_memories(
-                query=query_text,
-                k=k,
+            outcome = await RecallPipeline(memory_engine, config_manager).search(
+                current_query=query_text,
+                final_k=k,
                 session_id=session_id,
                 persona_id=None,
+                recent_messages=recent_messages,
+                expansion_enabled=bool(expansion_enabled),
+                assistant_mode=str(assistant_mode),
+                track_access=False,
             )
+            results = outcome.results
             elapsed_time = (time.time() - start_time) * 1000
         except Exception as exc:
             logger.error(f"[PageAPI] 召回测试失败: {exc}", exc_info=True)
@@ -99,5 +130,11 @@ class RecallHandler:
                 "k": k,
                 "session_id_filter": session_id,
                 "elapsed_time_ms": round(elapsed_time, 2),
+                "diagnostics": outcome.diagnostics(),
             }
         )
+
+    @staticmethod
+    def _config_value(config_manager, key: str, default: Any) -> Any:
+        getter = getattr(config_manager, "get", None)
+        return getter(key, default) if callable(getter) else default

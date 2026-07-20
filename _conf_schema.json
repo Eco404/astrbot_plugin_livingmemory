@@ -330,9 +330,50 @@
             },
             "inject_with_recent_context": {
                 "description": "启用跨轮次上下文扩展检索",
-                "hint": "启用后检索记忆时会自动拼接最近 2 轮对话（当前消息 + Bot 上一条回复 + 用户上一条消息）作为扩展查询，提升召回记忆与当前话题的相关性，减少无关记忆干扰。",
+                "hint": "启用后，将最近 2 轮中的用户消息作为低权重查询补充。当前消息始终是主要查询；Bot 回复是否参与由下方选项控制。",
                 "type": "bool",
                 "default": false
+            },
+            "assistant_context_mode": {
+                "description": "跨轮扩展中的 Bot 回复",
+                "hint": "不查询：忽略 Bot 回复，避免复述放大关键词（推荐）；低权重：Bot 回复单独检索但只提供弱信号；正常查询：Bot 回复与历史用户消息使用相同权重。仅在开启跨轮次扩展时生效。",
+                "type": "string",
+                "default": "exclude",
+                "options": [
+                    "exclude",
+                    "low_weight",
+                    "normal"
+                ]
+            },
+            "candidate_multiplier": {
+                "description": "召回候选倍率",
+                "hint": "先检索最终数量的若干倍候选，再执行相关度过滤和多样性选择。数值越大越全面，但检索开销也越高。",
+                "type": "int",
+                "default": 3
+            },
+            "min_relevance_score": {
+                "description": "最低召回相关度",
+                "hint": "低于该相关度的记忆不会注入。最终返回数量允许少于单次召回数量。",
+                "type": "float",
+                "default": 0.38
+            },
+            "relative_score_floor": {
+                "description": "相对相关度下限",
+                "hint": "候选还需达到本轮最佳候选相关度的一定比例，用于滤除明显落后的尾部结果。",
+                "type": "float",
+                "default": 0.65
+            },
+            "mmr_lambda": {
+                "description": "召回相关性与多样性平衡",
+                "hint": "越接近 1 越重视相关性，越接近 0 越倾向避免内容重复。",
+                "type": "float",
+                "default": 0.72
+            },
+            "context_overlap_suppression": {
+                "description": "抑制当前上下文中的重复记忆",
+                "hint": "当 Timeline 的来源消息仍位于模型当前原始对话上下文中时，不再重复注入整条长期记忆。建议开启。",
+                "type": "bool",
+                "default": true
             },
             "search_cache_enabled": {
                 "description": "启用短期检索缓存",

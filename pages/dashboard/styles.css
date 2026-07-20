@@ -1800,6 +1800,70 @@ body {
   color: var(--text-secondary);
 }
 
+.recall-diagnostics {
+  margin: 12px 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+
+.recall-diagnostics-header,
+.recall-query-branch,
+.recall-filtered-list > div {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.recall-diagnostics-header {
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+
+.recall-query-branches {
+  display: grid;
+  gap: 8px;
+}
+
+.recall-query-branch {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  font-size: 13px;
+}
+
+.recall-query-text {
+  flex: 1 1 360px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recall-filtered {
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.recall-filtered summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.recall-filtered-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.recall-filtered-list > div {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-input);
+}
+
 /* Result card */
 .result-card,
 .recall-result-item {

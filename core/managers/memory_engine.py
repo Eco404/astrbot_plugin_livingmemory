@@ -1406,6 +1406,19 @@ class MemoryEngine:
         self._set_cached_search_results(cache_key, results)
         return results
 
+    def record_memory_access(self, memory_ids: list[int]) -> None:
+        """Record access only for memories that survived final recall filtering."""
+        seen: set[int] = set()
+        for raw_memory_id in memory_ids:
+            try:
+                memory_id = int(raw_memory_id)
+            except (TypeError, ValueError):
+                continue
+            if memory_id in seen:
+                continue
+            seen.add(memory_id)
+            self._create_tracked_task(self._update_access_time_internal(memory_id))
+
     async def get_memory(self, memory_id: int) -> dict[str, Any] | None:
         """
         根据ID获取记忆
