@@ -155,6 +155,9 @@ class TopicMemoryConfig(BaseModel):
     rerank_candidate_floor: float = Field(default=0.63, ge=0.0, le=1.0)
     component_min_pair_similarity: float = Field(default=0.52, ge=0.0, le=1.0)
     component_min_average_similarity: float = Field(default=0.65, ge=0.0, le=1.0)
+    component_size_cohesion_penalty: float = Field(
+        default=0.005, ge=0.0, le=0.05
+    )
     rerank_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     rerank_reciprocal_rank_threshold: float = Field(
         default=0.60, ge=0.0, le=1.0

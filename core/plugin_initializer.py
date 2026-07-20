@@ -705,6 +705,9 @@ class PluginInitializer:
                     "component_min_average_similarity": self.config_manager.get(
                         "topic_memory.component_min_average_similarity", 0.65
                     ),
+                    "component_size_cohesion_penalty": self.config_manager.get(
+                        "topic_memory.component_size_cohesion_penalty", 0.005
+                    ),
                     "rerank_threshold": self.config_manager.get(
                         "topic_memory.rerank_threshold", 0.55
                     ),

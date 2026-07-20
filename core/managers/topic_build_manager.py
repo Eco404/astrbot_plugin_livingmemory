@@ -39,8 +39,8 @@ from .topic_maintenance_manager import TopicMaintenanceManager
 
 _FRAGMENT_PROMPT_VERSION = "topic-fragment-v7-single-retrieval-intent"
 _SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v4-authoritative-identities"
-_MATCHING_ALGORITHM_VERSION = 5
-_RELATION_ALGORITHM_VERSION = 2
+_MATCHING_ALGORITHM_VERSION = 6
+_RELATION_ALGORITHM_VERSION = 3
 _CONFIDENCE_CALIBRATION_VERSION = 1
 
 
@@ -883,6 +883,9 @@ class TopicBuildManager:
                 "component_min_average_similarity": self.config.get(
                     "component_min_average_similarity", 0.65
                 ),
+                "component_size_cohesion_penalty": self.config.get(
+                    "component_size_cohesion_penalty", 0.005
+                ),
                 "rerank_threshold": self.config.get("rerank_threshold", 0.55),
                 "rerank_reciprocal_rank_threshold": self.config.get(
                     "rerank_reciprocal_rank_threshold", 0.60
@@ -1019,6 +1022,9 @@ class TopicBuildManager:
         )
         component_cohesion = float(
             self.config.get("component_min_average_similarity", 0.65)
+        )
+        component_size_cohesion_penalty = float(
+            self.config.get("component_size_cohesion_penalty", 0.005)
         )
         scores: dict[str, float] = {}
         embedding_scores: dict[tuple[int, int], float] = {}
@@ -1281,6 +1287,7 @@ class TopicBuildManager:
             seed_edges,
             minimum_pair_similarity=component_min_pair,
             minimum_average_similarity=component_cohesion,
+            size_cohesion_penalty=component_size_cohesion_penalty,
         )
         return components, scores
 
@@ -1425,6 +1432,9 @@ class TopicBuildManager:
                 "component_min_average_similarity": float(
                     self.config.get("component_min_average_similarity", 0.65)
                 ),
+                "component_size_cohesion_penalty": float(
+                    self.config.get("component_size_cohesion_penalty", 0.005)
+                ),
             },
             "singleton_reason_counts": dict(reasons),
             "singletons": items,
@@ -1491,7 +1501,7 @@ class TopicBuildManager:
             topic.topic_uid: self._topic_keyword_terms(topic) for topic in topics
         }
         text_token_sets = {
-            topic.topic_uid: TopicMaintenanceManager.tokenize(
+            topic.topic_uid: self._relation_text_terms(
                 f"{topic.title} {topic.summary}"
             )
             for topic in topics
@@ -1609,10 +1619,10 @@ class TopicBuildManager:
             for term in left_keywords & right_keywords
             if keyword_document_frequency.get(term, 0) <= generic_frequency_limit
         )
-        left_text_tokens = left_text_tokens or TopicMaintenanceManager.tokenize(
+        left_text_tokens = left_text_tokens or cls._relation_text_terms(
             f"{left.title} {left.summary}"
         )
-        right_text_tokens = right_text_tokens or TopicMaintenanceManager.tokenize(
+        right_text_tokens = right_text_tokens or cls._relation_text_terms(
             f"{right.title} {right.summary}"
         )
         text_document_frequency = text_document_frequency or Counter(
@@ -1665,7 +1675,76 @@ class TopicBuildManager:
                 terms.add(normalized)
                 terms.update(re.findall(r"[a-z0-9_-]{2,}", raw_keyword))
                 terms.update(TopicMaintenanceManager.tokenize(raw_keyword))
-        return terms
+        return {
+            term for term in terms if not cls._is_structural_time_term(term)
+        }
+
+    @classmethod
+    def _relation_text_terms(cls, value: str) -> set[str]:
+        return {
+            term
+            for term in TopicMaintenanceManager.tokenize(value)
+            if not cls._is_structural_time_term(term)
+        }
+
+    @staticmethod
+    def _is_structural_time_term(value: str) -> bool:
+        """Exclude calendar/clock syntax without discarding named concepts.
+
+        Relation evidence should not become stronger merely because two Topics
+        mention the same date.  Alphanumeric names such as ``BW2026`` remain
+        usable; only standalone structural date and time forms are removed.
+        """
+        term = str(value or "").strip().casefold()
+        if not term:
+            return True
+        if term in {"年", "月", "日", "号", "时", "分", "秒"}:
+            return True
+        if re.fullmatch(r"\d{1,2}", term):
+            return True
+        if re.fullmatch(r"(?:19|20|21)\d{2}", term):
+            return True
+        if re.fullmatch(r"\d{1,2}[:：]\d{2}(?::\d{2})?", term):
+            return True
+        if re.fullmatch(r"\d{1,2}时(?:\d{1,2}分?)?(?:\d{1,2}秒)?", term):
+            return True
+
+        chinese_date = re.fullmatch(
+            r"((?:19|20|21)\d{2})年(\d{1,2})月(?:([0-3]?\d)日?)?",
+            term,
+        )
+        if chinese_date:
+            month = int(chinese_date.group(2))
+            day = int(chinese_date.group(3) or 1)
+            return 1 <= month <= 12 and 1 <= day <= 31
+
+        date_match = re.fullmatch(
+            r"((?:19|20|21)\d{2})[-_/.年](\d{1,2})"
+            r"(?:[-_/.月](\d{1,2})日?)?",
+            term,
+        )
+        if date_match:
+            month = int(date_match.group(2))
+            day = int(date_match.group(3) or 1)
+            return 1 <= month <= 12 and 1 <= day <= 31
+        month_day = re.fullmatch(r"(\d{1,2})[-_/.月](\d{1,2})日?", term)
+        if month_day:
+            return 1 <= int(month_day.group(1)) <= 12 and 1 <= int(
+                month_day.group(2)
+            ) <= 31
+
+        if term.isdigit() and len(term) in {6, 8, 12, 14}:
+            year, month = int(term[:4]), int(term[4:6])
+            if 1900 <= year <= 2199 and 1 <= month <= 12:
+                if len(term) == 6:
+                    return True
+                day = int(term[6:8])
+                if 1 <= day <= 31:
+                    return True
+        if term.isdigit() and len(term) == 4:
+            hour, minute = int(term[:2]), int(term[2:])
+            return 0 <= hour <= 23 and 0 <= minute <= 59
+        return False
 
     @staticmethod
     def _weighted_jaccard(
@@ -1696,6 +1775,7 @@ class TopicBuildManager:
         *,
         minimum_pair_similarity: float,
         minimum_average_similarity: float,
+        size_cohesion_penalty: float = 0.0,
     ) -> list[list[int]]:
         """Merge only components whose complete cross-section stays coherent.
 
@@ -1729,7 +1809,15 @@ class TopicBuildManager:
                 continue
             if min(cross_scores) < minimum_pair_similarity:
                 continue
-            if sum(cross_scores) / len(cross_scores) < minimum_average_similarity:
+            required_average = minimum_average_similarity
+            if min(len(members[left_root]), len(members[right_root])) > 1:
+                combined_size = len(members[left_root]) + len(members[right_root])
+                required_average += max(0.0, size_cohesion_penalty) * max(
+                    0.0,
+                    math.log2(max(1.0, combined_size / 2.0)),
+                )
+            required_average = min(1.0, required_average)
+            if sum(cross_scores) / len(cross_scores) < required_average:
                 continue
             parents[right_root] = left_root
             members[left_root].update(members.pop(right_root))
