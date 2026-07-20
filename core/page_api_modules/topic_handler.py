@@ -42,6 +42,10 @@ class TopicHandler:
         "rerank_call_total",
         "active_rerank_count",
         "rerank_concurrency",
+        "reviewed_components",
+        "active_component_review_count",
+        "component_review_concurrency",
+        "review_output_groups",
     }
     _STAGE_RANGES: dict[str, tuple[float, float]] = {
         "pending": (0.0, 0.0),
@@ -49,9 +53,10 @@ class TopicHandler:
         "candidate_scan_completed": (15.0, 15.0),
         "fragment_extraction": (15.0, 45.0),
         "embedding": (45.0, 60.0),
-        "fragment_matching": (60.0, 75.0),
-        "topic_synthesis": (75.0, 90.0),
-        "materialization": (90.0, 100.0),
+        "fragment_matching": (60.0, 72.0),
+        "component_review": (72.0, 82.0),
+        "topic_synthesis": (82.0, 92.0),
+        "materialization": (92.0, 100.0),
         "completed": (100.0, 100.0),
     }
 

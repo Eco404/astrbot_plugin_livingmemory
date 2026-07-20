@@ -19,6 +19,8 @@ def test_effective_topic_settings_are_sparse_overrides_over_code_defaults():
     assert effective["rerank_threshold"] == 0.61
     assert effective["llm_concurrency"] == 4
     assert effective["recall_rerank_weight"] == 0.35
+    assert effective["component_review_enabled"] is True
+    assert effective["component_review_min_fragments"] == 6
     assert effective["recall_top_k"] == defaults["recall_top_k"]
     assert set(effective) == set(TOPIC_SETTING_DEFINITIONS)
 
