@@ -162,6 +162,12 @@ class RecallHandler:
                                 result.embedding_score, 6
                             ),
                             "topic_keyword_score": round(result.keyword_score, 6),
+                            "topic_base_relevance_score": round(
+                                result.base_relevance_score
+                                if result.base_relevance_score is not None
+                                else result.relevance_score,
+                                6,
+                            ),
                             **(
                                 {
                                     "topic_rerank_score": round(
