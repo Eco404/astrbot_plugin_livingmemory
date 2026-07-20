@@ -89,6 +89,8 @@ class RecallHandler:
             )
             results = outcome.results
             topic_outcome = None
+            fragment_outcome = None
+            fragment_results = []
             topic_space_id = None
             topic_config = getattr(
                 memory_engine.topic_recall_pipeline, "config", {}
@@ -122,11 +124,20 @@ class RecallHandler:
                                 int(topic_config.get("timeline_supplement_k", 2)),
                                 max(0, k - len(topic_outcome.results)),
                             )
-                            results = memory_engine.topic_recall_pipeline.select_timeline_supplements(
-                                results,
-                                topic_outcome.results,
-                                supplement_k,
+                            fragment_outcome = await memory_engine.topic_recall_pipeline.search_fragment_supplements(
+                                branches=outcome.branches,
+                                topic_results=topic_outcome.results,
+                                limit=supplement_k,
                             )
+                            fragment_results = fragment_outcome.results
+                            if fragment_outcome.available_count:
+                                results = []
+                            else:
+                                results = memory_engine.topic_recall_pipeline.select_timeline_supplements(
+                                    results,
+                                    topic_outcome.results,
+                                    supplement_k,
+                                )
                 except Exception:
                     logger.warning(
                         "[PageAPI] Topic 召回失败，召回测试回退 Timeline",
@@ -180,6 +191,41 @@ class RecallHandler:
                         },
                     }
                 )
+        for result in fragment_results:
+            formatted_results.append(
+                {
+                    "memory_id": result.fragment_uid,
+                    "content": result.content,
+                    "similarity_score": round(float(result.final_score), 4),
+                    "score_percentage": round(float(result.final_score) * 100, 2),
+                    "metadata": {
+                        "memory_layer": "topic_fragment",
+                        "title": result.fragment.label,
+                        "parent_topic_uid": result.topic_uid,
+                        "importance": result.fragment.importance,
+                        "narrative_perspective": "third_person",
+                    },
+                    "score_breakdown": {
+                        "fragment_relevance_score": round(
+                            result.relevance_score, 6
+                        ),
+                        "fragment_embedding_score": round(
+                            result.embedding_score, 6
+                        ),
+                        "fragment_keyword_score": round(
+                            result.keyword_score, 6
+                        ),
+                        "parent_topic_relevance": round(
+                            result.parent_topic_relevance, 6
+                        ),
+                        **(
+                            {"fragment_rerank_score": round(result.rerank_score, 6)}
+                            if result.rerank_score is not None
+                            else {}
+                        ),
+                    },
+                }
+            )
         for result in results:
             score_breakdown = {
                 key: round(float(value), 6)
@@ -226,6 +272,9 @@ class RecallHandler:
                     "topic_space_id": topic_space_id,
                     "topic": topic_outcome.diagnostics()
                     if topic_outcome is not None
+                    else None,
+                    "topic_fragments": fragment_outcome.diagnostics()
+                    if fragment_outcome is not None
                     else None,
                 },
             }

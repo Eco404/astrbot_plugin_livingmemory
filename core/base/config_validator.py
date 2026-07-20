@@ -177,6 +177,8 @@ class TopicMemoryConfig(BaseModel):
         default=0.8, ge=0.0, le=1.0
     )
     timeline_supplement_k: int = Field(default=2, ge=0, le=10)
+    fragment_min_relevance: float = Field(default=0.28, ge=0.0, le=1.0)
+    fragment_relative_floor: float = Field(default=0.65, ge=0.0, le=1.0)
     auto_maintenance: bool = True
     auto_debounce_seconds: float = Field(default=60.0, ge=0.0, le=3600.0)
     time_gap_hours: float = Field(default=6.0, ge=1 / 60, le=24 * 30)

@@ -19,6 +19,7 @@ from ..core.models.topic_memory import (
     TopicMemory,
     TopicMemoryAtom,
     TopicMemoryStatus,
+    TopicFragmentLink,
     TopicRelation,
     TopicTimelineLink,
     TimelineTopicCandidate,
@@ -421,6 +422,73 @@ class TopicMemoryStore:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS topic_fragments (
+                fragment_uid TEXT PRIMARY KEY,
+                run_uid TEXT NOT NULL,
+                candidate_group_uid TEXT NOT NULL,
+                memory_space_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                timeline_uids TEXT NOT NULL,
+                source_revisions TEXT NOT NULL,
+                facts TEXT NOT NULL,
+                keywords TEXT NOT NULL DEFAULT '[]',
+                time_cluster_keys TEXT NOT NULL DEFAULT '[]',
+                importance REAL NOT NULL DEFAULT 0.5,
+                confidence REAL NOT NULL DEFAULT 0.7,
+                embedding TEXT NOT NULL DEFAULT '[]',
+                started_at REAL,
+                ended_at REAL,
+                status TEXT NOT NULL DEFAULT 'active',
+                prompt_hash TEXT NOT NULL,
+                input_hash TEXT NOT NULL,
+                provider_id TEXT,
+                model_id TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_formal_topic_fragments_space
+            ON topic_fragments(memory_space_id, status, updated_at DESC)
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topic_fragment_links (
+                topic_uid TEXT NOT NULL,
+                fragment_uid TEXT NOT NULL,
+                topic_revision INTEGER NOT NULL,
+                contribution_weight REAL NOT NULL DEFAULT 1.0,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY(topic_uid, fragment_uid),
+                FOREIGN KEY(topic_uid) REFERENCES topic_memories(topic_uid)
+                    ON DELETE CASCADE,
+                FOREIGN KEY(fragment_uid) REFERENCES topic_fragments(fragment_uid)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_fragment_links_fragment
+            ON topic_fragment_links(fragment_uid, status)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_fragment_links_topic_revision
+            ON topic_fragment_links(topic_uid, topic_revision, status)
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS topic_build_decisions (
                 decision_uid TEXT PRIMARY KEY,
                 run_uid TEXT NOT NULL,
@@ -550,6 +618,7 @@ class TopicMemoryStore:
         atoms: list[TopicMemoryAtom],
         links: list[TopicTimelineLink],
         atom_sources: list[TopicAtomSource],
+        fragments: list[TopicFragmentDraft] | None = None,
         expected_revision: int | None = None,
     ) -> TopicMemory:
         """Atomically replace one generated Topic snapshot and its provenance."""
@@ -640,6 +709,25 @@ class TopicMemoryStore:
                     "DELETE FROM topic_timeline_links WHERE topic_uid = ?",
                     (topic.topic_uid,),
                 )
+                previous_fragment_uids: set[str] = set()
+                if fragments is not None:
+                    previous_fragment_rows = await (
+                        await db.execute(
+                            """
+                            SELECT fragment_uid FROM topic_fragment_links
+                            WHERE topic_uid = ? AND status = 'active'
+                            """,
+                            (topic.topic_uid,),
+                        )
+                    ).fetchall()
+                    previous_fragment_uids = {
+                        str(row["fragment_uid"])
+                        for row in previous_fragment_rows
+                    }
+                    await db.execute(
+                        "DELETE FROM topic_fragment_links WHERE topic_uid = ?",
+                        (topic.topic_uid,),
+                    )
                 for atom in atoms:
                     await self._insert_atom(db, atom, now)
                 for link in links:
@@ -648,6 +736,31 @@ class TopicMemoryStore:
                 for source in atom_sources:
                     source_revision = int(registry[source.timeline_uid]["revision"])
                     await self._insert_atom_source(db, source, source_revision)
+                if fragments is not None:
+                    fragment_uids = [fragment.fragment_uid for fragment in fragments]
+                    await self._insert_fragment_links(
+                        db,
+                        topic,
+                        revision,
+                        fragments,
+                        now,
+                    )
+                    stale_uids = previous_fragment_uids - set(fragment_uids)
+                    if stale_uids:
+                        placeholders = ",".join("?" * len(stale_uids))
+                        await db.execute(
+                            f"""
+                            UPDATE topic_fragments SET status = 'archived',
+                                updated_at = ?
+                            WHERE fragment_uid IN ({placeholders})
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM topic_fragment_links l
+                                  WHERE l.fragment_uid = topic_fragments.fragment_uid
+                                    AND l.status = 'active'
+                              )
+                            """,
+                            [now, *sorted(stale_uids)],
+                        )
                 await db.commit()
             except Exception:
                 await db.rollback()
@@ -768,6 +881,88 @@ class TopicMemoryStore:
             for row in topic_rows
         ]
 
+    async def list_active_fragments_for_topics(
+        self,
+        topic_uids: list[str],
+    ) -> list[dict[str, Any]]:
+        """Load formal, current-revision fragment snapshots for recalled Topics."""
+        normalized = sorted(
+            {str(uid).strip() for uid in topic_uids if str(uid).strip()}
+        )
+        if not normalized:
+            return []
+        placeholders = ",".join("?" * len(normalized))
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT f.*, l.topic_uid, l.topic_revision,
+                           l.contribution_weight AS link_contribution_weight,
+                           l.metadata AS link_metadata
+                    FROM topic_fragment_links l
+                    JOIN topic_memories t ON t.topic_uid = l.topic_uid
+                    JOIN topic_fragments f
+                      ON f.fragment_uid = l.fragment_uid
+                    WHERE l.topic_uid IN ({placeholders})
+                      AND t.status = 'active'
+                      AND l.status = 'active'
+                      AND f.status = 'active'
+                      AND l.topic_revision = t.revision
+                    ORDER BY l.topic_uid, f.started_at, f.created_at,
+                             f.fragment_uid
+                    """,
+                    normalized,
+                )
+            ).fetchall()
+            fragments_by_uid = {
+                str(row["fragment_uid"]): self._row_to_fragment(row)
+                for row in rows
+            }
+            fragment_timeline_uids = sorted(
+                {
+                    uid
+                    for fragment in fragments_by_uid.values()
+                    for uid in fragment.timeline_uids
+                }
+            )
+            spans_by_timeline: dict[str, dict[str, Any]] = {}
+            if fragment_timeline_uids:
+                span_placeholders = ",".join("?" * len(fragment_timeline_uids))
+                span_rows = await (
+                    await db.execute(
+                        f"""
+                        SELECT memory_uid, session_id, start_index, end_index,
+                               started_at, ended_at
+                        FROM memory_source_spans
+                        WHERE memory_uid IN ({span_placeholders})
+                        """,
+                        fragment_timeline_uids,
+                    )
+                ).fetchall()
+                spans_by_timeline = {
+                    str(row["memory_uid"]): dict(row) for row in span_rows
+                }
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            fragment = fragments_by_uid[str(row["fragment_uid"])]
+            result.append(
+                {
+                    "topic_uid": str(row["topic_uid"]),
+                    "topic_revision": int(row["topic_revision"]),
+                    "contribution_weight": float(
+                        row["link_contribution_weight"]
+                    ),
+                    "link_metadata": self._from_json(row["link_metadata"]),
+                    "fragment": fragment,
+                    "sources": [
+                        spans_by_timeline[uid]
+                        for uid in fragment.timeline_uids
+                        if uid in spans_by_timeline
+                    ],
+                }
+            )
+        return result
+
     async def record_topic_access(self, topic_uids: list[str]) -> int:
         """Update reinforcement fields only for Topics actually injected."""
         normalized = sorted({str(uid).strip() for uid in topic_uids if str(uid).strip()})
@@ -871,7 +1066,7 @@ class TopicMemoryStore:
         async with self._connect() as db:
             topic_row = await (
                 await db.execute(
-                    "SELECT metadata FROM topic_memories WHERE topic_uid = ?",
+                    "SELECT revision, metadata FROM topic_memories WHERE topic_uid = ?",
                     (topic_uid,),
                 )
             ).fetchone()
@@ -906,16 +1101,31 @@ class TopicMemoryStore:
                 )
             ).fetchall()
             topic_metadata = self._from_json(topic_row["metadata"]) if topic_row else {}
+            fragment_link_rows = await (
+                await db.execute(
+                    """
+                    SELECT * FROM topic_fragment_links
+                    WHERE topic_uid = ? AND status = 'active'
+                      AND topic_revision = ?
+                    ORDER BY contribution_weight DESC, fragment_uid
+                    """,
+                    (topic_uid, int(topic_row["revision"]) if topic_row else 0),
+                )
+            ).fetchall()
             fragment_uids = {
-                str(value) for value in topic_metadata.get("fragment_uids", [])
+                str(row["fragment_uid"]) for row in fragment_link_rows
             }
+            if not fragment_uids:
+                fragment_uids = {
+                    str(value) for value in topic_metadata.get("fragment_uids", [])
+                }
             fragment_rows: list[aiosqlite.Row] = []
             if fragment_uids:
                 placeholders = ",".join("?" * len(fragment_uids))
                 fragment_rows = await (
                     await db.execute(
                         f"""
-                        SELECT * FROM topic_fragment_drafts
+                        SELECT * FROM topic_fragments
                         WHERE fragment_uid IN ({placeholders})
                         ORDER BY started_at, fragment_uid
                         """,
@@ -935,6 +1145,13 @@ class TopicMemoryStore:
             "fragments": [
                 self._fragment_to_dict(self._row_to_fragment(row))
                 for row in fragment_rows
+            ],
+            "fragment_links": [
+                {
+                    **dict(row),
+                    "metadata": self._from_json(row["metadata"]),
+                }
+                for row in fragment_link_rows
             ],
         }
 
@@ -1260,6 +1477,10 @@ class TopicMemoryStore:
                 )
                 run_cursor = await db.execute(
                     "DELETE FROM topic_maintenance_runs WHERE memory_space_id = ?",
+                    (memory_space_id,),
+                )
+                await db.execute(
+                    "DELETE FROM topic_fragments WHERE memory_space_id = ?",
                     (memory_space_id,),
                 )
                 await db.commit()
@@ -2103,6 +2324,150 @@ class TopicMemoryStore:
         )
 
     @staticmethod
+    async def _insert_fragment_links(
+        db: aiosqlite.Connection,
+        topic: TopicMemory,
+        topic_revision: int,
+        fragments: list[TopicFragmentDraft],
+        now: float,
+    ) -> None:
+        fragment_uids = [fragment.fragment_uid for fragment in fragments]
+        if len(fragment_uids) != len(set(fragment_uids)):
+            raise ValueError("A fragment may link to a Topic only once")
+        if not fragment_uids:
+            return
+        if any(fragment.memory_space_id != topic.memory_space_id for fragment in fragments):
+            raise TopicSourceValidationError(
+                "Topic fragment belongs to another memory space"
+            )
+        for fragment in fragments:
+            await db.execute(
+                """
+                INSERT INTO topic_fragments (
+                    fragment_uid, run_uid, candidate_group_uid, memory_space_id,
+                    label, summary, timeline_uids, source_revisions, facts,
+                    keywords, time_cluster_keys, importance, confidence,
+                    embedding, started_at, ended_at, status, prompt_hash,
+                    input_hash, provider_id, model_id, created_at, updated_at,
+                    metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          'active', ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fragment_uid) DO UPDATE SET
+                    run_uid = excluded.run_uid,
+                    candidate_group_uid = excluded.candidate_group_uid,
+                    memory_space_id = excluded.memory_space_id,
+                    label = excluded.label,
+                    summary = excluded.summary,
+                    timeline_uids = excluded.timeline_uids,
+                    source_revisions = excluded.source_revisions,
+                    facts = excluded.facts,
+                    keywords = excluded.keywords,
+                    time_cluster_keys = excluded.time_cluster_keys,
+                    importance = excluded.importance,
+                    confidence = excluded.confidence,
+                    embedding = excluded.embedding,
+                    started_at = excluded.started_at,
+                    ended_at = excluded.ended_at,
+                    status = 'active',
+                    prompt_hash = excluded.prompt_hash,
+                    input_hash = excluded.input_hash,
+                    provider_id = excluded.provider_id,
+                    model_id = excluded.model_id,
+                    updated_at = excluded.updated_at,
+                    metadata = excluded.metadata
+                """,
+                (
+                    fragment.fragment_uid,
+                    fragment.run_uid,
+                    fragment.candidate_group_uid,
+                    fragment.memory_space_id,
+                    fragment.label,
+                    fragment.summary,
+                    TopicMemoryStore._to_json(fragment.timeline_uids),
+                    TopicMemoryStore._to_json(fragment.source_revisions),
+                    TopicMemoryStore._to_json(fragment.facts),
+                    TopicMemoryStore._to_json(fragment.keywords),
+                    TopicMemoryStore._to_json(fragment.time_cluster_keys),
+                    float(fragment.importance),
+                    float(fragment.confidence),
+                    TopicMemoryStore._to_json(fragment.embedding),
+                    fragment.started_at,
+                    fragment.ended_at,
+                    fragment.prompt_hash,
+                    fragment.input_hash,
+                    fragment.provider_id,
+                    fragment.model_id,
+                    float(fragment.created_at),
+                    now,
+                    TopicMemoryStore._to_json(fragment.metadata),
+                ),
+            )
+        placeholders = ",".join("?" * len(fragment_uids))
+        rows = await (
+            await db.execute(
+                f"""
+                SELECT fragment_uid, memory_space_id
+                FROM topic_fragments
+                WHERE fragment_uid IN ({placeholders})
+                """,
+                fragment_uids,
+            )
+        ).fetchall()
+        stored = {
+            str(row["fragment_uid"]): str(row["memory_space_id"])
+            for row in rows
+        }
+        missing = set(fragment_uids) - stored.keys()
+        if missing:
+            raise TopicSourceValidationError(
+                "Unknown Topic fragment UID(s): " + ", ".join(sorted(missing))
+            )
+        if any(stored[uid] != topic.memory_space_id for uid in fragment_uids):
+            raise TopicSourceValidationError(
+                "Stored Topic fragment belongs to another memory space"
+            )
+        weight = 1.0 / max(1, len(fragment_uids))
+        for fragment in fragments:
+            link = TopicFragmentLink(
+                topic_uid=topic.topic_uid,
+                fragment_uid=fragment.fragment_uid,
+                topic_revision=topic_revision,
+                contribution_weight=weight,
+                metadata={
+                    "narrative_schema_version": fragment.metadata.get(
+                        "narrative_schema_version"
+                    ),
+                    "source_timeline_count": len(fragment.timeline_uids),
+                },
+            )
+            await db.execute(
+                """
+                INSERT INTO topic_fragment_links (
+                    topic_uid, fragment_uid, topic_revision,
+                    contribution_weight, status, created_at, updated_at,
+                    metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    link.topic_uid,
+                    link.fragment_uid,
+                    topic_revision,
+                    float(link.contribution_weight),
+                    TopicMemoryStore._enum_value(link.status),
+                    float(link.created_at),
+                    now,
+                    TopicMemoryStore._to_json(link.metadata),
+                ),
+            )
+        await db.execute(
+            f"""
+            UPDATE topic_fragments SET status = 'active', updated_at = ?
+            WHERE fragment_uid IN ({placeholders})
+            """,
+            [now, *fragment_uids],
+        )
+
+    @staticmethod
     async def _insert_atom_source(
         db: aiosqlite.Connection,
         source: TopicAtomSource,
@@ -2160,6 +2525,7 @@ class TopicMemoryStore:
             "source_revision": candidate.source_revision,
             "memory_space_id": candidate.memory_space_id,
             "session_id": candidate.session_id,
+            "persona_id": candidate.persona_id,
             "content": candidate.content,
             "summary": candidate.summary,
             "topics": candidate.topics,
@@ -2203,6 +2569,7 @@ class TopicMemoryStore:
             source_revision=max(1, int(payload.get("source_revision") or 1)),
             memory_space_id=str(payload.get("memory_space_id") or ""),
             session_id=payload.get("session_id"),
+            persona_id=(str(payload.get("persona_id") or "").strip() or None),
             content=str(payload.get("content") or ""),
             summary=str(payload.get("summary") or ""),
             topics=[str(item) for item in payload.get("topics", [])],

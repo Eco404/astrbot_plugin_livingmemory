@@ -77,7 +77,7 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 - Failed, cancelled, or restart-interrupted builds expose a **Resume from checkpoint** action. Candidate fragments, embeddings, matching, component synthesis, and completed materialization are reused under the same `run_uid`; changed input, prompts, Provider, model, or relevant configuration invalidates only the affected checkpoint.
 - Recoverable LLM structure errors are deterministically repaired from supplied sources and recorded in `validation_repairs`. Unverifiable model references are discarded rather than persisted as Topic provenance.
 - Fragment extraction targets one future retrieval intent per fragment. Related-topic edges require corpus-aware semantic evidence instead of a single generic keyword or shared Timeline alone. Topic and atom confidence is calibrated by independent time-cluster evidence so several nearby memories do not masquerade as repeated confirmation.
-- Database v9.5 adds sparse Topic runtime-setting overrides. It never invokes a model or creates/rewrites Topics automatically; `topic_memory.enabled` and `topic_memory.recall_enabled` control whether Topics participate in recall.
+- Database v9.6 formalizes revision-scoped Topic fragments and backfills existing fragment provenance without invoking a model or rewriting Topics. Legacy fragments are served only after a later rebuild normalizes the Bot's first-person Timeline narration into mapped third-person roles; `topic_memory.enabled` and `topic_memory.recall_enabled` control recall.
 
 **Memory injection compatibility**:
 - `fake_tool_call` automatically falls back to `extra_user_content` for Gemini providers to avoid tool-message protocol incompatibility.

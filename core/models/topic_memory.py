@@ -95,6 +95,20 @@ class TopicTimelineLink:
 
 
 @dataclass(slots=True)
+class TopicFragmentLink:
+    """Formal serving-layer link from one Topic revision to one fragment."""
+
+    topic_uid: str
+    fragment_uid: str
+    topic_revision: int = 0
+    contribution_weight: float = 1.0
+    status: TopicLinkStatus = TopicLinkStatus.ACTIVE
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class TopicAtomSource:
     topic_atom_uid: str
     timeline_uid: str
@@ -164,6 +178,7 @@ class TimelineTopicCandidate:
     ended_at: float | None = None
     time_cluster_key: str = ""
     features: dict[str, Any] = field(default_factory=dict)
+    persona_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -227,6 +242,7 @@ __all__ = [
     "TopicMemoryStatus",
     "TopicRelation",
     "TopicRelationType",
+    "TopicFragmentLink",
     "TopicTimelineLink",
     "TimelineTopicCandidate",
     "TopicCandidateGroup",

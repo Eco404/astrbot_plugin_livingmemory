@@ -377,6 +377,8 @@ def format_memories_for_injection(memories: list) -> str:
             memory_layer = str(metadata.get("memory_layer") or "timeline")
             if memory_layer == "topic":
                 entry_label = "Topic 记忆 / Topic memory"
+            elif memory_layer == "topic_fragment":
+                entry_label = "Topic 片段 / Topic fragment"
             elif memory_layer == "timeline_supplement":
                 entry_label = "Timeline 补充 / Timeline supplement"
             else:

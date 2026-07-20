@@ -10,7 +10,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ..models.topic_memory import TopicMemory
+from ..models.topic_memory import TopicFragmentDraft, TopicMemory
 
 
 @dataclass(slots=True)
@@ -58,6 +58,56 @@ class TopicRecallResult:
             "branch_scores": {
                 key: round(value, 6) for key, value in self.branch_scores.items()
             },
+        }
+
+
+@dataclass(slots=True)
+class TopicFragmentRecallResult:
+    fragment: TopicFragmentDraft
+    topic_uid: str
+    relevance_score: float
+    final_score: float
+    embedding_score: float
+    keyword_score: float
+    parent_topic_relevance: float
+    rerank_score: float | None = None
+    sources: list[dict[str, Any]] = field(default_factory=list)
+    context_coverage: float = 0.0
+
+    @property
+    def fragment_uid(self) -> str:
+        return self.fragment.fragment_uid
+
+    @property
+    def content(self) -> str:
+        facts = [
+            str(fact.get("content") or "").strip()
+            for fact in self.fragment.facts
+            if str(fact.get("content") or "").strip()
+            and str(fact.get("content") or "").strip()
+            not in self.fragment.summary
+        ][:3]
+        lines = [f"Topic 片段: {self.fragment.label}", self.fragment.summary]
+        if facts:
+            lines.append("关键事实: " + "；".join(facts))
+        return "\n".join(value for value in lines if value).strip()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fragment_uid": self.fragment_uid,
+            "topic_uid": self.topic_uid,
+            "label": self.fragment.label,
+            "relevance_score": round(self.relevance_score, 6),
+            "final_score": round(self.final_score, 6),
+            "embedding_score": round(self.embedding_score, 6),
+            "keyword_score": round(self.keyword_score, 6),
+            "parent_topic_relevance": round(self.parent_topic_relevance, 6),
+            "rerank_score": (
+                round(self.rerank_score, 6)
+                if self.rerank_score is not None
+                else None
+            ),
+            "context_coverage": round(self.context_coverage, 6),
         }
 
 
@@ -252,4 +302,4 @@ class TopicRetriever:
         return features or {"<empty>"}
 
 
-__all__ = ["TopicRecallResult", "TopicRetriever"]
+__all__ = ["TopicFragmentRecallResult", "TopicRecallResult", "TopicRetriever"]

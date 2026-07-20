@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.5"
+    CURRENT_VERSION = "9.6"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -42,6 +42,7 @@ class DBMigration:
         "9.3": "Automatic source-grounded Topic construction and maintenance",
         "9.4": "Related-subtopic graph and decoupled Topic matching thresholds",
         "9.5": "Runtime Topic settings and local incremental reconciliation",
+        "9.6": "Formal Topic fragments and revision-scoped fragment provenance",
     }
 
     def __init__(self, db_path: str):
@@ -314,6 +315,10 @@ class DBMigration:
                 # 从版本9.4升级到版本9.5
                 if current_key <= self.version_key("9.4"):
                     migration_steps.append(self._migrate_v9_4_to_v9_5)
+
+                # 从版本9.5升级到版本9.6
+                if current_key <= self.version_key("9.5"):
+                    migration_steps.append(self._migrate_v9_5_to_v9_6)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1079,6 +1084,111 @@ class DBMigration:
         if progress_callback:
             progress_callback("创建 Topic 运行参数覆盖结构", 1, 1)
         logger.info("v9.4 -> v9.5 迁移完成，未自动修改已有 Topic")
+
+    async def _migrate_v9_5_to_v9_6(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ):
+        """Create formal fragment links and backfill existing v9.5 provenance."""
+        logger.info("执行迁移步骤: v9.5 -> v9.6 (formal Topic fragments)")
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await TopicMemoryStore.create_tables(db)
+            rows = await (
+                await db.execute(
+                    "SELECT topic_uid, revision, metadata FROM topic_memories"
+                )
+            ).fetchall()
+            now = time.time()
+            for row in rows:
+                try:
+                    metadata = json.loads(row["metadata"] or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    metadata = {}
+                fragment_uids = [
+                    str(value).strip()
+                    for value in metadata.get("fragment_uids", [])
+                    if str(value).strip()
+                ]
+                if not fragment_uids:
+                    continue
+                placeholders = ",".join("?" * len(fragment_uids))
+                await db.execute(
+                    f"""
+                    INSERT OR IGNORE INTO topic_fragments (
+                        fragment_uid, run_uid, candidate_group_uid,
+                        memory_space_id, label, summary, timeline_uids,
+                        source_revisions, facts, keywords, time_cluster_keys,
+                        importance, confidence, embedding, started_at,
+                        ended_at, status, prompt_hash, input_hash, provider_id,
+                        model_id, created_at, updated_at, metadata
+                    )
+                    SELECT fragment_uid, run_uid, candidate_group_uid,
+                           memory_space_id, label, summary, timeline_uids,
+                           source_revisions, facts, keywords, time_cluster_keys,
+                           importance, confidence, embedding, started_at,
+                           ended_at, status, prompt_hash, input_hash, provider_id,
+                           model_id, created_at, updated_at, metadata
+                    FROM topic_fragment_drafts
+                    WHERE fragment_uid IN ({placeholders})
+                    """,
+                    fragment_uids,
+                )
+                existing = await (
+                    await db.execute(
+                        f"""
+                        SELECT fragment_uid FROM topic_fragments
+                        WHERE fragment_uid IN ({placeholders})
+                        """,
+                        fragment_uids,
+                    )
+                ).fetchall()
+                existing_uids = sorted(
+                    {str(item["fragment_uid"]) for item in existing}
+                )
+                weight = 1.0 / max(1, len(existing_uids))
+                for fragment_uid in existing_uids:
+                    await db.execute(
+                        """
+                        INSERT INTO topic_fragment_links (
+                            topic_uid, fragment_uid, topic_revision,
+                            contribution_weight, status, created_at, updated_at,
+                            metadata
+                        ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+                        ON CONFLICT(topic_uid, fragment_uid) DO UPDATE SET
+                            topic_revision = excluded.topic_revision,
+                            contribution_weight = excluded.contribution_weight,
+                            status = 'active',
+                            updated_at = excluded.updated_at,
+                            metadata = excluded.metadata
+                        """,
+                        (
+                            str(row["topic_uid"]),
+                            fragment_uid,
+                            int(row["revision"]),
+                            weight,
+                            now,
+                            now,
+                            json.dumps(
+                                {"backfilled_from": "topic_metadata_v9_5"},
+                                ensure_ascii=False,
+                            ),
+                        ),
+                    )
+                    await db.execute(
+                        """
+                        UPDATE topic_fragments
+                        SET status = 'active', updated_at = ?
+                        WHERE fragment_uid = ?
+                        """,
+                        (now, fragment_uid),
+                    )
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建正式 Topic 片段关系并回填来源", 1, 1)
+        logger.info("v9.5 -> v9.6 迁移完成；旧片段需重建后才参与召回")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

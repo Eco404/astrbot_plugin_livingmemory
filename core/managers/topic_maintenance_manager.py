@@ -637,6 +637,7 @@ class TopicMaintenanceManager:
             source_revision=max(1, int(row["revision"])),
             memory_space_id=str(row["memory_space_id"]),
             session_id=(row["source_session_id"] or metadata.get("session_id")),
+            persona_id=(str(metadata.get("persona_id") or "").strip() or None),
             content=content,
             summary=summary,
             topics=topics,

@@ -125,6 +125,14 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
             limited_k = max(1, min(requested_k_int, max_k))
 
             topic_outcome = None
+            topic_branches = [
+                RecallQueryBranch(
+                    name="tool_query",
+                    text=cleaned_query,
+                    weight=1.0,
+                    role="user",
+                )
+            ]
             if topic_enabled:
                 topic_config = getattr(
                     self.memory_engine.topic_recall_pipeline, "config", {}
@@ -137,14 +145,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     track_access=False,
                 )
                 topic_search = self.memory_engine.topic_recall_pipeline.search(
-                    branches=[
-                        RecallQueryBranch(
-                            name="tool_query",
-                            text=cleaned_query,
-                            weight=1.0,
-                            role="user",
-                        )
-                    ],
+                    branches=topic_branches,
                     memory_space_id=resolve_memory_space(
                         session_id, persona_id
                     ).memory_space_id,
@@ -180,6 +181,8 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                 )
 
             topic_results = topic_outcome.results if topic_outcome else []
+            fragment_outcome = None
+            fragment_results = []
             if topic_results:
                 topic_config = getattr(
                     self.memory_engine.topic_recall_pipeline, "config", {}
@@ -188,9 +191,27 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     int(topic_config.get("timeline_supplement_k", 2)),
                     max(0, limited_k - len(topic_results)),
                 )
-                memories = self.memory_engine.topic_recall_pipeline.select_timeline_supplements(
-                    memories, topic_results, supplement_k
-                )
+                try:
+                    fragment_outcome = await self.memory_engine.topic_recall_pipeline.search_fragment_supplements(
+                        branches=topic_branches,
+                        topic_results=topic_results,
+                        limit=supplement_k,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "记忆工具 Topic 片段召回失败，回退 Timeline 补充",
+                        exc_info=True,
+                    )
+                if fragment_outcome is not None:
+                    fragment_results = fragment_outcome.results
+                if fragment_outcome is not None and fragment_outcome.available_count:
+                    memories = []
+                else:
+                    memories = self.memory_engine.topic_recall_pipeline.select_timeline_supplements(
+                        memories, topic_results, supplement_k
+                    )
             if topic_enabled and memories:
                 self.memory_engine.record_memory_access(
                     [memory.doc_id for memory in memories]
@@ -207,6 +228,19 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                 }
                 for item in topic_results
             ]
+            serialized_results.extend(
+                {
+                    "id": item.fragment_uid,
+                    "content": item.content,
+                    "score": item.final_score,
+                    "importance": item.fragment.importance,
+                    "memory_layer": "topic_fragment",
+                    "parent_topic_uid": item.topic_uid,
+                    "source_timeline_count": len(item.fragment.timeline_uids),
+                    "narrative_perspective": "third_person",
+                }
+                for item in fragment_results
+            )
             for memory in memories:
                 metadata = memory.metadata if isinstance(memory.metadata, dict) else {}
                 serialized_results.append(

@@ -205,6 +205,7 @@ class MemoryRecall:
                     and self.config_manager.get("topic_memory.recall_enabled", True)
                 )
                 topic_search = None
+                branches = []
                 if topic_enabled:
                     topic_config = getattr(
                         self.memory_engine.topic_recall_pipeline, "config", {}
@@ -242,6 +243,8 @@ class MemoryRecall:
                     topic_outcome = None
 
                 topic_results = topic_outcome.results if topic_outcome else []
+                fragment_outcome = None
+                fragment_results = []
                 if topic_results:
                     topic_config = getattr(
                         self.memory_engine.topic_recall_pipeline, "config", {}
@@ -250,11 +253,27 @@ class MemoryRecall:
                         int(topic_config.get("timeline_supplement_k", 2)),
                         max(0, top_k - len(topic_results)),
                     )
-                    recalled_memories = self._select_timeline_supplements(
-                        recall_outcome.results,
-                        topic_results,
-                        supplement_limit,
+                    fragment_outcome = await self._safe_topic_recall(
+                        self.memory_engine.topic_recall_pipeline.search_fragment_supplements(
+                            branches=branches,
+                            topic_results=topic_results,
+                            limit=supplement_limit,
+                            context_session_id=session_id,
+                            visible_message_start_index=visible_start,
+                            visible_message_end_index=visible_end,
+                        ),
+                        session_id,
                     )
+                    if fragment_outcome is not None:
+                        fragment_results = fragment_outcome.results
+                    if fragment_outcome is not None and fragment_outcome.available_count:
+                        recalled_memories = []
+                    else:
+                        recalled_memories = self._select_timeline_supplements(
+                            recall_outcome.results,
+                            topic_results,
+                            supplement_limit,
+                        )
                 else:
                     recalled_memories = recall_outcome.results
                 if recalled_memories:
@@ -279,18 +298,23 @@ class MemoryRecall:
                         f"入选={len(topic_results)}, "
                         f"阈值={topic_outcome.applied_threshold:.3f}, "
                         f"上下文高覆盖过滤={topic_outcome.context_suppressed}, "
-                        f"Timeline 补充={len(recalled_memories)}"
+                        f"片段补充={len(fragment_results)}, "
+                        f"兼容 Timeline 补充={len(recalled_memories)}"
                     )
 
-                if topic_results or recalled_memories:
+                if topic_results or fragment_results or recalled_memories:
                     logger.info(
                         f"[{session_id}] 检索到 {len(topic_results)} 条 Topic、"
+                        f"{len(fragment_results)} 条片段、"
                         f"{len(recalled_memories)} 条 Timeline"
                     )
 
                     # 格式化并注入记忆
                     memory_list = [
                         self._topic_memory_dict(item) for item in topic_results
+                    ] + [
+                        self._fragment_memory_dict(item)
+                        for item in fragment_results
                     ] + [
                         self._timeline_memory_dict(
                             item, as_supplement=bool(topic_results)
@@ -442,6 +466,27 @@ class MemoryRecall:
             "score": item.final_score,
             "metadata": metadata,
             "timestamp": metadata.get("create_time"),
+        }
+
+    @staticmethod
+    def _fragment_memory_dict(item) -> dict:
+        return {
+            "id": item.fragment_uid,
+            "content": item.content,
+            "score": item.final_score,
+            "metadata": {
+                "memory_layer": "topic_fragment",
+                "parent_topic_uid": item.topic_uid,
+                "title": item.fragment.label,
+                "importance": item.fragment.importance,
+                "confidence": item.fragment.confidence,
+                "source_timeline_count": len(item.fragment.timeline_uids),
+                "context_coverage": item.context_coverage,
+                "narrative_perspective": "third_person",
+                "started_at": item.fragment.started_at,
+                "ended_at": item.fragment.ended_at,
+            },
+            "timestamp": item.fragment.started_at,
         }
 
     async def _visible_context_range(
