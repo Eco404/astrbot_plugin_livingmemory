@@ -18,6 +18,7 @@ def test_effective_topic_settings_are_sparse_overrides_over_code_defaults():
 
     assert effective["rerank_threshold"] == 0.61
     assert effective["llm_concurrency"] == 4
+    assert effective["recall_rerank_weight"] == 0.35
     assert effective["recall_top_k"] == defaults["recall_top_k"]
     assert set(effective) == set(TOPIC_SETTING_DEFINITIONS)
 
@@ -29,4 +30,3 @@ def test_topic_setting_validation_rejects_unknown_and_out_of_range_values():
         validate_topic_setting("rerank_concurrency", 33)
     with pytest.raises(ValueError, match="boolean"):
         validate_topic_setting("recall_use_rerank", 1)
-

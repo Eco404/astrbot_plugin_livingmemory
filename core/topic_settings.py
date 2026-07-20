@@ -16,6 +16,7 @@ TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "recall_relative_floor": {"default": 0.70, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "相对相关度下限", "effect": "recall"},
     "recall_mmr_lambda": {"default": 0.78, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "相关性与多样性平衡", "effect": "recall"},
     "recall_use_rerank": {"default": True, "type": "bool", "category": "recall", "label": "召回使用 Rerank", "effect": "recall"},
+    "recall_rerank_weight": {"default": 0.35, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "recall", "label": "召回 Rerank 权重", "effect": "recall"},
     "recall_context_overlap_threshold": {"default": 0.8, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "上下文来源覆盖阈值", "effect": "recall"},
     "timeline_supplement_k": {"default": 2, "type": "int", "min": 0, "max": 10, "category": "recall", "label": "Timeline 补充数量", "effect": "recall"},
     "time_gap_hours": {"default": 6.0, "type": "float", "min": 1 / 60, "max": 720.0, "step": 0.25, "category": "build", "label": "候选时间簇间隔（小时）", "effect": "rebuild"},

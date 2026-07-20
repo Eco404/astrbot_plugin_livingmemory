@@ -52,6 +52,25 @@ class _FixedScoreRetriever:
         return relevance
 
 
+class _RerankRow:
+    def __init__(self, index, relevance_score):
+        self.index = index
+        self.relevance_score = relevance_score
+
+
+class _CountingReranker:
+    def __init__(self, scores):
+        self.scores = list(scores)
+        self.calls = 0
+
+    async def rerank(self, query, documents, top_n=None):
+        self.calls += 1
+        return [
+            _RerankRow(index, score)
+            for index, score in enumerate(self.scores[: len(documents)])
+        ]
+
+
 def _payload(uid, title, embedding, *, sources=None, importance=0.6):
     return {
         "topic": TopicMemory(
@@ -89,6 +108,49 @@ async def test_topic_retriever_uses_stored_vectors_without_llm():
     assert [item.topic_uid for item in results] == ["weather", "coding"]
     assert results[0].embedding_score == pytest.approx(1.0)
     assert results[0].rerank_score is None
+
+
+@pytest.mark.asyncio
+async def test_topic_retriever_uses_configurable_rerank_weight():
+    store = _Store([_payload("weather", "上海雷雨", [1.0, 0.0])])
+    reranker = _CountingReranker([0.0])
+    retriever = TopicRetriever(
+        store,
+        embedding_provider=_Embedding(),
+        rerank_provider=reranker,
+        config={"recall_use_rerank": True, "recall_rerank_weight": 0.35},
+    )
+
+    result = (
+        await retriever.search("上海天气", memory_space_id="space-1", k=1)
+    )[0]
+
+    assert reranker.calls == 1
+    assert result.base_relevance_score is not None
+    assert result.rerank_score == pytest.approx(0.0)
+    assert result.relevance_score == pytest.approx(
+        result.base_relevance_score * 0.65
+    )
+
+
+@pytest.mark.asyncio
+async def test_topic_retriever_skips_rerank_when_weight_is_zero():
+    store = _Store([_payload("weather", "上海雷雨", [1.0, 0.0])])
+    reranker = _CountingReranker([1.0])
+    retriever = TopicRetriever(
+        store,
+        embedding_provider=_Embedding(),
+        rerank_provider=reranker,
+        config={"recall_use_rerank": True, "recall_rerank_weight": 0.0},
+    )
+
+    result = (
+        await retriever.search("上海天气", memory_space_id="space-1", k=1)
+    )[0]
+
+    assert reranker.calls == 0
+    assert result.rerank_score is None
+    assert result.relevance_score == pytest.approx(result.base_relevance_score)
 
 
 @pytest.mark.asyncio

@@ -172,6 +172,7 @@ class TopicMemoryConfig(BaseModel):
     recall_relative_floor: float = Field(default=0.70, ge=0.0, le=1.0)
     recall_mmr_lambda: float = Field(default=0.78, ge=0.0, le=1.0)
     recall_use_rerank: bool = True
+    recall_rerank_weight: float = Field(default=0.35, ge=0.0, le=1.0)
     recall_context_overlap_threshold: float = Field(
         default=0.8, ge=0.0, le=1.0
     )

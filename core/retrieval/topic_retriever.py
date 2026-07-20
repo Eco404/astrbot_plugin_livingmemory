@@ -21,6 +21,7 @@ class TopicRecallResult:
     embedding_score: float
     keyword_score: float
     rerank_score: float | None = None
+    base_relevance_score: float | None = None
     atoms: list[dict[str, Any]] = field(default_factory=list)
     sources: list[dict[str, Any]] = field(default_factory=list)
     context_coverage: float = 0.0
@@ -42,6 +43,12 @@ class TopicRecallResult:
             "final_score": round(self.final_score, 6),
             "embedding_score": round(self.embedding_score, 6),
             "keyword_score": round(self.keyword_score, 6),
+            "base_relevance_score": round(
+                self.base_relevance_score
+                if self.base_relevance_score is not None
+                else self.relevance_score,
+                6,
+            ),
             "rerank_score": (
                 round(self.rerank_score, 6)
                 if self.rerank_score is not None
@@ -125,6 +132,7 @@ class TopicRetriever:
                     final_score=self._rank_score(topic, relevance),
                     embedding_score=embedding_score,
                     keyword_score=keyword_score,
+                    base_relevance_score=relevance,
                     atoms=payload["atoms"],
                     sources=payload["sources"],
                 )
@@ -137,7 +145,16 @@ class TopicRetriever:
             if use_rerank is None
             else bool(use_rerank)
         )
-        if rerank_enabled and self.rerank_provider is not None and candidates:
+        rerank_weight = max(
+            0.0,
+            min(1.0, float(self.config.get("recall_rerank_weight", 0.35))),
+        )
+        if (
+            rerank_enabled
+            and rerank_weight > 0.0
+            and self.rerank_provider is not None
+            and candidates
+        ):
             try:
                 documents = [item.content for item in candidates]
                 rows = await self.rerank_provider.rerank(
@@ -155,8 +172,14 @@ class TopicRetriever:
                         continue
                     rerank_score = max(0.0, min(1.0, rerank_score))
                     candidate.rerank_score = rerank_score
+                    base_relevance = (
+                        candidate.base_relevance_score
+                        if candidate.base_relevance_score is not None
+                        else candidate.relevance_score
+                    )
                     candidate.relevance_score = (
-                        candidate.relevance_score * 0.45 + rerank_score * 0.55
+                        base_relevance * (1.0 - rerank_weight)
+                        + rerank_score * rerank_weight
                     )
                     candidate.final_score = self._rank_score(
                         candidate.topic, candidate.relevance_score
