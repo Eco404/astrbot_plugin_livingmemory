@@ -39,7 +39,7 @@ from .topic_maintenance_manager import TopicMaintenanceManager
 
 _FRAGMENT_PROMPT_VERSION = "topic-fragment-v7-single-retrieval-intent"
 _SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v4-authoritative-identities"
-_MATCHING_ALGORITHM_VERSION = 4
+_MATCHING_ALGORITHM_VERSION = 5
 _RELATION_ALGORITHM_VERSION = 2
 _CONFIDENCE_CALIBRATION_VERSION = 1
 
@@ -79,7 +79,7 @@ class TopicBuildManager:
         )
         self.rerank_concurrency = max(
             1,
-            min(32, int(self.config.get("rerank_concurrency", 4))),
+            min(32, int(self.config.get("rerank_concurrency", 1))),
         )
         self._llm_semaphore = asyncio.Semaphore(self.llm_concurrency)
         self._rerank_semaphore = asyncio.Semaphore(self.rerank_concurrency)
@@ -884,6 +884,9 @@ class TopicBuildManager:
                     "component_min_average_similarity", 0.65
                 ),
                 "rerank_threshold": self.config.get("rerank_threshold", 0.55),
+                "rerank_reciprocal_rank_threshold": self.config.get(
+                    "rerank_reciprocal_rank_threshold", 0.60
+                ),
                 "rerank_top_n": self.config.get("rerank_top_n", 5),
                 "rerank_provider": self._provider_identity(self.rerank_provider),
                 "matching_algorithm_version": _MATCHING_ALGORITHM_VERSION,
@@ -1038,6 +1041,8 @@ class TopicBuildManager:
             )
 
         rerank_passes: set[tuple[int, int]] = set()
+        rerank_relevance: dict[tuple[int, int], float] = {}
+        rerank_relative_ranks: dict[tuple[int, int], float] = {}
         rerank_failed = False
         if rerank_enabled:
             rerank_threshold = float(self.config.get("rerank_threshold", 0.55))
@@ -1106,7 +1111,11 @@ class TopicBuildManager:
                         results = await self.rerank_provider.rerank(
                             documents[index],
                             [documents[item] for item in candidate_indexes],
-                            top_n=top_n,
+                            # Request the complete candidate ordering.  Some
+                            # rerankers expose a saturated score distribution,
+                            # so truncating here would discard the reciprocal
+                            # rank evidence needed for scale-independent matching.
+                            top_n=len(candidate_indexes),
                         )
                         return index, candidate_indexes, list(results)
                     finally:
@@ -1135,26 +1144,58 @@ class TopicBuildManager:
             if not rerank_failed:
                 for index, candidate_indexes, results in rerank_outputs:
                     fragment = fragments[index]
+                    ranked_results: list[tuple[int, float, Any]] = []
+                    seen_candidates: set[int] = set()
                     for result in results:
                         local_index = int(getattr(result, "index", -1))
                         relevance = float(getattr(result, "relevance_score", 0.0))
                         if 0 <= local_index < len(candidate_indexes):
                             other = candidate_indexes[local_index]
-                            key = f"rerank:{fragment.fragment_uid}|{fragments[other].fragment_uid}"
-                            scores[key] = round(relevance, 6)
-                            raw_score = getattr(result, "raw_score", None)
-                            try:
-                                raw_value = float(raw_score)
-                            except (TypeError, ValueError):
-                                raw_value = math.nan
-                            if math.isfinite(raw_value):
-                                raw_key = (
-                                    "rerank_raw:"
-                                    f"{fragment.fragment_uid}|{fragments[other].fragment_uid}"
-                                )
-                                scores[raw_key] = round(raw_value, 6)
-                            if relevance >= rerank_threshold:
-                                rerank_passes.add((index, other))
+                            if other in seen_candidates or not math.isfinite(relevance):
+                                continue
+                            seen_candidates.add(other)
+                            ranked_results.append((other, relevance, result))
+                    ranked_results.sort(
+                        key=lambda item: (
+                            -item[1],
+                            fragments[item[0]].fragment_uid,
+                        )
+                    )
+                    relative_rank_scores = self._relative_rank_scores(
+                        [item[1] for item in ranked_results]
+                    )
+                    for (rank, (other, relevance, result)), relative_rank in zip(
+                        enumerate(ranked_results, start=1),
+                        relative_rank_scores,
+                        strict=True,
+                    ):
+                        key = f"rerank:{fragment.fragment_uid}|{fragments[other].fragment_uid}"
+                        scores[key] = round(relevance, 6)
+                        rank_key = (
+                            "rerank_rank:"
+                            f"{fragment.fragment_uid}|{fragments[other].fragment_uid}"
+                        )
+                        scores[rank_key] = float(rank)
+                        relative_key = (
+                            "rerank_relative:"
+                            f"{fragment.fragment_uid}|{fragments[other].fragment_uid}"
+                        )
+                        scores[relative_key] = round(relative_rank, 6)
+                        rerank_relevance[(index, other)] = relevance
+                        rerank_relative_ranks[(index, other)] = relative_rank
+                        raw_score = getattr(result, "raw_score", None)
+                        try:
+                            raw_value = float(raw_score)
+                        except (TypeError, ValueError):
+                            raw_value = math.nan
+                        if math.isfinite(raw_value):
+                            raw_key = (
+                                "rerank_raw:"
+                                f"{fragment.fragment_uid}|{fragments[other].fragment_uid}"
+                            )
+                            scores[raw_key] = round(raw_value, 6)
+                        if relevance >= rerank_threshold and rank <= top_n:
+                            rerank_passes.add((index, other))
 
         if fragments and work_total:
             await self._emit(
@@ -1166,14 +1207,47 @@ class TopicBuildManager:
             )
 
         seed_edges: list[tuple[float, int, int]] = []
+        reciprocal_rank_threshold = float(
+            self.config.get("rerank_reciprocal_rank_threshold", 0.60)
+        )
         for (left, right), embedding_score in embedding_scores.items():
             mutual_rerank = (
                 not rerank_failed
                 and (left, right) in rerank_passes
                 and (right, left) in rerank_passes
             )
+            directed_relevance = [
+                rerank_relevance.get((left, right)),
+                rerank_relevance.get((right, left)),
+            ]
+            directed_relative_ranks = [
+                rerank_relative_ranks.get((left, right)),
+                rerank_relative_ranks.get((right, left)),
+            ]
+            reciprocal_rerank = (
+                not rerank_failed
+                and all(value is not None for value in directed_relevance)
+                and all(
+                    float(value) >= rerank_threshold
+                    for value in directed_relevance
+                    if value is not None
+                )
+                and (
+                    (left, right) in rerank_passes
+                    or (right, left) in rerank_passes
+                )
+                and all(value is not None for value in directed_relative_ranks)
+                and sum(
+                    float(value)
+                    for value in directed_relative_ranks
+                    if value is not None
+                )
+                / 2.0
+                >= reciprocal_rank_threshold
+            )
             if embedding_score >= threshold or (
-                embedding_score >= rerank_candidate_floor and mutual_rerank
+                embedding_score >= rerank_candidate_floor
+                and (mutual_rerank or reciprocal_rerank)
             ):
                 directed_scores = [
                     float(scores[key])
@@ -1186,6 +1260,17 @@ class TopicBuildManager:
                 priority = (
                     (embedding_score + min(directed_scores)) / 2.0
                     if mutual_rerank and directed_scores
+                    else (
+                        embedding_score
+                        + sum(
+                            float(value)
+                            for value in directed_relative_ranks
+                            if value is not None
+                        )
+                        / 2.0
+                    )
+                    / 2.0
+                    if reciprocal_rerank
                     else embedding_score
                 )
                 seed_edges.append((priority, left, right))
@@ -1209,8 +1294,18 @@ class TopicBuildManager:
         embedding_scores: dict[frozenset[str], float] = {}
         rerank_scores: dict[tuple[str, str], float] = {}
         rerank_raw_scores: dict[tuple[str, str], float] = {}
+        rerank_ranks: dict[tuple[str, str], int] = {}
+        rerank_relative_ranks: dict[tuple[str, str], float] = {}
         for key, value in scores.items():
-            if key.startswith("rerank_raw:"):
+            if key.startswith("rerank_relative:"):
+                pair = key[16:].split("|", 1)
+                if len(pair) == 2:
+                    rerank_relative_ranks[(pair[0], pair[1])] = float(value)
+            elif key.startswith("rerank_rank:"):
+                pair = key[12:].split("|", 1)
+                if len(pair) == 2:
+                    rerank_ranks[(pair[0], pair[1])] = int(value)
+            elif key.startswith("rerank_raw:"):
                 pair = key[11:].split("|", 1)
                 if len(pair) == 2:
                     rerank_raw_scores[(pair[0], pair[1])] = float(value)
@@ -1227,6 +1322,10 @@ class TopicBuildManager:
             self.config.get("fragment_similarity_threshold", 0.78)
         )
         rerank_threshold = float(self.config.get("rerank_threshold", 0.55))
+        rerank_top_n = max(1, int(self.config.get("rerank_top_n", 5)))
+        reciprocal_rank_threshold = float(
+            self.config.get("rerank_reciprocal_rank_threshold", 0.60)
+        )
         singleton_indexes = {
             component[0] for component in components if len(component) == 1
         }
@@ -1247,14 +1346,46 @@ class TopicBuildManager:
                     and reverse is not None
                     and forward >= rerank_threshold
                     and reverse >= rerank_threshold
+                    and rerank_ranks.get((uid, other_uid), rerank_top_n + 1)
+                    <= rerank_top_n
+                    and rerank_ranks.get((other_uid, uid), rerank_top_n + 1)
+                    <= rerank_top_n
+                )
+                relative_values = [
+                    rerank_relative_ranks.get((uid, other_uid)),
+                    rerank_relative_ranks.get((other_uid, uid)),
+                ]
+                reciprocal = (
+                    forward is not None
+                    and reverse is not None
+                    and forward >= rerank_threshold
+                    and reverse >= rerank_threshold
+                    and (
+                        rerank_ranks.get((uid, other_uid), rerank_top_n + 1)
+                        <= rerank_top_n
+                        or rerank_ranks.get(
+                            (other_uid, uid), rerank_top_n + 1
+                        )
+                        <= rerank_top_n
+                    )
+                    and all(value is not None for value in relative_values)
+                    and sum(
+                        float(value)
+                        for value in relative_values
+                        if value is not None
+                    )
+                    / 2.0
+                    >= reciprocal_rank_threshold
                 )
                 seed = similarity >= merge_threshold or (
-                    similarity >= rerank_floor and mutual
+                    similarity >= rerank_floor and (mutual or reciprocal)
                 )
-                neighbors.append((similarity, other_uid, mutual, seed))
+                neighbors.append(
+                    (similarity, other_uid, mutual, reciprocal, seed)
+                )
             neighbors.sort(key=lambda item: (-item[0], item[1]))
             candidates = [item for item in neighbors if item[0] >= rerank_floor]
-            seeds = [item for item in candidates if item[3]]
+            seeds = [item for item in candidates if item[4]]
             if seeds:
                 reason = "component_cohesion_rejected"
             elif candidates:
@@ -1262,7 +1393,11 @@ class TopicBuildManager:
             else:
                 reason = "below_rerank_candidate_floor"
             reasons[reason] += 1
-            nearest = neighbors[0] if neighbors else (0.0, "", False, False)
+            nearest = (
+                neighbors[0]
+                if neighbors
+                else (0.0, "", False, False, False)
+            )
             items.append(
                 {
                     "fragment_uid": uid,
@@ -1271,6 +1406,7 @@ class TopicBuildManager:
                     "nearest_fragment_uid": nearest[1],
                     "nearest_similarity": round(float(nearest[0]), 6),
                     "nearest_mutual_rerank": bool(nearest[2]),
+                    "nearest_reciprocal_rerank": bool(nearest[3]),
                     "candidate_count": len(candidates),
                     "seed_count": len(seeds),
                 }
@@ -1282,6 +1418,7 @@ class TopicBuildManager:
                 "fragment_similarity_threshold": merge_threshold,
                 "rerank_candidate_floor": rerank_floor,
                 "rerank_threshold": rerank_threshold,
+                "rerank_reciprocal_rank_threshold": reciprocal_rank_threshold,
                 "component_min_pair_similarity": float(
                     self.config.get("component_min_pair_similarity", 0.52)
                 ),
@@ -1295,11 +1432,48 @@ class TopicBuildManager:
                 "mapped": self._score_distribution(mapped_values),
                 "raw": self._score_distribution(raw_values),
                 "raw_score_available": bool(raw_values),
+                "relative_rank": self._score_distribution(
+                    sorted(rerank_relative_ranks.values())
+                ),
                 "provider_mapping": str(
-                    getattr(self.rerank_provider, "score_mapping", "") or "unknown"
+                    getattr(self.rerank_provider, "score_mapping", "")
+                    or (
+                        "identity"
+                        if getattr(self.rerank_provider, "score_domain", "")
+                        == "[0,1]"
+                        else "provider_native"
+                    )
+                ),
+                "provider_score_domain": str(
+                    getattr(self.rerank_provider, "score_domain", "") or "unknown"
                 ),
             },
         }
+
+    @staticmethod
+    def _relative_rank_scores(scores: list[float]) -> list[float]:
+        """Map a descending score list to tie-aware percentiles in ``[0, 1]``."""
+        result_count = len(scores)
+        if result_count <= 1:
+            return [1.0] * result_count
+
+        relative_scores = [0.0] * result_count
+        start = 0
+        while start < result_count:
+            end = start
+            while end + 1 < result_count and math.isclose(
+                scores[end + 1],
+                scores[start],
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                end += 1
+            average_rank = (start + end + 2) / 2.0
+            percentile = 1.0 - (average_rank - 1.0) / (result_count - 1)
+            for index in range(start, end + 1):
+                relative_scores[index] = percentile
+            start = end + 1
+        return relative_scores
 
     def _derive_topic_relations(
         self,

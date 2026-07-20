@@ -217,6 +217,36 @@ class _PartiallyFailingReranker(_AllPassReranker):
         return await super().rerank(query, documents, top_n)
 
 
+class _AsymmetricRankReranker:
+    """Expose a strong reciprocal pair whose second direction ranks third."""
+
+    provider_config = {"id": "rank-rerank", "model": "test"}
+
+    async def rerank(self, query: str, documents: list[str], top_n: int | None = None):
+        query_index = int(query.split("片段 ", 1)[1].split(" ", 1)[0])
+        document_indexes = [
+            int(document.split("片段 ", 1)[1].split(" ", 1)[0])
+            for document in documents
+        ]
+        scores = {document_index: 0.1 for document_index in document_indexes}
+        if query_index == 0 and 1 in scores:
+            scores[1] = 0.999
+        elif query_index == 1 and 0 in scores:
+            higher_ranked = [item for item in document_indexes if item != 0][:2]
+            for offset, document_index in enumerate(higher_ranked):
+                scores[document_index] = 0.999 - offset * 0.001
+            scores[0] = 0.997
+        ranked = sorted(
+            enumerate(document_indexes),
+            key=lambda item: (-scores[item[1]], item[1]),
+        )
+        limit = len(ranked) if top_n is None else min(len(ranked), top_n)
+        return [
+            _RerankResult(local_index, scores[document_index])
+            for local_index, document_index in ranked[:limit]
+        ]
+
+
 class _FragmentStore:
     def __init__(self):
         self.fragments = []
@@ -272,7 +302,7 @@ async def test_full_build_splits_merges_and_materializes_exact_sources(tmp_path:
     assert run["stage"] == "completed"
     assert run["status"] == "completed"
     matching = await store.get_build_checkpoint(result["run_uid"], "fragment_matching")
-    assert matching["payload"]["matching_algorithm_version"] == 4
+    assert matching["payload"]["matching_algorithm_version"] == 5
     assert "singleton_reason_counts" in matching["payload"]["audit"]
 
 
@@ -606,6 +636,43 @@ async def test_rerank_can_promote_candidates_but_not_unrelated_fragments():
 
     assert [len(component) for component in related_components] == [2]
     assert sorted(map(len, unrelated_components)) == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_rerank_uses_reciprocal_relative_rank_when_scores_are_saturated():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        rerank_provider=_AsymmetricRankReranker(),
+        config={
+            "fragment_similarity_threshold": 1.01,
+            "rerank_candidate_floor": 0.63,
+            "rerank_threshold": 0.55,
+            "rerank_top_n": 2,
+            "rerank_reciprocal_rank_threshold": 0.60,
+        },
+    )
+    fragments = [_topic_fragment(index) for index in range(5)]
+    for fragment in fragments:
+        fragment.embedding = [1.0, 0.0]
+
+    components, scores = await manager._match_fragments(fragments)
+
+    assert [0, 1] in components
+    assert sorted(map(len, components), reverse=True) == [2, 1, 1, 1]
+    assert scores["rerank_rank:fragment-0|fragment-1"] == 1
+    assert scores["rerank_rank:fragment-1|fragment-0"] == 3
+    assert scores["rerank_relative:fragment-0|fragment-1"] == 1.0
+    assert scores["rerank_relative:fragment-1|fragment-0"] > 0.3
+
+
+def test_relative_rerank_percentiles_do_not_invent_order_for_ties():
+    assert TopicBuildManager._relative_rank_scores([0.99, 0.99, 0.99]) == [
+        0.5,
+        0.5,
+        0.5,
+    ]
 
 
 @pytest.mark.asyncio

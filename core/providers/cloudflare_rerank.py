@@ -23,7 +23,6 @@ class CloudflareRerankResult:
     index: int
     relevance_score: float
     raw_score: float
-    score_mapping: str
 
 
 class CloudflareRerankClient:
@@ -42,8 +41,6 @@ class CloudflareRerankClient:
         timeout_seconds: float = 30.0,
         max_retries: int = 2,
         retry_base_delay: float = 1.0,
-        score_mapping: str | None = None,
-        apply_sigmoid: bool | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.account_id = str(account_id or "").strip()
@@ -55,19 +52,7 @@ class CloudflareRerankClient:
         self.timeout_seconds = max(1.0, float(timeout_seconds))
         self.max_retries = max(0, int(max_retries))
         self.retry_base_delay = max(0.0, float(retry_base_delay))
-        configured_mapping = str(score_mapping or "").strip().lower()
-        if not configured_mapping:
-            if apply_sigmoid is None:
-                configured_mapping = "auto"
-            else:
-                configured_mapping = "sigmoid" if apply_sigmoid else "identity"
-        if configured_mapping not in {"auto", "identity", "sigmoid"}:
-            raise ValueError(
-                "Cloudflare rerank score_mapping must be auto, identity, or sigmoid"
-            )
-        self.score_mapping = configured_mapping
-        # Kept for older callers and the model-inspection API.
-        self.apply_sigmoid = configured_mapping == "sigmoid"
+        self.score_domain = "[0,1]"
         self._transport = transport
         if not self.account_id:
             raise ValueError("Cloudflare account_id is required")
@@ -81,7 +66,6 @@ class CloudflareRerankClient:
         self.provider_config = {
             "id": "cloudflare_workers_ai_rerank",
             "model": self.model,
-            "score_mapping": self.score_mapping,
         }
 
     @property
@@ -132,41 +116,24 @@ class CloudflareRerankClient:
                 continue
             if not math.isfinite(score):
                 continue
+            if not 0.0 <= score <= 1.0:
+                raise CloudflareRerankError(
+                    "Cloudflare rerank returned a score outside [0, 1]"
+                )
             seen.add(index)
             parsed_rows.append((index, score))
 
-        response_mapping = self._resolve_score_mapping(
-            [score for _, score in parsed_rows]
-        )
         results: list[CloudflareRerankResult] = []
         for index, score in parsed_rows:
-            relevance = (
-                self._sigmoid(score) if response_mapping == "sigmoid" else score
-            )
-            relevance = max(0.0, min(1.0, relevance))
             results.append(
                 CloudflareRerankResult(
                     index=index,
-                    relevance_score=relevance,
+                    relevance_score=score,
                     raw_score=score,
-                    score_mapping=response_mapping,
                 )
             )
         results.sort(key=lambda item: item.relevance_score, reverse=True)
         return results[:limit]
-
-    def _resolve_score_mapping(self, scores: list[float]) -> str:
-        """Use identity for probability-like responses, sigmoid for logits.
-
-        Workers AI models and API revisions do not all expose scores in the same
-        domain.  Resolving once per response preserves ranking and avoids applying
-        sigmoid twice to values that are already probabilities.
-        """
-        if self.score_mapping != "auto":
-            return self.score_mapping
-        if scores and all(0.0 <= score <= 1.0 for score in scores):
-            return "identity"
-        return "sigmoid"
 
     async def _post(self, request_payload: dict[str, Any]) -> dict[str, Any]:
         headers = {
@@ -230,14 +197,6 @@ class CloudflareRerankClient:
                 "Cloudflare rerank response is missing the response array"
             )
         return rows
-
-    @staticmethod
-    def _sigmoid(value: float) -> float:
-        if value >= 0:
-            factor = math.exp(-value)
-            return 1.0 / (1.0 + factor)
-        factor = math.exp(value)
-        return factor / (1.0 + factor)
 
     @staticmethod
     def _http_error(response: httpx.Response) -> str:

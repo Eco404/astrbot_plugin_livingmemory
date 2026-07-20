@@ -57,7 +57,6 @@ export class ModelPage {
     ];
     if (model.extra?.dimension) rows.push([window.t("models.dimension"), model.extra.dimension]);
     if (model.extra?.base_url) rows.push([window.t("models.baseUrl"), model.extra.base_url]);
-    if (model.extra?.score_mapping) rows.push([window.t("models.scoreMapping"), model.extra.score_mapping]);
     if (model.extra?.fallback_provider_id) rows.push([window.t("models.fallbackProvider"), model.extra.fallback_provider_id]);
     if (model.extra?.initialization_error) rows.push([window.t("models.initializationError"), model.extra.initialization_error]);
     if (model.extra?.account_configured !== undefined) {
