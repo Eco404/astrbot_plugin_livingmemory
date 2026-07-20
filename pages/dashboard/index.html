@@ -218,6 +218,7 @@
                   <div class="topic-stat"><span data-i18n="topic.active">活跃 Topic</span><strong id="topic-active">0</strong></div>
                   <div class="topic-stat"><span data-i18n="topic.atoms">独立原子</span><strong id="topic-atoms">0</strong></div>
                   <div class="topic-stat"><span data-i18n="topic.links">Timeline 索引</span><strong id="topic-links">0</strong></div>
+                  <div class="topic-stat"><span data-i18n="topic.relations">相关关系</span><strong id="topic-relations">0</strong></div>
                 </div>
               </div>
             </div>
@@ -396,6 +397,25 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" id="topic-full-build-confirm-cancel" type="button" data-i18n="common.cancel">取消</button>
           <button class="btn btn-danger" id="topic-full-build-confirm-submit" type="button" data-i18n="topic.fullBuildConfirmSubmit">仍然全量构建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Discard Topic Build Checkpoint Confirmation -->
+    <div class="modal-overlay" id="topic-discard-build-overlay" aria-hidden="true">
+      <div class="modal topic-discard-build-modal" role="alertdialog" aria-modal="true" aria-labelledby="topic-discard-build-title" aria-describedby="topic-discard-build-message">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-discard-build-title" data-i18n="topic.discardBuildTitle">取消断点任务</div>
+          <button class="modal-close" id="topic-discard-build-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="topic-discard-build-warning" data-i18n="topic.discardBuildWarning">此操作会永久清除该任务已保存的候选扫描、片段、向量、匹配、合成结果和构建检查点，之后无法从该断点继续。</div>
+          <p class="topic-discard-build-message" id="topic-discard-build-message"></p>
+          <p class="text-tertiary" data-i18n="topic.discardBuildMaterialized">已经正式写入的 Topic 会保留，避免误删或破坏任务开始前的 Topic；取消后可以重新执行全量或增量构建。</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="topic-discard-build-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-danger" id="topic-discard-build-submit" type="button" data-i18n="topic.discardBuildSubmit">确认取消并清除进度</button>
         </div>
       </div>
     </div>

@@ -22,6 +22,10 @@ class TopicLinkStatus(str, Enum):
     STALE = "stale"
 
 
+class TopicRelationType(str, Enum):
+    RELATED_SUBTOPIC = "related_subtopic"
+
+
 class TopicMaintenanceMode(str, Enum):
     FULL = "full"
     INCREMENTAL = "incremental"
@@ -101,6 +105,22 @@ class TopicAtomSource:
     source_kind: str = "atom"
     source_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TopicRelation:
+    memory_space_id: str
+    left_topic_uid: str
+    right_topic_uid: str
+    confidence: float
+    semantic_similarity: float
+    relation_type: TopicRelationType = TopicRelationType.RELATED_SUBTOPIC
+    relation_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    status: str = "active"
+    build_run_uid: str | None = None
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -205,6 +225,8 @@ __all__ = [
     "TopicMemory",
     "TopicMemoryAtom",
     "TopicMemoryStatus",
+    "TopicRelation",
+    "TopicRelationType",
     "TopicTimelineLink",
     "TimelineTopicCandidate",
     "TopicCandidateGroup",

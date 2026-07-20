@@ -178,6 +178,12 @@ class PluginPageApi:
             "LivingMemory Page Topic build progress",
         )
         register(
+            f"{PAGE_API_PREFIX}/topics/build/discard",
+            self.discard_topic_build,
+            ["POST"],
+            "LivingMemory Page discard Topic build checkpoint",
+        )
+        register(
             f"{PAGE_API_PREFIX}/models",
             self.list_models,
             ["GET"],
@@ -337,6 +343,12 @@ class PluginPageApi:
         if error:
             return error
         return await self.topic_handler.get_build_progress()
+
+    async def discard_topic_build(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.discard_build(ready["memory_engine"])
 
     async def list_models(self):
         """列出插件运行时实际使用的模型，包括默认回退来源。"""

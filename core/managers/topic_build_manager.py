@@ -31,6 +31,7 @@ from ..models.topic_memory import (
     TopicMemory,
     TopicMemoryAtom,
     TopicMemoryStatus,
+    TopicRelation,
     TopicTimelineLink,
 )
 from .topic_maintenance_manager import TopicMaintenanceManager
@@ -38,7 +39,7 @@ from .topic_maintenance_manager import TopicMaintenanceManager
 
 _FRAGMENT_PROMPT_VERSION = "topic-fragment-v6-complete-timeline-evidence"
 _SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v4-authoritative-identities"
-_MATCHING_ALGORITHM_VERSION = 2
+_MATCHING_ALGORITHM_VERSION = 3
 
 
 class TopicBuildValidationError(ValueError):
@@ -74,7 +75,12 @@ class TopicBuildManager:
             1,
             int(self.config.get("llm_concurrency", 2)),
         )
+        self.rerank_concurrency = max(
+            1,
+            min(32, int(self.config.get("rerank_concurrency", 4))),
+        )
         self._llm_semaphore = asyncio.Semaphore(self.llm_concurrency)
+        self._rerank_semaphore = asyncio.Semaphore(self.rerank_concurrency)
         self._space_locks: dict[str, asyncio.Lock] = {}
         self._scheduled: dict[str, asyncio.Task] = {}
         self._scheduled_requests: dict[str, dict[str, Any]] = {}
@@ -499,6 +505,16 @@ class TopicBuildManager:
 
             if run_mode is TopicMaintenanceMode.FULL:
                 await self.store.archive_topics_not_in(memory_space_id, active_uids)
+            active_topics = await self.store.list_topics(
+                memory_space_id,
+                status=TopicMemoryStatus.ACTIVE,
+                limit=1000,
+            )
+            relations = self._derive_topic_relations(run_uid, active_topics)
+            relation_count = await self.store.replace_topic_relations(
+                memory_space_id,
+                relations,
+            )
             await self.store.update_maintenance_run(
                 run_uid,
                 status=TopicMaintenanceStatus.COMPLETED,
@@ -514,6 +530,7 @@ class TopicBuildManager:
                 "fragment_count": len(fragments),
                 "topic_count": len(built),
                 "topics": built,
+                "related_topic_count": relation_count,
                 "rerank_used": self.rerank_provider is not None,
             }
         except asyncio.CancelledError:
@@ -855,6 +872,15 @@ class TopicBuildManager:
                 "candidate_similarity_threshold": self.config.get(
                     "candidate_similarity_threshold", 0.52
                 ),
+                "rerank_candidate_floor": self.config.get(
+                    "rerank_candidate_floor", 0.63
+                ),
+                "component_min_pair_similarity": self.config.get(
+                    "component_min_pair_similarity", 0.52
+                ),
+                "component_min_average_similarity": self.config.get(
+                    "component_min_average_similarity", 0.65
+                ),
                 "rerank_threshold": self.config.get("rerank_threshold", 0.55),
                 "rerank_top_n": self.config.get("rerank_top_n", 5),
                 "rerank_provider": self._provider_identity(self.rerank_provider),
@@ -911,6 +937,7 @@ class TopicBuildManager:
                 ],
                 "scores": scores,
                 "quality": self._matching_quality(components, len(fragments)),
+                "audit": self._matching_audit(fragments, components, scores),
                 "matching_algorithm_version": _MATCHING_ALGORITHM_VERSION,
             },
         )
@@ -979,11 +1006,15 @@ class TopicBuildManager:
         work_total = fragment_count * (2 if rerank_enabled else 1)
 
         threshold = float(self.config.get("fragment_similarity_threshold", 0.78))
-        candidate_threshold = float(
-            self.config.get("candidate_similarity_threshold", 0.52)
+        rerank_candidate_floor = float(
+            self.config.get("rerank_candidate_floor", 0.63)
         )
-        rerank_candidate_floor = max(candidate_threshold, threshold - 0.15)
-        component_cohesion = (threshold + candidate_threshold) / 2.0
+        component_min_pair = float(
+            self.config.get("component_min_pair_similarity", 0.52)
+        )
+        component_cohesion = float(
+            self.config.get("component_min_average_similarity", 0.65)
+        )
         scores: dict[str, float] = {}
         embedding_scores: dict[tuple[int, int], float] = {}
         for left in range(len(fragments)):
@@ -1010,11 +1041,12 @@ class TopicBuildManager:
             rerank_threshold = float(self.config.get("rerank_threshold", 0.55))
             top_n = max(1, int(self.config.get("rerank_top_n", 5)))
             documents = [self._fragment_embedding_text(item) for item in fragments]
-            for index, fragment in enumerate(fragments):
+            rerank_inputs: list[tuple[int, list[int]]] = []
+            for index in range(fragment_count):
                 candidate_indexes = sorted(
                     (
                         other
-                        for other in range(len(fragments))
+                        for other in range(fragment_count)
                         if other != index
                         and embedding_scores[tuple(sorted((index, other)))]
                         >= rerank_candidate_floor
@@ -1024,48 +1056,92 @@ class TopicBuildManager:
                         fragments[other].fragment_uid,
                     ),
                 )[: max(top_n * 2, top_n)]
-                if not candidate_indexes:
+                rerank_inputs.append((index, candidate_indexes))
+
+            progress_lock = asyncio.Lock()
+            completed_queries = 0
+            active_queries = 0
+
+            async def emit_rerank_progress(
+                *,
+                active_delta: int = 0,
+                completed_delta: int = 0,
+                item_index: int,
+            ) -> None:
+                nonlocal active_queries, completed_queries
+                async with progress_lock:
+                    active_queries += active_delta
+                    completed_queries += completed_delta
                     await self._emit(
                         progress_callback,
-                        fragment.run_uid,
+                        fragments[item_index].run_uid,
                         "fragment_matching",
-                        fragment_count + index + 1,
+                        fragment_count + completed_queries,
                         work_total,
+                        activity="rerank_call",
+                        item_kind="rerank_query",
+                        item_index=item_index + 1,
+                        item_total=fragment_count,
+                        rerank_call_current=completed_queries,
+                        rerank_call_total=fragment_count,
+                        active_rerank_count=active_queries,
+                        rerank_concurrency=self.rerank_concurrency,
                     )
-                    continue
-                try:
-                    results = await self.rerank_provider.rerank(
-                        documents[index],
-                        [documents[item] for item in candidate_indexes],
-                        top_n=top_n,
+
+            async def rerank_one(
+                index: int,
+                candidate_indexes: list[int],
+            ) -> tuple[int, list[int], list[Any]]:
+                if not candidate_indexes:
+                    await emit_rerank_progress(
+                        completed_delta=1,
+                        item_index=index,
                     )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    if not bool(self.config.get("rerank_failure_fallback", True)):
-                        raise
-                    rerank_failed = True
-                    logger.warning(
-                        "[TopicMemory] Rerank 调用失败，本轮回退到 Embedding 匹配",
-                        exc_info=True,
-                    )
-                    break
-                for result in results:
-                    local_index = int(getattr(result, "index", -1))
-                    relevance = float(getattr(result, "relevance_score", 0.0))
-                    if 0 <= local_index < len(candidate_indexes):
-                        other = candidate_indexes[local_index]
-                        key = f"rerank:{fragment.fragment_uid}|{fragments[other].fragment_uid}"
-                        scores[key] = round(relevance, 6)
-                        if relevance >= rerank_threshold:
-                            rerank_passes.add((index, other))
-                await self._emit(
-                    progress_callback,
-                    fragment.run_uid,
-                    "fragment_matching",
-                    fragment_count + index + 1,
-                    work_total,
+                    return index, candidate_indexes, []
+                async with self._rerank_semaphore:
+                    try:
+                        await emit_rerank_progress(active_delta=1, item_index=index)
+                        results = await self.rerank_provider.rerank(
+                            documents[index],
+                            [documents[item] for item in candidate_indexes],
+                            top_n=top_n,
+                        )
+                        return index, candidate_indexes, list(results)
+                    finally:
+                        await emit_rerank_progress(
+                            active_delta=-1,
+                            completed_delta=1,
+                            item_index=index,
+                        )
+
+            try:
+                rerank_outputs = await self._gather_cancel_on_error(
+                    [rerank_one(index, candidates) for index, candidates in rerank_inputs]
                 )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if not bool(self.config.get("rerank_failure_fallback", True)):
+                    raise
+                rerank_failed = True
+                logger.warning(
+                    "[TopicMemory] Rerank 调用失败，本轮回退到 Embedding 匹配",
+                    exc_info=True,
+                )
+                rerank_outputs = []
+
+            if not rerank_failed:
+                for index, candidate_indexes, results in rerank_outputs:
+                    fragment = fragments[index]
+                    for result in results:
+                        local_index = int(getattr(result, "index", -1))
+                        relevance = float(getattr(result, "relevance_score", 0.0))
+                        if 0 <= local_index < len(candidate_indexes):
+                            other = candidate_indexes[local_index]
+                            key = f"rerank:{fragment.fragment_uid}|{fragments[other].fragment_uid}"
+                            scores[key] = round(relevance, 6)
+                            if relevance >= rerank_threshold:
+                                rerank_passes.add((index, other))
 
         if fragments and work_total:
             await self._emit(
@@ -1105,10 +1181,216 @@ class TopicBuildManager:
             fragment_count,
             embedding_scores,
             seed_edges,
-            minimum_pair_similarity=candidate_threshold,
+            minimum_pair_similarity=component_min_pair,
             minimum_average_similarity=component_cohesion,
         )
         return components, scores
+
+    def _matching_audit(
+        self,
+        fragments: list[TopicFragmentDraft],
+        components: list[list[int]],
+        scores: dict[str, float],
+    ) -> dict[str, Any]:
+        """Explain singleton outcomes without treating the final partition as truth."""
+        embedding_scores: dict[frozenset[str], float] = {}
+        rerank_scores: dict[tuple[str, str], float] = {}
+        for key, value in scores.items():
+            if key.startswith("rerank:"):
+                pair = key[7:].split("|", 1)
+                if len(pair) == 2:
+                    rerank_scores[(pair[0], pair[1])] = float(value)
+            else:
+                pair = key.split("|", 1)
+                if len(pair) == 2:
+                    embedding_scores[frozenset(pair)] = float(value)
+        rerank_floor = float(self.config.get("rerank_candidate_floor", 0.63))
+        merge_threshold = float(
+            self.config.get("fragment_similarity_threshold", 0.78)
+        )
+        rerank_threshold = float(self.config.get("rerank_threshold", 0.55))
+        singleton_indexes = {
+            component[0] for component in components if len(component) == 1
+        }
+        reasons = Counter()
+        items = []
+        for index in sorted(singleton_indexes):
+            uid = fragments[index].fragment_uid
+            neighbors = []
+            for other_index, other in enumerate(fragments):
+                if other_index == index:
+                    continue
+                other_uid = other.fragment_uid
+                similarity = embedding_scores.get(frozenset((uid, other_uid)), 0.0)
+                forward = rerank_scores.get((uid, other_uid))
+                reverse = rerank_scores.get((other_uid, uid))
+                mutual = (
+                    forward is not None
+                    and reverse is not None
+                    and forward >= rerank_threshold
+                    and reverse >= rerank_threshold
+                )
+                seed = similarity >= merge_threshold or (
+                    similarity >= rerank_floor and mutual
+                )
+                neighbors.append((similarity, other_uid, mutual, seed))
+            neighbors.sort(key=lambda item: (-item[0], item[1]))
+            candidates = [item for item in neighbors if item[0] >= rerank_floor]
+            seeds = [item for item in candidates if item[3]]
+            if seeds:
+                reason = "component_cohesion_rejected"
+            elif candidates:
+                reason = "no_mutual_rerank"
+            else:
+                reason = "below_rerank_candidate_floor"
+            reasons[reason] += 1
+            nearest = neighbors[0] if neighbors else (0.0, "", False, False)
+            items.append(
+                {
+                    "fragment_uid": uid,
+                    "label": fragments[index].label,
+                    "reason": reason,
+                    "nearest_fragment_uid": nearest[1],
+                    "nearest_similarity": round(float(nearest[0]), 6),
+                    "nearest_mutual_rerank": bool(nearest[2]),
+                    "candidate_count": len(candidates),
+                    "seed_count": len(seeds),
+                }
+            )
+        return {
+            "parameters": {
+                "fragment_similarity_threshold": merge_threshold,
+                "rerank_candidate_floor": rerank_floor,
+                "rerank_threshold": rerank_threshold,
+                "component_min_pair_similarity": float(
+                    self.config.get("component_min_pair_similarity", 0.52)
+                ),
+                "component_min_average_similarity": float(
+                    self.config.get("component_min_average_similarity", 0.65)
+                ),
+            },
+            "singleton_reason_counts": dict(reasons),
+            "singletons": items,
+        }
+
+    def _derive_topic_relations(
+        self,
+        run_uid: str,
+        topics: list[TopicMemory],
+    ) -> list[TopicRelation]:
+        """Link reciprocal semantic neighbors while keeping leaf Topics separate."""
+        threshold = float(
+            self.config.get("related_topic_similarity_threshold", 0.60)
+        )
+        top_n = max(1, int(self.config.get("related_topic_top_n", 3)))
+        rankings: dict[str, list[tuple[float, str]]] = {}
+        topic_by_uid = {topic.topic_uid: topic for topic in topics}
+        for topic in topics:
+            vector = topic.metadata.get("embedding", [])
+            candidates = []
+            if vector:
+                for other in topics:
+                    if other.topic_uid == topic.topic_uid:
+                        continue
+                    other_vector = other.metadata.get("embedding", [])
+                    similarity = self._cosine(vector, other_vector)
+                    if other_vector and similarity >= threshold:
+                        candidates.append((similarity, other.topic_uid))
+            rankings[topic.topic_uid] = sorted(
+                candidates,
+                key=lambda item: (-item[0], item[1]),
+            )[:top_n]
+
+        related_sets = {
+            uid: {other_uid for _, other_uid in candidates}
+            for uid, candidates in rankings.items()
+        }
+        relations = []
+        for left_uid in sorted(topic_by_uid):
+            for similarity, right_uid in rankings.get(left_uid, []):
+                if left_uid >= right_uid or left_uid not in related_sets.get(right_uid, set()):
+                    continue
+                context = self._topic_relation_context(
+                    topic_by_uid[left_uid],
+                    topic_by_uid[right_uid],
+                )
+                if not context["contextual_match"]:
+                    continue
+                left_rank = next(
+                    index
+                    for index, (_, uid) in enumerate(rankings[left_uid], 1)
+                    if uid == right_uid
+                )
+                right_rank = next(
+                    index
+                    for index, (_, uid) in enumerate(rankings[right_uid], 1)
+                    if uid == left_uid
+                )
+                relation_uid = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"livingmemory:topic-relation:{left_uid}:{right_uid}:related_subtopic",
+                    )
+                )
+                relations.append(
+                    TopicRelation(
+                        relation_uid=relation_uid,
+                        memory_space_id=topic_by_uid[left_uid].memory_space_id,
+                        left_topic_uid=left_uid,
+                        right_topic_uid=right_uid,
+                        confidence=round(float(similarity), 6),
+                        semantic_similarity=round(float(similarity), 6),
+                        build_run_uid=run_uid,
+                        metadata={
+                            "algorithm_version": 1,
+                            "left_rank": left_rank,
+                            "right_rank": right_rank,
+                            "reciprocal_top_n": top_n,
+                            **context,
+                        },
+                    )
+                )
+        return relations
+
+    @classmethod
+    def _topic_relation_context(
+        cls,
+        left: TopicMemory,
+        right: TopicMemory,
+    ) -> dict[str, Any]:
+        """Require shared event context for medium-strength semantic neighbors."""
+        left_sources = set(left.metadata.get("source_timeline_uids", []))
+        right_sources = set(right.metadata.get("source_timeline_uids", []))
+        shared_sources = sorted(left_sources & right_sources)
+
+        def keyword_tokens(topic: TopicMemory) -> set[str]:
+            tokens: set[str] = set()
+            for keyword in topic.metadata.get("keywords", []):
+                tokens.update(TopicMaintenanceManager.tokenize(str(keyword)))
+                normalized = cls._norm(keyword)
+                tokens.update(re.findall(r"[a-z]{2,}", normalized))
+            return tokens
+
+        shared_keywords = sorted(keyword_tokens(left) & keyword_tokens(right))
+        left_text_tokens = TopicMaintenanceManager.tokenize(
+            f"{left.title} {left.summary}"
+        )
+        right_text_tokens = TopicMaintenanceManager.tokenize(
+            f"{right.title} {right.summary}"
+        )
+        lexical_similarity = TopicMaintenanceManager._jaccard(
+            left_text_tokens,
+            right_text_tokens,
+        )
+        contextual_match = bool(
+            shared_sources or shared_keywords or lexical_similarity >= 0.04
+        )
+        return {
+            "contextual_match": contextual_match,
+            "shared_timeline_uids": shared_sources,
+            "shared_keywords": shared_keywords[:20],
+            "lexical_similarity": round(float(lexical_similarity), 6),
+        }
 
     @staticmethod
     def _cluster_fragment_edges(
@@ -1698,6 +1980,14 @@ class TopicBuildManager:
                 "build_run_uid": run_uid,
                 "fragment_uids": [item.fragment_uid for item in fragments],
                 "source_timeline_uids": timeline_uids,
+                "keywords": sorted(
+                    {
+                        str(keyword).strip()
+                        for item in fragments
+                        for keyword in item.keywords
+                        if str(keyword).strip()
+                    }
+                ),
                 "time_cluster_count": len(clusters),
                 "embedding": embedding,
                 "automatic": True,

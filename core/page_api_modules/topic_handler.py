@@ -38,6 +38,10 @@ class TopicHandler:
         "completed_groups",
         "active_group_count",
         "group_concurrency",
+        "rerank_call_current",
+        "rerank_call_total",
+        "active_rerank_count",
+        "rerank_concurrency",
     }
     _STAGE_RANGES: dict[str, tuple[float, float]] = {
         "pending": (0.0, 0.0),
@@ -140,6 +144,9 @@ class TopicHandler:
             provenance = await memory_engine.topic_memory_store.get_topic_provenance(
                 topic_uid
             )
+            related_topics = await memory_engine.topic_memory_store.list_topic_relations(
+                topic_uid
+            )
             return self.utils.ok(
                 {
                     "topic": self._topic_payload(topic),
@@ -147,6 +154,7 @@ class TopicHandler:
                     "support": await memory_engine.topic_memory_store.get_topic_support_metrics(
                         topic_uid
                     ),
+                    "related_topics": related_topics,
                     "read_only": True,
                 }
             )
@@ -349,6 +357,42 @@ class TopicHandler:
         if not job_uid or job_uid not in self._jobs:
             return self.utils.error("构建任务不存在或插件已重启")
         return self.utils.ok(dict(self._jobs[job_uid]))
+
+    async def discard_build(self, memory_engine) -> dict[str, Any]:
+        """Cancel a persisted breakpoint task by discarding its saved progress."""
+        payload = await request.get_json(silent=True) or {}
+        run_uid = self.utils.optional_text(payload.get("run_uid"))
+        memory_space_id = self.utils.optional_text(payload.get("memory_space_id"))
+        if not run_uid:
+            return self.utils.error("run_uid 不能为空")
+        active_job = next(
+            (
+                job
+                for job in self._active_jobs()
+                if job.get("run_uid") == run_uid
+                or (
+                    memory_space_id
+                    and job.get("memory_space_id") == memory_space_id
+                )
+            ),
+            None,
+        )
+        if active_job is not None:
+            return self.utils.error("该记忆空间仍有 Topic 构建正在运行，不能清除断点")
+        try:
+            result = await memory_engine.topic_memory_store.discard_maintenance_run(
+                run_uid,
+                memory_space_id=memory_space_id,
+            )
+            for job_uid, job in list(self._jobs.items()):
+                if job.get("run_uid") == run_uid:
+                    self._jobs.pop(job_uid, None)
+            return self.utils.ok(result)
+        except ValueError as exc:
+            return self.utils.error(str(exc))
+        except Exception as exc:
+            logger.error("[PageAPI] 清除 Topic 构建断点失败", exc_info=True)
+            return self.utils.error(str(exc))
 
     def _active_jobs(self) -> list[dict[str, Any]]:
         jobs = [

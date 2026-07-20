@@ -68,9 +68,10 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 - Topic memories are derived and read-only. Edit their source Timeline memories instead; dependent Topics are marked stale and rebuilt.
 - Wide candidate groups are extracted in batches controlled by `topic_memory.fragment_extraction_batch_size` (default: 12). Large Topic components are then synthesized hierarchically using `topic_memory.synthesis_batch_size` (default: 12), while remaining one Topic with original provenance. The Topic page reports the active component, batch, LLM call, and elapsed time.
 - `topic_memory.llm_concurrency` sets the shared LLM concurrency limit across candidate groups, intra-group batches, and same-level Topic synthesis (default: 2); set it to 1 for sequential operation. Check the Provider and upstream API rate limits before increasing it.
+- `topic_memory.rerank_concurrency` independently limits concurrent rerank requests during fragment matching (default: 4, range: 1–32); set it to 1 for sequential operation and lower it if Cloudflare starts returning HTTP 429.
 - Failed, cancelled, or restart-interrupted builds expose a **Resume from checkpoint** action. Candidate fragments, embeddings, matching, component synthesis, and completed materialization are reused under the same `run_uid`; changed input, prompts, Provider, model, or relevant configuration invalidates only the affected checkpoint.
 - Recoverable LLM structure errors are deterministically repaired from supplied sources and recorded in `validation_repairs`. Unverifiable model references are discarded rather than persisted as Topic provenance.
-- Database v9.3 migration creates only the required tables and never invokes a model automatically. Existing recall remains unchanged in this stage.
+- Database v9.4 migration only adds the related-subtopic relation structure. It never invokes a model or creates/rewrites Topics automatically, and existing recall remains unchanged in this stage.
 
 **Memory injection compatibility**:
 - `fake_tool_call` automatically falls back to `extra_user_content` for Gemini providers to avoid tool-message protocol incompatibility.

@@ -25,6 +25,7 @@ from astrbot_plugin_livingmemory.core.models.topic_memory import (
     TopicCandidateGroup,
     TopicFragmentDraft,
     TopicMaintenanceMode,
+    TopicMemory,
 )
 from tests.test_topic_maintenance_manager import _create_timeline_db
 
@@ -190,6 +191,32 @@ class _AllPassReranker:
         return [_RerankResult(index, 0.9) for index in range(limit)]
 
 
+class _ConcurrentReranker(_AllPassReranker):
+    def __init__(self):
+        self.active_calls = 0
+        self.max_active_calls = 0
+        self.calls = 0
+
+    async def rerank(self, query: str, documents: list[str], top_n: int | None = None):
+        self.calls += 1
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            await asyncio.sleep(0.01)
+            return await super().rerank(query, documents, top_n)
+        finally:
+            self.active_calls -= 1
+
+
+class _PartiallyFailingReranker(_AllPassReranker):
+    async def rerank(self, query: str, documents: list[str], top_n: int | None = None):
+        await asyncio.sleep(0)
+        if "片段 1" in query:
+            raise RuntimeError("temporary rerank failure")
+        await asyncio.sleep(0.02)
+        return await super().rerank(query, documents, top_n)
+
+
 class _FragmentStore:
     def __init__(self):
         self.fragments = []
@@ -244,6 +271,9 @@ async def test_full_build_splits_merges_and_materializes_exact_sources(tmp_path:
     run = await store.get_maintenance_run(result["run_uid"])
     assert run["stage"] == "completed"
     assert run["status"] == "completed"
+    matching = await store.get_build_checkpoint(result["run_uid"], "fragment_matching")
+    assert matching["payload"]["matching_algorithm_version"] == 3
+    assert "singleton_reason_counts" in matching["payload"]["audit"]
 
 
 @pytest.mark.asyncio
@@ -576,6 +606,138 @@ async def test_rerank_can_promote_candidates_but_not_unrelated_fragments():
 
     assert [len(component) for component in related_components] == [2]
     assert sorted(map(len, unrelated_components)) == [1, 1]
+
+
+@pytest.mark.asyncio
+async def test_rerank_queries_respect_independent_concurrency_and_report_progress():
+    reranker = _ConcurrentReranker()
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        rerank_provider=reranker,
+        config={
+            "rerank_concurrency": 3,
+            "rerank_candidate_floor": 0.5,
+            "rerank_top_n": 5,
+        },
+    )
+    fragments = [_topic_fragment(index) for index in range(6)]
+    for index, fragment in enumerate(fragments):
+        fragment.label = f"话题 {index}"
+        fragment.embedding = [1.0, 0.0]
+    events = []
+
+    components, _ = await manager._match_fragments(
+        fragments,
+        progress_callback=events.append,
+    )
+
+    rerank_events = [
+        event for event in events if event.get("item_kind") == "rerank_query"
+    ]
+    assert reranker.calls == 6
+    assert reranker.max_active_calls == 3
+    assert [len(component) for component in components] == [6]
+    assert max(event["active_rerank_count"] for event in rerank_events) == 3
+    assert max(event["rerank_call_current"] for event in rerank_events) == 6
+    assert all(event["rerank_concurrency"] == 3 for event in rerank_events)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_rerank_failure_discards_partial_scores_before_fallback():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        rerank_provider=_PartiallyFailingReranker(),
+        config={
+            "rerank_concurrency": 2,
+            "rerank_candidate_floor": 0.63,
+            "fragment_similarity_threshold": 0.78,
+            "rerank_failure_fallback": True,
+        },
+    )
+    fragments = [_topic_fragment(1), _topic_fragment(2)]
+    fragments[0].label = "A"
+    fragments[1].label = "B"
+    fragments[0].embedding = [1.0, 0.0]
+    fragments[1].embedding = [0.7, 0.714142842]
+
+    components, scores = await manager._match_fragments(fragments)
+
+    assert sorted(map(len, components)) == [1, 1]
+    assert not any(key.startswith("rerank:") for key in scores)
+
+
+def test_matching_audit_distinguishes_singleton_reasons():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "rerank_candidate_floor": 0.63,
+            "fragment_similarity_threshold": 0.78,
+        },
+    )
+    fragments = [_topic_fragment(index) for index in range(3)]
+    scores = {
+        f"{fragments[0].fragment_uid}|{fragments[1].fragment_uid}": 0.70,
+        f"{fragments[0].fragment_uid}|{fragments[2].fragment_uid}": 0.40,
+        f"{fragments[1].fragment_uid}|{fragments[2].fragment_uid}": 0.50,
+    }
+
+    audit = manager._matching_audit(fragments, [[0], [1], [2]], scores)
+
+    assert audit["singleton_reason_counts"] == {
+        "no_mutual_rerank": 2,
+        "below_rerank_candidate_floor": 1,
+    }
+    assert audit["parameters"]["component_min_average_similarity"] == 0.65
+
+
+def test_related_topic_graph_uses_reciprocal_neighbors_without_merging_topics():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "related_topic_similarity_threshold": 0.60,
+            "related_topic_top_n": 1,
+        },
+    )
+    topics = [
+        TopicMemory(
+            topic_uid="topic-a",
+            memory_space_id="space-1",
+            title="BW 行程",
+            summary="天气与出发准备",
+            metadata={"embedding": [1.0, 0.0], "keywords": ["BW 2026"]},
+        ),
+        TopicMemory(
+            topic_uid="topic-b",
+            memory_space_id="space-1",
+            title="BW 展台",
+            summary="现场逛展",
+            metadata={"embedding": [0.8, 0.6], "keywords": ["BW"]},
+        ),
+        TopicMemory(
+            topic_uid="topic-c",
+            memory_space_id="space-1",
+            title="邮件工具",
+            summary="开发邮件插件",
+            metadata={"embedding": [0.0, 1.0]},
+        ),
+    ]
+
+    relations = manager._derive_topic_relations("run-1", topics)
+
+    assert len(relations) == 1
+    assert {relations[0].left_topic_uid, relations[0].right_topic_uid} == {
+        "topic-a",
+        "topic-b",
+    }
+    assert relations[0].semantic_similarity == pytest.approx(0.8)
 
 
 @pytest.mark.asyncio

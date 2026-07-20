@@ -87,6 +87,24 @@
                 "type": "float",
                 "default": 0.78
             },
+            "rerank_candidate_floor": {
+                "description": "Rerank 候选最低相似度",
+                "hint": "片段 Embedding 达到该值后才进入 Rerank；与候选扫描阈值相互独立。",
+                "type": "float",
+                "default": 0.63
+            },
+            "component_min_pair_similarity": {
+                "description": "Topic 组件最低两两相似度",
+                "hint": "合并两个片段组件时，任意跨组件片段对都不能低于该值。",
+                "type": "float",
+                "default": 0.52
+            },
+            "component_min_average_similarity": {
+                "description": "Topic 组件最低平均相似度",
+                "hint": "合并两个片段组件时，全部跨组件片段对的平均值必须达到该值。",
+                "type": "float",
+                "default": 0.65
+            },
             "rerank_threshold": {
                 "description": "Rerank 归并阈值",
                 "type": "float",
@@ -97,11 +115,30 @@
                 "type": "int",
                 "default": 5
             },
+            "rerank_concurrency": {
+                "description": "Topic Rerank 并发数",
+                "hint": "片段匹配阶段同时发出的 Rerank Provider 请求上限，允许 1-32。1 为串行；Cloudflare 或其他 Provider 出现 429 限流时请适当降低。",
+                "type": "int",
+                "default": 4,
+                "slider": {"min": 1, "max": 32, "step": 1}
+            },
             "rerank_failure_fallback": {
                 "description": "Rerank 失败时回退 Embedding",
                 "hint": "建议开启，避免 Cloudflare 或 AstrBot Rerank 临时不可用时中断整个 Topic 构建。",
                 "type": "bool",
                 "default": true
+            },
+            "related_topic_similarity_threshold": {
+                "description": "相关子话题相似度阈值",
+                "hint": "不会合并内容；达到阈值且互为近邻的 Topic 会建立 related_subtopic 关系。",
+                "type": "float",
+                "default": 0.60
+            },
+            "related_topic_top_n": {
+                "description": "每个 Topic 的相关候选数量",
+                "hint": "只为互相进入前 N 的 Topic 建立相关子话题关系。",
+                "type": "int",
+                "default": 3
             },
             "existing_topic_match_threshold": {
                 "description": "已有 Topic 延续阈值",
