@@ -24,6 +24,7 @@ def test_config_manager_loads_defaults() -> None:
     assert manager.get("topic_memory.enabled") is False
     assert manager.get("topic_memory.fragment_similarity_threshold") == 0.78
     assert manager.get("topic_memory.rerank_candidate_floor") == 0.63
+    assert manager.get("topic_memory.component_size_cohesion_penalty") == 0.005
     assert manager.get("topic_memory.component_min_pair_similarity") == 0.52
     assert manager.get("topic_memory.component_min_average_similarity") == 0.65
     assert manager.get("topic_memory.related_topic_similarity_threshold") == 0.60

@@ -302,7 +302,7 @@ async def test_full_build_splits_merges_and_materializes_exact_sources(tmp_path:
     assert run["stage"] == "completed"
     assert run["status"] == "completed"
     matching = await store.get_build_checkpoint(result["run_uid"], "fragment_matching")
-    assert matching["payload"]["matching_algorithm_version"] == 5
+    assert matching["payload"]["matching_algorithm_version"] == 6
     assert "singleton_reason_counts" in matching["payload"]["audit"]
 
 
@@ -611,6 +611,55 @@ async def test_fragment_matching_does_not_merge_a_similarity_chain():
     assert sorted(map(len, components), reverse=True) == [2, 1]
 
 
+def test_component_size_penalty_blocks_marginal_bridge_between_established_groups():
+    embedding_scores = {
+        (left, right): (0.9 if left // 4 == right // 4 else 0.659)
+        for left in range(8)
+        for right in range(left + 1, 8)
+    }
+    seed_edges = [
+        (0.9, 0, 1),
+        (0.9, 1, 2),
+        (0.9, 2, 3),
+        (0.9, 4, 5),
+        (0.9, 5, 6),
+        (0.9, 6, 7),
+        (0.8, 3, 4),
+    ]
+
+    without_penalty = TopicBuildManager._cluster_fragment_edges(
+        8,
+        embedding_scores,
+        seed_edges,
+        minimum_pair_similarity=0.52,
+        minimum_average_similarity=0.65,
+    )
+    with_penalty = TopicBuildManager._cluster_fragment_edges(
+        8,
+        embedding_scores,
+        seed_edges,
+        minimum_pair_similarity=0.52,
+        minimum_average_similarity=0.65,
+        size_cohesion_penalty=0.005,
+    )
+
+    assert sorted(map(len, without_penalty)) == [8]
+    assert sorted(map(len, with_penalty)) == [4, 4]
+
+
+def test_component_size_penalty_does_not_block_single_fragment_attachment():
+    components = TopicBuildManager._cluster_fragment_edges(
+        3,
+        {(0, 1): 0.9, (0, 2): 0.65, (1, 2): 0.65},
+        [(0.9, 0, 1), (0.8, 1, 2)],
+        minimum_pair_similarity=0.52,
+        minimum_average_similarity=0.65,
+        size_cohesion_penalty=0.05,
+    )
+
+    assert sorted(map(len, components)) == [3]
+
+
 @pytest.mark.asyncio
 async def test_rerank_can_promote_candidates_but_not_unrelated_fragments():
     manager = TopicBuildManager(
@@ -855,6 +904,44 @@ def test_related_topic_graph_rejects_one_generic_keyword_without_semantic_suppor
     ]
 
     assert manager._derive_topic_relations("run-1", topics) == []
+
+
+def test_related_topic_graph_does_not_treat_dates_as_semantic_evidence():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "related_topic_similarity_threshold": 0.60,
+            "related_topic_top_n": 1,
+        },
+    )
+    topics = [
+        TopicMemory(
+            topic_uid="topic-work",
+            memory_space_id="space-1",
+            title="2026年7月15日项目排期",
+            summary="处理客户方案",
+            metadata={
+                "embedding": [1.0, 0.0],
+                "keywords": ["2026-07-15", "工作"],
+            },
+        ),
+        TopicMemory(
+            topic_uid="topic-sleep",
+            memory_space_id="space-1",
+            title="2026年7月15日夜间睡眠",
+            summary="提前休息",
+            metadata={
+                "embedding": [0.8, 0.6],
+                "keywords": ["20260715", "睡眠"],
+            },
+        ),
+    ]
+
+    assert manager._derive_topic_relations("run-1", topics) == []
+    assert TopicBuildManager._topic_keyword_terms(topics[0]) == {"工作"}
+    assert TopicBuildManager._topic_keyword_terms(topics[1]) == {"睡眠"}
 
 
 def test_related_topic_context_uses_source_overlap_not_shared_source_alone():

@@ -105,6 +105,12 @@
                 "type": "float",
                 "default": 0.65
             },
+            "component_size_cohesion_penalty": {
+                "description": "Topic 大组件一致性增量",
+                "hint": "两个已形成的片段组件越大，合并所需的平均相似度会按规模缓慢提高；单片段接入不受影响。用于阻止少数边界桥把两个不同检索意图连成超大 Topic。设为 0 可关闭。",
+                "type": "float",
+                "default": 0.005
+            },
             "rerank_threshold": {
                 "description": "Rerank 归并阈值",
                 "hint": "Rerank 原始相关度的最低保护阈值。实际归并还会结合双向相对排名，避免不同模型分数尺度造成误判。",
