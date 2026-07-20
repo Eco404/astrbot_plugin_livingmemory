@@ -1533,6 +1533,73 @@ def test_topic_prompts_include_only_matching_authoritative_identity_profiles():
     assert "authoritative_identities" in manager._synthesis_prompt("{}")
 
 
+def test_fragment_role_map_converts_bot_first_person_to_named_third_person():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        identity_profile_store=AuthoritativeIdentityStore(
+            profiles=[
+                {
+                    "user_id": "1141337347",
+                    "display_name": "空雨",
+                    "gender": "男性",
+                    "pronouns": ["他"],
+                }
+            ]
+        ),
+    )
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-role-map",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="QQ:FriendMessage:1141337347",
+        persona_id="唯",
+        content="我陪空雨核对了测试结果",
+        summary="我陪空雨核对测试结果",
+    )
+
+    payload, _, _ = manager._fragment_llm_context([candidate])
+
+    assert payload["conversation_roles"]["timeline_narration"] == (
+        "first_person_assistant"
+    )
+    assert payload["conversation_roles"]["timeline_narrators"] == {"T1": "唯"}
+    assert payload["conversation_roles"]["human_participants"][0][
+        "display_name"
+    ] == "空雨"
+    with pytest.raises(TopicBuildValidationError, match="first-person"):
+        manager._validate_third_person_fragment(
+            "测试核对",
+            "我陪空雨核对测试结果",
+            [],
+            [candidate],
+        )
+    with pytest.raises(TopicBuildValidationError, match="display name"):
+        manager._validate_third_person_fragment(
+            "测试核对",
+            "唯陪用户核对测试结果",
+            [],
+            [candidate],
+        )
+    manager._validate_third_person_fragment(
+        "测试核对",
+        "唯陪空雨核对测试结果",
+        [{"content": "空雨确认结果符合预期"}],
+        [candidate],
+    )
+    fragment = _topic_fragment(1)
+    fragment.metadata = {
+        "narrative_schema_version": "third_person_roles_v1",
+        "conversation_roles": manager._conversation_role_payload([candidate]),
+    }
+    synthesis_payload, _ = manager._synthesis_llm_context([fragment])
+    assert "timeline-role-map" not in json.dumps(
+        synthesis_payload, ensure_ascii=False
+    )
+
+
 @pytest.mark.asyncio
 async def test_synthesis_retries_validation_once_with_specific_error():
     llm = _CorrectingSynthesisLLM()

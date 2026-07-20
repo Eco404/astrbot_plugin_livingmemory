@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from astrbot_plugin_livingmemory.core.models.topic_memory import TopicMemory
+from astrbot_plugin_livingmemory.core.models.topic_memory import (
+    TopicFragmentDraft,
+    TopicMemory,
+)
 from astrbot_plugin_livingmemory.core.retrieval.recall_pipeline import RecallQueryBranch
 from astrbot_plugin_livingmemory.core.retrieval.topic_recall_pipeline import (
     TopicRecallPipeline,
@@ -23,8 +26,9 @@ class _Embedding:
 
 
 class _Store:
-    def __init__(self, payloads):
+    def __init__(self, payloads, fragments=None):
         self.payloads = payloads
+        self.fragments = fragments or []
         self.accessed = []
 
     async def list_topic_recall_payloads(self, memory_space_id, limit=1000):
@@ -34,6 +38,11 @@ class _Store:
     async def record_topic_access(self, topic_uids):
         self.accessed.extend(topic_uids)
         return len(topic_uids)
+
+    async def list_active_fragments_for_topics(self, topic_uids):
+        return [
+            item for item in self.fragments if item["topic_uid"] in topic_uids
+        ]
 
 
 class _FixedScoreRetriever:
@@ -236,3 +245,65 @@ async def test_topic_pipeline_default_floor_accepts_moderate_match_but_rejects_w
 
     assert outcome.applied_threshold == pytest.approx(0.32)
     assert [item.topic_uid for item in outcome.results] == ["moderate"]
+
+
+@pytest.mark.asyncio
+async def test_topic_fragment_supplements_only_serve_formal_third_person_rows():
+    topic = _payload("weather", "上海雷雨", [1.0, 0.0])["topic"]
+    safe = TopicFragmentDraft(
+        fragment_uid="safe-fragment",
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        label="上海雷雨出行",
+        summary="唯提醒空雨携带雨具",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[{"content": "空雨决定携带雨具"}],
+        embedding=[1.0, 0.0],
+        metadata={"narrative_schema_version": "third_person_roles_v1"},
+    )
+    legacy = TopicFragmentDraft(
+        fragment_uid="legacy-fragment",
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        label="旧片段",
+        summary="我提醒用户带伞",
+        timeline_uids=["timeline-2"],
+        source_revisions={"timeline-2": 1},
+        facts=[],
+        embedding=[1.0, 0.0],
+        metadata={},
+    )
+    store = _Store(
+        [_payload("weather", "上海雷雨", [1.0, 0.0])],
+        fragments=[
+            {"topic_uid": "weather", "fragment": safe, "sources": []},
+            {"topic_uid": "weather", "fragment": legacy, "sources": []},
+        ],
+    )
+    retriever = TopicRetriever(
+        store,
+        embedding_provider=_Embedding(),
+        config={"recall_use_rerank": False},
+    )
+    pipeline = TopicRecallPipeline(
+        retriever,
+        {
+            "recall_use_rerank": False,
+            "fragment_min_relevance": 0.0,
+            "fragment_relative_floor": 0.0,
+        },
+    )
+    parent = TopicRecallResult(topic, 0.9, 0.9, 0.9, 0.0)
+
+    outcome = await pipeline.search_fragment_supplements(
+        branches=[RecallQueryBranch("current", "上海天气", 1.0, "user")],
+        topic_results=[parent],
+        limit=2,
+    )
+
+    assert outcome.available_count == 1
+    assert [item.fragment_uid for item in outcome.results] == ["safe-fragment"]
+    assert "唯提醒空雨" in outcome.results[0].content
