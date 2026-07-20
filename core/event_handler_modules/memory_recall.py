@@ -12,6 +12,7 @@ from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import TextPart
 
+from ..models.memory_identity import resolve_memory_space
 from ..retrieval.recall_pipeline import RecallPipeline
 from ..utils import (
     OperationContext,
@@ -186,7 +187,7 @@ class MemoryRecall:
                 assistant_mode = self.config_manager.get(
                     "recall_engine.assistant_context_mode", "exclude"
                 )
-                recall_outcome = await self.recall_pipeline.search(
+                timeline_search = self.recall_pipeline.search(
                     current_query=actual_query,
                     final_k=top_k,
                     session_id=recall_session_id,
@@ -197,9 +198,71 @@ class MemoryRecall:
                     context_session_id=session_id,
                     visible_message_start_index=visible_start,
                     visible_message_end_index=visible_end,
-                    track_access=True,
+                    track_access=False,
                 )
-                recalled_memories = recall_outcome.results
+                topic_enabled = bool(
+                    getattr(self.memory_engine, "topic_memory_enabled", False) is True
+                    and self.config_manager.get("topic_memory.recall_enabled", True)
+                )
+                topic_search = None
+                if topic_enabled:
+                    branches = self.recall_pipeline.build_query_branches(
+                        actual_query,
+                        recent_messages,
+                        expansion_enabled=expansion_enabled,
+                        assistant_mode=assistant_mode,
+                    )
+                    memory_space_id = resolve_memory_space(
+                        session_id, persona_id
+                    ).memory_space_id
+                    topic_search = self._safe_topic_recall(
+                        self.memory_engine.topic_recall_pipeline.search(
+                            branches=branches,
+                            memory_space_id=memory_space_id,
+                            final_k=min(
+                                top_k,
+                                int(
+                                    self.config_manager.get(
+                                        "topic_memory.recall_top_k", 3
+                                    )
+                                ),
+                            ),
+                            context_session_id=session_id,
+                            visible_message_start_index=visible_start,
+                            visible_message_end_index=visible_end,
+                            track_access=True,
+                        ),
+                        session_id,
+                    )
+                if topic_search is not None:
+                    recall_outcome, topic_outcome = await asyncio.gather(
+                        timeline_search, topic_search
+                    )
+                else:
+                    recall_outcome = await timeline_search
+                    topic_outcome = None
+
+                topic_results = topic_outcome.results if topic_outcome else []
+                if topic_results:
+                    supplement_limit = min(
+                        int(
+                            self.config_manager.get(
+                                "topic_memory.timeline_supplement_k", 2
+                            )
+                        ),
+                        max(0, top_k - len(topic_results)),
+                    )
+                    recalled_memories = self._select_timeline_supplements(
+                        recall_outcome.results,
+                        topic_results,
+                        supplement_limit,
+                    )
+                else:
+                    recalled_memories = recall_outcome.results
+                if recalled_memories:
+                    self.memory_engine.record_memory_access(
+                        [item.doc_id for item in recalled_memories]
+                    )
                 branch_summary = ", ".join(
                     f"{item.name}:{item.weight:.2f}"
                     for item in recall_outcome.branches
@@ -211,30 +274,38 @@ class MemoryRecall:
                     f"阈值={recall_outcome.applied_threshold:.3f}, "
                     f"上下文重叠过滤={recall_outcome.overlap_suppressed}"
                 )
-
-                if recalled_memories:
+                if topic_outcome is not None:
                     logger.info(
-                        f"[{session_id}] 检索到 {len(recalled_memories)} 条记忆"
+                        f"[{session_id}] Topic 召回完成: "
+                        f"候选={len(topic_outcome.candidates)}, "
+                        f"入选={len(topic_results)}, "
+                        f"阈值={topic_outcome.applied_threshold:.3f}, "
+                        f"上下文高覆盖过滤={topic_outcome.context_suppressed}, "
+                        f"Timeline 补充={len(recalled_memories)}"
+                    )
+
+                if topic_results or recalled_memories:
+                    logger.info(
+                        f"[{session_id}] 检索到 {len(topic_results)} 条 Topic、"
+                        f"{len(recalled_memories)} 条 Timeline"
                     )
 
                     # 格式化并注入记忆
                     memory_list = [
-                        {
-                            "id": getattr(mem, "doc_id", None),
-                            "content": mem.content,
-                            "score": mem.final_score,
-                            "metadata": mem.metadata,
-                            "timestamp": mem.metadata.get("create_time"),
-                        }
-                        for mem in recalled_memories
+                        self._topic_memory_dict(item) for item in topic_results
+                    ] + [
+                        self._timeline_memory_dict(
+                            item, as_supplement=bool(topic_results)
+                        )
+                        for item in recalled_memories
                     ]
 
                     # 输出详细记忆信息
-                    for i, mem in enumerate(recalled_memories, 1):
+                    for i, mem in enumerate(memory_list, 1):
                         logger.debug(
-                            f"[{session_id}] 记忆 #{i}: 得分={mem.final_score:.3f}, "
-                            f"重要性={mem.metadata.get('importance', 0.5):.2f}, "
-                            f"内容={mem.content[:100]}..."
+                            f"[{session_id}] 记忆 #{i}: 得分={mem['score']:.3f}, "
+                            f"层={mem['metadata'].get('memory_layer', 'timeline')}, "
+                            f"内容={mem['content'][:100]}..."
                         )
 
                     # 根据配置选择注入方式（含 Provider 兼容降级）
@@ -267,12 +338,12 @@ class MemoryRecall:
                     if injection_method == "user_message_before":
                         req.prompt = memory_str + "\n\n" + (req.prompt or "")
                         logger.info(
-                            f"[{session_id}] 成功向用户消息前注入 {len(recalled_memories)} 条记忆"
+                            f"[{session_id}] 成功向用户消息前注入 {len(memory_list)} 条记忆"
                         )
                     elif injection_method == "user_message_after":
                         req.prompt = (req.prompt or "") + "\n\n" + memory_str
                         logger.info(
-                            f"[{session_id}] 成功向用户消息后注入 {len(recalled_memories)} 条记忆"
+                            f"[{session_id}] 成功向用户消息后注入 {len(memory_list)} 条记忆"
                         )
                     elif injection_method == "fake_tool_call":
                         fake_messages = format_memories_for_fake_tool_call(
@@ -286,7 +357,7 @@ class MemoryRecall:
                             req.contexts.extend(fake_messages)
                             logger.info(
                                 f"[{session_id}] 成功以伪造工具调用方式注入 "
-                                f"{len(recalled_memories)} 条记忆"
+                                f"{len(memory_list)} 条记忆"
                             )
                     else:
                         # extra_user_content（推荐）：追加到用户消息末尾，
@@ -296,7 +367,7 @@ class MemoryRecall:
                         )
                         logger.info(
                             f"[{session_id}] 成功向用户消息末尾注入 "
-                            f"{len(recalled_memories)} 条记忆"
+                            f"{len(memory_list)} 条记忆"
                         )
                 else:
                     logger.info(f"[{session_id}] 未找到相关记忆")
@@ -305,6 +376,75 @@ class MemoryRecall:
             raise
         except Exception as e:
             logger.error(f"处理 on_llm_request 钩子时发生错误: {e}", exc_info=True)
+
+    @staticmethod
+    async def _safe_topic_recall(search_coro, session_id: str):
+        """A derived-layer outage must never disable Timeline recall."""
+        try:
+            return await search_coro
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                f"[{session_id}] Topic 召回失败，本轮回退纯 Timeline 召回",
+                exc_info=True,
+            )
+            return None
+
+    @staticmethod
+    def _select_timeline_supplements(
+        timeline_results,
+        topic_results,
+        limit: int,
+    ) -> list:
+        from ..retrieval.topic_recall_pipeline import TopicRecallPipeline
+
+        return TopicRecallPipeline.select_timeline_supplements(
+            timeline_results, topic_results, limit
+        )
+
+    @staticmethod
+    def _topic_memory_dict(item) -> dict:
+        metadata = item.topic.metadata if isinstance(item.topic.metadata, dict) else {}
+        keywords = [
+            str(value) for value in metadata.get("keywords", []) if str(value).strip()
+        ]
+        facts = [
+            str(atom.get("content") or "").strip()
+            for atom in item.atoms[:4]
+            if str(atom.get("content") or "").strip()
+        ]
+        return {
+            "id": item.topic_uid,
+            "content": f"Topic: {item.topic.title}\n{item.topic.summary}".strip(),
+            "score": item.final_score,
+            "metadata": {
+                "memory_layer": "topic",
+                "title": item.topic.title,
+                "importance": item.topic.importance,
+                "confidence": item.topic.confidence,
+                "status": item.topic.status.value,
+                "topics": [item.topic.title, *keywords[:5]],
+                "key_facts": facts,
+                "source_timeline_count": len(item.sources),
+                "context_coverage": item.context_coverage,
+                "started_at": item.topic.started_at,
+                "ended_at": item.topic.ended_at,
+            },
+            "timestamp": None,
+        }
+
+    @staticmethod
+    def _timeline_memory_dict(item, *, as_supplement: bool) -> dict:
+        metadata = dict(item.metadata) if isinstance(item.metadata, dict) else {}
+        metadata["memory_layer"] = "timeline_supplement" if as_supplement else "timeline"
+        return {
+            "id": getattr(item, "doc_id", None),
+            "content": item.content,
+            "score": item.final_score,
+            "metadata": metadata,
+            "timestamp": metadata.get("create_time"),
+        }
 
     async def _visible_context_range(
         self,

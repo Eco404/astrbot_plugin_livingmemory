@@ -170,7 +170,7 @@
     "topic.noTimelineSummary": { zh: "无摘要", en: "No summary", ru: "Нет сводки" },
     "topic.maintenanceSubmit": { zh: "开始增量补建", en: "Build selected Timelines", ru: "Обработать выбранные Timeline" },
     "topic.detectUnindexedFailed": { zh: "检查未索引 Timeline 失败", en: "Failed to check unindexed Timelines", ru: "Не удалось проверить Timeline без индекса" },
-    "topic.warning":      { zh: "Topic 记忆由 Timeline 自动派生，当前仅供检查，不允许手动编辑；本版本尚未改变正式记忆召回。", en: "Topic memories are read-only derivatives of Timeline memories. This version does not change production recall.", ru: "Тематическая память создаётся из Timeline и доступна только для чтения. Поиск пока не изменён." },
+    "topic.warning":      { zh: "Topic 记忆由 Timeline 自动派生且不允许手动编辑；启用 Topic 优先召回后，会以 Topic 为主并用少量 Timeline 补充。", en: "Topic memories are read-only Timeline derivatives. With Topic-first recall enabled, Topics are primary and a few Timelines provide detail.", ru: "Topic создаётся из Timeline и доступен только для чтения; при включённом поиске Topic является основным, а Timeline дополняет детали." },
     "topic.total":        { zh: "Topic 总数", en: "Total topics", ru: "Всего тем" },
     "topic.active":       { zh: "活跃 Topic", en: "Active topics", ru: "Активные темы" },
     "topic.atoms":        { zh: "独立原子", en: "Independent atoms", ru: "Независимые атомы" },
@@ -546,6 +546,11 @@
     "recall.filteredCandidates": { zh: "查看 {0} 条未入选候选", en: "View {0} filtered candidates", ru: "Показать отфильтрованные: {0}" },
     "recall.relevance": { zh: "相关度", en: "Relevance", ru: "Релевантность" },
     "recall.branchCount": { zh: "命中查询分支", en: "Matched branches", ru: "Ветви запроса" },
+    "recall.topicDiagnostics": { zh: "Topic 召回", en: "Topic recall", ru: "Поиск Topic" },
+    "recall.topicContextSuppressed": { zh: "Topic 高覆盖过滤", en: "Topic context suppression", ru: "Фильтр Topic по контексту" },
+    "recall.topicCandidates": { zh: "查看 {0} 条 Topic 候选", en: "View {0} Topic candidates", ru: "Кандидаты Topic: {0}" },
+    "recall.selected": { zh: "已入选", en: "Selected", ru: "Выбрано" },
+    "recall.filtered": { zh: "未入选", en: "Filtered", ru: "Отфильтровано" },
 
     /* ---- Recall Results Metadata ---- */
     "recall.resultId":    { zh: "记忆 ID:", en: "Memory ID:", ru: "ID памяти:" },

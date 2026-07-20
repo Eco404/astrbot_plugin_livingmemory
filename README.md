@@ -35,7 +35,7 @@
 - **Time-Aware Graph**: Edge confidence updates dynamically via EMA as new evidence accumulates; cross-memory semantic edge merging; temporal decay in retrieval scoring.
 - **Data Safety**: Automatic backup on plugin version update, pre-migration backup, rollback on index rebuild failure, and transactional deletion.
 - **WebUI Management**: Supports the AstrBot official plugin Pages dashboard with trilingual (zh/en/ru) support and dark mode.
-- **Experimental Topic Memory**: Builds read-only, source-grounded topic memories above the existing Timeline layer, with full/incremental maintenance and optional reranking. It does not affect production recall yet.
+- **Topic Memory**: Builds read-only, source-grounded topic memories above the existing Timeline layer, with full/incremental maintenance, optional reranking, and Topic-first production recall with lightweight Timeline supplements.
 
 ---
 
@@ -65,6 +65,8 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 
 **Experimental Topic memory**:
 - Enable `topic_memory.enabled`, then run one full build from the Topic Memory page. Automatic maintenance can be controlled by `topic_memory.auto_maintenance`.
+- `topic_memory.recall_enabled` defaults to on. Active Topics are recalled first, with at most `topic_memory.timeline_supplement_k` Timeline supplements inside the global `recall_engine.top_k` budget. Missing or failed Topic retrieval falls back to Timeline-only recall.
+- Topic recall reuses stored embeddings, optionally reranks candidates, and never invokes an LLM. Partial visible-source overlap downweights a Topic; suppression occurs only at `topic_memory.recall_context_overlap_threshold`.
 - Topic memories are derived and read-only. Edit their source Timeline memories instead; dependent Topics are marked stale and rebuilt.
 - **Maintenance** checks whether each active Timeline revision has an active Topic index, lists missing entries with all selected by default, and incrementally processes only the confirmed selection instead of using a fixed 24-hour window.
 - Wide candidate groups are extracted in batches controlled by `topic_memory.fragment_extraction_batch_size` (default: 12). Large Topic components are then synthesized hierarchically using `topic_memory.synthesis_batch_size` (default: 12), while remaining one Topic with original provenance. The Topic page reports the active component, batch, LLM call, and elapsed time.
@@ -75,7 +77,7 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 - Failed, cancelled, or restart-interrupted builds expose a **Resume from checkpoint** action. Candidate fragments, embeddings, matching, component synthesis, and completed materialization are reused under the same `run_uid`; changed input, prompts, Provider, model, or relevant configuration invalidates only the affected checkpoint.
 - Recoverable LLM structure errors are deterministically repaired from supplied sources and recorded in `validation_repairs`. Unverifiable model references are discarded rather than persisted as Topic provenance.
 - Fragment extraction targets one future retrieval intent per fragment. Related-topic edges require corpus-aware semantic evidence instead of a single generic keyword or shared Timeline alone. Topic and atom confidence is calibrated by independent time-cluster evidence so several nearby memories do not masquerade as repeated confirmation.
-- Database v9.4 migration only adds the related-subtopic relation structure. It never invokes a model or creates/rewrites Topics automatically, and existing recall remains unchanged in this stage.
+- Database v9.4 migration only adds the related-subtopic relation structure. It never invokes a model or creates/rewrites Topics automatically; `topic_memory.enabled` and `topic_memory.recall_enabled` control whether Topics participate in recall.
 
 **Memory injection compatibility**:
 - `fake_tool_call` automatically falls back to `extra_user_content` for Gemini providers to avoid tool-message protocol incompatibility.

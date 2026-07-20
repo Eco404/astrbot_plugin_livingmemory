@@ -618,6 +618,98 @@ class TopicMemoryStore:
             rows = await cursor.fetchall()
         return [self._row_to_topic(row) for row in rows]
 
+    async def list_topic_recall_payloads(
+        self,
+        memory_space_id: str,
+        *,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Load active Topics and their compact recall provenance in bulk."""
+        safe_limit = max(1, min(int(limit), 5000))
+        async with self._connect() as db:
+            topic_rows = await (
+                await db.execute(
+                    """
+                    SELECT * FROM topic_memories
+                    WHERE memory_space_id = ? AND status = 'active'
+                    ORDER BY importance DESC, updated_at DESC
+                    LIMIT ?
+                    """,
+                    (memory_space_id, safe_limit),
+                )
+            ).fetchall()
+            topic_uids = [str(row["topic_uid"]) for row in topic_rows]
+            if not topic_uids:
+                return []
+            placeholders = ",".join("?" * len(topic_uids))
+            atom_rows = await (
+                await db.execute(
+                    f"""
+                    SELECT topic_uid, atom_uid, atom_type, content, importance,
+                           confidence, event_started_at, event_ended_at
+                    FROM topic_memory_atoms
+                    WHERE topic_uid IN ({placeholders}) AND status = 'active'
+                    ORDER BY importance DESC, created_at, atom_uid
+                    """,
+                    topic_uids,
+                )
+            ).fetchall()
+            source_rows = await (
+                await db.execute(
+                    f"""
+                    SELECT l.topic_uid, l.timeline_uid, l.time_cluster_key,
+                           l.contribution_weight, l.semantic_similarity,
+                           l.temporal_affinity, s.session_id, s.start_index,
+                           s.end_index, s.started_at, s.ended_at
+                    FROM topic_timeline_links l
+                    LEFT JOIN memory_source_spans s
+                      ON s.memory_uid = l.timeline_uid
+                    WHERE l.topic_uid IN ({placeholders})
+                      AND l.status = 'active'
+                    ORDER BY l.contribution_weight DESC,
+                             l.semantic_similarity DESC, l.timeline_uid
+                    """,
+                    topic_uids,
+                )
+            ).fetchall()
+        atoms_by_topic: dict[str, list[dict[str, Any]]] = {
+            uid: [] for uid in topic_uids
+        }
+        sources_by_topic: dict[str, list[dict[str, Any]]] = {
+            uid: [] for uid in topic_uids
+        }
+        for row in atom_rows:
+            atoms_by_topic[str(row["topic_uid"])].append(dict(row))
+        for row in source_rows:
+            sources_by_topic[str(row["topic_uid"])].append(dict(row))
+        return [
+            {
+                "topic": self._row_to_topic(row),
+                "atoms": atoms_by_topic[str(row["topic_uid"])],
+                "sources": sources_by_topic[str(row["topic_uid"])],
+            }
+            for row in topic_rows
+        ]
+
+    async def record_topic_access(self, topic_uids: list[str]) -> int:
+        """Update reinforcement fields only for Topics actually injected."""
+        normalized = sorted({str(uid).strip() for uid in topic_uids if str(uid).strip()})
+        if not normalized:
+            return 0
+        placeholders = ",".join("?" * len(normalized))
+        now = time.time()
+        async with self._connect() as db:
+            cursor = await db.execute(
+                f"""
+                UPDATE topic_memories
+                SET access_count = access_count + 1, last_accessed_at = ?
+                WHERE topic_uid IN ({placeholders}) AND status = 'active'
+                """,
+                [now, *normalized],
+            )
+            await db.commit()
+            return int(cursor.rowcount or 0)
+
     async def get_topics_for_timeline(self, timeline_uid: str) -> list[dict[str, Any]]:
         async with self._connect() as db:
             cursor = await db.execute(
@@ -922,6 +1014,31 @@ class TopicMemoryStore:
                 )
             ).fetchall()
         return [dict(row) for row in rows]
+
+    async def find_memory_spaces_for_session(
+        self, session_id: str, *, limit: int = 10
+    ) -> list[str]:
+        """Resolve WebUI/tool session input to existing Topic memory spaces."""
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT r.memory_space_id, MAX(r.updated_at) AS last_updated
+                    FROM memory_registry r
+                    JOIN memory_source_spans s ON s.memory_uid = r.memory_uid
+                    JOIN topic_memories t
+                      ON t.memory_space_id = r.memory_space_id
+                     AND t.status = 'active'
+                    WHERE r.memory_layer = 'timeline' AND r.status = 'active'
+                      AND s.session_id = ?
+                    GROUP BY r.memory_space_id
+                    ORDER BY last_updated DESC
+                    LIMIT ?
+                    """,
+                    (session_id, max(1, min(int(limit), 100))),
+                )
+            ).fetchall()
+        return [str(row["memory_space_id"]) for row in rows]
 
     async def list_maintenance_runs(
         self, memory_space_id: str | None = None, *, limit: int = 20

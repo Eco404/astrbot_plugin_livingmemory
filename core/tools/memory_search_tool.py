@@ -13,6 +13,8 @@ from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
 from ..base.config_manager import ConfigManager
+from ..models.memory_identity import resolve_memory_space
+from ..retrieval.recall_pipeline import RecallQueryBranch
 from ..utils import get_persona_id
 
 
@@ -97,9 +99,15 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
             use_session_filtering = filtering_config.get("use_session_filtering", True)
 
             session_id = event.unified_msg_origin
+            topic_enabled = bool(
+                getattr(self.memory_engine, "topic_memory_enabled", False) is True
+                and bool(
+                    self.config_manager.get("topic_memory.recall_enabled", True)
+                )
+            )
             persona_id = (
                 await get_persona_id(self.context, event)
-                if use_persona_filtering
+                if use_persona_filtering or topic_enabled
                 else None
             )
 
@@ -116,14 +124,91 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
             limited_k = max(1, min(requested_k_int, max_k))
 
-            memories = await self.memory_engine.search_memories(
-                query=cleaned_query,
-                k=limited_k,
-                session_id=recall_session_id,
-                persona_id=recall_persona_id,
-            )
+            topic_outcome = None
+            if topic_enabled:
+                timeline_search = self.memory_engine.search_memories(
+                    query=cleaned_query,
+                    k=limited_k,
+                    session_id=recall_session_id,
+                    persona_id=recall_persona_id,
+                    track_access=False,
+                )
+                topic_search = self.memory_engine.topic_recall_pipeline.search(
+                    branches=[
+                        RecallQueryBranch(
+                            name="tool_query",
+                            text=cleaned_query,
+                            weight=1.0,
+                            role="user",
+                        )
+                    ],
+                    memory_space_id=resolve_memory_space(
+                        session_id, persona_id
+                    ).memory_space_id,
+                    final_k=min(
+                        limited_k,
+                        int(
+                            self.config_manager.get(
+                                "topic_memory.recall_top_k", 3
+                            )
+                        ),
+                    ),
+                    track_access=True,
+                )
+                timeline_result, topic_result = await asyncio.gather(
+                    timeline_search,
+                    topic_search,
+                    return_exceptions=True,
+                )
+                if isinstance(timeline_result, BaseException):
+                    raise timeline_result
+                memories = timeline_result
+                if isinstance(topic_result, asyncio.CancelledError):
+                    raise topic_result
+                if isinstance(topic_result, Exception):
+                    logger.warning(
+                        "记忆工具 Topic 召回失败，本次回退 Timeline: "
+                        f"{topic_result}",
+                    )
+                else:
+                    topic_outcome = topic_result
+            else:
+                memories = await self.memory_engine.search_memories(
+                    query=cleaned_query,
+                    k=limited_k,
+                    session_id=recall_session_id,
+                    persona_id=recall_persona_id,
+                )
 
-            serialized_results = []
+            topic_results = topic_outcome.results if topic_outcome else []
+            if topic_results:
+                supplement_k = min(
+                    int(
+                        self.config_manager.get(
+                            "topic_memory.timeline_supplement_k", 2
+                        )
+                    ),
+                    max(0, limited_k - len(topic_results)),
+                )
+                memories = self.memory_engine.topic_recall_pipeline.select_timeline_supplements(
+                    memories, topic_results, supplement_k
+                )
+            if topic_enabled and memories:
+                self.memory_engine.record_memory_access(
+                    [memory.doc_id for memory in memories]
+                )
+
+            serialized_results = [
+                {
+                    "id": item.topic_uid,
+                    "content": f"Topic: {item.topic.title}\n{item.topic.summary}",
+                    "score": item.final_score,
+                    "importance": item.topic.importance,
+                    "memory_layer": "topic",
+                    "source_timeline_count": len(item.sources),
+                }
+                for item in topic_results
+            ]
             for memory in memories:
                 metadata = memory.metadata if isinstance(memory.metadata, dict) else {}
                 serialized_results.append(
@@ -136,6 +221,17 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                         "persona_id": metadata.get("persona_id"),
                         "create_time": metadata.get("create_time"),
                         "last_access_time": metadata.get("last_access_time"),
+                        **(
+                            {
+                                "memory_layer": (
+                                    "timeline_supplement"
+                                    if topic_results
+                                    else "timeline"
+                                )
+                            }
+                            if topic_enabled
+                            else {}
+                        ),
                     }
                 )
 

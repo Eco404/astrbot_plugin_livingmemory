@@ -35,6 +35,8 @@ from ..retrieval.graph_retriever import GraphRetriever
 from ..retrieval.graph_vector_retriever import GraphVectorRetriever
 from ..retrieval.hybrid_retriever import HybridResult, HybridRetriever
 from ..retrieval.rrf_fusion import RRFFusion
+from ..retrieval.topic_recall_pipeline import TopicRecallPipeline
+from ..retrieval.topic_retriever import TopicRetriever
 from ..retrieval.vector_retriever import VectorRetriever
 from ..utils.number_utils import clamp_float, safe_float
 from .topic_build_manager import TopicBuildManager
@@ -156,6 +158,9 @@ class MemoryEngine:
             self.topic_memory_store,
         )
         topic_build_config = dict(self.config.get("topic_memory", {}))
+        topic_build_config.setdefault(
+            "recall_decay_rate", float(self.config.get("decay_rate", 0.01))
+        )
         self.topic_build_manager = TopicBuildManager(
             self.db_path,
             self.topic_memory_store,
@@ -165,6 +170,16 @@ class MemoryEngine:
             rerank_provider=self.rerank_provider,
             config=topic_build_config,
             identity_profile_store=self.identity_profile_store,
+        )
+        self.topic_retriever = TopicRetriever(
+            self.topic_memory_store,
+            embedding_provider=getattr(self.faiss_db, "embedding_provider", None),
+            rerank_provider=self.rerank_provider,
+            config=topic_build_config,
+        )
+        self.topic_recall_pipeline = TopicRecallPipeline(
+            self.topic_retriever,
+            topic_build_config,
         )
         self.topic_memory_enabled = bool(
             self.config.get("topic_memory", {}).get("enabled", False)
