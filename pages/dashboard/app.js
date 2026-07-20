@@ -5,11 +5,14 @@
 
 import {
   ApiClient,
+  IdentityPage,
   PeekPanel,
   MemoryPage,
+  ModelPage,
   RecallPage,
   SessionPicker,
   SystemPage,
+  TopicPage,
   esc,
   statusPill,
   nodeBadge,
@@ -50,9 +53,12 @@ import {
   const api = new ApiClient();
   const peekPanel = new PeekPanel(state, api);
   const memoryPage = new MemoryPage(state, api, peekPanel);
+  const identityPage = new IdentityPage(api, showToast);
+  const modelPage = new ModelPage(api, showToast);
   const recallPage = new RecallPage(state, api, peekPanel);
   const systemPage = new SystemPage(state, api);
   const sessionPicker = new SessionPicker(api, showToast);
+  const topicPage = new TopicPage(api, showToast);
 
   /* ================================================================
      Theme Management
@@ -134,6 +140,9 @@ import {
       if (window.ensureGraphScene) window.ensureGraphScene();
     }
     if (name === "memory") memoryPage.fetch();
+    if (name === "topic") topicPage.fetch();
+    if (name === "models") modelPage.fetch();
+    if (name === "identities") identityPage.fetch();
     if (name === "recall") { /* 召回页面按需加载 */ }
     if (name === "system") systemPage.fetch();
   }
@@ -217,6 +226,9 @@ import {
     if (state.page === "system" && state._systemCache) {
       systemPage.render(state._systemCache.data);
     }
+    if (state.page === "topic") topicPage.fetch();
+    if (state.page === "models") modelPage.render();
+    if (state.page === "identities") identityPage.render();
 
     const peekPanelEl = document.getElementById("peek-panel");
     const peekVisible = peekPanelEl && peekPanelEl.classList.contains("visible");
@@ -278,6 +290,9 @@ import {
     memoryPage.initEventListeners();
     recallPage.initEventListeners();
     sessionPicker.init();
+    topicPage.initEventListeners();
+    modelPage.initEventListeners();
+    identityPage.initEventListeners();
 
     document.getElementById("peek-close").addEventListener("click", () => peekPanel.close());
     document.getElementById("peek-overlay").addEventListener("click", () => peekPanel.close());

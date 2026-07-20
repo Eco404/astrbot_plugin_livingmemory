@@ -131,6 +131,87 @@ async def test_topic_snapshot_has_independent_atoms_and_cluster_metrics(
     assert topic_atom_count == 1
 
 
+@pytest.mark.asyncio
+async def test_clear_space_removes_only_topic_derivatives_and_build_history(
+    tmp_path: Path,
+):
+    db_path = str(tmp_path / "clear-space.db")
+    space_a = await _register_timeline(
+        db_path,
+        memory_uid="timeline-a",
+        document_id=1,
+        session_id="bot:FriendMessage:a",
+    )
+    space_b = await _register_timeline(
+        db_path,
+        memory_uid="timeline-b",
+        document_id=2,
+        session_id="bot:FriendMessage:b",
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+
+    for suffix, space_id in (("a", space_a), ("b", space_b)):
+        topic = TopicMemory(
+            topic_uid=f"topic-{suffix}",
+            memory_space_id=space_id,
+            title=f"Topic {suffix}",
+            summary=f"Summary {suffix}",
+        )
+        atom = TopicMemoryAtom(
+            atom_uid=f"atom-{suffix}",
+            topic_uid=topic.topic_uid,
+            atom_type="factual",
+            content=f"Fact {suffix}",
+        )
+        link = TopicTimelineLink(
+            topic_uid=topic.topic_uid,
+            timeline_uid=f"timeline-{suffix}",
+            time_cluster_key=f"cluster-{suffix}",
+        )
+        source = TopicAtomSource(
+            source_uid=f"source-{suffix}",
+            topic_atom_uid=atom.atom_uid,
+            timeline_uid=link.timeline_uid,
+            source_atom_fingerprint=f"fingerprint-{suffix}",
+        )
+        await store.save_topic_snapshot(
+            topic, atoms=[atom], links=[link], atom_sources=[source]
+        )
+        await store.create_maintenance_run(
+            TopicMaintenanceRun(
+                memory_space_id=space_id,
+                mode=TopicMaintenanceMode.FULL,
+            )
+        )
+
+    result = await store.clear_space(space_a)
+
+    assert result == {"deleted_topics": 1, "deleted_runs": 1}
+    assert await store.get_topic("topic-a") is None
+    assert await store.get_topic("topic-b") is not None
+    assert await store.list_maintenance_runs(space_a) == []
+    assert len(await store.list_maintenance_runs(space_b)) == 1
+    assert (await store.get_overview(space_a))["topic_count"] == 0
+    async with aiosqlite.connect(db_path) as db:
+        timeline_count = (
+            await (
+                await db.execute(
+                    "SELECT COUNT(*) FROM memory_registry WHERE memory_uid = 'timeline-a'"
+                )
+            ).fetchone()
+        )[0]
+        source_count = (
+            await (
+                await db.execute(
+                    "SELECT COUNT(*) FROM topic_atom_sources WHERE source_uid = 'source-a'"
+                )
+            ).fetchone()
+        )[0]
+    assert timeline_count == 1
+    assert source_count == 0
+
+
 async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
     row = await (
         await db.execute(
@@ -296,3 +377,62 @@ async def test_topic_maintenance_run_is_resumable(tmp_path: Path):
     assert loaded["cursor_memory_uid"] == "timeline-8"
     assert loaded["processed_items"] == 8
     assert loaded["started_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_store_startup_marks_interrupted_run_as_resumable(tmp_path: Path):
+    db_path = str(tmp_path / "interrupted.db")
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    run = TopicMaintenanceRun(
+        run_uid="run-interrupted",
+        memory_space_id="space-1",
+        mode=TopicMaintenanceMode.FULL,
+    )
+    await store.create_maintenance_run(run)
+    await store.update_maintenance_run(
+        run.run_uid,
+        status=TopicMaintenanceStatus.RUNNING,
+        stage="topic_synthesis",
+        current_group_index=3,
+        total_groups=8,
+    )
+
+    await store.initialize()
+
+    recovered = await store.get_maintenance_run(run.run_uid)
+    assert recovered["status"] == "pending"
+    assert recovered["stage"] == "topic_synthesis"
+    assert recovered["current_group_index"] == 3
+    assert recovered["completed_at"] is None
+    assert "stopped" in recovered["error"]
+
+
+@pytest.mark.asyncio
+async def test_build_checkpoint_round_trip(tmp_path: Path):
+    db_path = str(tmp_path / "checkpoint.db")
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    run = TopicMaintenanceRun(
+        run_uid="run-checkpoint",
+        memory_space_id="space-1",
+        mode=TopicMaintenanceMode.FULL,
+    )
+    await store.create_maintenance_run(run)
+
+    await store.save_build_checkpoint(
+        run_uid=run.run_uid,
+        checkpoint_key="topic_synthesis:abc",
+        stage="topic_synthesis",
+        input_hash="hash-1",
+        payload={"title": "测试", "fragment_uids": ["fragment-1"]},
+        metadata={"fragment_count": 1},
+    )
+
+    checkpoint = await store.get_build_checkpoint(
+        run.run_uid,
+        "topic_synthesis:abc",
+    )
+    assert checkpoint["input_hash"] == "hash-1"
+    assert checkpoint["payload"]["title"] == "测试"
+    assert checkpoint["metadata"]["fragment_count"] == 1

@@ -35,6 +35,7 @@
 - **Time-Aware Graph**: Edge confidence updates dynamically via EMA as new evidence accumulates; cross-memory semantic edge merging; temporal decay in retrieval scoring.
 - **Data Safety**: Automatic backup on plugin version update, pre-migration backup, rollback on index rebuild failure, and transactional deletion.
 - **WebUI Management**: Supports the AstrBot official plugin Pages dashboard with trilingual (zh/en/ru) support and dark mode.
+- **Experimental Topic Memory**: Builds read-only, source-grounded topic memories above the existing Timeline layer, with full/incremental maintenance and optional reranking. It does not affect production recall yet.
 
 ---
 
@@ -51,6 +52,25 @@ Configure the plugin from the AstrBot plugin configuration page.
 **Required settings**:
 - `embedding_provider_id`: Embedding model ID. Leave empty to use the AstrBot default.
 - `llm_provider_id`: LLM model ID. Leave empty to use the AstrBot default.
+- `rerank_provider_id`: Optional Rerank model ID used to validate cross-time Topic matches.
+
+If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank.enabled` and configure the Cloudflare `account_id` and `api_token` (or the `CLOUDFLARE_AUTH_TOKEN` environment variable). The default model is `@cf/baai/bge-reranker-base`. This plugin maps its raw scores through sigmoid and falls back to Embedding matching on temporary failures.
+
+**Authoritative identity profiles**:
+- Manage known participant facts from the **Identity Profiles** page in the plugin WebUI rather than AstrBot plugin settings. Profiles are stored in `authoritative_identities.json` under the plugin data directory and injected into Timeline summarization and both Topic extraction/synthesis prompts.
+- `user_id` is required and should be the stable platform account ID. `platform` scopes that ID; `display_name` and `aliases` are recognition/display aids. Optional fields include `gender`, `pronouns`, and `notes`.
+- For 示例甲, enter platform `qq`, stable account ID `10000001`, display name `示例甲`, gender `男性`, and pronouns `他, 他的`.
+- Saves take effect immediately without restarting. Saving is blocked while a Topic build is active so one build cannot mix two profile versions.
+- When neither a matching profile nor an explicit source pronoun exists, prompts require the model to repeat the display name. This stage intentionally does not add deterministic post-generation identity validation.
+
+**Experimental Topic memory**:
+- Enable `topic_memory.enabled`, then run one full build from the Topic Memory page. Automatic maintenance can be controlled by `topic_memory.auto_maintenance`.
+- Topic memories are derived and read-only. Edit their source Timeline memories instead; dependent Topics are marked stale and rebuilt.
+- Wide candidate groups are extracted in batches controlled by `topic_memory.fragment_extraction_batch_size` (default: 12). Large Topic components are then synthesized hierarchically using `topic_memory.synthesis_batch_size` (default: 12), while remaining one Topic with original provenance. The Topic page reports the active component, batch, LLM call, and elapsed time.
+- `topic_memory.llm_concurrency` sets the shared LLM concurrency limit across candidate groups, intra-group batches, and same-level Topic synthesis (default: 2); set it to 1 for sequential operation. Check the Provider and upstream API rate limits before increasing it.
+- Failed, cancelled, or restart-interrupted builds expose a **Resume from checkpoint** action. Candidate fragments, embeddings, matching, component synthesis, and completed materialization are reused under the same `run_uid`; changed input, prompts, Provider, model, or relevant configuration invalidates only the affected checkpoint.
+- Recoverable LLM structure errors are deterministically repaired from supplied sources and recorded in `validation_repairs`. Unverifiable model references are discarded rather than persisted as Topic provenance.
+- Database v9.3 migration creates only the required tables and never invokes a model automatically. Existing recall remains unchanged in this stage.
 
 **Memory injection compatibility**:
 - `fake_tool_call` automatically falls back to `extra_user_content` for Gemini providers to avoid tool-message protocol incompatibility.

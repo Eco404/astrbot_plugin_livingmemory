@@ -166,6 +166,36 @@ class TopicCandidateGroup:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class TopicFragmentDraft:
+    """Source-grounded LLM output before cross-time Topic synthesis."""
+
+    run_uid: str
+    candidate_group_uid: str
+    memory_space_id: str
+    label: str
+    summary: str
+    timeline_uids: list[str]
+    source_revisions: dict[str, int]
+    facts: list[dict[str, Any]]
+    keywords: list[str] = field(default_factory=list)
+    time_cluster_keys: list[str] = field(default_factory=list)
+    importance: float = 0.5
+    confidence: float = 0.7
+    fragment_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    embedding: list[float] = field(default_factory=list)
+    started_at: float | None = None
+    ended_at: float | None = None
+    status: str = "draft"
+    prompt_hash: str = ""
+    input_hash: str = ""
+    provider_id: str = ""
+    model_id: str = ""
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 __all__ = [
     "TopicAtomSource",
     "TopicLinkStatus",
@@ -178,4 +208,5 @@ __all__ = [
     "TopicTimelineLink",
     "TimelineTopicCandidate",
     "TopicCandidateGroup",
+    "TopicFragmentDraft",
 ]

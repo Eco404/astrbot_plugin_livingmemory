@@ -21,6 +21,8 @@ def test_config_manager_loads_defaults() -> None:
     assert manager.get("session_manager.max_messages_per_session") == 1000
     assert manager.get("session_manager.cleanup_batch_size") == 50
     assert manager.get("reflection_engine.save_original_conversation") is None
+    assert manager.get("topic_memory.enabled") is False
+    assert manager.get("topic_memory.fragment_similarity_threshold") == 0.78
 
 
 def test_config_manager_supports_nested_get_and_default() -> None:
@@ -79,3 +81,31 @@ def test_config_manager_graph_memory_property() -> None:
     assert manager.graph_memory["enabled"] is False
     assert manager.get("graph_memory.graph_route_weight") == 0.35
     assert manager.get("graph_memory.document_route_weight") == 0.65
+
+
+def test_config_manager_preserves_topic_and_rerank_settings() -> None:
+    manager = ConfigManager(
+        {
+            "provider_settings": {"rerank_provider_id": "reranker"},
+            "topic_memory": {
+                "enabled": True,
+                "auto_debounce_seconds": 2.0,
+                "rerank_threshold": 0.7,
+                "llm_concurrency": 64,
+            },
+            "cloudflare_rerank": {
+                "enabled": True,
+                "account_id": "account",
+                "api_token": "token",
+            },
+        }
+    )
+
+    assert manager.get("provider_settings.rerank_provider_id") == "reranker"
+    assert manager.get("topic_memory.enabled") is True
+    assert manager.get("topic_memory.auto_debounce_seconds") == 2.0
+    assert manager.get("topic_memory.rerank_threshold") == 0.7
+    assert manager.get("topic_memory.llm_concurrency") == 64
+    assert manager.get("cloudflare_rerank.enabled") is True
+    assert manager.get("cloudflare_rerank.account_id") == "account"
+    assert manager.get("cloudflare_rerank.model") == "@cf/baai/bge-reranker-base"

@@ -17,13 +17,20 @@ from astrbot.api import logger
 from astrbot.api.star import Context
 from astrbot.core.provider.provider import EmbeddingProvider, Provider
 
+try:
+    from astrbot.core.provider.provider import RerankProvider
+except ImportError:  # AstrBot versions without the optional rerank interface
+    RerankProvider = None  # type: ignore[assignment,misc]
+
 from ..storage.conversation_store import ConversationStore
 from ..storage.db_migration import DBMigration
 from .base.config_manager import ConfigManager
 from .base.exceptions import InitializationError, ProviderNotReadyError
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
+from .models.identity_profile import AuthoritativeIdentityStore
 from .processors.memory_processor import MemoryProcessor
+from .providers.cloudflare_rerank import CloudflareRerankClient
 from .schedulers.decay_scheduler import DecayScheduler
 from .validators.index_validator import IndexValidator
 
@@ -97,10 +104,13 @@ class PluginInitializer:
         # 组件实例
         self.embedding_provider: EmbeddingProvider | None = None
         self.llm_provider: Provider | None = None
+        self.rerank_provider: Any | None = None
+        self.rerank_initialization_error: str | None = None
         self.db: Any | None = None
         self.graph_db: Any | None = None
         self.memory_engine: MemoryEngine | None = None
         self.memory_processor: MemoryProcessor | None = None
+        self.identity_profile_store: AuthoritativeIdentityStore | None = None
         self.db_migration: DBMigration | None = None
         self.conversation_manager: ConversationManager | None = None
         self.index_validator: IndexValidator | None = None
@@ -268,6 +278,10 @@ class PluginInitializer:
 
     def _initialize_providers(self, silent: bool = False):
         """初始化 Embedding 和 LLM provider"""
+        # Rerank 不依赖聊天 Provider。必须先初始化，避免静默等待 LLM 时的
+        # 提前返回跳过内置 Cloudflare 客户端。
+        self._initialize_rerank_provider(silent=silent)
+
         # 初始化 Embedding Provider
         emb_id = self.config_manager.get("provider_settings.embedding_provider_id")
         if emb_id:
@@ -329,6 +343,65 @@ class PluginInitializer:
                 if not silent:
                     logger.debug(f"获取默认 LLM Provider 失败: {e}")
                 self.llm_provider = None
+
+    def _initialize_rerank_provider(self, *, silent: bool = False) -> None:
+        """Resolve AstrBot or built-in Cloudflare Rerank independently."""
+        self.rerank_provider = None
+        self.rerank_initialization_error = None
+        rerank_id = self.config_manager.get("provider_settings.rerank_provider_id")
+        if rerank_id:
+            provider = self._get_provider_by_id(rerank_id, silent=silent)
+            is_reranker = (
+                isinstance(provider, RerankProvider)
+                if RerankProvider is not None
+                else callable(getattr(provider, "rerank", None))
+            )
+            if provider and is_reranker:
+                self.rerank_provider = provider
+                if not silent:
+                    logger.info(f"成功从配置加载 Rerank Provider: {rerank_id}")
+            elif provider and not silent:
+                logger.warning(f"Provider {rerank_id} 不是 RerankProvider 类型")
+
+        if self.config_manager.get("cloudflare_rerank.enabled", False):
+            try:
+                self.rerank_provider = CloudflareRerankClient(
+                    account_id=self.config_manager.get(
+                        "cloudflare_rerank.account_id", ""
+                    ),
+                    api_token=self.config_manager.get(
+                        "cloudflare_rerank.api_token", ""
+                    ),
+                    model=self.config_manager.get(
+                        "cloudflare_rerank.model",
+                        CloudflareRerankClient.DEFAULT_MODEL,
+                    ),
+                    base_url=self.config_manager.get(
+                        "cloudflare_rerank.base_url",
+                        CloudflareRerankClient.DEFAULT_BASE_URL,
+                    ),
+                    timeout_seconds=self.config_manager.get(
+                        "cloudflare_rerank.timeout_seconds", 30.0
+                    ),
+                    max_retries=self.config_manager.get(
+                        "cloudflare_rerank.max_retries", 2
+                    ),
+                    retry_base_delay=self.config_manager.get(
+                        "cloudflare_rerank.retry_base_delay", 1.0
+                    ),
+                    apply_sigmoid=self.config_manager.get(
+                        "cloudflare_rerank.apply_sigmoid", True
+                    ),
+                )
+                if not silent:
+                    logger.info(
+                        "已启用插件内置 Cloudflare Workers AI Rerank: "
+                        f"{self.rerank_provider.model}"
+                    )
+            except ValueError as exc:
+                self.rerank_initialization_error = str(exc)
+                if not silent:
+                    logger.warning(f"Cloudflare Rerank 配置无效，已回退: {exc}")
 
     def _get_provider_by_id(self, provider_id: str, *, silent: bool):
         """静默检查阶段绕过会打印 warning 的 AstrBot 查询接口。"""
@@ -452,6 +525,9 @@ class PluginInitializer:
             graph_doc_path = data_dir_path / "livingmemory_graph_documents.db"
             graph_index_path = data_dir_path / "livingmemory_graph.index"
             graph_memory_enabled = self.config_manager.get("graph_memory.enabled", True)
+            self.identity_profile_store = AuthoritativeIdentityStore(
+                data_dir_path / "authoritative_identities.json"
+            )
 
             if not self.embedding_provider:
                 raise ProviderNotReadyError("Embedding Provider 未初始化")
@@ -598,6 +674,56 @@ class PluginInitializer:
                 "index_rebuild_max_failure_ratio": self.config_manager.get(
                     "index_rebuild_settings.max_failure_ratio", 0.02
                 ),
+                "topic_memory": {
+                    "enabled": self.config_manager.get(
+                        "topic_memory.enabled", False
+                    ),
+                    "auto_maintenance": self.config_manager.get(
+                        "topic_memory.auto_maintenance", True
+                    ),
+                    "auto_debounce_seconds": self.config_manager.get(
+                        "topic_memory.auto_debounce_seconds", 60.0
+                    ),
+                    "time_gap_hours": self.config_manager.get(
+                        "topic_memory.time_gap_hours", 6.0
+                    ),
+                    "candidate_batch_size": self.config_manager.get(
+                        "topic_memory.candidate_batch_size", 100
+                    ),
+                    "fragment_extraction_batch_size": self.config_manager.get(
+                        "topic_memory.fragment_extraction_batch_size", 12
+                    ),
+                    "candidate_similarity_threshold": self.config_manager.get(
+                        "topic_memory.candidate_similarity_threshold", 0.52
+                    ),
+                    "fragment_similarity_threshold": self.config_manager.get(
+                        "topic_memory.fragment_similarity_threshold", 0.78
+                    ),
+                    "rerank_threshold": self.config_manager.get(
+                        "topic_memory.rerank_threshold", 0.55
+                    ),
+                    "rerank_top_n": self.config_manager.get(
+                        "topic_memory.rerank_top_n", 5
+                    ),
+                    "rerank_failure_fallback": self.config_manager.get(
+                        "topic_memory.rerank_failure_fallback", True
+                    ),
+                    "existing_topic_match_threshold": self.config_manager.get(
+                        "topic_memory.existing_topic_match_threshold", 0.55
+                    ),
+                    "synthesis_batch_size": self.config_manager.get(
+                        "topic_memory.synthesis_batch_size", 12
+                    ),
+                    "embedding_batch_size": self.config_manager.get(
+                        "topic_memory.embedding_batch_size", 8
+                    ),
+                    "llm_concurrency": self.config_manager.get(
+                        "topic_memory.llm_concurrency", 2
+                    ),
+                    "llm_max_retries": self.config_manager.get(
+                        "topic_memory.llm_max_retries", 3
+                    ),
+                },
             }
 
             self.memory_engine = MemoryEngine(
@@ -605,7 +731,9 @@ class PluginInitializer:
                 faiss_db=self.db,
                 graph_vector_db=self.graph_db,
                 llm_provider=self.llm_provider,
+                rerank_provider=self.rerank_provider,
                 config=memory_engine_config,
+                identity_profile_store=self.identity_profile_store,
             )
             await self.memory_engine.initialize()
             logger.info("MemoryEngine 已初始化")
@@ -639,6 +767,7 @@ class PluginInitializer:
                 config={
                     "atom_enabled": memory_engine_config["atom_enabled"],
                 },
+                identity_profile_store=self.identity_profile_store,
             )
             logger.info("MemoryProcessor 已初始化")
 
