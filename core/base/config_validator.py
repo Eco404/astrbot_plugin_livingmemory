@@ -3,7 +3,7 @@ config_validator.py - 配置验证模块
 提供配置验证和默认值管理功能。
 """
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -156,8 +156,11 @@ class TopicMemoryConfig(BaseModel):
     component_min_pair_similarity: float = Field(default=0.52, ge=0.0, le=1.0)
     component_min_average_similarity: float = Field(default=0.65, ge=0.0, le=1.0)
     rerank_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    rerank_reciprocal_rank_threshold: float = Field(
+        default=0.60, ge=0.0, le=1.0
+    )
     rerank_top_n: int = Field(default=5, ge=1, le=100)
-    rerank_concurrency: int = Field(default=4, ge=1, le=32)
+    rerank_concurrency: int = Field(default=1, ge=1, le=32)
     rerank_failure_fallback: bool = True
     related_topic_similarity_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
     related_topic_top_n: int = Field(default=3, ge=1, le=20)
@@ -179,21 +182,6 @@ class CloudflareRerankConfig(BaseModel):
     timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=8)
     retry_base_delay: float = Field(default=1.0, ge=0.0, le=60.0)
-    score_mapping: Literal["auto", "identity", "sigmoid"] = "auto"
-    # Accepted for configuration files created before score_mapping existed.
-    apply_sigmoid: bool | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def migrate_legacy_score_mapping(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "score_mapping" in value:
-            return value
-        legacy = value.get("apply_sigmoid")
-        if legacy is None:
-            return value
-        migrated = dict(value)
-        migrated["score_mapping"] = "sigmoid" if bool(legacy) else "identity"
-        return migrated
 
 
 class ImportanceDecayConfig(BaseModel):
@@ -378,18 +366,6 @@ def merge_config_with_defaults(user_config: dict[str, Any]) -> dict[str, Any]:
         dict[str, Any]: 合并后的配置
     """
     user_config = dict(user_config)
-    cloudflare = user_config.get("cloudflare_rerank")
-    if (
-        isinstance(cloudflare, dict)
-        and "score_mapping" not in cloudflare
-        and cloudflare.get("apply_sigmoid") is not None
-    ):
-        migrated_cloudflare = dict(cloudflare)
-        migrated_cloudflare["score_mapping"] = (
-            "sigmoid" if bool(cloudflare["apply_sigmoid"]) else "identity"
-        )
-        user_config["cloudflare_rerank"] = migrated_cloudflare
-
     default_config = get_default_config()
 
     def deep_merge(default: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:

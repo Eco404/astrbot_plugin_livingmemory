@@ -88,8 +88,6 @@ async def test_list_models_exposes_cloudflare_configuration_without_secrets():
         },
         model="@cf/baai/bge-reranker-base",
         base_url="https://api.cloudflare.com/client/v4",
-        score_mapping="auto",
-        apply_sigmoid=False,
     )
 
     response = await handler.list_models(initializer)
@@ -98,7 +96,7 @@ async def test_list_models_exposes_cloudflare_configuration_without_secrets():
     assert rerank["selection"] == "cloudflare"
     assert rerank["configured_provider_id"] == "cloudflare_workers_ai_rerank"
     assert rerank["extra"]["credential_source"] == "configuration"
-    assert rerank["extra"]["score_mapping"] == "auto"
+    assert "score_mapping" not in rerank["extra"]
     assert "private-token" not in str(rerank)
 
 

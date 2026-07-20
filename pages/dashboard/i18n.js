@@ -123,7 +123,6 @@
     "models.runtimeClass": { zh: "运行时实现", en: "Runtime implementation", ru: "Реализация" },
     "models.dimension": { zh: "向量维度", en: "Vector dimension", ru: "Размерность вектора" },
     "models.baseUrl": { zh: "API 地址", en: "API base URL", ru: "Адрес API" },
-    "models.scoreMapping": { zh: "分数映射", en: "Score mapping", ru: "Преобразование оценки" },
     "models.fallbackProvider": { zh: "失败回退 Provider", en: "Failure fallback provider", ru: "Резервный Provider" },
     "models.initializationError": { zh: "初始化错误", en: "Initialization error", ru: "Ошибка инициализации" },
     "models.accountConfigured": { zh: "Account ID", en: "Account ID", ru: "Account ID" },

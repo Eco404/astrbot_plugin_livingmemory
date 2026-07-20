@@ -389,12 +389,6 @@ class PluginInitializer:
                     retry_base_delay=self.config_manager.get(
                         "cloudflare_rerank.retry_base_delay", 1.0
                     ),
-                    score_mapping=self.config_manager.get(
-                        "cloudflare_rerank.score_mapping", None
-                    ),
-                    apply_sigmoid=self.config_manager.get(
-                        "cloudflare_rerank.apply_sigmoid", None
-                    ),
                 )
                 if not silent:
                     logger.info(
@@ -714,11 +708,14 @@ class PluginInitializer:
                     "rerank_threshold": self.config_manager.get(
                         "topic_memory.rerank_threshold", 0.55
                     ),
+                    "rerank_reciprocal_rank_threshold": self.config_manager.get(
+                        "topic_memory.rerank_reciprocal_rank_threshold", 0.60
+                    ),
                     "rerank_top_n": self.config_manager.get(
                         "topic_memory.rerank_top_n", 5
                     ),
                     "rerank_concurrency": self.config_manager.get(
-                        "topic_memory.rerank_concurrency", 4
+                        "topic_memory.rerank_concurrency", 1
                     ),
                     "rerank_failure_fallback": self.config_manager.get(
                         "topic_memory.rerank_failure_fallback", True

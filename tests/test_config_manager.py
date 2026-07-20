@@ -28,7 +28,7 @@ def test_config_manager_loads_defaults() -> None:
     assert manager.get("topic_memory.component_min_average_similarity") == 0.65
     assert manager.get("topic_memory.related_topic_similarity_threshold") == 0.60
     assert manager.get("topic_memory.related_topic_top_n") == 3
-    assert manager.get("topic_memory.rerank_concurrency") == 4
+    assert manager.get("topic_memory.rerank_concurrency") == 1
 
 
 def test_config_manager_supports_nested_get_and_default() -> None:
@@ -104,7 +104,6 @@ def test_config_manager_preserves_topic_and_rerank_settings() -> None:
                 "enabled": True,
                 "account_id": "account",
                 "api_token": "token",
-                "score_mapping": "auto",
             },
         }
     )
@@ -118,12 +117,17 @@ def test_config_manager_preserves_topic_and_rerank_settings() -> None:
     assert manager.get("cloudflare_rerank.enabled") is True
     assert manager.get("cloudflare_rerank.account_id") == "account"
     assert manager.get("cloudflare_rerank.model") == "@cf/baai/bge-reranker-base"
-    assert manager.get("cloudflare_rerank.score_mapping") == "auto"
 
 
-def test_config_manager_migrates_legacy_rerank_score_mapping() -> None:
+def test_config_manager_ignores_legacy_rerank_score_mapping() -> None:
     manager = ConfigManager(
-        {"cloudflare_rerank": {"apply_sigmoid": False}}
+        {
+            "cloudflare_rerank": {
+                "apply_sigmoid": True,
+                "score_mapping": "sigmoid",
+            }
+        }
     )
 
-    assert manager.get("cloudflare_rerank.score_mapping") == "identity"
+    assert manager.get("cloudflare_rerank.score_mapping") is None
+    assert manager.get("cloudflare_rerank.apply_sigmoid") is None

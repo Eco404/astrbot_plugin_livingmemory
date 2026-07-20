@@ -12,7 +12,7 @@ from astrbot_plugin_livingmemory.core.providers.cloudflare_rerank import (
 
 
 @pytest.mark.asyncio
-async def test_cloudflare_rerank_maps_ids_and_sigmoid_scores():
+async def test_cloudflare_rerank_maps_ids_and_preserves_probability_scores():
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -24,8 +24,8 @@ async def test_cloudflare_rerank_maps_ids_and_sigmoid_scores():
                 "success": True,
                 "result": {
                     "response": [
-                        {"id": 0, "score": -2.0},
-                        {"id": 1, "score": 2.0},
+                        {"id": 0, "score": 0.12},
+                        {"id": 1, "score": 0.88},
                     ]
                 },
             },
@@ -45,8 +45,8 @@ async def test_cloudflare_rerank_maps_ids_and_sigmoid_scores():
         "top_k": 2,
     }
     assert [item.index for item in results] == [1, 0]
-    assert results[0].relevance_score == pytest.approx(0.880797, rel=1e-5)
-    assert results[1].relevance_score == pytest.approx(0.119203, rel=1e-5)
+    assert results[0].relevance_score == 0.88
+    assert results[1].relevance_score == 0.12
 
 
 @pytest.mark.asyncio
@@ -68,7 +68,6 @@ async def test_cloudflare_rerank_retries_429_and_accepts_direct_worker_shape():
         api_token="token",
         max_retries=1,
         retry_base_delay=0,
-        apply_sigmoid=False,
         transport=httpx.MockTransport(handler),
     )
     results = await client.rerank("query", ["document"])
@@ -79,7 +78,7 @@ async def test_cloudflare_rerank_retries_429_and_accepts_direct_worker_shape():
 
 
 @pytest.mark.asyncio
-async def test_cloudflare_rerank_auto_preserves_probability_scores_and_raw_audit():
+async def test_cloudflare_rerank_preserves_raw_score_for_audit():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -89,14 +88,30 @@ async def test_cloudflare_rerank_auto_preserves_probability_scores_and_raw_audit
     client = CloudflareRerankClient(
         account_id="account",
         api_token="token",
-        score_mapping="auto",
         transport=httpx.MockTransport(handler),
     )
     results = await client.rerank("query", ["document"])
 
     assert results[0].relevance_score == 0.72
     assert results[0].raw_score == 0.72
-    assert results[0].score_mapping == "identity"
+
+
+@pytest.mark.asyncio
+async def test_cloudflare_rerank_rejects_scores_outside_probability_range():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"response": [{"id": 0, "score": 1.2}]},
+        )
+
+    client = CloudflareRerankClient(
+        account_id="account",
+        api_token="token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(CloudflareRerankError, match=r"outside \[0, 1\]"):
+        await client.rerank("query", ["document"])
 
 
 @pytest.mark.asyncio

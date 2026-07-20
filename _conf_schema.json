@@ -107,8 +107,15 @@
             },
             "rerank_threshold": {
                 "description": "Rerank 归并阈值",
+                "hint": "Rerank 原始相关度的最低保护阈值。实际归并还会结合双向相对排名，避免不同模型分数尺度造成误判。",
                 "type": "float",
                 "default": 0.55
+            },
+            "rerank_reciprocal_rank_threshold": {
+                "description": "Rerank 双向相对排名阈值",
+                "hint": "对两个方向在各自候选列表中的相对名次取平均；达到该值且至少一侧进入前 N 时可作为归并证据。该判定不依赖模型绝对分数尺度。",
+                "type": "float",
+                "default": 0.60
             },
             "rerank_top_n": {
                 "description": "Rerank 候选数量",
@@ -220,13 +227,6 @@
                 "description": "重试基础等待（秒）",
                 "type": "float",
                 "default": 1.0
-            },
-            "score_mapping": {
-                "description": "Rerank 分数映射",
-                "hint": "自动模式会保留已经位于 0-1 的概率分数，仅对超出该范围的原始 logits 应用 Sigmoid，避免重复压缩分数。",
-                "type": "string",
-                "default": "auto",
-                "options": ["auto", "identity", "sigmoid"]
             }
         }
     },

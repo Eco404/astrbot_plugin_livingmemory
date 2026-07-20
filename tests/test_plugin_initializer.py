@@ -107,7 +107,6 @@ def test_cloudflare_rerank_overrides_astrbot_reranker(
         "cloudflare_workers_ai_rerank"
     )
     assert init.rerank_provider.model == "@cf/baai/bge-reranker-base"
-    assert init.rerank_provider.score_mapping == "auto"
     assert init.rerank_initialization_error is None
 
 
