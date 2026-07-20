@@ -134,7 +134,7 @@ class TopicRecallPipeline:
         visible.sort(key=lambda item: item.final_score, reverse=True)
 
         minimum = max(
-            0.0, min(1.0, float(self.config.get("recall_min_relevance", 0.42)))
+            0.0, min(1.0, float(self.config.get("recall_min_relevance", 0.32)))
         )
         relative = max(
             0.0, min(1.0, float(self.config.get("recall_relative_floor", 0.7)))

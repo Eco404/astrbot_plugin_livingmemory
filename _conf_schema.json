@@ -38,7 +38,7 @@
     },
     "topic_memory": {
         "description": "Topic 记忆（实验性）",
-        "hint": "在 Timeline 之上自动构建按话题归并、可精确追溯的只读记忆层。启用召回后优先注入 Topic，并用少量 Timeline 补充细节。",
+        "hint": "这里只保留稳定开关。召回、构建、Rerank 与性能参数请在插件 WebUI 的 Topic 记忆页面右上角“参数”中调整。",
         "type": "object",
         "items": {
             "enabled": {
@@ -49,197 +49,15 @@
             },
             "recall_enabled": {
                 "description": "启用 Topic 优先召回",
-                "hint": "仅在 Topic 记忆总开关开启时生效。当前空间没有可用 Topic 时自动回退到纯 Timeline 召回。",
+                "hint": "当前空间没有可用 Topic 时自动回退到纯 Timeline 召回。",
                 "type": "bool",
                 "default": true
-            },
-            "recall_top_k": {
-                "description": "Topic 最大召回数量",
-                "hint": "Topic 是主要召回结果；实际数量受相关度门槛约束，可以少于该值。",
-                "type": "int",
-                "default": 3
-            },
-            "recall_candidate_multiplier": {
-                "description": "Topic 召回候选倍率",
-                "type": "int",
-                "default": 4
-            },
-            "recall_scan_limit": {
-                "description": "Topic 单次扫描上限",
-                "hint": "当前召回会在记忆空间内扫描已保存的 Topic 向量。默认 2000 可覆盖绝大多数单会话；极长生命周期空间可提高到 5000。",
-                "type": "int",
-                "default": 2000
-            },
-            "recall_min_relevance": {
-                "description": "Topic 最低相关度",
-                "hint": "低于该值的 Topic 不会进入正式注入。",
-                "type": "float",
-                "default": 0.42
-            },
-            "recall_relative_floor": {
-                "description": "Topic 相对相关度下限",
-                "hint": "Topic 还需达到本轮最佳 Topic 相关度的一定比例。",
-                "type": "float",
-                "default": 0.7
-            },
-            "recall_mmr_lambda": {
-                "description": "Topic 相关性与多样性平衡",
-                "hint": "避免多个内容高度相似的 Topic 同时占满结果；越接近 1 越偏向原始相关度。",
-                "type": "float",
-                "default": 0.78
-            },
-            "recall_use_rerank": {
-                "description": "Topic 召回使用 Rerank",
-                "hint": "配置了可用 Rerank 时用于精排 Topic 候选；调用失败会自动保留 Embedding 与关键词结果。",
-                "type": "bool",
-                "default": true
-            },
-            "recall_context_overlap_threshold": {
-                "description": "Topic 上下文来源覆盖阈值",
-                "hint": "Topic 有多少比例的来源 Timeline 已在当前上下文中时不再重复注入。部分重叠只降低权重，不会直接删除整个 Topic；设为 0 关闭此处理。",
-                "type": "float",
-                "default": 0.8
-            },
-            "timeline_supplement_k": {
-                "description": "Timeline 补充数量",
-                "hint": "命中 Topic 后最多附带的相关 Timeline 数量；总注入数量仍不超过召回 top_k。设为 0 可仅注入 Topic。",
-                "type": "int",
-                "default": 2
             },
             "auto_maintenance": {
                 "description": "自动维护 Topic",
-                "hint": "新增 Timeline 后增量维护；编辑或删除 Timeline 后全量重建其记忆空间。",
+                "hint": "新增 Timeline 后执行受影响局部重构；编辑或删除 Timeline 后重建其记忆空间。",
                 "type": "bool",
                 "default": true
-            },
-            "auto_debounce_seconds": {
-                "description": "自动维护合并等待（秒）",
-                "hint": "连续写入会合并为一次维护任务，避免频繁调用模型。",
-                "type": "float",
-                "default": 60.0
-            },
-            "time_gap_hours": {
-                "description": "候选时间簇间隔（小时）",
-                "hint": "相邻 Timeline 超过此间隔时先划分到不同时间簇，后续仍可按语义跨时间归并。",
-                "type": "float",
-                "default": 6.0
-            },
-            "candidate_batch_size": {
-                "description": "候选扫描批量",
-                "type": "int",
-                "default": 100
-            },
-            "fragment_extraction_batch_size": {
-                "description": "Topic 片段提取批量",
-                "hint": "宽候选组中单次交给 LLM 的 Timeline 上限；跨批产生的片段仍会通过 Embedding 与 Rerank 归并。",
-                "type": "int",
-                "default": 12
-            },
-            "candidate_similarity_threshold": {
-                "description": "候选窗口相似度阈值",
-                "type": "float",
-                "default": 0.52
-            },
-            "fragment_similarity_threshold": {
-                "description": "Topic 片段归并阈值",
-                "hint": "Embedding 相似度达到该值的跨时间片段会归并为同一 Topic。",
-                "type": "float",
-                "default": 0.78
-            },
-            "rerank_candidate_floor": {
-                "description": "Rerank 候选最低相似度",
-                "hint": "片段 Embedding 达到该值后才进入 Rerank；与候选扫描阈值相互独立。",
-                "type": "float",
-                "default": 0.63
-            },
-            "component_min_pair_similarity": {
-                "description": "Topic 组件最低两两相似度",
-                "hint": "合并两个片段组件时，任意跨组件片段对都不能低于该值。",
-                "type": "float",
-                "default": 0.52
-            },
-            "component_min_average_similarity": {
-                "description": "Topic 组件最低平均相似度",
-                "hint": "合并两个片段组件时，全部跨组件片段对的平均值必须达到该值。",
-                "type": "float",
-                "default": 0.65
-            },
-            "component_size_cohesion_penalty": {
-                "description": "Topic 大组件一致性增量",
-                "hint": "两个已形成的片段组件越大，合并所需的平均相似度会按规模缓慢提高；单片段接入不受影响。用于阻止少数边界桥把两个不同检索意图连成超大 Topic。设为 0 可关闭。",
-                "type": "float",
-                "default": 0.005
-            },
-            "rerank_threshold": {
-                "description": "Rerank 归并阈值",
-                "hint": "Rerank 原始相关度的最低保护阈值。实际归并还会结合双向相对排名，避免不同模型分数尺度造成误判。",
-                "type": "float",
-                "default": 0.55
-            },
-            "rerank_reciprocal_rank_threshold": {
-                "description": "Rerank 双向相对排名阈值",
-                "hint": "对两个方向在各自候选列表中的相对名次取平均；达到该值且至少一侧进入前 N 时可作为归并证据。该判定不依赖模型绝对分数尺度。",
-                "type": "float",
-                "default": 0.60
-            },
-            "rerank_top_n": {
-                "description": "Rerank 候选数量",
-                "type": "int",
-                "default": 5
-            },
-            "rerank_concurrency": {
-                "description": "Topic Rerank 并发数",
-                "hint": "片段匹配阶段同时发出的 Rerank Provider 请求上限，允许 1-32。1 为串行；Cloudflare 或其他 Provider 出现 429 限流时请适当降低。",
-                "type": "int",
-                "default": 1,
-                "slider": {"min": 1, "max": 32, "step": 1}
-            },
-            "rerank_failure_fallback": {
-                "description": "Rerank 失败时回退 Embedding",
-                "hint": "建议开启，避免 Cloudflare 或 AstrBot Rerank 临时不可用时中断整个 Topic 构建。",
-                "type": "bool",
-                "default": true
-            },
-            "related_topic_similarity_threshold": {
-                "description": "相关子话题相似度阈值",
-                "hint": "不会合并内容；达到阈值且互为近邻的 Topic 会建立 related_subtopic 关系。",
-                "type": "float",
-                "default": 0.60
-            },
-            "related_topic_top_n": {
-                "description": "每个 Topic 的相关候选数量",
-                "hint": "只为互相进入前 N 的 Topic 建立相关子话题关系。",
-                "type": "int",
-                "default": 3
-            },
-            "existing_topic_match_threshold": {
-                "description": "已有 Topic 延续阈值",
-                "hint": "达到该综合分数时保留原 Topic UID 并递增 revision。",
-                "type": "float",
-                "default": 0.55
-            },
-            "synthesis_batch_size": {
-                "description": "Topic 分层合成批量",
-                "hint": "单次 LLM 最多处理的片段数。超出时自动分批并继续归并为同一个 Topic，避免超大上下文和来源遗漏。",
-                "type": "int",
-                "default": 12
-            },
-            "embedding_batch_size": {
-                "description": "片段向量批量",
-                "type": "int",
-                "default": 8
-            },
-            "llm_concurrency": {
-                "description": "Topic LLM 并发数",
-                "hint": "候选组提取、组内分批与同层 Topic 合成共享的最大 Provider 请求数，允许 1-64。1 为串行；并发越高速度通常越快，但更容易触发 Provider/API 限流。",
-                "type": "int",
-                "default": 1,
-                "slider": {"min": 1, "max": 64, "step": 1}
-            },
-            "llm_max_retries": {
-                "description": "Topic 模型调用重试次数",
-                "type": "int",
-                "default": 3
             }
         }
     },

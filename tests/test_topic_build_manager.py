@@ -67,6 +67,58 @@ async def test_selected_unindexed_build_does_not_expand_to_full_without_topics()
     store.list_topics.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_incremental_build_uses_expanded_scope_and_shared_scan_pipeline():
+    store = SimpleNamespace(list_topics=AsyncMock(return_value=[SimpleNamespace()]))
+    seeds = [SimpleNamespace(memory_uid="timeline-new")]
+    scope = {
+        "seed_timeline_uids": ["timeline-new"],
+        "timeline_uids": ["timeline-old", "timeline-new"],
+        "affected_topic_uids": ["topic-existing"],
+        "time_cluster_keys": {
+            "timeline-old": "cluster-1",
+            "timeline-new": "cluster-1",
+        },
+        "scope_limited": False,
+    }
+    candidate_manager = SimpleNamespace(
+        load_candidates=AsyncMock(return_value=seeds),
+        prepare_incremental_scope=AsyncMock(return_value=scope),
+        start_scan=AsyncMock(return_value={"run_uid": "run-local"}),
+    )
+    manager = TopicBuildManager(
+        ":memory:",
+        store,
+        candidate_manager,
+        config={"time_gap_hours": 6.0, "candidate_similarity_threshold": 0.52},
+    )
+    manager.build_from_scan = AsyncMock(
+        return_value={"status": "completed", "run_uid": "run-local"}
+    )
+
+    result = await manager.build_space(
+        "space-1",
+        mode=TopicMaintenanceMode.INCREMENTAL,
+        timeline_uids=["timeline-new"],
+    )
+
+    assert result["status"] == "completed"
+    candidate_manager.load_candidates.assert_awaited_once_with(
+        "space-1",
+        since=None,
+        timeline_uids=["timeline-new"],
+        only_unindexed=True,
+    )
+    kwargs = candidate_manager.start_scan.await_args.kwargs
+    assert kwargs["mode"] is TopicMaintenanceMode.INCREMENTAL
+    assert kwargs["timeline_uids"] == ["timeline-old", "timeline-new"]
+    assert kwargs["only_unindexed"] is False
+    assert kwargs["run_config"]["time_cluster_keys"] == scope["time_cluster_keys"]
+    assert kwargs["run_config"]["topic_settings"] == manager.config
+    assert kwargs["run_metadata"]["incremental_scope"] == scope
+    assert kwargs["run_metadata"]["pipeline"] == "shared_full_pipeline"
+
+
 class _GroundedLLM:
     def __init__(
         self, *, hallucinate: bool = False, unknown_atom_fingerprint: bool = False

@@ -39,6 +39,13 @@ from ..retrieval.topic_recall_pipeline import TopicRecallPipeline
 from ..retrieval.topic_retriever import TopicRetriever
 from ..retrieval.vector_retriever import VectorRetriever
 from ..utils.number_utils import clamp_float, safe_float
+from ..topic_settings import (
+    TOPIC_SETTING_DEFINITIONS,
+    TOPIC_SETTINGS_REVISION,
+    effective_topic_settings,
+    topic_setting_defaults,
+    validate_topic_setting,
+)
 from .topic_build_manager import TopicBuildManager
 from .topic_maintenance_manager import TopicMaintenanceManager
 
@@ -218,6 +225,7 @@ class MemoryEngine:
         await self._create_tables()
         await self.memory_identity_store.initialize()
         await self.topic_memory_store.initialize()
+        await self._initialize_topic_runtime_settings()
 
         # 3. 初始化文本处理器
         stopwords_path = self.config.get("stopwords_path")
@@ -585,6 +593,94 @@ class MemoryEngine:
         self.topic_build_manager.schedule_space(
             str(memory_space_id), full=full, since=since
         )
+
+    async def _initialize_topic_runtime_settings(self) -> None:
+        """Load sparse overrides and import only genuinely customized legacy values."""
+        stored = await self.topic_memory_store.get_topic_setting_overrides()
+        if not stored.get("__legacy_imported_v1__"):
+            defaults = topic_setting_defaults()
+            legacy = self.config.get("topic_memory_legacy_overrides", {})
+            imported: dict[str, Any] = {}
+            if isinstance(legacy, dict):
+                for key, value in legacy.items():
+                    if key not in TOPIC_SETTING_DEFINITIONS:
+                        continue
+                    try:
+                        normalized = validate_topic_setting(key, value)
+                    except ValueError:
+                        continue
+                    # Schema-generated old defaults must not pin future defaults.
+                    if normalized != defaults[key]:
+                        imported[key] = normalized
+            imported["__legacy_imported_v1__"] = True
+            stored = await self.topic_memory_store.update_topic_setting_overrides(
+                imported,
+                settings_revision=TOPIC_SETTINGS_REVISION,
+            )
+        self.apply_topic_runtime_settings(stored)
+
+    def apply_topic_runtime_settings(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        """Apply one validated effective configuration to every Topic consumer."""
+        public_overrides = {
+            key: value
+            for key, value in overrides.items()
+            if key in TOPIC_SETTING_DEFINITIONS
+        }
+        effective = effective_topic_settings(public_overrides)
+        base = dict(self.config.get("topic_memory", {}))
+        base.update(effective)
+        self.config["topic_memory"] = base
+        self.topic_build_manager.apply_config(base)
+        self.topic_retriever.config = dict(base)
+        self.topic_recall_pipeline.config = dict(base)
+        self._invalidate_search_cache()
+        return effective
+
+    async def get_topic_runtime_settings(self) -> dict[str, Any]:
+        stored = await self.topic_memory_store.get_topic_setting_overrides()
+        overrides = {
+            key: value
+            for key, value in stored.items()
+            if key in TOPIC_SETTING_DEFINITIONS
+        }
+        effective = effective_topic_settings(overrides)
+        definitions = {
+            key: {**value, "customized": key in overrides}
+            for key, value in TOPIC_SETTING_DEFINITIONS.items()
+        }
+        return {
+            "settings_revision": TOPIC_SETTINGS_REVISION,
+            "definitions": definitions,
+            "overrides": overrides,
+            "effective": effective,
+        }
+
+    async def update_topic_runtime_settings(
+        self,
+        changes: dict[str, Any],
+        *,
+        reset_keys: list[str] | None = None,
+        reset_all: bool = False,
+    ) -> dict[str, Any]:
+        if self.topic_build_manager.has_active_builds():
+            raise RuntimeError("Topic 构建正在运行，暂时不能修改参数")
+        normalized = {
+            str(key): validate_topic_setting(str(key), value)
+            for key, value in changes.items()
+        }
+        normalized_reset = [
+            str(key)
+            for key in (reset_keys or [])
+            if str(key) in TOPIC_SETTING_DEFINITIONS
+        ]
+        stored = await self.topic_memory_store.update_topic_setting_overrides(
+            normalized,
+            reset_keys=normalized_reset,
+            reset_all=bool(reset_all),
+            settings_revision=TOPIC_SETTINGS_REVISION,
+        )
+        self.apply_topic_runtime_settings(stored)
+        return await self.get_topic_runtime_settings()
 
     def _serialize_atom_for_repair(self, atom: Any) -> dict[str, Any]:
         """Convert a MemoryAtom-like object into JSON-safe repair payload."""

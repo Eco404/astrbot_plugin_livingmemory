@@ -126,6 +126,9 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
             topic_outcome = None
             if topic_enabled:
+                topic_config = getattr(
+                    self.memory_engine.topic_recall_pipeline, "config", {}
+                ) or {}
                 timeline_search = self.memory_engine.search_memories(
                     query=cleaned_query,
                     k=limited_k,
@@ -147,11 +150,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     ).memory_space_id,
                     final_k=min(
                         limited_k,
-                        int(
-                            self.config_manager.get(
-                                "topic_memory.recall_top_k", 3
-                            )
-                        ),
+                        int(topic_config.get("recall_top_k", 3)),
                     ),
                     track_access=True,
                 )
@@ -182,12 +181,11 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
             topic_results = topic_outcome.results if topic_outcome else []
             if topic_results:
+                topic_config = getattr(
+                    self.memory_engine.topic_recall_pipeline, "config", {}
+                ) or {}
                 supplement_k = min(
-                    int(
-                        self.config_manager.get(
-                            "topic_memory.timeline_supplement_k", 2
-                        )
-                    ),
+                    int(topic_config.get("timeline_supplement_k", 2)),
                     max(0, limited_k - len(topic_results)),
                 )
                 memories = self.memory_engine.topic_recall_pipeline.select_timeline_supplements(

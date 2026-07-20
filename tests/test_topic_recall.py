@@ -8,6 +8,9 @@ from astrbot_plugin_livingmemory.core.retrieval.topic_recall_pipeline import (
     TopicRecallPipeline,
 )
 from astrbot_plugin_livingmemory.core.retrieval.topic_retriever import TopicRetriever
+from astrbot_plugin_livingmemory.core.retrieval.topic_retriever import (
+    TopicRecallResult,
+)
 
 
 class _Embedding:
@@ -31,6 +34,22 @@ class _Store:
     async def record_topic_access(self, topic_uids):
         self.accessed.extend(topic_uids)
         return len(topic_uids)
+
+
+class _FixedScoreRetriever:
+    def __init__(self, store, candidates):
+        self.store = store
+        self.candidates = candidates
+
+    async def _get_embeddings(self, texts):
+        return [[1.0] for _ in texts]
+
+    async def search(self, *args, **kwargs):
+        return list(self.candidates)
+
+    @staticmethod
+    def _rank_score(topic, relevance):
+        return relevance
 
 
 def _payload(uid, title, embedding, *, sources=None, importance=0.6):
@@ -130,3 +149,28 @@ async def test_topic_pipeline_suppresses_high_context_coverage_and_tracks_select
     assert outcome.context_suppressed == 1
     assert outcome.results[0].context_coverage == pytest.approx(0.5)
     assert store.accessed == ["partial"]
+
+
+@pytest.mark.asyncio
+async def test_topic_pipeline_default_floor_accepts_moderate_match_but_rejects_weak_one():
+    store = _Store([_payload("placeholder", "占位", [1.0])])
+    moderate_topic = _payload("moderate", "临时加班", [1.0])["topic"]
+    weak_topic = _payload("weak", "无关闲聊", [1.0])["topic"]
+    retriever = _FixedScoreRetriever(
+        store,
+        [
+            TopicRecallResult(moderate_topic, 0.36, 0.36, 0.36, 0.0),
+            TopicRecallResult(weak_topic, 0.29, 0.29, 0.29, 0.0),
+        ],
+    )
+    pipeline = TopicRecallPipeline(retriever, {})
+
+    outcome = await pipeline.search(
+        branches=[RecallQueryBranch("current", "今晚是否加班", 1.0, "user")],
+        memory_space_id="space-1",
+        final_k=3,
+        track_access=False,
+    )
+
+    assert outcome.applied_threshold == pytest.approx(0.32)
+    assert [item.topic_uid for item in outcome.results] == ["moderate"]

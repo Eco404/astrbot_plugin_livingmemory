@@ -34,6 +34,7 @@ from ..models.topic_memory import (
     TopicRelation,
     TopicTimelineLink,
 )
+from ..topic_settings import TOPIC_SETTINGS_REVISION
 from .topic_maintenance_manager import TopicMaintenanceManager
 
 
@@ -75,7 +76,7 @@ class TopicBuildManager:
         )
         self.llm_concurrency = max(
             1,
-            int(self.config.get("llm_concurrency", 2)),
+            int(self.config.get("llm_concurrency", 1)),
         )
         self.rerank_concurrency = max(
             1,
@@ -84,8 +85,21 @@ class TopicBuildManager:
         self._llm_semaphore = asyncio.Semaphore(self.llm_concurrency)
         self._rerank_semaphore = asyncio.Semaphore(self.rerank_concurrency)
         self._space_locks: dict[str, asyncio.Lock] = {}
+        self._configuration_lock = asyncio.Lock()
         self._scheduled: dict[str, asyncio.Task] = {}
         self._scheduled_requests: dict[str, dict[str, Any]] = {}
+
+    def apply_config(self, config: dict[str, Any]) -> None:
+        """Apply settings between builds; callers must reject active mutations."""
+        self.config = dict(config)
+        self.llm_concurrency = max(
+            1, min(64, int(self.config.get("llm_concurrency", 1)))
+        )
+        self.rerank_concurrency = max(
+            1, min(32, int(self.config.get("rerank_concurrency", 1)))
+        )
+        self._llm_semaphore = asyncio.Semaphore(self.llm_concurrency)
+        self._rerank_semaphore = asyncio.Semaphore(self.rerank_concurrency)
 
     def schedule_space(
         self,
@@ -173,19 +187,56 @@ class TopicBuildManager:
         lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
         async with lock:
             reset_result = None
+            incremental_scope: dict[str, Any] | None = None
+            scan_only_unindexed = False
             if reset_topics:
                 reset_result = await self.store.clear_space(memory_space_id)
             if mode is TopicMaintenanceMode.INCREMENTAL:
-                existing = await self.store.list_topics(memory_space_id, limit=1)
-                if not existing and timeline_uids is None:
-                    mode = TopicMaintenanceMode.FULL
+                existing = await self.store.list_topics(
+                    memory_space_id,
+                    status=TopicMemoryStatus.ACTIVE,
+                    limit=1,
+                )
+                if not existing:
+                    if timeline_uids is None:
+                        mode = TopicMaintenanceMode.FULL
+                        since = None
+                    else:
+                        scan_only_unindexed = True
+                else:
+                    selected_only = timeline_uids is not None
+                    seeds = await self.candidate_manager.load_candidates(
+                        memory_space_id,
+                        since=since,
+                        timeline_uids=timeline_uids,
+                        only_unindexed=selected_only,
+                    )
+                    incremental_scope = (
+                        await self.candidate_manager.prepare_incremental_scope(
+                            memory_space_id,
+                            seeds,
+                            time_gap_seconds=float(
+                                self.config.get("time_gap_hours", 6.0)
+                            )
+                            * 3600.0,
+                            similarity_threshold=float(
+                                self.config.get(
+                                    "incremental_context_similarity", 0.58
+                                )
+                            ),
+                            max_timelines=int(
+                                self.config.get("incremental_max_timelines", 120)
+                            ),
+                        )
+                    )
+                    timeline_uids = list(incremental_scope["timeline_uids"])
                     since = None
             scan = await self.candidate_manager.start_scan(
                 memory_space_id,
                 mode=mode,
                 since=since,
                 timeline_uids=timeline_uids,
-                only_unindexed=timeline_uids is not None,
+                only_unindexed=scan_only_unindexed,
                 batch_size=int(self.config.get("candidate_batch_size", 100)),
                 time_gap_seconds=float(self.config.get("time_gap_hours", 6.0))
                 * 3600.0,
@@ -193,6 +244,17 @@ class TopicBuildManager:
                     self.config.get("candidate_similarity_threshold", 0.52)
                 ),
                 progress_callback=progress_callback,
+                run_config={
+                    "topic_settings": dict(self.config),
+                    "topic_settings_revision": TOPIC_SETTINGS_REVISION,
+                    "time_cluster_keys": dict(
+                        (incremental_scope or {}).get("time_cluster_keys", {})
+                    ),
+                },
+                run_metadata={
+                    "incremental_scope": incremental_scope or {},
+                    "pipeline": "shared_full_pipeline",
+                },
             )
             result = await self.build_from_scan(
                 scan["run_uid"], progress_callback=progress_callback
@@ -223,6 +285,27 @@ class TopicBuildManager:
         )
 
     async def build_from_scan(self, run_uid: str, *, progress_callback=None) -> dict[str, Any]:
+        """Run one build with the immutable settings captured at task creation."""
+        run = await self.store.get_maintenance_run(run_uid)
+        if run is None:
+            raise ValueError(f"Topic maintenance run not found: {run_uid}")
+        snapshot = (run.get("config") or {}).get("topic_settings")
+        async with self._configuration_lock:
+            previous = dict(self.config)
+            if isinstance(snapshot, dict):
+                merged = dict(previous)
+                merged.update(snapshot)
+                self.apply_config(merged)
+            try:
+                return await self._build_from_scan_impl(
+                    run_uid, progress_callback=progress_callback
+                )
+            finally:
+                self.apply_config(previous)
+
+    async def _build_from_scan_impl(
+        self, run_uid: str, *, progress_callback=None
+    ) -> dict[str, Any]:
         run = await self.store.get_maintenance_run(run_uid)
         if run is None:
             raise ValueError(f"Topic maintenance run not found: {run_uid}")
@@ -272,7 +355,27 @@ class TopicBuildManager:
             active_uids: set[str] = set()
             built: list[dict[str, Any]] = []
             plans: list[dict[str, Any]] = []
-            existing = await self.store.list_topics(memory_space_id, limit=1000)
+            existing = await self.store.list_topics(
+                memory_space_id,
+                status=TopicMemoryStatus.ACTIVE,
+                limit=1000,
+            )
+            incremental_scope = (
+                (run.get("metadata") or {}).get("incremental_scope", {})
+                if run_mode is TopicMaintenanceMode.INCREMENTAL
+                else {}
+            )
+            affected_topic_uids = {
+                str(uid)
+                for uid in incremental_scope.get("affected_topic_uids", [])
+                if str(uid)
+            }
+            if run_mode is TopicMaintenanceMode.INCREMENTAL:
+                existing = [
+                    topic
+                    for topic in existing
+                    if topic.topic_uid in affected_topic_uids
+                ]
             used_existing: set[str] = set()
             component_fragment_sets = [
                 [fragments[index] for index in component]
@@ -370,8 +473,15 @@ class TopicBuildManager:
                     component_fragments,
                     existing,
                     used_existing,
+                    require_source_overlap=(
+                        run_mode is TopicMaintenanceMode.INCREMENTAL
+                    ),
                 )
-                if matched is not None and run_mode is TopicMaintenanceMode.INCREMENTAL:
+                if (
+                    matched is not None
+                    and run_mode is TopicMaintenanceMode.INCREMENTAL
+                    and not incremental_scope
+                ):
                     existing_fragment = await self._existing_topic_fragment(
                         run_uid, matched
                     )
@@ -541,6 +651,12 @@ class TopicBuildManager:
 
             if run_mode is TopicMaintenanceMode.FULL:
                 await self.store.archive_topics_not_in(memory_space_id, active_uids)
+            elif affected_topic_uids:
+                await self.store.archive_topic_uids_not_in(
+                    memory_space_id,
+                    affected_topic_uids,
+                    active_uids,
+                )
             active_topics = await self.store.list_topics(
                 memory_space_id,
                 status=TopicMemoryStatus.ACTIVE,
@@ -2215,6 +2331,8 @@ class TopicBuildManager:
         fragments: list[TopicFragmentDraft],
         existing: list[TopicMemory],
         used: set[str],
+        *,
+        require_source_overlap: bool = False,
     ) -> TopicMemory | None:
         source_uids = {uid for item in fragments for uid in item.timeline_uids}
         best: tuple[float, TopicMemory] | None = None
@@ -2225,6 +2343,8 @@ class TopicBuildManager:
             metadata = topic.metadata
             previous_sources = set(metadata.get("source_timeline_uids", []))
             overlap = len(source_uids & previous_sources) / max(1, len(source_uids | previous_sources))
+            if require_source_overlap and overlap <= 0.0:
+                continue
             stored_vector = metadata.get("embedding", [])
             semantic = self._cosine(target_vector, stored_vector) if stored_vector else 0.0
             title = 1.0 if self._norm(topic.title) == self._norm(synthesis["title"]) else 0.0

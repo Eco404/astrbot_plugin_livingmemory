@@ -231,6 +231,11 @@ export class RecallPage {
           html += '<span>' + (item.selected ? window.t("recall.selected") : window.t("recall.filtered")) + '</span>';
           html += '<span>rel ' + Number(item.relevance_score || 0).toFixed(3) + '</span>';
           html += '<span>score ' + Number(item.final_score || 0).toFixed(3) + '</span>';
+          html += '<span>emb ' + Number(item.embedding_score || 0).toFixed(3) + '</span>';
+          html += '<span>key ' + Number(item.keyword_score || 0).toFixed(3) + '</span>';
+          if (item.rerank_score != null) {
+            html += '<span>rerank ' + Number(item.rerank_score).toFixed(3) + '</span>';
+          }
           html += '<span>coverage ' + Number(item.context_coverage || 0).toFixed(2) + '</span></div>';
         });
         html += '</div></details>';

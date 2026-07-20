@@ -168,7 +168,7 @@ class TopicMemoryConfig(BaseModel):
     recall_top_k: int = Field(default=3, ge=1, le=20)
     recall_candidate_multiplier: int = Field(default=4, ge=1, le=10)
     recall_scan_limit: int = Field(default=2000, ge=100, le=5000)
-    recall_min_relevance: float = Field(default=0.42, ge=0.0, le=1.0)
+    recall_min_relevance: float = Field(default=0.32, ge=0.0, le=1.0)
     recall_relative_floor: float = Field(default=0.70, ge=0.0, le=1.0)
     recall_mmr_lambda: float = Field(default=0.78, ge=0.0, le=1.0)
     recall_use_rerank: bool = True
@@ -201,7 +201,7 @@ class TopicMemoryConfig(BaseModel):
     existing_topic_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     synthesis_batch_size: int = Field(default=12, ge=2, le=50)
     embedding_batch_size: int = Field(default=8, ge=1, le=256)
-    llm_concurrency: int = Field(default=2, ge=1, le=64)
+    llm_concurrency: int = Field(default=1, ge=1, le=64)
     llm_max_retries: int = Field(default=3, ge=1, le=8)
 
 

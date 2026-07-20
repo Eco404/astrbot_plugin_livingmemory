@@ -465,6 +465,83 @@ class TopicMemoryStore:
             ON topic_build_checkpoints(run_uid, stage, updated_at)
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topic_setting_overrides (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                settings_revision INTEGER NOT NULL DEFAULT 1,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+
+    async def get_topic_setting_overrides(self) -> dict[str, Any]:
+        """Return only explicit runtime overrides; defaults never persist here."""
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    "SELECT setting_key, setting_value FROM topic_setting_overrides"
+                )
+            ).fetchall()
+        result: dict[str, Any] = {}
+        for row in rows:
+            try:
+                result[str(row["setting_key"])] = json.loads(row["setting_value"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        return result
+
+    async def update_topic_setting_overrides(
+        self,
+        changes: dict[str, Any],
+        *,
+        reset_keys: list[str] | None = None,
+        reset_all: bool = False,
+        settings_revision: int = 1,
+    ) -> dict[str, Any]:
+        """Atomically write sparse overrides and/or remove selected overrides."""
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                if reset_all:
+                    await db.execute(
+                        "DELETE FROM topic_setting_overrides "
+                        "WHERE setting_key NOT LIKE '__%'"
+                    )
+                elif reset_keys:
+                    placeholders = ",".join("?" * len(reset_keys))
+                    await db.execute(
+                        f"DELETE FROM topic_setting_overrides "
+                        f"WHERE setting_key IN ({placeholders})",
+                        list(reset_keys),
+                    )
+                for key, value in changes.items():
+                    await db.execute(
+                        """
+                        INSERT INTO topic_setting_overrides (
+                            setting_key, setting_value, settings_revision,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(setting_key) DO UPDATE SET
+                            setting_value = excluded.setting_value,
+                            settings_revision = excluded.settings_revision,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            str(key),
+                            self._to_json(value),
+                            max(1, int(settings_revision)),
+                            now,
+                            now,
+                        ),
+                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return await self.get_topic_setting_overrides()
 
     async def save_topic_snapshot(
         self,
@@ -727,6 +804,68 @@ class TopicMemoryStore:
             )
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+    async def find_incremental_topic_scope(
+        self,
+        memory_space_id: str,
+        context_timeline_uids: list[str],
+        seed_timeline_uids: list[str],
+    ) -> dict[str, list[str]]:
+        """Select focused existing Topics safe to reconstruct as one local scope."""
+        context = sorted({str(uid) for uid in context_timeline_uids if str(uid)})
+        seeds = sorted({str(uid) for uid in seed_timeline_uids if str(uid)})
+        if not context:
+            return {"topic_uids": [], "timeline_uids": []}
+        context_json = self._to_json(context)
+        seed_json = self._to_json(seeds)
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    WITH support AS (
+                        SELECT t.topic_uid,
+                               COUNT(*) AS source_count,
+                               SUM(CASE WHEN l.timeline_uid IN
+                                   (SELECT value FROM json_each(?))
+                                   THEN 1 ELSE 0 END) AS context_count,
+                               SUM(CASE WHEN l.timeline_uid IN
+                                   (SELECT value FROM json_each(?))
+                                   THEN 1 ELSE 0 END) AS seed_count
+                        FROM topic_memories t
+                        JOIN topic_timeline_links l ON l.topic_uid = t.topic_uid
+                        WHERE t.memory_space_id = ?
+                          AND t.status = 'active' AND l.status = 'active'
+                        GROUP BY t.topic_uid
+                    )
+                    SELECT topic_uid FROM support
+                    WHERE seed_count > 0
+                       OR (context_count > 0 AND (
+                           source_count <= 4 OR context_count >= 2
+                           OR CAST(context_count AS REAL) / source_count >= 0.25
+                       ))
+                    ORDER BY topic_uid
+                    """,
+                    (context_json, seed_json, memory_space_id),
+                )
+            ).fetchall()
+            topic_uids = [str(row["topic_uid"]) for row in rows]
+            timeline_uids: list[str] = []
+            if topic_uids:
+                placeholders = ",".join("?" * len(topic_uids))
+                source_rows = await (
+                    await db.execute(
+                        f"""
+                        SELECT DISTINCT timeline_uid
+                        FROM topic_timeline_links
+                        WHERE status = 'active'
+                          AND topic_uid IN ({placeholders})
+                        ORDER BY timeline_uid
+                        """,
+                        topic_uids,
+                    )
+                ).fetchall()
+                timeline_uids = [str(row["timeline_uid"]) for row in source_rows]
+        return {"topic_uids": topic_uids, "timeline_uids": timeline_uids}
 
     async def get_topic_provenance(self, topic_uid: str) -> dict[str, Any]:
         async with self._connect() as db:
@@ -1235,7 +1374,12 @@ class TopicMemoryStore:
                     (run_uid,),
                 )
             ).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        result = dict(row)
+        result["config"] = self._from_json(result.get("config"))
+        result["metadata"] = self._from_json(result.get("metadata"))
+        return result
 
     async def discard_maintenance_run(
         self,
@@ -1768,6 +1912,29 @@ class TopicMemoryStore:
                     """,
                     (time.time(), memory_space_id),
                 )
+            await db.commit()
+            return int(cursor.rowcount or 0)
+
+    async def archive_topic_uids_not_in(
+        self,
+        memory_space_id: str,
+        affected_topic_uids: set[str],
+        active_topic_uids: set[str],
+    ) -> int:
+        """Archive only replaced members of an incremental reconstruction scope."""
+        targets = sorted(set(affected_topic_uids) - set(active_topic_uids))
+        if not targets:
+            return 0
+        placeholders = ",".join("?" * len(targets))
+        async with self._connect() as db:
+            cursor = await db.execute(
+                f"""
+                UPDATE topic_memories SET status = 'archived', updated_at = ?
+                WHERE memory_space_id = ? AND status != 'archived'
+                  AND topic_uid IN ({placeholders})
+                """,
+                [time.time(), memory_space_id, *targets],
+            )
             await db.commit()
             return int(cursor.rowcount or 0)
 

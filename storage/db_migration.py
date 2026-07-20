@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.4"
+    CURRENT_VERSION = "9.5"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -41,6 +41,7 @@ class DBMigration:
         "9.2": "Resumable deterministic Topic candidate discovery",
         "9.3": "Automatic source-grounded Topic construction and maintenance",
         "9.4": "Related-subtopic graph and decoupled Topic matching thresholds",
+        "9.5": "Runtime Topic settings and local incremental reconciliation",
     }
 
     def __init__(self, db_path: str):
@@ -309,6 +310,10 @@ class DBMigration:
                 # 从版本9.3升级到版本9.4
                 if current_key <= self.version_key("9.3"):
                     migration_steps.append(self._migrate_v9_3_to_v9_4)
+
+                # 从版本9.4升级到版本9.5
+                if current_key <= self.version_key("9.4"):
+                    migration_steps.append(self._migrate_v9_4_to_v9_5)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1059,6 +1064,21 @@ class DBMigration:
         if progress_callback:
             progress_callback("创建 Topic 相关子话题关系结构", 1, 1)
         logger.info("v9.3 -> v9.4 迁移完成，未自动修改已有 Topic")
+
+    async def _migrate_v9_4_to_v9_5(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ):
+        """Add sparse runtime Topic settings without rewriting Topic data."""
+        logger.info("执行迁移步骤: v9.4 -> v9.5 (Topic runtime settings)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await TopicMemoryStore.create_tables(db)
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建 Topic 运行参数覆盖结构", 1, 1)
+        logger.info("v9.4 -> v9.5 迁移完成，未自动修改已有 Topic")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

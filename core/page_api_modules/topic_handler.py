@@ -133,6 +133,45 @@ class TopicHandler:
             logger.error("[PageAPI] 获取 Topic 列表失败", exc_info=True)
             return self.utils.error(str(exc))
 
+    async def get_settings(self, memory_engine) -> dict[str, Any]:
+        try:
+            payload = await memory_engine.get_topic_runtime_settings()
+            payload["build_active"] = bool(
+                self.has_active_jobs()
+                or memory_engine.topic_build_manager.has_active_builds()
+            )
+            return self.utils.ok(payload)
+        except Exception as exc:
+            logger.error("[PageAPI] 获取 Topic 参数失败", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def update_settings(self, memory_engine) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        changes = payload.get("changes", {})
+        reset_keys = payload.get("reset_keys", [])
+        reset_all = payload.get("reset_all", False)
+        if not isinstance(changes, dict):
+            return self.utils.error("changes 必须是对象")
+        if not isinstance(reset_keys, list):
+            return self.utils.error("reset_keys 必须是数组")
+        if not isinstance(reset_all, bool):
+            return self.utils.error("reset_all 必须是布尔值")
+        if self.has_active_jobs() or memory_engine.topic_build_manager.has_active_builds():
+            return self.utils.error("Topic 构建正在运行，暂时不能修改参数")
+        try:
+            result = await memory_engine.update_topic_runtime_settings(
+                changes,
+                reset_keys=reset_keys,
+                reset_all=reset_all,
+            )
+            result["build_active"] = False
+            return self.utils.ok(result)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+        except Exception as exc:
+            logger.error("[PageAPI] 保存 Topic 参数失败", exc_info=True)
+            return self.utils.error(str(exc))
+
     async def get_topic_detail(self, memory_engine) -> dict[str, Any]:
         topic_uid = self.utils.optional_text(request.args.get("topic_uid"))
         if not topic_uid:
