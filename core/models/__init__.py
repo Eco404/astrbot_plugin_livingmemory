@@ -11,6 +11,12 @@ from .conversation_models import (
     serialize_to_json,
 )
 from .graph_models import ExtractedGraph, GraphEdge, GraphEntry, GraphNode
+from .identity_profile import (
+    AuthoritativeIdentityProfile,
+    AuthoritativeIdentityStore,
+    identity_prompt_payload,
+    parse_authoritative_identity_profiles,
+)
 from .memory_identity import MemorySpace, resolve_memory_space
 from .topic_memory import (
     TopicAtomSource,
@@ -24,6 +30,7 @@ from .topic_memory import (
     TopicTimelineLink,
     TimelineTopicCandidate,
     TopicCandidateGroup,
+    TopicFragmentDraft,
 )
 
 __all__ = [
@@ -36,6 +43,10 @@ __all__ = [
     "GraphEdge",
     "GraphEntry",
     "ExtractedGraph",
+    "AuthoritativeIdentityProfile",
+    "AuthoritativeIdentityStore",
+    "identity_prompt_payload",
+    "parse_authoritative_identity_profiles",
     "MemorySpace",
     "resolve_memory_space",
     "TopicAtomSource",
@@ -49,4 +60,5 @@ __all__ = [
     "TopicTimelineLink",
     "TimelineTopicCandidate",
     "TopicCandidateGroup",
+    "TopicFragmentDraft",
 ]

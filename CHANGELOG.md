@@ -7,6 +7,32 @@
 
 ## [Unreleased]
 
+### 新增
+- **自动 Topic 记忆层（数据库 v9.3，实验性）**：LLM 将宽时间窗口拆为可溯源片段，再通过 Embedding 与可选 Rerank 跨时间归并；Topic 拥有独立原子、稳定 UID/revision，以及 `Topic → Timeline → 事实指纹` 来源链。
+- **全量与增量维护**：首次增量任务自动转为全量扫描；后续新增 Timeline 可增量合并到已有 Topic，编辑或删除 Timeline 会将依赖 Topic 标记为 stale 并触发受影响记忆空间重建。
+- **Topic WebUI**：新增只读 Topic 列表、原子与 Timeline 来源查看、全量/增量手动构建及实时进度显示。
+- **可选 Rerank Provider**：新增 `provider_settings.rerank_provider_id`，未配置时保持纯 Embedding 匹配。
+- **Cloudflare Workers AI Rerank**：AstrBot 尚未支持 Cloudflare Rerank Provider 时，插件可直接调用 `@cf/baai/bge-reranker-base`；支持 sigmoid 分数映射、429/5xx 重试、超时控制和失败后回退 Embedding。
+- **模型测试 WebUI**：以独立卡片展示插件运行时实际使用的 LLM、Embedding、Rerank，标明显式配置、AstrBot 默认回退或 Cloudflare 内置来源，并可分别发起连接测试。
+- **WebUI 权威人物资料与身份提示词**：新增“人物资料”页面，以平台稳定账号 ID 为主键管理姓名、性别、代词和备注，独立保存到插件数据目录并在保存后立即更新 Timeline 与 Topic 生成链路；插件配置中不增加人物资料字段。提示词禁止从昵称、语气、兴趣或人格设定推断参与者身份，未知时改为重复昵称。本阶段不进行生成后的确定性身份校验。
+
+### 兼容性
+- Topic 功能默认关闭，v9→v9.3 迁移只创建结构，不调用模型、不生成 Topic，也不改变现有 Timeline/图谱/召回逻辑。
+
+### 修复
+- **内置 Cloudflare Rerank 启动期误判未启用**：Rerank 初始化从 LLM Provider 等待流程中解耦，避免静默等待聊天模型时提前返回并跳过 Cloudflare 客户端；`provider_settings.rerank_provider_id` 留空时内置 Cloudflare 仍可独立启用，二者同时配置时内置 Cloudflare 优先。修复 `topic_memory.llm_concurrency=30` 超出隐藏校验上限后导致整份插件配置回退默认值、连带关闭 Cloudflare 的问题，并将允许范围明确为 1-64。模型测试页会显示安全的初始化错误，不再将配置异常笼统标为“未启用”。
+- **Topic 全量构建被无效原子指纹整体中断**：LLM 返回未知或被改写的 `source_atom_fingerprints` 时，安全剔除无效引用；事实内容与来源原子完全一致时确定性恢复正确指纹，否则保留 Timeline 来源并降级为事实指纹溯源。未知 Timeline 和越界来源不会被采纳；无法局部修复时整批回退为输入 Timeline 的确定性片段。
+- **Topic 构建进度与重复启动**：新增覆盖六个处理阶段的总体进度；候选扫描完成不再显示误导性的 `running · completed`，最终异常会明确更新为 `failed · failed`。活动任务可在页面刷新后恢复轮询，构建期间按钮自动禁用，后端也会阻止重复启动。
+- **Topic 合成遗漏来源导致全量失败**：模型未让原子覆盖全部已知片段时，使用输入中的事实原子确定性补齐并记录修复审计；未知片段或事实引用会被剔除，并由可验证输入补回。宽候选组先按 `topic_memory.fragment_extraction_batch_size` 提取，超大语义组件再按 `topic_memory.synthesis_batch_size` 分层合成，保持单一 Topic 与原始溯源，避免一次请求携带过大的上下文。
+- **长任务详细进度**：Topic 页面在 LLM 运行期间显示当前候选组或语义组件、组件/批次片段数、分层级别、调用序号、总耗时以及距上次进度时间，便于区分长请求与任务停滞。
+- **Topic LLM 并发控制**：新增 `topic_memory.llm_concurrency`（默认 2）；候选组、组内片段提取批次及同一合成层级均可并发调用 Provider，并由共享信号量限制全局并发。候选组进度按实际完成数聚合，额外显示活跃组数量；配置为 1 可恢复串行模式。
+- **Topic 构建断点续建**：失败、取消或插件重启中断的任务可在 WebUI 使用原 `run_uid` 继续；候选组片段、Embedding、片段匹配、每个 Topic 组件合成及已完成物化均持久化检查点。输入、Prompt、Provider 或模型变化时，对应检查点自动失效并安全重算。
+- **可恢复的 LLM 结构错误**：合成顶层遗漏/多写 `fragment_uids`、原子引用未知片段或事实、缺少标题摘要、无效原子数组，以及片段提取返回无效 JSON/越界来源时不再直接中断。系统只保留输入中可验证的来源，并以原 Timeline 片段或事实原子确定性补齐；Provider 请求最终失败和数据库错误仍会终止任务并保留断点。
+- **Topic 提示词与溯源协议**：片段提取和 Topic 合成改用 `T1.A1`、`F1` 等批次内短引用，LLM 不再抄写真实 UUID、事实 UID、原子指纹或可由事实推导的片段范围；后端确定性恢复完整来源链。合成输入会剔除嵌套溯源元数据，并在 JSON 或引用校验失败时携带具体错误自动校正一次，减少 Token、超时和长标识抄写错误。
+- **Topic 列表紧凑展示**：列表仅显示标题，整行支持鼠标点击及键盘 Enter/空格打开大尺寸来源详情浮窗；浮窗支持点击外部、右上角关闭按钮或 Escape 关闭。Topic 主页面贴合可视区域，列表内容改为内部滚动，避免详情拉长整个页面。
+- **Topic 重复全量构建确认**：当前记忆空间已有 Topic 时，再次点击“全量构建”会显示二次确认，可选择保留现有 Topic 并更新，或先清空该空间的 Topic、原子、来源、索引及构建断点后从零构建；首次构建仍可直接启动。Topic 概览同步改为紧凑横向布局，为列表释放更多可视高度。
+- **Topic 跨话题过度归并与来源空链**：Rerank 候选改为按 Embedding 排序并要求双向确认，组件聚类增加最差跨成员相似度与平均凝聚度约束，避免单链接传递将大量异质片段合成全局生活摘要；片段与最终 Topic 强制保证每条 Timeline 至少支撑一个事实原子，原子指纹未覆盖的来源会确定性补充事实指纹。匹配算法版本纳入断点哈希，旧聚类检查点不会被误复用。
+
 ## [2.3.6] - 2026-06-28
 
 ### 修复

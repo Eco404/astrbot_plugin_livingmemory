@@ -68,6 +68,107 @@ def test_initialize_providers_with_fallback(monkeypatch, mock_context, tmp_path)
     assert init.llm_provider is llm
 
 
+def test_cloudflare_rerank_overrides_astrbot_reranker(
+    monkeypatch, mock_context, tmp_path
+):
+    class DummyEmbeddingProvider:
+        pass
+
+    class DummyProvider:
+        pass
+
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.plugin_initializer.EmbeddingProvider",
+        DummyEmbeddingProvider,
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.plugin_initializer.Provider",
+        DummyProvider,
+    )
+    emb = DummyEmbeddingProvider()
+    llm = DummyProvider()
+    mock_context.get_all_embedding_providers.return_value = [emb]
+    mock_context.get_using_provider.return_value = llm
+    config = ConfigManager(
+        {
+            "cloudflare_rerank": {
+                "enabled": True,
+                "account_id": "account",
+                "api_token": "token",
+            }
+        }
+    )
+
+    init = PluginInitializer(mock_context, config, str(tmp_path))
+    init._initialize_providers(silent=True)
+
+    assert init.rerank_provider is not None
+    assert init.rerank_provider.provider_config["id"] == (
+        "cloudflare_workers_ai_rerank"
+    )
+    assert init.rerank_provider.model == "@cf/baai/bge-reranker-base"
+    assert init.rerank_initialization_error is None
+
+
+def test_cloudflare_rerank_initializes_while_llm_provider_is_still_unavailable(
+    mock_context, tmp_path
+):
+    mock_context.get_all_providers.return_value = []
+    mock_context.get_all_embedding_providers.return_value = []
+    config = ConfigManager(
+        {
+            "provider_settings": {"rerank_provider_id": ""},
+            "cloudflare_rerank": {
+                "enabled": True,
+                "account_id": "account",
+                "api_token": "token",
+            },
+        }
+    )
+    init = PluginInitializer(mock_context, config, str(tmp_path))
+
+    init._initialize_providers(silent=True)
+
+    assert init.llm_provider is None
+    assert init.rerank_provider is not None
+    assert init.rerank_provider.provider_config["id"] == (
+        "cloudflare_workers_ai_rerank"
+    )
+
+
+def test_builtin_cloudflare_rerank_has_priority_over_astrbot_rerank_id(
+    monkeypatch, mock_context, tmp_path
+):
+    class DummyAstrBotReranker:
+        async def rerank(self, *_args, **_kwargs):
+            return []
+
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.plugin_initializer.RerankProvider",
+        DummyAstrBotReranker,
+    )
+    astrbot_reranker = DummyAstrBotReranker()
+    mock_context.get_provider_by_id.return_value = astrbot_reranker
+    config = ConfigManager(
+        {
+            "provider_settings": {"rerank_provider_id": "astrbot-reranker"},
+            "cloudflare_rerank": {
+                "enabled": True,
+                "account_id": "account",
+                "api_token": "token",
+            },
+        }
+    )
+    init = PluginInitializer(mock_context, config, str(tmp_path))
+
+    init._initialize_rerank_provider(silent=False)
+
+    assert init.rerank_provider is not astrbot_reranker
+    assert init.rerank_provider.provider_config["id"] == (
+        "cloudflare_workers_ai_rerank"
+    )
+
+
 def test_check_faiss_runtime_raises_actionable_error(monkeypatch, initializer):
     result = subprocess.CompletedProcess(
         args=[],
@@ -155,12 +256,15 @@ async def test_complete_initialization_wires_graph_db_and_engine_config(
 
     class FakeMemoryEngine:
         def __init__(
-            self, db_path, faiss_db, graph_vector_db, llm_provider=None, config=None
+            self, db_path, faiss_db, graph_vector_db, llm_provider=None,
+            rerank_provider=None, config=None, identity_profile_store=None
         ):
             self.db_path = db_path
             self.faiss_db = faiss_db
             self.graph_vector_db = graph_vector_db
             self.llm_provider = llm_provider
+            self.rerank_provider = rerank_provider
+            self.identity_profile_store = identity_profile_store
             self.config = config or {}
             self.text_processor = Mock(async_init=AsyncMock())
 
@@ -186,6 +290,7 @@ async def test_complete_initialization_wires_graph_db_and_engine_config(
             self.context = context
             self.llm_provider = llm_provider
             self.config = kwargs.get("config", {})
+            self.identity_profile_store = kwargs.get("identity_profile_store")
 
     class FakeIndexValidator:
         def __init__(self, db_path, db):
@@ -288,6 +393,11 @@ async def test_complete_initialization_wires_graph_db_and_engine_config(
     assert init.memory_engine.config["atom_maintenance_interval_hours"] == 12.0
     assert init.memory_engine.config["atom_forget_delay_days"] == 3.0
     assert init.memory_processor.config.get("atom_enabled") is False
+    assert init.identity_profile_store is init.memory_engine.identity_profile_store
+    assert init.identity_profile_store is init.memory_processor.identity_profile_store
+    assert init.identity_profile_store.path == (
+        tmp_path / "authoritative_identities.json"
+    )
 
 
 @pytest.mark.asyncio
@@ -318,12 +428,14 @@ async def test_complete_initialization_skips_graph_db_when_disabled(
 
     class FakeMemoryEngine:
         def __init__(
-            self, db_path, faiss_db, graph_vector_db, llm_provider=None, config=None
+            self, db_path, faiss_db, graph_vector_db, llm_provider=None,
+            rerank_provider=None, config=None, identity_profile_store=None
         ):
             self.db_path = db_path
             self.faiss_db = faiss_db
             self.graph_vector_db = graph_vector_db
             self.llm_provider = llm_provider
+            self.rerank_provider = rerank_provider
             self.config = config or {}
             self.text_processor = Mock(async_init=AsyncMock())
 

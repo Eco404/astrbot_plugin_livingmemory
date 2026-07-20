@@ -27,6 +27,168 @@
                 "type": "string",
                 "_special": "select_provider",
                 "default": ""
+            },
+            "rerank_provider_id": {
+                "description": "Rerank 模型 ID（可选）",
+                "hint": "用于选择 AstrBot 已注册的 Rerank Provider。启用下方内置 Cloudflare Rerank 时应保持留空，内置模型不依赖此字段；两者都未配置时仅使用 Embedding 相似度。",
+                "type": "string",
+                "default": ""
+            }
+        }
+    },
+    "topic_memory": {
+        "description": "Topic 记忆（实验性）",
+        "hint": "在原有 Timeline 记忆之上自动构建按话题归并、可精确追溯的只读记忆层。当前版本尚未改变正式召回逻辑。",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用 Topic 记忆构建",
+                "hint": "开启后允许手动构建，并可在 Timeline 写入后自动维护 Topic。首次启用建议先在 WebUI 执行一次全量构建。",
+                "type": "bool",
+                "default": false
+            },
+            "auto_maintenance": {
+                "description": "自动维护 Topic",
+                "hint": "新增 Timeline 后增量维护；编辑或删除 Timeline 后全量重建其记忆空间。",
+                "type": "bool",
+                "default": true
+            },
+            "auto_debounce_seconds": {
+                "description": "自动维护合并等待（秒）",
+                "hint": "连续写入会合并为一次维护任务，避免频繁调用模型。",
+                "type": "float",
+                "default": 60.0
+            },
+            "time_gap_hours": {
+                "description": "候选时间簇间隔（小时）",
+                "hint": "相邻 Timeline 超过此间隔时先划分到不同时间簇，后续仍可按语义跨时间归并。",
+                "type": "float",
+                "default": 6.0
+            },
+            "candidate_batch_size": {
+                "description": "候选扫描批量",
+                "type": "int",
+                "default": 100
+            },
+            "fragment_extraction_batch_size": {
+                "description": "Topic 片段提取批量",
+                "hint": "宽候选组中单次交给 LLM 的 Timeline 上限；跨批产生的片段仍会通过 Embedding 与 Rerank 归并。",
+                "type": "int",
+                "default": 12
+            },
+            "candidate_similarity_threshold": {
+                "description": "候选窗口相似度阈值",
+                "type": "float",
+                "default": 0.52
+            },
+            "fragment_similarity_threshold": {
+                "description": "Topic 片段归并阈值",
+                "hint": "Embedding 相似度达到该值的跨时间片段会归并为同一 Topic。",
+                "type": "float",
+                "default": 0.78
+            },
+            "rerank_threshold": {
+                "description": "Rerank 归并阈值",
+                "type": "float",
+                "default": 0.55
+            },
+            "rerank_top_n": {
+                "description": "Rerank 候选数量",
+                "type": "int",
+                "default": 5
+            },
+            "rerank_failure_fallback": {
+                "description": "Rerank 失败时回退 Embedding",
+                "hint": "建议开启，避免 Cloudflare 或 AstrBot Rerank 临时不可用时中断整个 Topic 构建。",
+                "type": "bool",
+                "default": true
+            },
+            "existing_topic_match_threshold": {
+                "description": "已有 Topic 延续阈值",
+                "hint": "达到该综合分数时保留原 Topic UID 并递增 revision。",
+                "type": "float",
+                "default": 0.55
+            },
+            "synthesis_batch_size": {
+                "description": "Topic 分层合成批量",
+                "hint": "单次 LLM 最多处理的片段数。超出时自动分批并继续归并为同一个 Topic，避免超大上下文和来源遗漏。",
+                "type": "int",
+                "default": 12
+            },
+            "embedding_batch_size": {
+                "description": "片段向量批量",
+                "type": "int",
+                "default": 8
+            },
+            "llm_concurrency": {
+                "description": "Topic LLM 并发数",
+                "hint": "候选组提取、组内分批与同层 Topic 合成共享的最大 Provider 请求数，允许 1-64。1 为串行；并发越高速度通常越快，但更容易触发 Provider/API 限流。",
+                "type": "int",
+                "default": 1,
+                "slider": {"min": 1, "max": 64, "step": 1}
+            },
+            "llm_max_retries": {
+                "description": "Topic 模型调用重试次数",
+                "type": "int",
+                "default": 3
+            }
+        }
+    },
+    "cloudflare_rerank": {
+        "description": "Cloudflare Rerank 模型",
+        "hint": "AstrBot 尚未提供 Cloudflare Rerank Provider 时，可由插件直接调用 Workers AI。启用后优先于 AstrBot 的 rerank_provider_id，且不需要填写上方的 Rerank 模型 ID。",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用插件内置 Cloudflare Rerank",
+                "type": "bool",
+                "default": false
+            },
+            "account_id": {
+                "description": "Cloudflare Account ID",
+                "hint": "Cloudflare 控制台中的账户 ID。",
+                "type": "string",
+                "default": ""
+            },
+            "api_token": {
+                "description": "Cloudflare API Token",
+                "hint": "需要 Workers AI Read 或 Workers AI Write 权限。留空时读取环境变量 CLOUDFLARE_AUTH_TOKEN。请保护好插件配置文件。",
+                "type": "string",
+                "default": ""
+            },
+            "model": {
+                "description": "Rerank 模型",
+                "hint": "Cloudflare Workers AI 模型路径。",
+                "type": "string",
+                "default": "@cf/baai/bge-reranker-base"
+            },
+            "base_url": {
+                "description": "Cloudflare API 地址",
+                "hint": "通常无需修改；保留此项以支持兼容代理或未来接口迁移。",
+                "type": "string",
+                "default": "https://api.cloudflare.com/client/v4"
+            },
+            "timeout_seconds": {
+                "description": "请求超时（秒）",
+                "type": "float",
+                "default": 30.0
+            },
+            "max_retries": {
+                "description": "临时错误重试次数",
+                "hint": "仅网络错误、HTTP 429 和 5xx 自动重试。",
+                "type": "int",
+                "default": 2
+            },
+            "retry_base_delay": {
+                "description": "重试基础等待（秒）",
+                "type": "float",
+                "default": 1.0
+            },
+            "apply_sigmoid": {
+                "description": "对模型分数应用 Sigmoid",
+                "hint": "将 bge-reranker 的原始分数映射到 0-1，以匹配 Topic 阈值。建议开启。",
+                "type": "bool",
+                "default": true
             }
         }
     },

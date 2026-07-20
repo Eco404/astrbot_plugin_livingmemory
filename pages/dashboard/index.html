@@ -27,11 +27,23 @@
             </svg>
             <span data-i18n="nav.memory">Memories</span>
           </button>
+          <button class="nav-item" data-page="topic">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h13"/><circle cx="19" cy="12" r="2"/></svg>
+            <span data-i18n="nav.topic">Topic 记忆</span>
+          </button>
           <button class="nav-item" data-page="recall">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
             </svg>
             <span data-i18n="nav.recall">Recall Test</span>
+          </button>
+          <button class="nav-item" data-page="models">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6l1 3h3a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3l1-3Z"/><circle cx="9" cy="12" r="2"/><circle cx="15" cy="12" r="2"/><path d="M8 17h8"/></svg>
+            <span data-i18n="nav.models">模型测试</span>
+          </button>
+          <button class="nav-item" data-page="identities">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/><path d="m17 11 2 2 3-3"/></svg>
+            <span data-i18n="nav.identities">人物资料</span>
           </button>
           <button class="nav-item" data-page="system">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -185,6 +197,42 @@
           </div>
         </section>
 
+        <!-- Page: Topic Memory -->
+        <section class="page" id="page-topic">
+          <header class="page-header">
+            <span class="page-title" data-i18n="nav.topic">Topic 记忆</span>
+            <div class="page-actions">
+              <select id="topic-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
+              <button class="btn btn-secondary btn-sm" id="topic-refresh" data-i18n="common.refresh">刷新</button>
+              <button class="btn btn-primary btn-sm" id="topic-build-full" data-i18n="topic.fullBuild" disabled>全量构建</button>
+              <button class="btn btn-secondary btn-sm" id="topic-build-incremental" data-i18n="topic.incremental" disabled>增量维护（24h）</button>
+            </div>
+          </header>
+          <div class="page-body topic-page-body">
+            <div class="topic-overview-compact">
+              <div class="topic-warning" data-i18n="topic.warning">Topic 记忆由 Timeline 自动派生，当前仅供检查，不允许手动编辑；本版本尚未改变正式记忆召回。</div>
+              <div class="topic-overview-meta">
+                <div id="topic-flags" class="topic-flags text-secondary"></div>
+                <div class="topic-stats">
+                  <div class="topic-stat"><span data-i18n="topic.total">Topic 总数</span><strong id="topic-total">0</strong></div>
+                  <div class="topic-stat"><span data-i18n="topic.active">活跃 Topic</span><strong id="topic-active">0</strong></div>
+                  <div class="topic-stat"><span data-i18n="topic.atoms">独立原子</span><strong id="topic-atoms">0</strong></div>
+                  <div class="topic-stat"><span data-i18n="topic.links">Timeline 索引</span><strong id="topic-links">0</strong></div>
+                </div>
+              </div>
+            </div>
+            <div id="topic-progress" class="system-panel hidden mb-4"></div>
+            <div class="table-container topic-table-container">
+              <div class="table-scroll topic-table-scroll">
+                <table class="data-table">
+                  <thead><tr><th data-i18n="topic.uid">Topic UID</th><th data-i18n="topic.title">标题</th><th data-i18n="topic.status">状态</th><th data-i18n="topic.importance">重要性</th><th data-i18n="topic.support">时间簇 / Timeline</th><th data-i18n="topic.revision">版本</th></tr></thead>
+                  <tbody id="topics-body"><tr><td colspan="6" class="table-empty" data-i18n="topic.chooseSpace">请选择记忆空间</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <!-- Page: Recall Test -->
         <section class="page" id="page-recall">
           <header class="page-header">
@@ -213,6 +261,48 @@
               <span class="text-tertiary" id="recall-time-text"></span>
             </div>
             <div id="recall-results"></div>
+          </div>
+        </section>
+
+        <!-- Page: Models -->
+        <section class="page" id="page-models">
+          <header class="page-header">
+            <span class="page-title" data-i18n="nav.models">模型测试</span>
+            <div class="page-actions">
+              <button class="btn btn-secondary btn-sm" id="model-refresh" data-i18n="common.refresh">刷新</button>
+            </div>
+          </header>
+          <div class="page-body">
+            <div class="model-page-intro">
+              <div class="model-page-intro-title" data-i18n="models.introTitle">LivingMemory 当前模型</div>
+              <p data-i18n="models.intro">这里展示插件运行时实际使用的模型。测试连接会发起一次真实模型请求，可能产生少量用量和费用。</p>
+            </div>
+            <div class="model-cards" id="model-cards">
+              <div class="model-page-state" data-i18n="common.loading">加载中...</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Page: Authoritative identities -->
+        <section class="page" id="page-identities">
+          <header class="page-header">
+            <span class="page-title" data-i18n="nav.identities">人物资料</span>
+            <div class="page-actions">
+              <span class="identity-dirty hidden" id="identity-dirty" data-i18n="identity.unsaved">有未保存的修改</span>
+              <button class="btn btn-secondary btn-sm" id="identity-refresh" data-i18n="common.refresh">刷新</button>
+              <button class="btn btn-secondary btn-sm" id="identity-add" data-i18n="identity.add">添加人物</button>
+              <button class="btn btn-primary btn-sm" id="identity-save" data-i18n="common.save" disabled>保存</button>
+            </div>
+          </header>
+          <div class="page-body identity-page-body">
+            <div class="model-page-intro">
+              <div class="model-page-intro-title" data-i18n="identity.introTitle">权威人物资料</div>
+              <p data-i18n="identity.intro">使用平台与稳定账号 ID 约束 Timeline 和 Topic 生成中的人物身份与代词。保存后立即生效。</p>
+            </div>
+            <div class="identity-warning" data-i18n="identity.warning">资料只用于校正人物指代，不会自动新增为记忆事实。Topic 构建期间不能保存，以免同一任务使用两版资料。</div>
+            <div class="identity-list" id="identity-list">
+              <div class="identity-state" data-i18n="common.loading">加载中...</div>
+            </div>
           </div>
         </section>
 
@@ -267,6 +357,48 @@
       </div>
       <div class="peek-body" id="peek-body"></div>
     </aside>
+
+    <!-- Topic Detail Modal -->
+    <div class="modal-overlay topic-detail-overlay" id="topic-detail-overlay" aria-hidden="true">
+      <div class="modal topic-detail-modal" role="dialog" aria-modal="true" aria-labelledby="topic-detail-title">
+        <div class="modal-header">
+          <div class="modal-title topic-detail-title" id="topic-detail-title">Topic</div>
+          <button class="modal-close topic-detail-close" id="topic-detail-close" type="button" data-i18n-aria="common.close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body topic-detail-body" id="topic-detail-body"></div>
+      </div>
+    </div>
+
+    <!-- Full Topic Build Confirmation -->
+    <div class="modal-overlay" id="topic-full-build-confirm-overlay" aria-hidden="true">
+      <div class="modal topic-full-build-confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="topic-full-build-confirm-title" aria-describedby="topic-full-build-confirm-message">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-full-build-confirm-title" data-i18n="topic.fullBuildConfirmTitle">确认重新全量构建</div>
+          <button class="modal-close" id="topic-full-build-confirm-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="topic-full-build-warning" data-i18n="topic.fullBuildConfirmWarning">这是高耗时操作，会重新调用 LLM、Embedding 和 Rerank。</div>
+          <p class="topic-full-build-message" id="topic-full-build-confirm-message"></p>
+          <div class="topic-full-build-choices" role="radiogroup" data-i18n-aria="topic.fullBuildModeLabel" aria-label="Full build mode">
+            <label class="topic-full-build-choice">
+              <input type="radio" name="topic-full-build-mode" value="preserve" checked>
+              <span><strong data-i18n="topic.fullBuildPreserveTitle">保留现有 Topic 后重新构建</strong><small data-i18n="topic.fullBuildPreserveDetail">匹配到的 Topic 保留 ID 并更新版本；新主题会新建，本轮未生成的旧 Topic 会归档。</small></span>
+            </label>
+            <label class="topic-full-build-choice topic-full-build-choice-danger">
+              <input type="radio" name="topic-full-build-mode" value="clear">
+              <span><strong data-i18n="topic.fullBuildClearTitle">清空后全量构建</strong><small data-i18n="topic.fullBuildClearDetail">先永久删除该空间的全部 Topic、原子、来源、索引及旧构建断点，再像首次使用一样重新构建。</small></span>
+            </label>
+          </div>
+          <div class="topic-full-build-reset-risk hidden" id="topic-full-build-reset-risk" data-i18n="topic.fullBuildClearRisk">清空不可撤销；如果随后构建失败，旧 Topic 不会自动恢复。</div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="topic-full-build-confirm-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-danger" id="topic-full-build-confirm-submit" type="button" data-i18n="topic.fullBuildConfirmSubmit">仍然全量构建</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Layered Session Picker -->
     <div class="modal-overlay" id="session-picker-overlay">

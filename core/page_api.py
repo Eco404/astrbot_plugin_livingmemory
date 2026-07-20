@@ -14,11 +14,14 @@ from typing import Any
 from .page_api_modules import (
     BackupHandler,
     GraphHandler,
+    IdentityHandler,
     MemoryHandler,
+    ModelHandler,
     PageApiUtils,
     RecallHandler,
     SessionHandler,
     StatsHandler,
+    TopicHandler,
 )
 
 PLUGIN_NAME = "astrbot_plugin_livingmemory"
@@ -37,9 +40,12 @@ class PluginPageApi:
         # 初始化各个处理器
         self.stats_handler = StatsHandler(self.utils)
         self.memory_handler = MemoryHandler(self.utils)
+        self.model_handler = ModelHandler(self.utils)
         self.recall_handler = RecallHandler(self.utils)
         self.session_handler = SessionHandler(self.utils)
         self.graph_handler = GraphHandler(self.utils)
+        self.identity_handler = IdentityHandler(self.utils)
+        self.topic_handler = TopicHandler(self.utils)
 
         # BackupHandler 需要 data_dir，延迟初始化
         self._backup_handler = None
@@ -140,6 +146,60 @@ class PluginPageApi:
             self.list_backups,
             ["GET"],
             "LivingMemory Page backup list",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/overview",
+            self.get_topic_overview,
+            ["GET"],
+            "LivingMemory Page Topic overview",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics",
+            self.list_topics,
+            ["GET"],
+            "LivingMemory Page Topic list",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/detail",
+            self.get_topic_detail,
+            ["GET"],
+            "LivingMemory Page Topic detail",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/build/start",
+            self.start_topic_build,
+            ["POST"],
+            "LivingMemory Page start Topic build",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/build/progress",
+            self.get_topic_build_progress,
+            ["GET"],
+            "LivingMemory Page Topic build progress",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/models",
+            self.list_models,
+            ["GET"],
+            "LivingMemory Page model information",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/models/test",
+            self.test_model_connection,
+            ["POST"],
+            "LivingMemory Page model connection test",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/identities",
+            self.list_identity_profiles,
+            ["GET"],
+            "LivingMemory Page authoritative identity profiles",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/identities/save",
+            self.save_identity_profiles,
+            ["POST"],
+            "LivingMemory Page save authoritative identity profiles",
         )
 
     # ==================== 路由处理方法 ====================
@@ -248,6 +308,69 @@ class PluginPageApi:
         """列出所有版本备份及其元数据"""
         return await self.backup_handler.list_backups()
 
+    async def get_topic_overview(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.get_overview(ready["memory_engine"])
+
+    async def list_topics(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.list_topics(ready["memory_engine"])
+
+    async def get_topic_detail(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.get_topic_detail(ready["memory_engine"])
+
+    async def start_topic_build(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.start_build(ready["memory_engine"])
+
+    async def get_topic_build_progress(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.get_build_progress()
+
+    async def list_models(self):
+        """列出插件运行时实际使用的模型，包括默认回退来源。"""
+        return await self.model_handler.list_models(self.plugin.initializer)
+
+    async def test_model_connection(self):
+        """测试指定模型角色当前解析到的 Provider。"""
+        return await self.model_handler.test_connection(self.plugin.initializer)
+
+    async def list_identity_profiles(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        store = ready.get("identity_profile_store")
+        if store is None:
+            return self.utils.error("人物资料存储尚未初始化")
+        return await self.identity_handler.list_profiles(store)
+
+    async def save_identity_profiles(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        store = ready.get("identity_profile_store")
+        if store is None:
+            return self.utils.error("人物资料存储尚未初始化")
+        manager = ready["memory_engine"].topic_build_manager
+        topic_build_active = bool(
+            self.topic_handler.has_active_jobs() or manager.has_active_builds()
+        )
+        return await self.identity_handler.save_profiles(
+            store,
+            topic_build_active=topic_build_active,
+        )
+
     # ==================== 辅助方法 ====================
 
     async def _ensure_plugin_ready(self) -> tuple[dict[str, Any] | None, dict | None]:
@@ -274,4 +397,7 @@ class PluginPageApi:
                 self.plugin.initializer, "memory_processor", None
             ),
             "index_validator": self.plugin.initializer.index_validator,
+            "identity_profile_store": getattr(
+                self.plugin.initializer, "identity_profile_store", None
+            ),
         }, None

@@ -18,6 +18,9 @@ from astrbot_plugin_livingmemory.core.page_api import (
     PLUGIN_NAME,
     PluginPageApi,
 )
+from astrbot_plugin_livingmemory.core.models.identity_profile import (
+    AuthoritativeIdentityStore,
+)
 
 # ---------------------------------------------------------------------------
 # Fake / stub helpers
@@ -80,6 +83,12 @@ class FakeInitializer:
         self.conversation_manager = None
         self.memory_processor = SimpleNamespace()
         self.index_validator = None
+        self.config_manager = MagicMock()
+        self.config_manager.get.side_effect = lambda _key, default=None: default
+        self.llm_provider = None
+        self.embedding_provider = None
+        self.rerank_provider = None
+        self.identity_profile_store = AuthoritativeIdentityStore()
         self.data_dir = "/tmp/test_plugin"
 
 
@@ -1639,7 +1648,7 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 14
+        assert len(plugin._api_routes) == 23
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
@@ -1655,6 +1664,15 @@ class TestRouteRegistration:
         assert f"{prefix}/graph/overview" in paths
         assert f"{prefix}/graph/query" in paths
         assert f"{prefix}/backups" in paths
+        assert f"{prefix}/topics/overview" in paths
+        assert f"{prefix}/topics" in paths
+        assert f"{prefix}/topics/detail" in paths
+        assert f"{prefix}/topics/build/start" in paths
+        assert f"{prefix}/topics/build/progress" in paths
+        assert f"{prefix}/models" in paths
+        assert f"{prefix}/models/test" in paths
+        assert f"{prefix}/identities" in paths
+        assert f"{prefix}/identities/save" in paths
 
     def test_route_prefix_contains_plugin_name(self):
         assert PLUGIN_NAME in PAGE_API_PREFIX

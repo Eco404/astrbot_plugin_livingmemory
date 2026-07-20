@@ -41,6 +41,7 @@
 - **安全分批索引重建**: 以小批量原子方式重建大型索引，防止内存溢出和损坏；失败时自动回滚
 - **版本备份**: 插件版本更新时自动备份所有数据文件到版本标记目录，便于数据恢复
 - **WebUI 管理**: 可视化记忆管理界面，支持三语（中/英/俄）和深色模式
+- **实验性 Topic 记忆**: 在原 Timeline 层之上构建可溯源、只读的主题记忆，支持全量/增量维护和可选 Rerank；当前阶段不参与正式召回。
 
 ---
 
@@ -57,6 +58,25 @@
 **必需配置**:
 - `embedding_provider_id`: 向量嵌入模型 ID（留空使用默认）
 - `llm_provider_id`: 大语言模型 ID（留空使用默认）
+- `rerank_provider_id`: 可选的 Rerank 模型 ID，用于复核跨时间 Topic 片段是否属于同一话题
+
+如果 AstrBot 暂无可用 Rerank Provider，可开启 `cloudflare_rerank.enabled`，填写 Cloudflare `account_id` 与 `api_token`（或设置环境变量 `CLOUDFLARE_AUTH_TOKEN`）。默认模型为 `@cf/baai/bge-reranker-base`；插件会用 sigmoid 将原始分数映射到 0-1，临时调用失败时回退到 Embedding 匹配。
+
+**权威人物资料**:
+- 在插件 WebUI 的“人物资料”页面管理已知参与者的稳定身份事实，不占用 AstrBot 插件配置。这些资料保存在插件数据目录的 `authoritative_identities.json`，会注入 Timeline 总结和 Topic 片段提取/合成提示词。
+- `user_id` 必填并应使用平台稳定账号 ID；`platform` 用于区分平台，`display_name` 和 `aliases` 只用于识别/展示。可选字段还有 `gender`、`pronouns` 和 `notes`。
+- 例如空雨可填写平台 `qq`、稳定账号 ID `1141337347`、显示名 `空雨`、性别 `男性`、代词 `他, 他的`。
+- 保存后对新生成的 Timeline 和 Topic 立即生效，无需重启插件。Topic 构建运行期间暂时禁止保存，避免同一构建任务混用两版资料。
+- 未匹配资料且来源没有明确代词时，提示词要求模型重复昵称，不根据昵称、人格或表达习惯推断性别。本阶段仅做资料注入与提示词约束，不做生成结果的确定性身份校验。
+
+**实验性 Topic 记忆**:
+- 开启 `topic_memory.enabled` 后，在 Topic 记忆页面执行一次全量构建；`topic_memory.auto_maintenance` 控制后续自动维护。
+- Topic 是自动派生的只读数据。应编辑来源 Timeline，关联 Topic 会被标记为待重建并自动更新。
+- 宽候选组按 `topic_memory.fragment_extraction_batch_size`（默认 12）分批提取；大型 Topic 组件再按 `topic_memory.synthesis_batch_size`（默认 12）分层合成，最终仍归并为同一个 Topic。可在 Topic 页面查看当前组件、批次、调用序号和耗时。
+- `topic_memory.llm_concurrency` 控制候选组、组内批次和同层 Topic 合成的共享 LLM 并发上限，默认 2；设为 1 使用串行模式。提高并发前应确认 Provider 与上游 API 的速率限制。
+- 构建失败、取消或因插件重启中断后，Topic 页面会显示“从断点继续”。候选片段、向量、匹配、组件合成和已写入 Topic 都会按原 `run_uid` 复用；配置、Prompt、Provider、模型或输入发生变化时，只重算受影响阶段。
+- LLM 输出中的可验证结构错误会使用输入来源确定性修复并写入 `validation_repairs`；无法验证的模型引用会被丢弃，不会作为 Topic 来源保存。
+- 数据库 v9.3 迁移只创建结构，不自动调用模型、不生成 Topic，也不改变当前召回逻辑。
 
 管理界面通过 AstrBot 官方插件页面（插件 → LivingMemory → Pages → dashboard）访问，无需额外配置。
 

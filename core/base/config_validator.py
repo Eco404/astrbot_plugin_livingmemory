@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 from astrbot.api import logger
 
 
+
 class SessionManagerConfig(BaseModel):
     """会话管理器配置"""
 
@@ -135,6 +136,44 @@ class ProviderConfig(BaseModel):
         default=None, description="Embedding Provider ID"
     )
     llm_provider_id: str | None = Field(default=None, description="LLM Provider ID")
+    rerank_provider_id: str | None = Field(
+        default=None, description="Optional Rerank Provider ID"
+    )
+
+
+class TopicMemoryConfig(BaseModel):
+    """Automatically maintained derived Topic-memory settings."""
+
+    enabled: bool = False
+    auto_maintenance: bool = True
+    auto_debounce_seconds: float = Field(default=60.0, ge=0.0, le=3600.0)
+    time_gap_hours: float = Field(default=6.0, ge=1 / 60, le=24 * 30)
+    candidate_batch_size: int = Field(default=100, ge=1, le=1000)
+    fragment_extraction_batch_size: int = Field(default=12, ge=1, le=100)
+    candidate_similarity_threshold: float = Field(default=0.52, ge=0.0, le=1.0)
+    fragment_similarity_threshold: float = Field(default=0.78, ge=0.0, le=1.0)
+    rerank_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    rerank_top_n: int = Field(default=5, ge=1, le=100)
+    rerank_failure_fallback: bool = True
+    existing_topic_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    synthesis_batch_size: int = Field(default=12, ge=2, le=50)
+    embedding_batch_size: int = Field(default=8, ge=1, le=256)
+    llm_concurrency: int = Field(default=2, ge=1, le=64)
+    llm_max_retries: int = Field(default=3, ge=1, le=8)
+
+
+class CloudflareRerankConfig(BaseModel):
+    """Plugin-owned Cloudflare Workers AI reranker settings."""
+
+    enabled: bool = False
+    account_id: str = ""
+    api_token: str = ""
+    model: str = "@cf/baai/bge-reranker-base"
+    base_url: str = "https://api.cloudflare.com/client/v4"
+    timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    max_retries: int = Field(default=2, ge=0, le=8)
+    retry_base_delay: float = Field(default=1.0, ge=0.0, le=60.0)
+    apply_sigmoid: bool = True
 
 
 class ImportanceDecayConfig(BaseModel):
@@ -257,6 +296,10 @@ class LivingMemoryConfig(BaseModel):
     )
     filtering_settings: FilteringConfig = Field(default_factory=FilteringConfig)
     provider_settings: ProviderConfig = Field(default_factory=ProviderConfig)
+    topic_memory: TopicMemoryConfig = Field(default_factory=TopicMemoryConfig)
+    cloudflare_rerank: CloudflareRerankConfig = Field(
+        default_factory=CloudflareRerankConfig
+    )
     migration_settings: MigrationSettings = Field(default_factory=MigrationSettings)
     index_rebuild_settings: IndexRebuildSettings = Field(
         default_factory=IndexRebuildSettings

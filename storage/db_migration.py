@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.2"
+    CURRENT_VERSION = "9.3"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -39,6 +39,7 @@ class DBMigration:
         9: "Stable timeline identity registry and source-span provenance",
         "9.1": "Derived topic-memory storage and Timeline provenance links",
         "9.2": "Resumable deterministic Topic candidate discovery",
+        "9.3": "Automatic source-grounded Topic construction and maintenance",
     }
 
     def __init__(self, db_path: str):
@@ -299,6 +300,10 @@ class DBMigration:
                 # 从版本9.1升级到版本9.2
                 if current_key <= self.version_key("9.1"):
                     migration_steps.append(self._migrate_v9_1_to_v9_2)
+
+                # 从版本9.2升级到版本9.3
+                if current_key <= self.version_key("9.2"):
+                    migration_steps.append(self._migrate_v9_2_to_v9_3)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1004,6 +1009,36 @@ class DBMigration:
         if progress_callback:
             progress_callback("创建 Topic 候选扫描结构", 1, 1)
         logger.info("v9.1 -> v9.2 迁移完成，未执行扫描或生成正式 Topic")
+
+    async def _migrate_v9_2_to_v9_3(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ):
+        """Add source-grounded fragment drafts and build audit tables."""
+        logger.info("执行迁移步骤: v9.2 -> v9.3 (automatic Topic construction)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            if await self._table_exists(db, "topic_maintenance_runs"):
+                cursor = await db.execute("PRAGMA table_info(topic_maintenance_runs)")
+                columns = {str(row[1]) for row in await cursor.fetchall()}
+                additions = {
+                    "stage": "TEXT NOT NULL DEFAULT 'candidate_scan'",
+                    "current_group_index": "INTEGER NOT NULL DEFAULT 0",
+                    "total_groups": "INTEGER NOT NULL DEFAULT 0",
+                }
+                for name, declaration in additions.items():
+                    if name not in columns:
+                        await db.execute(
+                            f"ALTER TABLE topic_maintenance_runs "
+                            f"ADD COLUMN {name} {declaration}"
+                        )
+            await MemoryIdentityStore.create_tables(db)
+            await TopicMemoryStore.create_tables(db)
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建自动 Topic 构建与审计结构", 1, 1)
+        logger.info("v9.2 -> v9.3 迁移完成，未自动执行模型调用")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

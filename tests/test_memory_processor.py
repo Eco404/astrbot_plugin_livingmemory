@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+from astrbot_plugin_livingmemory.core.models.identity_profile import (
+    AuthoritativeIdentityStore,
+)
 from astrbot_plugin_livingmemory.core.processors.memory_processor import MemoryProcessor
 
 
@@ -109,6 +112,84 @@ async def test_persona_prompt_is_included_when_available():
     system_prompt = await processor._build_system_prompt_with_persona("persona_1")
     assert "人格设定" in system_prompt
     assert "活泼助手" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_authoritative_identity_is_injected_by_stable_sender_id():
+    llm = _DummyLLMProvider(
+        """{
+            "summary":"我记录了空雨的安排",
+            "topics":["安排"],
+            "key_facts":["空雨是男性，使用他作为代词"],
+            "sentiment":"neutral",
+            "importance":0.6
+        }"""
+    )
+    messages = _make_messages()
+    messages[0].sender_id = "1141337347"
+    messages[0].sender_name = "空雨"
+    messages[0].platform = "qq_official"
+    processor = MemoryProcessor(
+        llm_provider=llm,
+        context=None,
+        identity_profile_store=AuthoritativeIdentityStore(
+            profiles=[
+                {
+                    "platform": "qq",
+                    "user_id": "1141337347",
+                    "display_name": "空雨",
+                    "gender": "男性",
+                    "pronouns": ["他", "他的"],
+                }
+            ]
+        ),
+    )
+
+    await processor.process_conversation(messages, is_group_chat=False)
+
+    prompt = llm.text_chat.await_args.kwargs["prompt"]
+    system_prompt = llm.text_chat.await_args.kwargs["system_prompt"]
+    assert prompt.startswith("# 权威人物资料（必须严格遵守）")
+    assert '"user_id":"1141337347"' in prompt
+    assert '"gender":"男性"' in prompt
+    assert '"pronouns":["他","他的"]' in prompt
+    assert "人格设定只描述你自己" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_authoritative_identity_does_not_match_same_name_with_other_id():
+    llm = _DummyLLMProvider(
+        """{
+            "summary":"我记录了空雨的安排",
+            "topics":["安排"],
+            "key_facts":["空雨有一个安排"],
+            "sentiment":"neutral",
+            "importance":0.6
+        }"""
+    )
+    messages = _make_messages()
+    messages[0].sender_id = "different-account"
+    messages[0].sender_name = "空雨"
+    messages[0].platform = "qq"
+    processor = MemoryProcessor(
+        llm_provider=llm,
+        context=None,
+        identity_profile_store=AuthoritativeIdentityStore(
+            profiles=[
+                {
+                    "platform": "qq",
+                    "user_id": "1141337347",
+                    "display_name": "空雨",
+                    "gender": "男性",
+                }
+            ]
+        ),
+    )
+
+    await processor.process_conversation(messages, is_group_chat=False)
+
+    prompt = llm.text_chat.await_args.kwargs["prompt"]
+    assert not prompt.startswith("# 权威人物资料（必须严格遵守）")
 
 
 # ── New tests for dual-channel summary and quality validator ──────────────────

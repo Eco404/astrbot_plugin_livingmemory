@@ -481,6 +481,44 @@ async def test_migrate_v9_1_to_v9_2_creates_empty_candidate_scan_tables(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_migrate_v9_2_to_v9_3_creates_resumable_topic_build_tables(tmp_path):
+    db_path = str(tmp_path / "topic_build_foundation.db")
+    await _create_legacy_db(
+        db_path,
+        [{"text": PRIVATE_MEMORY_LONG, "metadata": json.dumps(PRIVATE_METADATA_V2)}],
+    )
+    migration = DBMigration(db_path)
+    await migration._migrate_v8_to_v9(None)
+    await migration._migrate_v9_to_v9_1(None)
+    await migration._migrate_v9_1_to_v9_2(None)
+    await migration._migrate_v9_2_to_v9_3(None)
+    await migration._migrate_v9_2_to_v9_3(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+        run_columns = {
+            str(row[1])
+            for row in await (
+                await db.execute("PRAGMA table_info(topic_maintenance_runs)")
+            ).fetchall()
+        }
+
+    assert {
+        "topic_build_group_jobs",
+        "topic_fragment_drafts",
+        "topic_build_decisions",
+    } <= tables
+    assert {"stage", "current_group_index", "total_groups"} <= run_columns
+
+
+@pytest.mark.asyncio
 async def test_full_migration_v1_to_v4_with_real_data(tmp_path):
     """模拟真实 v1 数据库完整迁移到 v4，私聊和群聊各 3 条。"""
     db_path = str(tmp_path / "test.db")

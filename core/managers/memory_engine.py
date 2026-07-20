@@ -24,6 +24,7 @@ from ..managers.atom_lifecycle_manager import AtomLifecycleManager
 from ..managers.graph_memory_manager import GraphMemoryManager
 from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
 from ..models.memory_identity import resolve_memory_space
+from ..models.identity_profile import AuthoritativeIdentityStore
 from ..processors.graph_extractor import GraphExtractor
 from ..processors.text_processor import TextProcessor
 from ..retrieval.atom_retriever import AtomRetriever
@@ -36,6 +37,7 @@ from ..retrieval.hybrid_retriever import HybridResult, HybridRetriever
 from ..retrieval.rrf_fusion import RRFFusion
 from ..retrieval.vector_retriever import VectorRetriever
 from ..utils.number_utils import clamp_float, safe_float
+from .topic_build_manager import TopicBuildManager
 from .topic_maintenance_manager import TopicMaintenanceManager
 
 
@@ -88,7 +90,9 @@ class MemoryEngine:
         faiss_db,
         graph_vector_db=None,
         llm_provider=None,
+        rerank_provider=None,
         config: dict[str, Any] | None = None,
+        identity_profile_store: AuthoritativeIdentityStore | None = None,
     ):
         """
         初始化记忆引擎
@@ -110,6 +114,10 @@ class MemoryEngine:
         self.faiss_db = faiss_db
         self.graph_vector_db = graph_vector_db
         self.llm_provider = llm_provider
+        self.rerank_provider = rerank_provider
+        self.identity_profile_store = (
+            identity_profile_store or AuthoritativeIdentityStore()
+        )
         self.config = config or {}
         self.graph_enabled = bool(self.config.get("graph_memory_enabled", False))
         self.atom_enabled = bool(
@@ -146,6 +154,23 @@ class MemoryEngine:
         self.topic_maintenance_manager = TopicMaintenanceManager(
             self.db_path,
             self.topic_memory_store,
+        )
+        topic_build_config = dict(self.config.get("topic_memory", {}))
+        self.topic_build_manager = TopicBuildManager(
+            self.db_path,
+            self.topic_memory_store,
+            self.topic_maintenance_manager,
+            llm_provider=self.llm_provider,
+            embedding_provider=getattr(self.faiss_db, "embedding_provider", None),
+            rerank_provider=self.rerank_provider,
+            config=topic_build_config,
+            identity_profile_store=self.identity_profile_store,
+        )
+        self.topic_memory_enabled = bool(
+            self.config.get("topic_memory", {}).get("enabled", False)
+        )
+        self.topic_auto_maintenance = bool(
+            self.config.get("topic_memory", {}).get("auto_maintenance", True)
         )
         self.db_connection = None
         self._search_cache_enabled = bool(self.config.get("search_cache_enabled", True))
@@ -248,6 +273,7 @@ class MemoryEngine:
 
     async def close(self):
         """关闭数据库连接和清理资源"""
+        await self.topic_build_manager.close()
         if self.atom_lifecycle_manager is not None:
             await self.atom_lifecycle_manager.stop()
         if self._pending_tasks:
@@ -527,6 +553,23 @@ class MemoryEngine:
                 f"(memory_uid={memory_uid}, reason={reason})",
                 exc_info=True,
             )
+
+    def _schedule_topic_maintenance(
+        self,
+        memory_space_id: str | None,
+        *,
+        full: bool,
+        since: float | None = None,
+    ) -> None:
+        if (
+            not self.topic_memory_enabled
+            or not self.topic_auto_maintenance
+            or not memory_space_id
+        ):
+            return
+        self.topic_build_manager.schedule_space(
+            str(memory_space_id), full=full, since=since
+        )
 
     def _serialize_atom_for_repair(self, atom: Any) -> dict[str, Any]:
         """Convert a MemoryAtom-like object into JSON-safe repair payload."""
@@ -1287,6 +1330,11 @@ class MemoryEngine:
                 status="completed",
                 memory_id=doc_id,
             )
+        self._schedule_topic_maintenance(
+            str(full_metadata.get("memory_space_id") or ""),
+            full=False,
+            since=current_time - 1.0,
+        )
         self._invalidate_search_cache()
         return doc_id
 
@@ -1535,6 +1583,22 @@ class MemoryEngine:
                         current_metadata,
                     )
                 await self._register_memory_identity(memory_id, current_metadata)
+                topic_source_fields = {
+                    "canonical_summary",
+                    "persona_summary",
+                    "topics",
+                    "key_facts",
+                    "importance",
+                }
+                if topic_source_fields & metadata_updates.keys():
+                    await self._mark_dependent_topics_stale(
+                        str(current_metadata.get("memory_uid") or ""),
+                        reason="timeline_metadata_updated",
+                    )
+                    self._schedule_topic_maintenance(
+                        str(current_metadata.get("memory_space_id") or ""),
+                        full=True,
+                    )
                 self._invalidate_search_cache()
             else:
                 logger.error(f"[更新] 元数据更新失败 (memory_id={memory_id})")
@@ -1657,6 +1721,10 @@ class MemoryEngine:
             await self._mark_dependent_topics_stale(
                 str(replacement_metadata.get("memory_uid") or ""),
                 reason="timeline_rewritten_in_place",
+            )
+            self._schedule_topic_maintenance(
+                str(replacement_metadata.get("memory_space_id") or ""),
+                full=True,
             )
 
             self._invalidate_search_cache()
@@ -1884,6 +1952,10 @@ class MemoryEngine:
                 status="completed",
                 memory_id=memory_id,
             )
+        self._schedule_topic_maintenance(
+            registry_record.memory_space_id if registry_record else None,
+            full=True,
+        )
         self._invalidate_search_cache()
         return success
 
