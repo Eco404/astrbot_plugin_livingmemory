@@ -19,6 +19,7 @@ from ..core.models.topic_memory import (
     TopicMemory,
     TopicMemoryAtom,
     TopicMemoryStatus,
+    TopicRelation,
     TopicTimelineLink,
     TimelineTopicCandidate,
     TopicCandidateGroup,
@@ -212,6 +213,48 @@ class TopicMemoryStore:
             """
             CREATE INDEX IF NOT EXISTS idx_topic_atom_sources_atom
             ON topic_atom_sources(topic_atom_uid)
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topic_relations (
+                relation_uid TEXT PRIMARY KEY,
+                memory_space_id TEXT NOT NULL,
+                left_topic_uid TEXT NOT NULL,
+                right_topic_uid TEXT NOT NULL,
+                relation_type TEXT NOT NULL DEFAULT 'related_subtopic',
+                confidence REAL NOT NULL DEFAULT 0.5,
+                semantic_similarity REAL NOT NULL DEFAULT 0.0,
+                status TEXT NOT NULL DEFAULT 'active',
+                build_run_uid TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                UNIQUE(left_topic_uid, right_topic_uid, relation_type),
+                CHECK(left_topic_uid <> right_topic_uid),
+                FOREIGN KEY(left_topic_uid) REFERENCES topic_memories(topic_uid)
+                    ON DELETE CASCADE,
+                FOREIGN KEY(right_topic_uid) REFERENCES topic_memories(topic_uid)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_relations_space_status
+            ON topic_relations(memory_space_id, status, semantic_similarity DESC)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_relations_left
+            ON topic_relations(left_topic_uid, status)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_relations_right
+            ON topic_relations(right_topic_uid, status)
             """
         )
         await db.execute(
@@ -689,6 +732,127 @@ class TopicMemoryStore:
             "temporal_affinity": 0.0,
         }
 
+    async def replace_topic_relations(
+        self,
+        memory_space_id: str,
+        relations: list[TopicRelation],
+    ) -> int:
+        """Atomically replace the derived related-subtopic graph for one space."""
+        memory_space_id = str(memory_space_id or "").strip()
+        if not memory_space_id:
+            raise ValueError("memory_space_id is required")
+        normalized: list[TopicRelation] = []
+        for relation in relations:
+            left, right = sorted(
+                (str(relation.left_topic_uid), str(relation.right_topic_uid))
+            )
+            if not left or not right or left == right:
+                raise ValueError("Topic relation requires two distinct Topic UIDs")
+            if relation.memory_space_id != memory_space_id:
+                raise TopicSourceValidationError(
+                    "Topic relation belongs to another memory space"
+                )
+            self._validate_score("relation confidence", relation.confidence)
+            self._validate_score(
+                "relation semantic_similarity", relation.semantic_similarity
+            )
+            normalized.append(
+                replace(
+                    relation,
+                    left_topic_uid=left,
+                    right_topic_uid=right,
+                )
+            )
+
+        async with self._connect() as db:
+            try:
+                topic_uids = {
+                    uid
+                    for relation in normalized
+                    for uid in (relation.left_topic_uid, relation.right_topic_uid)
+                }
+                if topic_uids:
+                    placeholders = ",".join("?" * len(topic_uids))
+                    rows = await (
+                        await db.execute(
+                            f"SELECT topic_uid, memory_space_id FROM topic_memories "
+                            f"WHERE topic_uid IN ({placeholders})",
+                            sorted(topic_uids),
+                        )
+                    ).fetchall()
+                    scopes = {str(row["topic_uid"]): str(row["memory_space_id"]) for row in rows}
+                    if set(scopes) != topic_uids or any(
+                        scope != memory_space_id for scope in scopes.values()
+                    ):
+                        raise TopicSourceValidationError(
+                            "Topic relation crosses a memory-space boundary"
+                        )
+                await db.execute(
+                    "DELETE FROM topic_relations WHERE memory_space_id = ?",
+                    (memory_space_id,),
+                )
+                for relation in normalized:
+                    await db.execute(
+                        """
+                        INSERT INTO topic_relations (
+                            relation_uid, memory_space_id, left_topic_uid,
+                            right_topic_uid, relation_type, confidence,
+                            semantic_similarity, status, build_run_uid,
+                            created_at, updated_at, metadata
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            relation.relation_uid,
+                            memory_space_id,
+                            relation.left_topic_uid,
+                            relation.right_topic_uid,
+                            self._enum_value(relation.relation_type),
+                            float(relation.confidence),
+                            float(relation.semantic_similarity),
+                            relation.status,
+                            relation.build_run_uid,
+                            float(relation.created_at),
+                            float(relation.updated_at),
+                            self._to_json(relation.metadata),
+                        ),
+                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return len(normalized)
+
+    async def list_topic_relations(self, topic_uid: str) -> list[dict[str, Any]]:
+        """Return active neighboring Topics without flattening their contents."""
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT r.*,
+                           CASE WHEN r.left_topic_uid = ?
+                                THEN r.right_topic_uid ELSE r.left_topic_uid END
+                                AS related_topic_uid,
+                           t.title AS related_title,
+                           t.summary AS related_summary,
+                           t.status AS related_status
+                    FROM topic_relations r
+                    JOIN topic_memories t ON t.topic_uid = CASE
+                        WHEN r.left_topic_uid = ?
+                        THEN r.right_topic_uid ELSE r.left_topic_uid END
+                    WHERE (r.left_topic_uid = ? OR r.right_topic_uid = ?)
+                      AND r.status = 'active' AND t.status = 'active'
+                    ORDER BY r.semantic_similarity DESC, t.importance DESC
+                    """,
+                    (topic_uid, topic_uid, topic_uid, topic_uid),
+                )
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = self._from_json(item.get("metadata"))
+            result.append(item)
+        return result
+
     async def get_overview(self, memory_space_id: str | None = None) -> dict[str, Any]:
         where = "WHERE memory_space_id = ?" if memory_space_id else ""
         params = [memory_space_id] if memory_space_id else []
@@ -722,12 +886,19 @@ class TopicMemoryStore:
                     params,
                 )
             ).fetchone()
+            relation_count = await (
+                await db.execute(
+                    f"SELECT COUNT(*) FROM topic_relations {where}",
+                    params,
+                )
+            ).fetchone()
         counts = {str(row["status"]): int(row["count"]) for row in rows}
         return {
             "topic_count": sum(counts.values()),
             "status_counts": counts,
             "atom_count": int(atom_count[0] if atom_count else 0),
             "timeline_link_count": int(link_count[0] if link_count else 0),
+            "relation_count": int(relation_count[0] if relation_count else 0),
         }
 
     async def list_memory_spaces(self, *, limit: int = 200) -> list[dict[str, Any]]:
@@ -948,6 +1119,89 @@ class TopicMemoryStore:
                 )
             ).fetchone()
         return dict(row) if row else None
+
+    async def discard_maintenance_run(
+        self,
+        run_uid: str,
+        *,
+        memory_space_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Discard a resumable run and every run-owned intermediate artifact.
+
+        Topic snapshots are formal derived data rather than checkpoints. They are
+        intentionally preserved because an interrupted materialization may have
+        updated a pre-existing Topic in place and the current schema does not keep
+        the previous snapshot needed for a safe rollback.
+        """
+        run_uid = str(run_uid or "").strip()
+        expected_space = str(memory_space_id or "").strip() or None
+        if not run_uid:
+            raise ValueError("run_uid is required")
+        child_tables = (
+            "topic_maintenance_items",
+            "topic_candidate_groups",
+            "topic_build_group_jobs",
+            "topic_fragment_drafts",
+            "topic_build_decisions",
+            "topic_build_checkpoints",
+        )
+        async with self._connect() as db:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                row = await (
+                    await db.execute(
+                        "SELECT * FROM topic_maintenance_runs WHERE run_uid = ?",
+                        (run_uid,),
+                    )
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Topic 构建任务不存在")
+                run = dict(row)
+                run_space = str(run.get("memory_space_id") or "")
+                if expected_space and run_space != expected_space:
+                    raise ValueError("Topic 构建任务与当前记忆空间不一致")
+                status = str(run.get("status") or "")
+                if status not in {
+                    TopicMaintenanceStatus.FAILED.value,
+                    TopicMaintenanceStatus.PENDING.value,
+                    TopicMaintenanceStatus.CANCELLED.value,
+                }:
+                    raise ValueError(
+                        "只能取消失败、待继续或已取消的 Topic 构建任务"
+                    )
+
+                deleted: dict[str, int] = {}
+                for table in child_tables:
+                    count_row = await (
+                        await db.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE run_uid = ?",
+                            (run_uid,),
+                        )
+                    ).fetchone()
+                    deleted[table] = int(count_row[0] if count_row else 0)
+
+                cursor = await db.execute(
+                    """
+                    DELETE FROM topic_maintenance_runs
+                    WHERE run_uid = ? AND status IN ('failed', 'pending', 'cancelled')
+                    """,
+                    (run_uid,),
+                )
+                if not cursor.rowcount:
+                    raise ValueError("Topic 构建任务状态已变化，无法清除断点")
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "run_uid": run_uid,
+            "memory_space_id": run_space,
+            "status": status,
+            "deleted_run": 1,
+            "deleted_intermediate_items": sum(deleted.values()),
+            "deleted_by_table": deleted,
+            "preserved_materialized_topics": True,
+        }
 
     async def save_scan_items(
         self,

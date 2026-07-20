@@ -519,6 +519,34 @@ async def test_migrate_v9_2_to_v9_3_creates_resumable_topic_build_tables(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_migrate_v9_3_to_v9_4_creates_related_topic_graph(tmp_path):
+    db_path = str(tmp_path / "topic_relations.db")
+    await _create_legacy_db(
+        db_path,
+        [{"text": PRIVATE_MEMORY_LONG, "metadata": json.dumps(PRIVATE_METADATA_V2)}],
+    )
+    migration = DBMigration(db_path)
+    await migration._migrate_v8_to_v9(None)
+    await migration._migrate_v9_to_v9_1(None)
+    await migration._migrate_v9_1_to_v9_2(None)
+    await migration._migrate_v9_2_to_v9_3(None)
+    await migration._migrate_v9_3_to_v9_4(None)
+    await migration._migrate_v9_3_to_v9_4(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+
+    assert "topic_relations" in tables
+
+
+@pytest.mark.asyncio
 async def test_full_migration_v1_to_v4_with_real_data(tmp_path):
     """模拟真实 v1 数据库完整迁移到 v4，私聊和群聊各 3 条。"""
     db_path = str(tmp_path / "test.db")

@@ -301,3 +301,77 @@ def test_resumable_run_payload_preserves_failed_stage():
     assert payload["resumable"] is True
     assert payload["failed_stage"] == "topic_synthesis"
     assert payload["overall_percent"] == 80.6
+
+
+@pytest.mark.asyncio
+async def test_persisted_breakpoint_task_can_be_discarded(monkeypatch):
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={
+            "run_uid": "run-failed",
+            "memory_space_id": "space-1",
+        }
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    store = SimpleNamespace(
+        discard_maintenance_run=AsyncMock(
+            return_value={
+                "run_uid": "run-failed",
+                "memory_space_id": "space-1",
+                "deleted_intermediate_items": 7,
+            }
+        )
+    )
+    handler = TopicHandler(PageApiUtils())
+    handler._jobs["old-job"] = {
+        "job_uid": "old-job",
+        "run_uid": "run-failed",
+        "memory_space_id": "space-1",
+        "status": "failed",
+    }
+
+    response = await handler.discard_build(
+        SimpleNamespace(topic_memory_store=store)
+    )
+
+    assert response["status"] == "ok"
+    assert response["data"]["deleted_intermediate_items"] == 7
+    store.discard_maintenance_run.assert_awaited_once_with(
+        "run-failed",
+        memory_space_id="space-1",
+    )
+    assert "old-job" not in handler._jobs
+
+
+@pytest.mark.asyncio
+async def test_active_topic_build_cannot_be_discarded(monkeypatch):
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={
+            "run_uid": "run-active",
+            "memory_space_id": "space-1",
+        }
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    store = SimpleNamespace(discard_maintenance_run=AsyncMock())
+    handler = TopicHandler(PageApiUtils())
+    handler._jobs["active-job"] = {
+        "job_uid": "active-job",
+        "run_uid": "run-active",
+        "memory_space_id": "space-1",
+        "status": "running",
+    }
+
+    response = await handler.discard_build(
+        SimpleNamespace(topic_memory_store=store)
+    )
+
+    assert response["status"] == "error"
+    assert "正在运行" in response["message"]
+    store.discard_maintenance_run.assert_not_awaited()

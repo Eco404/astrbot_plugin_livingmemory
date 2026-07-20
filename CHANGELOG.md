@@ -8,6 +8,9 @@
 ## [Unreleased]
 
 ### 新增
+- **Rerank 并发控制**：新增 `topic_memory.rerank_concurrency`（默认 4、范围 1–32），片段匹配阶段可并行调用 Cloudflare 或 AstrBot Rerank Provider；进度栏显示完成数、活跃请求数与并发上限，任一请求失败时仍按既有策略整轮回退 Embedding。
+- **断点任务取消与进度清理**：Topic 构建出现可恢复断点时，WebUI 同时提供“取消任务”；确认后删除该运行保存的扫描、片段、匹配、合成和检查点数据，并保留已正式落库的 Topic，避免破坏构建前数据。
+- **Topic 相关子话题图（数据库 v9.4）**：保持叶子 Topic 内容独立，通过互为语义近邻的 `related_subtopic` 关系连接同一事件下的行程、天气、住宿、现场活动与后续恢复等子话题；详情浮窗可直接查看并跳转相关 Topic。
 - **自动 Topic 记忆层（数据库 v9.3，实验性）**：LLM 将宽时间窗口拆为可溯源片段，再通过 Embedding 与可选 Rerank 跨时间归并；Topic 拥有独立原子、稳定 UID/revision，以及 `Topic → Timeline → 事实指纹` 来源链。
 - **全量与增量维护**：首次增量任务自动转为全量扫描；后续新增 Timeline 可增量合并到已有 Topic，编辑或删除 Timeline 会将依赖 Topic 标记为 stale 并触发受影响记忆空间重建。
 - **Topic WebUI**：新增只读 Topic 列表、原子与 Timeline 来源查看、全量/增量手动构建及实时进度显示。
@@ -20,6 +23,7 @@
 - Topic 功能默认关闭，v9→v9.3 迁移只创建结构，不调用模型、不生成 Topic，也不改变现有 Timeline/图谱/召回逻辑。
 
 ### 修复
+- **Topic 匹配参数解耦与审计**：候选扫描阈值不再隐式控制 Rerank 候选线和组件凝聚度；新增独立最低两两/平均相似度参数。构建断点记录单片段 Topic 是因候选不足、未通过双向 Rerank，还是被组件凝聚度拒绝，便于后续使用真实样本调优。
 - **内置 Cloudflare Rerank 启动期误判未启用**：Rerank 初始化从 LLM Provider 等待流程中解耦，避免静默等待聊天模型时提前返回并跳过 Cloudflare 客户端；`provider_settings.rerank_provider_id` 留空时内置 Cloudflare 仍可独立启用，二者同时配置时内置 Cloudflare 优先。修复 `topic_memory.llm_concurrency=30` 超出隐藏校验上限后导致整份插件配置回退默认值、连带关闭 Cloudflare 的问题，并将允许范围明确为 1-64。模型测试页会显示安全的初始化错误，不再将配置异常笼统标为“未启用”。
 - **Topic 全量构建被无效原子指纹整体中断**：LLM 返回未知或被改写的 `source_atom_fingerprints` 时，安全剔除无效引用；事实内容与来源原子完全一致时确定性恢复正确指纹，否则保留 Timeline 来源并降级为事实指纹溯源。未知 Timeline 和越界来源不会被采纳；无法局部修复时整批回退为输入 Timeline 的确定性片段。
 - **Topic 构建进度与重复启动**：新增覆盖六个处理阶段的总体进度；候选扫描完成不再显示误导性的 `running · completed`，最终异常会明确更新为 `failed · failed`。活动任务可在页面刷新后恢复轮询，构建期间按钮自动禁用，后端也会阻止重复启动。

@@ -699,14 +699,32 @@ class PluginInitializer:
                     "fragment_similarity_threshold": self.config_manager.get(
                         "topic_memory.fragment_similarity_threshold", 0.78
                     ),
+                    "rerank_candidate_floor": self.config_manager.get(
+                        "topic_memory.rerank_candidate_floor", 0.63
+                    ),
+                    "component_min_pair_similarity": self.config_manager.get(
+                        "topic_memory.component_min_pair_similarity", 0.52
+                    ),
+                    "component_min_average_similarity": self.config_manager.get(
+                        "topic_memory.component_min_average_similarity", 0.65
+                    ),
                     "rerank_threshold": self.config_manager.get(
                         "topic_memory.rerank_threshold", 0.55
                     ),
                     "rerank_top_n": self.config_manager.get(
                         "topic_memory.rerank_top_n", 5
                     ),
+                    "rerank_concurrency": self.config_manager.get(
+                        "topic_memory.rerank_concurrency", 4
+                    ),
                     "rerank_failure_fallback": self.config_manager.get(
                         "topic_memory.rerank_failure_fallback", True
+                    ),
+                    "related_topic_similarity_threshold": self.config_manager.get(
+                        "topic_memory.related_topic_similarity_threshold", 0.60
+                    ),
+                    "related_topic_top_n": self.config_manager.get(
+                        "topic_memory.related_topic_top_n", 3
                     ),
                     "existing_topic_match_threshold": self.config_manager.get(
                         "topic_memory.existing_topic_match_threshold", 0.55

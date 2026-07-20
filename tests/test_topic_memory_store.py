@@ -17,6 +17,7 @@ from astrbot_plugin_livingmemory.core.models.topic_memory import (
     TopicMemory,
     TopicMemoryAtom,
     TopicMemoryStatus,
+    TopicRelation,
     TopicTimelineLink,
 )
 from astrbot_plugin_livingmemory.storage.memory_identity_store import (
@@ -436,3 +437,142 @@ async def test_build_checkpoint_round_trip(tmp_path: Path):
     assert checkpoint["input_hash"] == "hash-1"
     assert checkpoint["payload"]["title"] == "测试"
     assert checkpoint["metadata"]["fragment_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_discard_maintenance_run_clears_progress_but_preserves_topics(
+    tmp_path: Path,
+):
+    db_path = str(tmp_path / "discard-checkpoint.db")
+    space_id = await _register_timeline(
+        db_path, memory_uid="timeline-1", document_id=1
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    topic = TopicMemory(
+        topic_uid="topic-materialized",
+        memory_space_id=space_id,
+        title="已写入 Topic",
+        summary="正式 Topic 不属于可安全删除的断点数据。",
+        metadata={"build_run_uid": "run-discard"},
+    )
+    await store.save_topic_snapshot(
+        topic,
+        atoms=[],
+        links=[
+            TopicTimelineLink(
+                topic_uid=topic.topic_uid,
+                timeline_uid="timeline-1",
+                time_cluster_key="cluster-1",
+            )
+        ],
+        atom_sources=[],
+    )
+    run = TopicMaintenanceRun(
+        run_uid="run-discard",
+        memory_space_id=space_id,
+        mode=TopicMaintenanceMode.FULL,
+    )
+    await store.create_maintenance_run(run)
+    await store.update_maintenance_run(
+        run.run_uid,
+        status=TopicMaintenanceStatus.FAILED,
+        stage="topic_synthesis",
+        error="timeout",
+    )
+    await store.save_build_checkpoint(
+        run_uid=run.run_uid,
+        checkpoint_key="topic_synthesis:abc",
+        stage="topic_synthesis",
+        input_hash="hash-1",
+        payload={"title": "未完成"},
+    )
+
+    result = await store.discard_maintenance_run(
+        run.run_uid,
+        memory_space_id=space_id,
+    )
+
+    assert result["deleted_run"] == 1
+    assert result["deleted_intermediate_items"] == 1
+    assert result["deleted_by_table"]["topic_build_checkpoints"] == 1
+    assert await store.get_maintenance_run(run.run_uid) is None
+    assert await store.get_build_checkpoint(run.run_uid, "topic_synthesis:abc") is None
+    assert await store.get_topic(topic.topic_uid) is not None
+
+
+@pytest.mark.asyncio
+async def test_discard_maintenance_run_rejects_running_and_completed_runs(
+    tmp_path: Path,
+):
+    store = TopicMemoryStore(str(tmp_path / "discard-status.db"))
+    await store.initialize()
+    for status in (
+        TopicMaintenanceStatus.RUNNING,
+        TopicMaintenanceStatus.COMPLETED,
+    ):
+        run = TopicMaintenanceRun(
+            run_uid=f"run-{status.value}",
+            memory_space_id="space-1",
+            mode=TopicMaintenanceMode.FULL,
+        )
+        await store.create_maintenance_run(run)
+        await store.update_maintenance_run(run.run_uid, status=status)
+
+        with pytest.raises(ValueError, match="只能取消失败"):
+            await store.discard_maintenance_run(run.run_uid)
+
+        assert await store.get_maintenance_run(run.run_uid) is not None
+
+
+@pytest.mark.asyncio
+async def test_related_topics_are_replaced_and_return_neighbor_details(tmp_path: Path):
+    db_path = str(tmp_path / "relations.db")
+    space_id = await _register_timeline(
+        db_path, memory_uid="timeline-1", document_id=1
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    for index in (1, 2):
+        topic = TopicMemory(
+            topic_uid=f"topic-{index}",
+            memory_space_id=space_id,
+            title=f"子话题 {index}",
+            summary=f"同一事件的部分 {index}",
+        )
+        await store.save_topic_snapshot(
+            topic,
+            atoms=[],
+            links=[
+                TopicTimelineLink(
+                    topic_uid=topic.topic_uid,
+                    timeline_uid="timeline-1",
+                    time_cluster_key="cluster-1",
+                )
+            ],
+            atom_sources=[],
+        )
+
+    count = await store.replace_topic_relations(
+        space_id,
+        [
+            TopicRelation(
+                relation_uid="relation-1",
+                memory_space_id=space_id,
+                left_topic_uid="topic-2",
+                right_topic_uid="topic-1",
+                confidence=0.72,
+                semantic_similarity=0.72,
+            )
+        ],
+    )
+
+    assert count == 1
+    related = await store.list_topic_relations("topic-1")
+    assert related[0]["related_topic_uid"] == "topic-2"
+    assert related[0]["related_title"] == "子话题 2"
+    assert related[0]["semantic_similarity"] == pytest.approx(0.72)
+    assert (await store.get_overview(space_id))["relation_count"] == 1
+
+    await store.replace_topic_relations(space_id, [])
+    assert await store.list_topic_relations("topic-1") == []

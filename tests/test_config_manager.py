@@ -23,6 +23,12 @@ def test_config_manager_loads_defaults() -> None:
     assert manager.get("reflection_engine.save_original_conversation") is None
     assert manager.get("topic_memory.enabled") is False
     assert manager.get("topic_memory.fragment_similarity_threshold") == 0.78
+    assert manager.get("topic_memory.rerank_candidate_floor") == 0.63
+    assert manager.get("topic_memory.component_min_pair_similarity") == 0.52
+    assert manager.get("topic_memory.component_min_average_similarity") == 0.65
+    assert manager.get("topic_memory.related_topic_similarity_threshold") == 0.60
+    assert manager.get("topic_memory.related_topic_top_n") == 3
+    assert manager.get("topic_memory.rerank_concurrency") == 4
 
 
 def test_config_manager_supports_nested_get_and_default() -> None:
@@ -91,6 +97,7 @@ def test_config_manager_preserves_topic_and_rerank_settings() -> None:
                 "enabled": True,
                 "auto_debounce_seconds": 2.0,
                 "rerank_threshold": 0.7,
+                "rerank_concurrency": 12,
                 "llm_concurrency": 64,
             },
             "cloudflare_rerank": {
@@ -105,6 +112,7 @@ def test_config_manager_preserves_topic_and_rerank_settings() -> None:
     assert manager.get("topic_memory.enabled") is True
     assert manager.get("topic_memory.auto_debounce_seconds") == 2.0
     assert manager.get("topic_memory.rerank_threshold") == 0.7
+    assert manager.get("topic_memory.rerank_concurrency") == 12
     assert manager.get("topic_memory.llm_concurrency") == 64
     assert manager.get("cloudflare_rerank.enabled") is True
     assert manager.get("cloudflare_rerank.account_id") == "account"

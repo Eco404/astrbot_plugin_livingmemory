@@ -12,6 +12,8 @@ export class TopicPage {
     this.detailRequestId = 0;
     this.detailTrigger = null;
     this.fullBuildTrigger = null;
+    this.discardBuildTrigger = null;
+    this.discardRun = null;
   }
 
   initEventListeners() {
@@ -36,9 +38,16 @@ export class TopicPage {
     document.getElementById("topic-full-build-confirm-overlay")?.addEventListener("click", event => {
       if (event.target === event.currentTarget) this.closeFullBuildConfirm();
     });
+    document.getElementById("topic-discard-build-close")?.addEventListener("click", () => this.closeDiscardBuildConfirm());
+    document.getElementById("topic-discard-build-cancel")?.addEventListener("click", () => this.closeDiscardBuildConfirm());
+    document.getElementById("topic-discard-build-submit")?.addEventListener("click", () => this.discardBuild());
+    document.getElementById("topic-discard-build-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeDiscardBuildConfirm();
+    });
     document.addEventListener("keydown", event => {
       if (event.key !== "Escape") return;
-      if (this.fullBuildConfirmIsOpen()) this.closeFullBuildConfirm();
+      if (this.discardBuildConfirmIsOpen()) this.closeDiscardBuildConfirm();
+      else if (this.fullBuildConfirmIsOpen()) this.closeFullBuildConfirm();
       else if (this.detailIsOpen()) this.closeDetail();
     });
   }
@@ -78,6 +87,7 @@ export class TopicPage {
     document.getElementById("topic-active").textContent = data.status_counts?.active || 0;
     document.getElementById("topic-atoms").textContent = data.atom_count || 0;
     document.getElementById("topic-links").textContent = data.timeline_link_count || 0;
+    document.getElementById("topic-relations").textContent = data.relation_count || 0;
     const flags = document.getElementById("topic-flags");
     flags.textContent = [
       window.t(data.enabled ? "topic.buildEnabled" : "topic.buildDisabled"),
@@ -158,6 +168,7 @@ export class TopicPage {
       if (requestId !== this.detailRequestId || !this.detailIsOpen()) return;
       const topic = data.topic;
       const provenance = data.provenance || {};
+      const relatedTopics = data.related_topics || [];
       const sourcesByAtom = {};
       (provenance.atom_sources || []).forEach(source => {
         (sourcesByAtom[source.topic_atom_uid] ||= []).push(source);
@@ -165,10 +176,20 @@ export class TopicPage {
       title.innerHTML = `${esc(topic.title)} <span class="topic-detail-readonly text-tertiary">（${esc(window.t("topic.readOnly"))}）</span>`;
       body.innerHTML = `
         <p class="topic-detail-summary">${esc(topic.summary)}</p>
+        <div class="topic-related-section">
+          <strong>${esc(window.t("topic.relatedTopics"))} (${relatedTopics.length})</strong>
+          <div class="topic-related-list">${relatedTopics.length ? relatedTopics.map(item => `
+            <button class="topic-related-item" type="button" data-related-topic-uid="${esc(item.related_topic_uid)}">
+              <span>${esc(item.related_title)}</span><small>${Number(item.semantic_similarity || 0).toFixed(3)}</small>
+            </button>`).join("") : `<span class="text-tertiary">${esc(window.t("topic.none"))}</span>`}</div>
+        </div>
         <div class="topic-detail-grid">
           <div><strong>${esc(window.t("topic.topicAtoms"))} (${(provenance.atoms || []).length})</strong>${(provenance.atoms || []).map(atom => `<div class="topic-source-item"><div>${esc(atom.content)}</div>${(sourcesByAtom[atom.atom_uid] || []).map(source => `<div class="text-tertiary text-mono">↳ ${esc(source.timeline_uid)} · ${esc(source.source_kind)} · ${esc(source.source_atom_fingerprint || "")}</div>`).join("")}</div>`).join("") || `<div class='text-tertiary'>${esc(window.t("topic.none"))}</div>`}</div>
           <div><strong>${esc(window.t("topic.sources"))} (${(provenance.links || []).length})</strong>${(provenance.links || []).map(link => `<div class="topic-source-item text-mono">${esc(link.timeline_uid)} · ${esc(link.time_cluster_key)}</div>`).join("") || `<div class='text-tertiary'>${esc(window.t("topic.none"))}</div>`}</div>
         </div>`;
+      body.querySelectorAll("[data-related-topic-uid]").forEach(button => {
+        button.addEventListener("click", () => this.showDetail(button.dataset.relatedTopicUid));
+      });
     } catch (e) {
       if (requestId !== this.detailRequestId) return;
       this.closeDetail();
@@ -273,7 +294,7 @@ export class TopicPage {
 
   renderResetBuildState() {
     this.topicCount = 0;
-    ["topic-total", "topic-active", "topic-atoms", "topic-links"].forEach(id => {
+    ["topic-total", "topic-active", "topic-atoms", "topic-links", "topic-relations"].forEach(id => {
       const element = document.getElementById(id);
       if (element) element.textContent = "0";
     });
@@ -297,6 +318,60 @@ export class TopicPage {
     } catch (e) {
       this.setBuildButtonsDisabled(!this.currentSpace() || !this.buildEnabled);
       this.showToast(e.message || window.t("topic.resumeFailed"), true);
+    }
+  }
+
+  requestDiscardBuild(job, trigger) {
+    if (!job?.run_uid || this.activeJobUid) return;
+    this.discardRun = {
+      run_uid: job.run_uid,
+      memory_space_id: job.memory_space_id || this.currentSpace(),
+    };
+    this.discardBuildTrigger = trigger || null;
+    const overlay = document.getElementById("topic-discard-build-overlay");
+    const message = document.getElementById("topic-discard-build-message");
+    message.textContent = window.t("topic.discardBuildMessage", job.run_uid);
+    overlay.classList.add("visible");
+    overlay.setAttribute("aria-hidden", "false");
+    document.getElementById("topic-discard-build-cancel")?.focus();
+  }
+
+  discardBuildConfirmIsOpen() {
+    return document.getElementById("topic-discard-build-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeDiscardBuildConfirm({ restoreFocus = true } = {}) {
+    if (!this.discardBuildConfirmIsOpen() && !this.discardRun) return;
+    const overlay = document.getElementById("topic-discard-build-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    const trigger = this.discardBuildTrigger;
+    this.discardBuildTrigger = null;
+    this.discardRun = null;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  async discardBuild() {
+    const run = this.discardRun;
+    if (!run?.run_uid || this.activeJobUid) return;
+    const submit = document.getElementById("topic-discard-build-submit");
+    const cancel = document.getElementById("topic-discard-build-cancel");
+    if (submit) submit.disabled = true;
+    if (cancel) cancel.disabled = true;
+    try {
+      const result = await this.api.post("topics/build/discard", run);
+      this.closeDiscardBuildConfirm({ restoreFocus: false });
+      document.getElementById("topic-progress")?.classList.add("hidden");
+      this.showToast(window.t(
+        "topic.discardBuildSuccess",
+        Number(result.deleted_intermediate_items || 0),
+      ));
+      await this.fetch();
+    } catch (e) {
+      this.showToast(e.message || window.t("topic.discardBuildFailed"), true);
+    } finally {
+      if (submit) submit.disabled = false;
+      if (cancel) cancel.disabled = false;
     }
   }
 
@@ -368,11 +443,18 @@ export class TopicPage {
       <div class="text-tertiary">${esc(window.t("topic.progress.elapsed"))} ${esc(elapsed)} · ${esc(window.t("topic.progress.updated"))} ${esc(updatedAgo)}${job.error ? ` · ${esc(job.error)}` : ""}</div>
       <div class="text-tertiary">${esc(job.status)} · ${esc(job.memory_space_id || "")}</div>
       ${job.run_uid && ["failed", "cancelled", "pending"].includes(job.status)
-        ? `<button id="topic-resume-build" class="btn btn-primary topic-resume-button">${esc(window.t("topic.resumeBuild"))}</button>`
+        ? `<div class="topic-progress-actions">
+            <button id="topic-resume-build" class="btn btn-primary">${esc(window.t("topic.resumeBuild"))}</button>
+            <button id="topic-discard-build" class="btn btn-danger">${esc(window.t("topic.discardBuild"))}</button>
+          </div>`
         : ""}`;
     document.getElementById("topic-resume-build")?.addEventListener(
       "click",
       () => this.resumeBuild(job.run_uid),
+    );
+    document.getElementById("topic-discard-build")?.addEventListener(
+      "click",
+      event => this.requestDiscardBuild(job, event.currentTarget),
     );
   }
 
@@ -387,6 +469,16 @@ export class TopicPage {
       ? ` · ${window.t("topic.progress.llmCall")} ${Math.min(callTotal, completed)} / ${callTotal}`
         + ` · ${window.t("topic.progress.concurrency")} ${Number(job.llm_concurrency || 1)}`
       : "";
+    if (job.item_kind === "rerank_query") {
+      const rerankTotal = Number(job.rerank_call_total || job.item_total || 0);
+      const rerankCompleted = Math.min(
+        rerankTotal,
+        Number(job.rerank_call_current || 0),
+      );
+      return `${window.t("topic.progress.rerankCompleted")} ${rerankCompleted} / ${rerankTotal}`
+        + ` · ${window.t("topic.progress.rerankActive")} ${Number(job.active_rerank_count || 0)}`
+        + ` · ${window.t("topic.progress.concurrency")} ${Number(job.rerank_concurrency || 1)}`;
+    }
     if (job.item_kind === "candidate_group") {
       const groupCompleted = Number(job.completed_groups ?? job.current ?? 0);
       const groupTotal = Number(job.item_total || job.total || 0);
