@@ -141,16 +141,14 @@ class ModelHandler:
                 or manager.get("cloudflare_rerank.base_url", "")
                 or ""
             )
-            extra["score_mapping"] = (
-                "sigmoid"
-                if bool(
-                    getattr(
-                        provider,
-                        "apply_sigmoid",
-                        manager.get("cloudflare_rerank.apply_sigmoid", True),
-                    )
+            extra["score_mapping"] = str(
+                getattr(provider, "score_mapping", "")
+                or manager.get("cloudflare_rerank.score_mapping", "")
+                or (
+                    "sigmoid"
+                    if manager.get("cloudflare_rerank.apply_sigmoid", True)
+                    else "identity"
                 )
-                else "raw"
             )
             extra["account_configured"] = bool(
                 manager.get("cloudflare_rerank.account_id", "")

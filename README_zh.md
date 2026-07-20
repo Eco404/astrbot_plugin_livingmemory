@@ -60,7 +60,7 @@
 - `llm_provider_id`: 大语言模型 ID（留空使用默认）
 - `rerank_provider_id`: 可选的 Rerank 模型 ID，用于复核跨时间 Topic 片段是否属于同一话题
 
-如果 AstrBot 暂无可用 Rerank Provider，可开启 `cloudflare_rerank.enabled`，填写 Cloudflare `account_id` 与 `api_token`（或设置环境变量 `CLOUDFLARE_AUTH_TOKEN`）。默认模型为 `@cf/baai/bge-reranker-base`；插件会用 sigmoid 将原始分数映射到 0-1，临时调用失败时回退到 Embedding 匹配。
+如果 AstrBot 暂无可用 Rerank Provider，可开启 `cloudflare_rerank.enabled`，填写 Cloudflare `account_id` 与 `api_token`（或设置环境变量 `CLOUDFLARE_AUTH_TOKEN`）。默认模型为 `@cf/baai/bge-reranker-base`；`score_mapping=auto` 会保留已经位于 `[0, 1]` 的分数，仅对 logits 形式的响应应用 sigmoid，临时调用失败时回退到 Embedding 匹配。
 
 **权威人物资料**:
 - 在插件 WebUI 的“人物资料”页面管理已知参与者的稳定身份事实，不占用 AstrBot 插件配置。这些资料保存在插件数据目录的 `authoritative_identities.json`，会注入 Timeline 总结和 Topic 片段提取/合成提示词。
@@ -77,6 +77,7 @@
 - `topic_memory.rerank_concurrency` 独立控制片段匹配阶段的 Rerank 请求并发上限，默认 4、范围 1–32；设为 1 使用串行模式。Cloudflare 返回 429 时应降低该值。
 - 构建失败、取消或因插件重启中断后，Topic 页面会显示“从断点继续”。候选片段、向量、匹配、组件合成和已写入 Topic 都会按原 `run_uid` 复用；配置、Prompt、Provider、模型或输入发生变化时，只重算受影响阶段。
 - LLM 输出中的可验证结构错误会使用输入来源确定性修复并写入 `validation_repairs`；无法验证的模型引用会被丢弃，不会作为 Topic 来源保存。
+- 片段提取以“一个未来检索意图”为边界；相关子话题关系要求全库区分度与正文语义共同支持，不会仅因一个泛化关键词或共享 Timeline 建边。Topic 与原子置信度按独立时间簇校准，避免同一段连续对话被误当成多次独立证据。
 - 数据库 v9.4 迁移只增加 Topic 相关子话题关系结构，不自动调用模型、不生成或改写 Topic，也不改变当前召回逻辑。
 
 管理界面通过 AstrBot 官方插件页面（插件 → LivingMemory → Pages → dashboard）访问，无需额外配置。

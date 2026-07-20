@@ -5,6 +5,7 @@ export class IdentityPage {
     this.api = api;
     this.showToast = showToast;
     this.profiles = [];
+    this.expandedProfiles = new Set();
     this.dirty = false;
     this.loaded = false;
   }
@@ -16,8 +17,13 @@ export class IdentityPage {
     const container = document.getElementById("identity-list");
     container?.addEventListener("input", event => this.updateField(event));
     container?.addEventListener("click", event => {
-      const button = event.target.closest("[data-identity-remove]");
-      if (button) this.remove(Number(button.dataset.identityRemove));
+      const removeButton = event.target.closest("[data-identity-remove]");
+      if (removeButton) {
+        this.remove(Number(removeButton.dataset.identityRemove));
+        return;
+      }
+      const toggleButton = event.target.closest("[data-identity-toggle]");
+      if (toggleButton) this.toggle(Number(toggleButton.dataset.identityToggle));
     });
   }
 
@@ -35,6 +41,7 @@ export class IdentityPage {
       this.profiles = Array.isArray(data.profiles)
         ? data.profiles.map(profile => this.normalize(profile))
         : [];
+      this.expandedProfiles.clear();
       this.dirty = false;
       this.loaded = true;
       this.render(data.load_error || "");
@@ -57,7 +64,9 @@ export class IdentityPage {
   }
 
   add() {
-    this.profiles.push(this.normalize());
+    const profile = this.normalize();
+    this.profiles.push(profile);
+    this.expandedProfiles.add(profile);
     this.dirty = true;
     this.render();
     document.querySelector("#identity-list .identity-card:last-child input")?.focus();
@@ -65,8 +74,20 @@ export class IdentityPage {
 
   remove(index) {
     if (!Number.isInteger(index) || !this.profiles[index]) return;
+    this.expandedProfiles.delete(this.profiles[index]);
     this.profiles.splice(index, 1);
     this.dirty = true;
+    this.render();
+  }
+
+  toggle(index) {
+    const profile = this.profiles[index];
+    if (!Number.isInteger(index) || !profile) return;
+    if (this.expandedProfiles.has(profile)) {
+      this.expandedProfiles.delete(profile);
+    } else {
+      this.expandedProfiles.add(profile);
+    }
     this.render();
   }
 
@@ -123,6 +144,7 @@ export class IdentityPage {
     try {
       const data = await this.api.post("identities/save", { profiles: this.profiles });
       this.profiles = (data.profiles || []).map(profile => this.normalize(profile));
+      this.expandedProfiles.clear();
       this.dirty = false;
       this.loaded = true;
       this.render(data.load_error || "");
@@ -147,6 +169,13 @@ export class IdentityPage {
   }
 
   renderCard(profile, index) {
+    const expanded = this.expandedProfiles.has(profile);
+    const title = profile.display_name || profile.user_id || window.t("identity.newProfile");
+    const identityParts = [
+      profile.platform && profile.user_id ? `${profile.platform} · ${profile.user_id}` : profile.platform || profile.user_id,
+      profile.gender,
+      profile.pronouns.join(" / "),
+    ].filter(Boolean);
     const field = (name, label, value, placeholder = "") => `
       <label class="identity-field">
         <span>${esc(window.t(label))}</span>
@@ -154,12 +183,19 @@ export class IdentityPage {
           data-identity-index="${index}" data-identity-field="${name}" />
       </label>`;
     return `
-      <article class="identity-card">
+      <article class="identity-card${expanded ? " is-expanded" : ""}">
         <div class="identity-card-header">
-          <strong>${esc(profile.display_name || profile.user_id || window.t("identity.newProfile"))}</strong>
+          <button class="identity-card-summary" type="button" data-identity-toggle="${index}"
+            aria-expanded="${expanded ? "true" : "false"}">
+            <span class="identity-card-summary-text">
+              <strong>${esc(title)}</strong>
+              ${identityParts.length ? `<span>${esc(identityParts.join(" · "))}</span>` : ""}
+            </span>
+            <span class="identity-card-chevron" aria-hidden="true">⌄</span>
+          </button>
           <button class="btn btn-danger btn-sm" type="button" data-identity-remove="${index}">${esc(window.t("identity.remove"))}</button>
         </div>
-        <div class="identity-fields">
+        ${expanded ? `<div class="identity-fields">
           ${field("platform", "identity.platform", profile.platform, "identity.platformPh")}
           ${field("user_id", "identity.userId", profile.user_id, "identity.userIdPh")}
           ${field("display_name", "identity.displayName", profile.display_name, "identity.displayNamePh")}
@@ -171,7 +207,7 @@ export class IdentityPage {
             <textarea class="input" rows="3" placeholder="${this.attr(window.t("identity.notesPh"))}"
               data-identity-index="${index}" data-identity-field="notes">${esc(profile.notes)}</textarea>
           </label>
-        </div>
+        </div>` : ""}
       </article>`;
   }
 

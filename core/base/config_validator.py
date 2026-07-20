@@ -3,7 +3,7 @@ config_validator.py - 配置验证模块
 提供配置验证和默认值管理功能。
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -179,7 +179,21 @@ class CloudflareRerankConfig(BaseModel):
     timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
     max_retries: int = Field(default=2, ge=0, le=8)
     retry_base_delay: float = Field(default=1.0, ge=0.0, le=60.0)
-    apply_sigmoid: bool = True
+    score_mapping: Literal["auto", "identity", "sigmoid"] = "auto"
+    # Accepted for configuration files created before score_mapping existed.
+    apply_sigmoid: bool | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_score_mapping(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "score_mapping" in value:
+            return value
+        legacy = value.get("apply_sigmoid")
+        if legacy is None:
+            return value
+        migrated = dict(value)
+        migrated["score_mapping"] = "sigmoid" if bool(legacy) else "identity"
+        return migrated
 
 
 class ImportanceDecayConfig(BaseModel):
@@ -363,6 +377,19 @@ def merge_config_with_defaults(user_config: dict[str, Any]) -> dict[str, Any]:
     Returns:
         dict[str, Any]: 合并后的配置
     """
+    user_config = dict(user_config)
+    cloudflare = user_config.get("cloudflare_rerank")
+    if (
+        isinstance(cloudflare, dict)
+        and "score_mapping" not in cloudflare
+        and cloudflare.get("apply_sigmoid") is not None
+    ):
+        migrated_cloudflare = dict(cloudflare)
+        migrated_cloudflare["score_mapping"] = (
+            "sigmoid" if bool(cloudflare["apply_sigmoid"]) else "identity"
+        )
+        user_config["cloudflare_rerank"] = migrated_cloudflare
+
     default_config = get_default_config()
 
     def deep_merge(default: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:

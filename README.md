@@ -54,7 +54,7 @@ Configure the plugin from the AstrBot plugin configuration page.
 - `llm_provider_id`: LLM model ID. Leave empty to use the AstrBot default.
 - `rerank_provider_id`: Optional Rerank model ID used to validate cross-time Topic matches.
 
-If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank.enabled` and configure the Cloudflare `account_id` and `api_token` (or the `CLOUDFLARE_AUTH_TOKEN` environment variable). The default model is `@cf/baai/bge-reranker-base`. This plugin maps its raw scores through sigmoid and falls back to Embedding matching on temporary failures.
+If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank.enabled` and configure the Cloudflare `account_id` and `api_token` (or the `CLOUDFLARE_AUTH_TOKEN` environment variable). The default model is `@cf/baai/bge-reranker-base`. With `score_mapping=auto`, values already in `[0, 1]` are preserved while logit-like responses are mapped through sigmoid; temporary failures fall back to Embedding matching.
 
 **Authoritative identity profiles**:
 - Manage known participant facts from the **Identity Profiles** page in the plugin WebUI rather than AstrBot plugin settings. Profiles are stored in `authoritative_identities.json` under the plugin data directory and injected into Timeline summarization and both Topic extraction/synthesis prompts.
@@ -71,6 +71,7 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 - `topic_memory.rerank_concurrency` independently limits concurrent rerank requests during fragment matching (default: 4, range: 1–32); set it to 1 for sequential operation and lower it if Cloudflare starts returning HTTP 429.
 - Failed, cancelled, or restart-interrupted builds expose a **Resume from checkpoint** action. Candidate fragments, embeddings, matching, component synthesis, and completed materialization are reused under the same `run_uid`; changed input, prompts, Provider, model, or relevant configuration invalidates only the affected checkpoint.
 - Recoverable LLM structure errors are deterministically repaired from supplied sources and recorded in `validation_repairs`. Unverifiable model references are discarded rather than persisted as Topic provenance.
+- Fragment extraction targets one future retrieval intent per fragment. Related-topic edges require corpus-aware semantic evidence instead of a single generic keyword or shared Timeline alone. Topic and atom confidence is calibrated by independent time-cluster evidence so several nearby memories do not masquerade as repeated confirmation.
 - Database v9.4 migration only adds the related-subtopic relation structure. It never invokes a model or creates/rewrites Topics automatically, and existing recall remains unchanged in this stage.
 
 **Memory injection compatibility**:

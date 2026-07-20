@@ -272,7 +272,7 @@ async def test_full_build_splits_merges_and_materializes_exact_sources(tmp_path:
     assert run["stage"] == "completed"
     assert run["status"] == "completed"
     matching = await store.get_build_checkpoint(result["run_uid"], "fragment_matching")
-    assert matching["payload"]["matching_algorithm_version"] == 3
+    assert matching["payload"]["matching_algorithm_version"] == 4
     assert "singleton_reason_counts" in matching["payload"]["audit"]
 
 
@@ -696,6 +696,25 @@ def test_matching_audit_distinguishes_singleton_reasons():
     assert audit["parameters"]["component_min_average_similarity"] == 0.65
 
 
+def test_matching_audit_keeps_raw_rerank_scores_out_of_embedding_pairs():
+    manager = TopicBuildManager(":memory:", None, None)
+    fragments = [_topic_fragment(1), _topic_fragment(2)]
+    pair = f"{fragments[0].fragment_uid}|{fragments[1].fragment_uid}"
+    audit = manager._matching_audit(
+        fragments,
+        [[0], [1]],
+        {
+            pair: 0.7,
+            f"rerank:{pair}": 0.72,
+            f"rerank_raw:{pair}": 0.72,
+        },
+    )
+
+    distribution = audit["rerank_score_distribution"]
+    assert distribution["mapped"]["count"] == 1
+    assert distribution["raw"]["median"] == 0.72
+
+
 def test_related_topic_graph_uses_reciprocal_neighbors_without_merging_topics():
     manager = TopicBuildManager(
         ":memory:",
@@ -738,6 +757,92 @@ def test_related_topic_graph_uses_reciprocal_neighbors_without_merging_topics():
         "topic-b",
     }
     assert relations[0].semantic_similarity == pytest.approx(0.8)
+    assert relations[0].metadata["evidence_kind"] == "shared_distinctive_identifier"
+
+
+def test_related_topic_graph_rejects_one_generic_keyword_without_semantic_support():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "related_topic_similarity_threshold": 0.60,
+            "related_topic_top_n": 1,
+        },
+    )
+    topics = [
+        TopicMemory(
+            topic_uid="topic-a",
+            memory_space_id="space-1",
+            title="照片元数据处理",
+            summary="读取照片的拍摄时间和位置信息",
+            metadata={"embedding": [1.0, 0.0], "keywords": ["工具"]},
+        ),
+        TopicMemory(
+            topic_uid="topic-b",
+            memory_space_id="space-1",
+            title="邮件发送边界",
+            summary="发送邮件前需要获得用户确认",
+            metadata={"embedding": [0.8, 0.6], "keywords": ["工具"]},
+        ),
+    ]
+
+    assert manager._derive_topic_relations("run-1", topics) == []
+
+
+def test_related_topic_context_uses_source_overlap_not_shared_source_alone():
+    shared_event = TopicBuildManager._topic_relation_context(
+        TopicMemory(
+            memory_space_id="space-1",
+            title="现场取餐",
+            summary="领取活动期间预订的饮品",
+            metadata={"source_timeline_uids": ["timeline-event"]},
+        ),
+        TopicMemory(
+            memory_space_id="space-1",
+            title="现场逛展",
+            summary="浏览展台并购买周边",
+            metadata={"source_timeline_uids": ["timeline-event"]},
+        ),
+    )
+    accidental_overlap = TopicBuildManager._topic_relation_context(
+        TopicMemory(
+            memory_space_id="space-1",
+            title="洗澡放松",
+            summary="下班回家后洗澡",
+            metadata={
+                "source_timeline_uids": ["shared", "commute-1", "commute-2"]
+            },
+        ),
+        TopicMemory(
+            memory_space_id="space-1",
+            title="长期陪伴需求",
+            summary="多次讨论情绪陪伴",
+            metadata={
+                "source_timeline_uids": ["shared", *[f"chat-{i}" for i in range(15)]]
+            },
+        ),
+    )
+
+    assert shared_event["contextual_match"] is True
+    assert shared_event["evidence_kind"] == "shared_timeline_with_semantic_support"
+    assert accidental_overlap["contextual_match"] is False
+
+
+def test_confidence_calibration_counts_independent_time_clusters_more_strongly():
+    one_episode, one_audit = TopicBuildManager._calibrate_confidence(
+        0.99,
+        independent_clusters=1,
+        supporting_timelines=4,
+    )
+    repeated_episode, repeated_audit = TopicBuildManager._calibrate_confidence(
+        0.99,
+        independent_clusters=4,
+        supporting_timelines=4,
+    )
+
+    assert 0.6 < one_episode < repeated_episode < 0.99
+    assert one_audit["evidence_weight"] < repeated_audit["evidence_weight"]
 
 
 @pytest.mark.asyncio
@@ -873,6 +978,14 @@ def test_fragment_prompt_uses_local_refs_and_restores_exact_provenance():
     assert decoded["fragments"][0]["timeline_uids"] == [candidate.memory_uid]
     assert fact["source_timeline_uids"] == [candidate.memory_uid]
     assert fact["source_atom_fingerprints"] == [fingerprint]
+
+
+def test_fragment_prompt_defines_one_future_retrieval_intent_per_fragment():
+    prompt = TopicBuildManager._fragment_prompt("{}")
+
+    assert "one plausible future retrieval query" in prompt
+    assert "Repeating its ref is preferable" in prompt
+    assert "mixed fragment" in prompt
 
 
 def test_synthesis_prompt_strips_nested_provenance_and_derives_fragment_scope():

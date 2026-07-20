@@ -119,7 +119,7 @@
                 "description": "Topic Rerank 并发数",
                 "hint": "片段匹配阶段同时发出的 Rerank Provider 请求上限，允许 1-32。1 为串行；Cloudflare 或其他 Provider 出现 429 限流时请适当降低。",
                 "type": "int",
-                "default": 4,
+                "default": 1,
                 "slider": {"min": 1, "max": 32, "step": 1}
             },
             "rerank_failure_fallback": {
@@ -221,11 +221,12 @@
                 "type": "float",
                 "default": 1.0
             },
-            "apply_sigmoid": {
-                "description": "对模型分数应用 Sigmoid",
-                "hint": "将 bge-reranker 的原始分数映射到 0-1，以匹配 Topic 阈值。建议开启。",
-                "type": "bool",
-                "default": true
+            "score_mapping": {
+                "description": "Rerank 分数映射",
+                "hint": "自动模式会保留已经位于 0-1 的概率分数，仅对超出该范围的原始 logits 应用 Sigmoid，避免重复压缩分数。",
+                "type": "string",
+                "default": "auto",
+                "options": ["auto", "identity", "sigmoid"]
             }
         }
     },

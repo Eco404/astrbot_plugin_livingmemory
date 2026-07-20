@@ -17,12 +17,13 @@
 - **可选 Rerank Provider**：新增 `provider_settings.rerank_provider_id`，未配置时保持纯 Embedding 匹配。
 - **Cloudflare Workers AI Rerank**：AstrBot 尚未支持 Cloudflare Rerank Provider 时，插件可直接调用 `@cf/baai/bge-reranker-base`；支持 sigmoid 分数映射、429/5xx 重试、超时控制和失败后回退 Embedding。
 - **模型测试 WebUI**：以独立卡片展示插件运行时实际使用的 LLM、Embedding、Rerank，标明显式配置、AstrBot 默认回退或 Cloudflare 内置来源，并可分别发起连接测试。
-- **WebUI 权威人物资料与身份提示词**：新增“人物资料”页面，以平台稳定账号 ID 为主键管理姓名、性别、代词和备注，独立保存到插件数据目录并在保存后立即更新 Timeline 与 Topic 生成链路；插件配置中不增加人物资料字段。提示词禁止从昵称、语气、兴趣或人格设定推断参与者身份，未知时改为重复昵称。本阶段不进行生成后的确定性身份校验。
+- **WebUI 权威人物资料与身份提示词**：新增“人物资料”页面，以平台稳定账号 ID 为主键管理姓名、性别、代词和备注；人物条目以默认折叠的紧凑列表展示，点击后展开编辑。资料独立保存到插件数据目录并在保存后立即更新 Timeline 与 Topic 生成链路；插件配置中不增加人物资料字段。提示词禁止从昵称、语气、兴趣或人格设定推断参与者身份，未知时改为重复昵称。本阶段不进行生成后的确定性身份校验。
 
 ### 兼容性
 - Topic 功能默认关闭，v9→v9.3 迁移只创建结构，不调用模型、不生成 Topic，也不改变现有 Timeline/图谱/召回逻辑。
 
 ### 修复
+- **Topic 泛化质量与可解释分数**：片段提示词改为单一检索意图边界；相关子话题关系使用全库词频、加权正文重合与来源组合证据，过滤单个泛词和偶然共享 Timeline。Cloudflare Rerank 支持 `auto`/`identity`/`sigmoid` 映射并在构建审计中同时保留原始与判定分数；Topic/原子置信度按独立时间簇和来源数量进行收缩校准。
 - **Topic 匹配参数解耦与审计**：候选扫描阈值不再隐式控制 Rerank 候选线和组件凝聚度；新增独立最低两两/平均相似度参数。构建断点记录单片段 Topic 是因候选不足、未通过双向 Rerank，还是被组件凝聚度拒绝，便于后续使用真实样本调优。
 - **内置 Cloudflare Rerank 启动期误判未启用**：Rerank 初始化从 LLM Provider 等待流程中解耦，避免静默等待聊天模型时提前返回并跳过 Cloudflare 客户端；`provider_settings.rerank_provider_id` 留空时内置 Cloudflare 仍可独立启用，二者同时配置时内置 Cloudflare 优先。修复 `topic_memory.llm_concurrency=30` 超出隐藏校验上限后导致整份插件配置回退默认值、连带关闭 Cloudflare 的问题，并将允许范围明确为 1-64。模型测试页会显示安全的初始化错误，不再将配置异常笼统标为“未启用”。
 - **Topic 全量构建被无效原子指纹整体中断**：LLM 返回未知或被改写的 `source_atom_fingerprints` 时，安全剔除无效引用；事实内容与来源原子完全一致时确定性恢复正确指纹，否则保留 Timeline 来源并降级为事实指纹溯源。未知 Timeline 和越界来源不会被采纳；无法局部修复时整批回退为输入 Timeline 的确定性片段。

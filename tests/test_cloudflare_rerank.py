@@ -79,6 +79,27 @@ async def test_cloudflare_rerank_retries_429_and_accepts_direct_worker_shape():
 
 
 @pytest.mark.asyncio
+async def test_cloudflare_rerank_auto_preserves_probability_scores_and_raw_audit():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"response": [{"id": 0, "score": 0.72}]},
+        )
+
+    client = CloudflareRerankClient(
+        account_id="account",
+        api_token="token",
+        score_mapping="auto",
+        transport=httpx.MockTransport(handler),
+    )
+    results = await client.rerank("query", ["document"])
+
+    assert results[0].relevance_score == 0.72
+    assert results[0].raw_score == 0.72
+    assert results[0].score_mapping == "identity"
+
+
+@pytest.mark.asyncio
 async def test_cloudflare_rerank_error_does_not_expose_token():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
