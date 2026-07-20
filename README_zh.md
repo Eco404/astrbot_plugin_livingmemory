@@ -41,7 +41,7 @@
 - **安全分批索引重建**: 以小批量原子方式重建大型索引，防止内存溢出和损坏；失败时自动回滚
 - **版本备份**: 插件版本更新时自动备份所有数据文件到版本标记目录，便于数据恢复
 - **WebUI 管理**: 可视化记忆管理界面，支持三语（中/英/俄）和深色模式
-- **实验性 Topic 记忆**: 在原 Timeline 层之上构建可溯源、只读的主题记忆，支持全量/增量维护和可选 Rerank；当前阶段不参与正式召回。
+- **Topic 记忆**: 在原 Timeline 层之上构建可溯源、只读的主题记忆，支持全量/增量维护、可选 Rerank，以及 Topic 优先、Timeline 轻量补充的正式召回。
 
 ---
 
@@ -71,6 +71,8 @@
 
 **实验性 Topic 记忆**:
 - 开启 `topic_memory.enabled` 后，在 Topic 记忆页面执行一次全量构建；`topic_memory.auto_maintenance` 控制后续自动维护。
+- `topic_memory.recall_enabled` 默认开启：正式召回优先返回活跃 Topic，并在 `recall_engine.top_k` 总预算内附带最多 `topic_memory.timeline_supplement_k` 条 Timeline；没有可用 Topic 或 Topic 检索失败时自动回退纯 Timeline。
+- Topic 召回复用已保存的 Embedding，可选使用当前 Rerank Provider 精排，不调用 LLM。当前上下文只覆盖部分来源时降低分数，覆盖率达到 `topic_memory.recall_context_overlap_threshold` 才抑制整个 Topic。
 - Topic 是自动派生的只读数据。应编辑来源 Timeline，关联 Topic 会被标记为待重建并自动更新。
 - Topic 页面的“维护”会检查活跃 Timeline 当前版本是否已有活跃 Topic 索引，列出缺失项并默认全选；确认后仅对选中 Timeline 增量补建，不再使用固定 24 小时时间窗口。
 - 宽候选组按 `topic_memory.fragment_extraction_batch_size`（默认 12）分批提取；大型 Topic 组件再按 `topic_memory.synthesis_batch_size`（默认 12）分层合成，最终仍归并为同一个 Topic。可在 Topic 页面查看当前组件、批次、调用序号和耗时。
@@ -81,7 +83,7 @@
 - 构建失败、取消或因插件重启中断后，Topic 页面会显示“从断点继续”。候选片段、向量、匹配、组件合成和已写入 Topic 都会按原 `run_uid` 复用；配置、Prompt、Provider、模型或输入发生变化时，只重算受影响阶段。
 - LLM 输出中的可验证结构错误会使用输入来源确定性修复并写入 `validation_repairs`；无法验证的模型引用会被丢弃，不会作为 Topic 来源保存。
 - 片段提取以“一个未来检索意图”为边界；相关子话题关系要求全库区分度与正文语义共同支持，不会仅因一个泛化关键词或共享 Timeline 建边。Topic 与原子置信度按独立时间簇校准，避免同一段连续对话被误当成多次独立证据。
-- 数据库 v9.4 迁移只增加 Topic 相关子话题关系结构，不自动调用模型、不生成或改写 Topic，也不改变当前召回逻辑。
+- 数据库 v9.4 迁移只增加 Topic 相关子话题关系结构，不自动调用模型，也不生成或改写 Topic；是否参与召回由 `topic_memory.enabled` 与 `topic_memory.recall_enabled` 控制。
 
 管理界面通过 AstrBot 官方插件页面（插件 → LivingMemory → Pages → dashboard）访问，无需额外配置。
 

@@ -88,12 +88,92 @@ class RecallHandler:
                 track_access=False,
             )
             results = outcome.results
+            topic_outcome = None
+            topic_space_id = None
+            if (
+                getattr(memory_engine, "topic_memory_enabled", False) is True
+                and bool(
+                    self._config_value(
+                        config_manager, "topic_memory.recall_enabled", True
+                    )
+                )
+                and session_id
+            ):
+                try:
+                    spaces = await memory_engine.topic_memory_store.find_memory_spaces_for_session(
+                        session_id
+                    )
+                    if spaces:
+                        topic_space_id = spaces[0]
+                        topic_outcome = await memory_engine.topic_recall_pipeline.search(
+                            branches=outcome.branches,
+                            memory_space_id=topic_space_id,
+                            final_k=min(
+                                k,
+                                int(
+                                    self._config_value(
+                                        config_manager,
+                                        "topic_memory.recall_top_k",
+                                        3,
+                                    )
+                                ),
+                            ),
+                            track_access=False,
+                        )
+                        if topic_outcome.results:
+                            supplement_k = min(
+                                int(
+                                    self._config_value(
+                                        config_manager,
+                                        "topic_memory.timeline_supplement_k",
+                                        2,
+                                    )
+                                ),
+                                max(0, k - len(topic_outcome.results)),
+                            )
+                            results = memory_engine.topic_recall_pipeline.select_timeline_supplements(
+                                results,
+                                topic_outcome.results,
+                                supplement_k,
+                            )
+                except Exception:
+                    logger.warning(
+                        "[PageAPI] Topic 召回失败，召回测试回退 Timeline",
+                        exc_info=True,
+                    )
+                    topic_outcome = None
+                    topic_space_id = None
             elapsed_time = (time.time() - start_time) * 1000
         except Exception as exc:
             logger.error(f"[PageAPI] 召回测试失败: {exc}", exc_info=True)
             return self.utils.error(str(exc))
 
         formatted_results = []
+        if topic_outcome is not None:
+            for result in topic_outcome.results:
+                formatted_results.append(
+                    {
+                        "memory_id": result.topic_uid,
+                        "content": f"Topic: {result.topic.title}\n{result.topic.summary}",
+                        "similarity_score": round(float(result.final_score), 4),
+                        "score_percentage": round(float(result.final_score) * 100, 2),
+                        "metadata": {
+                            "memory_layer": "topic",
+                            "title": result.topic.title,
+                            "importance": result.topic.importance,
+                            "status": result.topic.status.value,
+                        },
+                        "score_breakdown": {
+                            "topic_relevance_score": round(
+                                result.relevance_score, 6
+                            ),
+                            "topic_embedding_score": round(
+                                result.embedding_score, 6
+                            ),
+                            "topic_keyword_score": round(result.keyword_score, 6),
+                        },
+                    }
+                )
         for result in results:
             score_breakdown = {
                 key: round(float(value), 6)
@@ -109,6 +189,11 @@ class RecallHandler:
                 "memory_type": result.metadata.get("memory_type", "GENERAL"),
                 "status": result.metadata.get("status", "active"),
                 "create_time": result.metadata.get("create_time"),
+                "memory_layer": (
+                    "timeline_supplement"
+                    if topic_outcome is not None and topic_outcome.results
+                    else "timeline"
+                ),
             }
             metadata.update(score_breakdown)
             formatted_results.append(
@@ -130,7 +215,13 @@ class RecallHandler:
                 "k": k,
                 "session_id_filter": session_id,
                 "elapsed_time_ms": round(elapsed_time, 2),
-                "diagnostics": outcome.diagnostics(),
+                "diagnostics": {
+                    **outcome.diagnostics(),
+                    "topic_space_id": topic_space_id,
+                    "topic": topic_outcome.diagnostics()
+                    if topic_outcome is not None
+                    else None,
+                },
             }
         )
 

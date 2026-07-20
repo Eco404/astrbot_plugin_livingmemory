@@ -55,6 +55,23 @@ For very busy group chats, lower `context_window_size` or disable full group cap
 
 With recent-context expansion enabled, recent user messages are searched as a separate lower-weight branch instead of being concatenated repeatedly into the current query. Keep `assistant_context_mode=exclude` to prevent bot paraphrases from amplifying keywords; use `low_weight` or `normal` only when the previous bot response is useful retrieval context.
 
+## Topic-first recall
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `topic_memory.recall_enabled` | `true` | Prefer active Topics when Topic memory is enabled |
+| `topic_memory.recall_top_k` | `3` | Maximum Topics injected per recall |
+| `topic_memory.recall_candidate_multiplier` | `4` | Topic candidate multiplier before filtering |
+| `topic_memory.recall_scan_limit` | `2000` | Topic vector scan limit per memory space |
+| `topic_memory.recall_min_relevance` | `0.42` | Minimum Topic relevance |
+| `topic_memory.recall_relative_floor` | `0.70` | Minimum relevance relative to the best Topic |
+| `topic_memory.recall_mmr_lambda` | `0.78` | Balance between Topic relevance and diversity |
+| `topic_memory.recall_use_rerank` | `true` | Rerank Topic candidates when a provider is available |
+| `topic_memory.recall_context_overlap_threshold` | `0.80` | Suppress a Topic when this fraction of its sources is already visible |
+| `topic_memory.timeline_supplement_k` | `2` | Maximum Timeline supplements after a Topic match |
+
+Topic retrieval reuses vectors saved during Topic construction and does not invoke an LLM. The combined injection never exceeds `recall_engine.top_k`. If no active/relevant Topic exists, recall falls back to Timeline-only behavior. Partial source overlap only reduces the Topic score; the Topic is suppressed only after the configured coverage threshold is reached.
+
 ## Memory isolation
 
 | Key | Default | Description |

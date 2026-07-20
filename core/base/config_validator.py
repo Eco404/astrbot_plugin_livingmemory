@@ -164,6 +164,18 @@ class TopicMemoryConfig(BaseModel):
     """Automatically maintained derived Topic-memory settings."""
 
     enabled: bool = False
+    recall_enabled: bool = True
+    recall_top_k: int = Field(default=3, ge=1, le=20)
+    recall_candidate_multiplier: int = Field(default=4, ge=1, le=10)
+    recall_scan_limit: int = Field(default=2000, ge=100, le=5000)
+    recall_min_relevance: float = Field(default=0.42, ge=0.0, le=1.0)
+    recall_relative_floor: float = Field(default=0.70, ge=0.0, le=1.0)
+    recall_mmr_lambda: float = Field(default=0.78, ge=0.0, le=1.0)
+    recall_use_rerank: bool = True
+    recall_context_overlap_threshold: float = Field(
+        default=0.8, ge=0.0, le=1.0
+    )
+    timeline_supplement_k: int = Field(default=2, ge=0, le=10)
     auto_maintenance: bool = True
     auto_debounce_seconds: float = Field(default=60.0, ge=0.0, le=3600.0)
     time_gap_hours: float = Field(default=6.0, ge=1 / 60, le=24 * 30)

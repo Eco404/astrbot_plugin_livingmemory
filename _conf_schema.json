@@ -38,7 +38,7 @@
     },
     "topic_memory": {
         "description": "Topic 记忆（实验性）",
-        "hint": "在原有 Timeline 记忆之上自动构建按话题归并、可精确追溯的只读记忆层。当前版本尚未改变正式召回逻辑。",
+        "hint": "在 Timeline 之上自动构建按话题归并、可精确追溯的只读记忆层。启用召回后优先注入 Topic，并用少量 Timeline 补充细节。",
         "type": "object",
         "items": {
             "enabled": {
@@ -46,6 +46,65 @@
                 "hint": "开启后允许手动构建，并可在 Timeline 写入后自动维护 Topic。首次启用建议先在 WebUI 执行一次全量构建。",
                 "type": "bool",
                 "default": false
+            },
+            "recall_enabled": {
+                "description": "启用 Topic 优先召回",
+                "hint": "仅在 Topic 记忆总开关开启时生效。当前空间没有可用 Topic 时自动回退到纯 Timeline 召回。",
+                "type": "bool",
+                "default": true
+            },
+            "recall_top_k": {
+                "description": "Topic 最大召回数量",
+                "hint": "Topic 是主要召回结果；实际数量受相关度门槛约束，可以少于该值。",
+                "type": "int",
+                "default": 3
+            },
+            "recall_candidate_multiplier": {
+                "description": "Topic 召回候选倍率",
+                "type": "int",
+                "default": 4
+            },
+            "recall_scan_limit": {
+                "description": "Topic 单次扫描上限",
+                "hint": "当前召回会在记忆空间内扫描已保存的 Topic 向量。默认 2000 可覆盖绝大多数单会话；极长生命周期空间可提高到 5000。",
+                "type": "int",
+                "default": 2000
+            },
+            "recall_min_relevance": {
+                "description": "Topic 最低相关度",
+                "hint": "低于该值的 Topic 不会进入正式注入。",
+                "type": "float",
+                "default": 0.42
+            },
+            "recall_relative_floor": {
+                "description": "Topic 相对相关度下限",
+                "hint": "Topic 还需达到本轮最佳 Topic 相关度的一定比例。",
+                "type": "float",
+                "default": 0.7
+            },
+            "recall_mmr_lambda": {
+                "description": "Topic 相关性与多样性平衡",
+                "hint": "避免多个内容高度相似的 Topic 同时占满结果；越接近 1 越偏向原始相关度。",
+                "type": "float",
+                "default": 0.78
+            },
+            "recall_use_rerank": {
+                "description": "Topic 召回使用 Rerank",
+                "hint": "配置了可用 Rerank 时用于精排 Topic 候选；调用失败会自动保留 Embedding 与关键词结果。",
+                "type": "bool",
+                "default": true
+            },
+            "recall_context_overlap_threshold": {
+                "description": "Topic 上下文来源覆盖阈值",
+                "hint": "Topic 有多少比例的来源 Timeline 已在当前上下文中时不再重复注入。部分重叠只降低权重，不会直接删除整个 Topic；设为 0 关闭此处理。",
+                "type": "float",
+                "default": 0.8
+            },
+            "timeline_supplement_k": {
+                "description": "Timeline 补充数量",
+                "hint": "命中 Topic 后最多附带的相关 Timeline 数量；总注入数量仍不超过召回 top_k。设为 0 可仅注入 Topic。",
+                "type": "int",
+                "default": 2
             },
             "auto_maintenance": {
                 "description": "自动维护 Topic",

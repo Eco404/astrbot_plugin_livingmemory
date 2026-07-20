@@ -55,6 +55,23 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 
 开启跨轮扩展时，最近用户消息以较低权重单独检索，不会再与当前消息重复拼接。`assistant_context_mode=exclude` 可以避免 Bot 对用户内容的复述反复放大同一批关键词；只有确实依赖 Bot 上一轮说明的场景，才建议改为 `low_weight` 或 `normal`。
 
+## Topic 优先召回
+
+| 配置项 | 默认 | 说明 |
+| --- | --- | --- |
+| `topic_memory.recall_enabled` | `true` | Topic 总开关开启后优先召回活跃 Topic |
+| `topic_memory.recall_top_k` | `3` | 每轮最多注入的 Topic 数量 |
+| `topic_memory.recall_candidate_multiplier` | `4` | Topic 精筛前的候选倍率 |
+| `topic_memory.recall_scan_limit` | `2000` | 单个记忆空间每次参与向量扫描的 Topic 上限 |
+| `topic_memory.recall_min_relevance` | `0.42` | Topic 最低相关度 |
+| `topic_memory.recall_relative_floor` | `0.70` | 相对最佳 Topic 的最低比例 |
+| `topic_memory.recall_mmr_lambda` | `0.78` | Topic 相关性与结果多样性的平衡 |
+| `topic_memory.recall_use_rerank` | `true` | 有可用 Rerank 时精排 Topic 候选 |
+| `topic_memory.recall_context_overlap_threshold` | `0.80` | 当前上下文覆盖该比例的 Topic 来源时抑制注入 |
+| `topic_memory.timeline_supplement_k` | `2` | Topic 命中后附带的 Timeline 上限 |
+
+Topic 检索复用构建时保存的向量，不调用 LLM。正式注入总数仍不超过 `recall_engine.top_k`；没有活跃或足够相关的 Topic 时自动回退纯 Timeline。部分 Topic 来源仍位于当前上下文时只降低分数，只有覆盖率达到配置阈值才过滤整个 Topic。
+
 ## 记忆隔离
 
 | 配置项 | 默认 | 说明 |

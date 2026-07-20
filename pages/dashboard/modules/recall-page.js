@@ -127,7 +127,7 @@ export class RecallPage {
       const score = mem.similarity_score != null ? Number(mem.similarity_score).toFixed(3) :
                     (mem.score != null ? Number(mem.score).toFixed(3) : "--");
       const importance = normalizeImportance(mem.metadata?.importance || 0.5).toFixed(1);
-      const type = mem.metadata?.memory_type || "GENERAL";
+      const type = mem.metadata?.memory_layer || mem.metadata?.memory_type || "GENERAL";
       const status = mem.metadata?.status || "active";
       const breakdown = mem.score_breakdown || {};
 
@@ -211,6 +211,31 @@ export class RecallPage {
       html += '</div>';
     });
     html += '</div>';
+    const topic = diagnostics.topic;
+    if (topic) {
+      html += '<div class="recall-topic-diagnostics">';
+      html += '<strong>' + window.t("recall.topicDiagnostics") + '</strong>';
+      html += '<span>' + window.t("recall.candidateSummary", topic.candidate_count || 0, topic.selected_count || 0) + '</span>';
+      html += '<span>' + window.t("recall.threshold") + ': ' + Number(topic.applied_threshold || 0).toFixed(3) + '</span>';
+      html += '<span>' + window.t("recall.topicContextSuppressed") + ': ' + Number(topic.context_suppressed || 0) + '</span>';
+      if (diagnostics.topic_space_id) {
+        html += '<span class="cell-mono">' + esc(diagnostics.topic_space_id) + '</span>';
+      }
+      html += '</div>';
+      const topicCandidates = topic.candidates || [];
+      if (topicCandidates.length) {
+        html += '<details class="recall-filtered"><summary>' + window.t("recall.topicCandidates", topicCandidates.length) + '</summary>';
+        html += '<div class="recall-filtered-list">';
+        topicCandidates.forEach(item => {
+          html += '<div><span class="cell-mono">' + esc(item.title || item.topic_uid) + '</span>';
+          html += '<span>' + (item.selected ? window.t("recall.selected") : window.t("recall.filtered")) + '</span>';
+          html += '<span>rel ' + Number(item.relevance_score || 0).toFixed(3) + '</span>';
+          html += '<span>score ' + Number(item.final_score || 0).toFixed(3) + '</span>';
+          html += '<span>coverage ' + Number(item.context_coverage || 0).toFixed(2) + '</span></div>';
+        });
+        html += '</div></details>';
+      }
+    }
     if (filtered.length) {
       html += '<details class="recall-filtered"><summary>' + window.t("recall.filteredCandidates", filtered.length) + '</summary>';
       html += '<div class="recall-filtered-list">';

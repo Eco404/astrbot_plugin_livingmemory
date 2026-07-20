@@ -374,8 +374,15 @@ def format_memories_for_injection(memories: list) -> str:
 
             # 构建格式化的记忆条目（展示content和元数据信息）
             time_part = f", Memory write time: {time_str}" if time_str else ""
+            memory_layer = str(metadata.get("memory_layer") or "timeline")
+            if memory_layer == "topic":
+                entry_label = "Topic 记忆 / Topic memory"
+            elif memory_layer == "timeline_supplement":
+                entry_label = "Timeline 补充 / Timeline supplement"
+            else:
+                entry_label = "记忆 / Memory"
             entry_parts = [
-                f"记忆 #{idx} / Memory #{idx} (Importance: {importance:.2f}){time_part}"
+                f"{entry_label} #{idx} (Importance: {importance:.2f}){time_part}"
             ]
 
             # 添加元数据信息
@@ -525,6 +532,8 @@ def format_memories_for_fake_tool_call(
                 "persona_id": metadata.get("persona_id"),
                 "create_time": metadata.get("create_time"),
                 "last_access_time": metadata.get("last_access_time"),
+                "memory_layer": metadata.get("memory_layer", "timeline"),
+                "title": metadata.get("title"),
             }
         )
 

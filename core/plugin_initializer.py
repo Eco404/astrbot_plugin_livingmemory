@@ -687,6 +687,36 @@ class PluginInitializer:
                     "enabled": self.config_manager.get(
                         "topic_memory.enabled", False
                     ),
+                    "recall_enabled": self.config_manager.get(
+                        "topic_memory.recall_enabled", True
+                    ),
+                    "recall_top_k": self.config_manager.get(
+                        "topic_memory.recall_top_k", 3
+                    ),
+                    "recall_candidate_multiplier": self.config_manager.get(
+                        "topic_memory.recall_candidate_multiplier", 4
+                    ),
+                    "recall_scan_limit": self.config_manager.get(
+                        "topic_memory.recall_scan_limit", 2000
+                    ),
+                    "recall_min_relevance": self.config_manager.get(
+                        "topic_memory.recall_min_relevance", 0.42
+                    ),
+                    "recall_relative_floor": self.config_manager.get(
+                        "topic_memory.recall_relative_floor", 0.70
+                    ),
+                    "recall_mmr_lambda": self.config_manager.get(
+                        "topic_memory.recall_mmr_lambda", 0.78
+                    ),
+                    "recall_use_rerank": self.config_manager.get(
+                        "topic_memory.recall_use_rerank", True
+                    ),
+                    "recall_context_overlap_threshold": self.config_manager.get(
+                        "topic_memory.recall_context_overlap_threshold", 0.8
+                    ),
+                    "timeline_supplement_k": self.config_manager.get(
+                        "topic_memory.timeline_supplement_k", 2
+                    ),
                     "auto_maintenance": self.config_manager.get(
                         "topic_memory.auto_maintenance", True
                     ),
