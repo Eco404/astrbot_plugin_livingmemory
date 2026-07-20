@@ -90,6 +90,9 @@ class RecallHandler:
             results = outcome.results
             topic_outcome = None
             topic_space_id = None
+            topic_config = getattr(
+                memory_engine.topic_recall_pipeline, "config", {}
+            ) or {}
             if (
                 getattr(memory_engine, "topic_memory_enabled", False) is True
                 and bool(
@@ -110,25 +113,13 @@ class RecallHandler:
                             memory_space_id=topic_space_id,
                             final_k=min(
                                 k,
-                                int(
-                                    self._config_value(
-                                        config_manager,
-                                        "topic_memory.recall_top_k",
-                                        3,
-                                    )
-                                ),
+                                int(topic_config.get("recall_top_k", 3)),
                             ),
                             track_access=False,
                         )
                         if topic_outcome.results:
                             supplement_k = min(
-                                int(
-                                    self._config_value(
-                                        config_manager,
-                                        "topic_memory.timeline_supplement_k",
-                                        2,
-                                    )
-                                ),
+                                int(topic_config.get("timeline_supplement_k", 2)),
                                 max(0, k - len(topic_outcome.results)),
                             )
                             results = memory_engine.topic_recall_pipeline.select_timeline_supplements(
@@ -171,6 +162,15 @@ class RecallHandler:
                                 result.embedding_score, 6
                             ),
                             "topic_keyword_score": round(result.keyword_score, 6),
+                            **(
+                                {
+                                    "topic_rerank_score": round(
+                                        result.rerank_score, 6
+                                    )
+                                }
+                                if result.rerank_score is not None
+                                else {}
+                            ),
                         },
                     }
                 )

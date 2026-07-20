@@ -83,6 +83,11 @@ class ConfigManager:
         """
         return self._config.get(section, {})
 
+    def get_raw_section(self, section: str) -> dict[str, Any]:
+        """Return explicitly persisted values without injecting schema defaults."""
+        value = self._raw_config.get(section, {})
+        return dict(value) if isinstance(value, dict) else {}
+
     def get_all(self) -> dict[str, Any]:
         """获取所有配置"""
         return self._config.copy()

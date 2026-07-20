@@ -2649,6 +2649,44 @@ body {
   max-height: none;
 }
 .modal.topic-maintenance-modal { width: min(700px, calc(100vw - 48px)); }
+.modal.topic-settings-modal {
+  width: min(1040px, calc(100vw - 56px));
+  max-height: calc(100vh - 56px);
+}
+.topic-settings-body { display: grid; gap: var(--space-3); overflow: auto; }
+.topic-settings-notice {
+  padding: 12px 14px;
+  border: 1px solid var(--warning-border, #f0b35c);
+  border-radius: var(--radius-md);
+  background: var(--warning-bg, rgba(245, 158, 11, 0.08));
+  line-height: 1.55;
+}
+.topic-settings-content { display: grid; gap: var(--space-4); }
+.topic-settings-section {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.topic-settings-section h3 { margin: 0; padding: 12px 16px; background: var(--surface-secondary); font-size: 14px; }
+.topic-setting-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(310px, 1.2fr) minmax(110px, auto);
+  gap: var(--space-3);
+  align-items: center;
+  padding: 11px 16px;
+  border-top: 1px solid var(--border-color);
+}
+.topic-setting-copy { display: grid; gap: 3px; min-width: 0; }
+.topic-setting-copy small { overflow-wrap: anywhere; }
+.topic-setting-control { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.topic-setting-input[type="number"] { width: 120px; }
+.topic-setting-input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+.topic-setting-source { padding: 3px 8px; border-radius: 999px; background: var(--surface-secondary); font-size: 12px; white-space: nowrap; }
+.topic-setting-source.is-custom { color: var(--accent); background: var(--accent-light); }
+.topic-setting-default { text-align: right; font-size: 12px; }
+.topic-settings-footer-spacer { flex: 1; }
 .topic-maintenance-intro { margin-bottom: var(--space-4); line-height: 1.65; }
 .topic-maintenance-toolbar,
 .topic-maintenance-selection,
@@ -2866,6 +2904,8 @@ body {
   }
 
   .topic-maintenance-toolbar { align-items: stretch; flex-direction: column; }
+  .topic-setting-row { grid-template-columns: 1fr; }
+  .topic-setting-default { text-align: left; }
   .topic-maintenance-toolbar .btn { align-self: flex-start; }
 
   .topic-overview-meta { align-items: flex-start; flex-direction: column; }

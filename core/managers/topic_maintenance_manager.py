@@ -54,6 +54,8 @@ class TopicMaintenanceManager:
         only_unindexed: bool = False,
         progress_callback: ProgressCallback | None = None,
         max_batches: int | None = None,
+        run_config: dict[str, Any] | None = None,
+        run_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a scan run and process it until completion or a test pause."""
         if not memory_space_id.strip():
@@ -89,7 +91,9 @@ class TopicMaintenanceManager:
                 "timeline_uids": selected_timeline_uids,
                 "only_unindexed": bool(only_unindexed),
                 "candidate_schema_version": 1,
+                **dict(run_config or {}),
             },
+            metadata=dict(run_metadata or {}),
         )
         await self.store.create_maintenance_run(run)
         return await self.resume_scan(
@@ -193,6 +197,18 @@ class TopicMaintenanceManager:
                 candidates,
                 gap_seconds=time_gap_seconds,
             )
+            cluster_overrides = config.get("time_cluster_keys", {})
+            if isinstance(cluster_overrides, dict) and cluster_overrides:
+                candidates = [
+                    replace(
+                        candidate,
+                        time_cluster_key=str(
+                            cluster_overrides.get(candidate.memory_uid)
+                            or candidate.time_cluster_key
+                        ),
+                    )
+                    for candidate in candidates
+                ]
             # Persist the final cluster keys so a later LLM stage can be resumed
             # without recomputing against potentially changed source rows.
             await self.store.save_scan_items(run_uid, candidates)
@@ -330,6 +346,137 @@ class TopicMaintenanceManager:
             atom_map = await self._load_atoms(db, [int(row["document_id"]) for row in rows])
 
         return [self._row_to_candidate(row, atom_map) for row in rows]
+
+    async def load_candidates(
+        self,
+        memory_space_id: str,
+        *,
+        since: float | None = None,
+        timeline_uids: list[str] | None = None,
+        only_unindexed: bool = False,
+    ) -> list[TimelineTopicCandidate]:
+        """Load a deterministic candidate snapshot without creating a build run."""
+        where = [
+            "r.memory_space_id = ?",
+            "r.memory_layer = 'timeline'",
+            "r.status = 'active'",
+        ]
+        params: list[Any] = [memory_space_id]
+        normalized_uids = self._normalized_uids(timeline_uids)
+        if since is not None:
+            where.append("r.updated_at >= ?")
+            params.append(float(since))
+        if normalized_uids is not None:
+            where.append("r.memory_uid IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(normalized_uids, ensure_ascii=False))
+        if only_unindexed:
+            where.append(self._unindexed_timeline_predicate())
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT r.memory_uid, r.document_id, r.revision,
+                           r.memory_space_id, r.created_at AS registry_created_at,
+                           d.text, d.metadata,
+                           s.session_id AS source_session_id,
+                           s.started_at, s.ended_at
+                    FROM memory_registry r
+                    JOIN documents d ON d.id = r.document_id
+                    LEFT JOIN memory_source_spans s ON s.memory_uid = r.memory_uid
+                    WHERE {' AND '.join(where)}
+                    ORDER BY COALESCE(s.started_at, r.created_at), r.document_id
+                    """,
+                    params,
+                )
+            ).fetchall()
+            atom_map = await self._load_atoms(
+                db, [int(row["document_id"]) for row in rows]
+            )
+        return [self._row_to_candidate(row, atom_map) for row in rows]
+
+    async def prepare_incremental_scope(
+        self,
+        memory_space_id: str,
+        seeds: list[TimelineTopicCandidate],
+        *,
+        time_gap_seconds: float,
+        similarity_threshold: float,
+        max_timelines: int,
+    ) -> dict[str, Any]:
+        """Expand seeds into a bounded affected neighborhood for local rebuild."""
+        if not seeds:
+            return {
+                "seed_timeline_uids": [],
+                "timeline_uids": [],
+                "affected_topic_uids": [],
+                "time_cluster_keys": {},
+                "scope_limited": False,
+            }
+        all_candidates = await self.load_candidates(memory_space_id)
+        clustered = self.assign_time_clusters(
+            all_candidates, gap_seconds=time_gap_seconds
+        )
+        by_uid = {item.memory_uid: item for item in clustered}
+        seed_uids = {item.memory_uid for item in seeds}
+        effective_seeds = [by_uid[uid] for uid in seed_uids if uid in by_uid]
+        seed_clusters = {
+            item.time_cluster_key for item in effective_seeds if item.time_cluster_key
+        }
+        selected_uids = set(seed_uids)
+        scored: list[tuple[float, str]] = []
+        for candidate in clustered:
+            if candidate.memory_uid in seed_uids:
+                continue
+            similarity = max(
+                (
+                    self.candidate_similarity(seed, candidate)
+                    for seed in effective_seeds
+                ),
+                default=0.0,
+            )
+            same_cluster = bool(
+                candidate.time_cluster_key
+                and candidate.time_cluster_key in seed_clusters
+            )
+            if same_cluster or similarity >= similarity_threshold:
+                selected_uids.add(candidate.memory_uid)
+                scored.append((similarity + (1.0 if same_cluster else 0.0), candidate.memory_uid))
+
+        max_timelines = max(len(seed_uids), int(max_timelines))
+        scope_limited = len(selected_uids) > max_timelines
+        if scope_limited:
+            ranked = [uid for _, uid in sorted(scored, reverse=True)]
+            selected_uids = set(seed_uids)
+            selected_uids.update(ranked[: max(0, max_timelines - len(seed_uids))])
+
+        affected = await self.store.find_incremental_topic_scope(
+            memory_space_id,
+            sorted(selected_uids),
+            sorted(seed_uids),
+        )
+        affected_topic_uids = list(affected["topic_uids"])
+        expanded_uids = set(selected_uids)
+        expanded_uids.update(affected["timeline_uids"])
+        if len(expanded_uids) > max_timelines:
+            # Never truncate an existing Topic's provenance.  Fall back to an
+            # isolated safe build that may create duplicates but cannot corrupt
+            # broad existing Topics.
+            scope_limited = True
+            affected_topic_uids = []
+            expanded_uids = set(selected_uids)
+
+        return {
+            "seed_timeline_uids": sorted(seed_uids),
+            "timeline_uids": sorted(expanded_uids),
+            "affected_topic_uids": sorted(affected_topic_uids),
+            "time_cluster_keys": {
+                uid: by_uid[uid].time_cluster_key
+                for uid in expanded_uids
+                if uid in by_uid
+            },
+            "scope_limited": scope_limited,
+        }
 
     async def list_unindexed_timelines(
         self,

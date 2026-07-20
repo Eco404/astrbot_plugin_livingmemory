@@ -17,6 +17,10 @@ export class TopicPage {
     this.maintenanceItems = [];
     this.discardBuildTrigger = null;
     this.discardRun = null;
+    this.settingsTrigger = null;
+    this.settingsData = null;
+    this.settingsResetKeys = new Set();
+    this.settingsResetAll = false;
   }
 
   initEventListeners() {
@@ -24,6 +28,14 @@ export class TopicPage {
     document.getElementById("topic-space")?.addEventListener("change", () => this.fetch());
     document.getElementById("topic-build-full")?.addEventListener("click", event => this.requestFullBuild(event.currentTarget));
     document.getElementById("topic-maintenance")?.addEventListener("click", event => this.openMaintenance(event.currentTarget));
+    document.getElementById("topic-settings")?.addEventListener("click", event => this.openSettings(event.currentTarget));
+    document.getElementById("topic-settings-close")?.addEventListener("click", () => this.closeSettings());
+    document.getElementById("topic-settings-cancel")?.addEventListener("click", () => this.closeSettings());
+    document.getElementById("topic-settings-save")?.addEventListener("click", () => this.saveSettings());
+    document.getElementById("topic-settings-reset-all")?.addEventListener("click", () => this.resetAllSettings());
+    document.getElementById("topic-settings-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeSettings();
+    });
     document.getElementById("topic-maintenance-close")?.addEventListener("click", () => this.closeMaintenance());
     document.getElementById("topic-maintenance-cancel")?.addEventListener("click", () => this.closeMaintenance());
     document.getElementById("topic-maintenance-detect")?.addEventListener("click", () => this.detectUnindexedTimelines());
@@ -64,6 +76,7 @@ export class TopicPage {
       if (event.key !== "Escape") return;
       if (this.discardBuildConfirmIsOpen()) this.closeDiscardBuildConfirm();
       else if (this.fullBuildConfirmIsOpen()) this.closeFullBuildConfirm();
+      else if (this.settingsIsOpen()) this.closeSettings();
       else if (this.maintenanceIsOpen()) this.closeMaintenance();
       else if (this.detailIsOpen()) this.closeDetail();
     });
@@ -115,6 +128,8 @@ export class TopicPage {
     ].join(" · ");
 
     const activeJob = activeJobs[0] || null;
+    const settingsButton = document.getElementById("topic-settings");
+    if (settingsButton) settingsButton.disabled = Boolean(activeJob);
     this.setBuildButtonsDisabled(
       !this.currentSpace() || !this.buildEnabled || Boolean(activeJob)
     );
@@ -230,6 +245,132 @@ export class TopicPage {
     const trigger = this.detailTrigger;
     this.detailTrigger = null;
     if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  async openSettings(trigger) {
+    if (this.activeJobUid) return;
+    this.settingsTrigger = trigger || null;
+    this.settingsResetKeys = new Set();
+    this.settingsResetAll = false;
+    const overlay = document.getElementById("topic-settings-overlay");
+    const status = document.getElementById("topic-settings-status");
+    const content = document.getElementById("topic-settings-content");
+    overlay?.classList.add("visible");
+    overlay?.setAttribute("aria-hidden", "false");
+    status.textContent = window.t("common.loading");
+    content.innerHTML = "";
+    try {
+      this.settingsData = await this.api.get("topics/settings");
+      this.renderSettings();
+      document.getElementById("topic-settings-close")?.focus();
+    } catch (e) {
+      status.textContent = e.message || window.t("topic.settingsLoadFailed");
+    }
+  }
+
+  settingsIsOpen() {
+    return document.getElementById("topic-settings-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeSettings({ restoreFocus = true } = {}) {
+    if (!this.settingsIsOpen() && !this.settingsTrigger) return;
+    const overlay = document.getElementById("topic-settings-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    const trigger = this.settingsTrigger;
+    this.settingsTrigger = null;
+    this.settingsData = null;
+    this.settingsResetKeys = new Set();
+    this.settingsResetAll = false;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  renderSettings() {
+    const data = this.settingsData || {};
+    const definitions = data.definitions || {};
+    const effective = data.effective || {};
+    const overrides = data.overrides || {};
+    const status = document.getElementById("topic-settings-status");
+    status.textContent = data.build_active ? window.t("topic.settingsBuildActive") : "";
+    const categories = ["recall", "build", "performance"];
+    const content = document.getElementById("topic-settings-content");
+    content.innerHTML = categories.map(category => {
+      const rows = Object.entries(definitions)
+        .filter(([, definition]) => definition.category === category && !definition.deprecated)
+        .map(([key, definition]) => {
+          const customized = Object.prototype.hasOwnProperty.call(overrides, key);
+          const value = effective[key];
+          const input = definition.type === "bool"
+            ? `<input class="topic-setting-input" data-setting-key="${esc(key)}" type="checkbox" ${value ? "checked" : ""}>`
+            : `<input class="input topic-setting-input" data-setting-key="${esc(key)}" type="number" value="${esc(value)}" min="${esc(definition.min)}" max="${esc(definition.max)}" step="${esc(definition.step || 1)}">`;
+          return `<div class="topic-setting-row" data-setting-row="${esc(key)}">
+            <div class="topic-setting-copy"><strong>${esc(definition.label || key)}</strong><small class="text-tertiary text-mono">${esc(key)}</small></div>
+            <div class="topic-setting-control">${input}<span class="topic-setting-source ${customized ? "is-custom" : ""}" data-setting-source>${esc(window.t(customized ? "topic.customValue" : "topic.defaultValue"))}</span><button class="btn btn-ghost btn-sm topic-setting-reset" type="button" data-reset-setting="${esc(key)}" ${customized ? "" : "disabled"}>${esc(window.t("topic.resetDefault"))}</button></div>
+            <div class="topic-setting-default text-tertiary">${esc(window.t("topic.codeDefault"))}: ${esc(definition.default)}</div>
+          </div>`;
+        }).join("");
+      return `<section class="topic-settings-section"><h3>${esc(window.t(`topic.settingsCategory.${category}`))}</h3>${rows}</section>`;
+    }).join("");
+    content.querySelectorAll("[data-reset-setting]").forEach(button => {
+      button.addEventListener("click", () => this.resetSetting(button.dataset.resetSetting));
+    });
+    ["topic-settings-save", "topic-settings-reset-all"].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = Boolean(data.build_active);
+    });
+  }
+
+  resetSetting(key) {
+    const definition = this.settingsData?.definitions?.[key];
+    const input = document.querySelector(`.topic-setting-input[data-setting-key="${key}"]`);
+    if (!definition || !input) return;
+    if (definition.type === "bool") input.checked = Boolean(definition.default);
+    else input.value = definition.default;
+    this.settingsResetKeys.add(key);
+    const row = document.querySelector(`[data-setting-row="${key}"]`);
+    row?.querySelector("[data-setting-source]")?.classList.remove("is-custom");
+    const source = row?.querySelector("[data-setting-source]");
+    if (source) source.textContent = window.t("topic.defaultValue");
+    const button = row?.querySelector("[data-reset-setting]");
+    if (button) button.disabled = true;
+  }
+
+  resetAllSettings() {
+    this.settingsResetAll = true;
+    Object.keys(this.settingsData?.definitions || {}).forEach(key => this.resetSetting(key));
+  }
+
+  async saveSettings() {
+    if (!this.settingsData || this.settingsData.build_active) return;
+    const changes = {};
+    try {
+      document.querySelectorAll(".topic-setting-input[data-setting-key]").forEach(input => {
+        const key = input.dataset.settingKey;
+        const definition = this.settingsData.definitions[key];
+        const value = definition.type === "bool" ? input.checked
+          : definition.type === "int" ? Number.parseInt(input.value, 10)
+          : Number.parseFloat(input.value);
+        if (!Number.isFinite(value) && definition.type !== "bool") throw new Error(`${definition.label}: ${window.t("topic.invalidSetting")}`);
+        if (value === definition.default) this.settingsResetKeys.add(key);
+        else changes[key] = value;
+      });
+      const save = document.getElementById("topic-settings-save");
+      save.disabled = true;
+      const result = await this.api.post("topics/settings/update", {
+        changes,
+        reset_keys: Array.from(this.settingsResetKeys),
+        reset_all: this.settingsResetAll,
+      });
+      this.settingsData = result;
+      this.settingsResetKeys = new Set();
+      this.settingsResetAll = false;
+      this.renderSettings();
+      this.showToast(window.t("topic.settingsSaved"));
+    } catch (e) {
+      this.showToast(e.message || window.t("topic.settingsSaveFailed"), true);
+      const save = document.getElementById("topic-settings-save");
+      if (save) save.disabled = false;
+    }
   }
 
   openMaintenance(trigger) {

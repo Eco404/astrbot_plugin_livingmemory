@@ -206,6 +206,7 @@
               <button class="btn btn-secondary btn-sm" id="topic-refresh" data-i18n="common.refresh">刷新</button>
               <button class="btn btn-primary btn-sm" id="topic-build-full" data-i18n="topic.fullBuild" disabled>全量构建</button>
               <button class="btn btn-secondary btn-sm" id="topic-maintenance" data-i18n="topic.maintenance" disabled>维护</button>
+              <button class="btn btn-secondary btn-sm" id="topic-settings" data-i18n="topic.settings">参数</button>
             </div>
           </header>
           <div class="page-body topic-page-body">
@@ -398,6 +399,27 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" id="topic-maintenance-cancel" type="button" data-i18n="common.close">关闭</button>
           <button class="btn btn-primary" id="topic-maintenance-submit" type="button" data-i18n="topic.maintenanceSubmit" disabled>开始增量补建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Topic Runtime Settings -->
+    <div class="modal-overlay" id="topic-settings-overlay" aria-hidden="true">
+      <div class="modal topic-settings-modal" role="dialog" aria-modal="true" aria-labelledby="topic-settings-title">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-settings-title" data-i18n="topic.settingsTitle">Topic 参数</div>
+          <button class="modal-close" id="topic-settings-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body topic-settings-body">
+          <div class="topic-settings-notice" data-i18n="topic.settingsNotice">召回参数保存后立即生效；构建参数只影响之后的新任务，不会自动改写已有 Topic。</div>
+          <div id="topic-settings-status" class="text-secondary" aria-live="polite"></div>
+          <div id="topic-settings-content" class="topic-settings-content"></div>
+        </div>
+        <div class="modal-footer topic-settings-footer">
+          <button class="btn btn-ghost" id="topic-settings-reset-all" type="button" data-i18n="topic.resetAllDefaults">全部恢复默认</button>
+          <span class="topic-settings-footer-spacer"></span>
+          <button class="btn btn-secondary" id="topic-settings-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-primary" id="topic-settings-save" type="button" data-i18n="common.save">保存</button>
         </div>
       </div>
     </div>

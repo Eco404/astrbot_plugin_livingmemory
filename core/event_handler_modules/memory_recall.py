@@ -206,6 +206,9 @@ class MemoryRecall:
                 )
                 topic_search = None
                 if topic_enabled:
+                    topic_config = getattr(
+                        self.memory_engine.topic_recall_pipeline, "config", {}
+                    ) or {}
                     branches = self.recall_pipeline.build_query_branches(
                         actual_query,
                         recent_messages,
@@ -221,11 +224,7 @@ class MemoryRecall:
                             memory_space_id=memory_space_id,
                             final_k=min(
                                 top_k,
-                                int(
-                                    self.config_manager.get(
-                                        "topic_memory.recall_top_k", 3
-                                    )
-                                ),
+                                int(topic_config.get("recall_top_k", 3)),
                             ),
                             context_session_id=session_id,
                             visible_message_start_index=visible_start,
@@ -244,12 +243,11 @@ class MemoryRecall:
 
                 topic_results = topic_outcome.results if topic_outcome else []
                 if topic_results:
+                    topic_config = getattr(
+                        self.memory_engine.topic_recall_pipeline, "config", {}
+                    ) or {}
                     supplement_limit = min(
-                        int(
-                            self.config_manager.get(
-                                "topic_memory.timeline_supplement_k", 2
-                            )
-                        ),
+                        int(topic_config.get("timeline_supplement_k", 2)),
                         max(0, top_k - len(topic_results)),
                     )
                     recalled_memories = self._select_timeline_supplements(

@@ -71,19 +71,19 @@
 
 **实验性 Topic 记忆**:
 - 开启 `topic_memory.enabled` 后，在 Topic 记忆页面执行一次全量构建；`topic_memory.auto_maintenance` 控制后续自动维护。
-- `topic_memory.recall_enabled` 默认开启：正式召回优先返回活跃 Topic，并在 `recall_engine.top_k` 总预算内附带最多 `topic_memory.timeline_supplement_k` 条 Timeline；没有可用 Topic 或 Topic 检索失败时自动回退纯 Timeline。
-- Topic 召回复用已保存的 Embedding，可选使用当前 Rerank Provider 精排，不调用 LLM。当前上下文只覆盖部分来源时降低分数，覆盖率达到 `topic_memory.recall_context_overlap_threshold` 才抑制整个 Topic。
+- `topic_memory.recall_enabled` 默认开启：正式召回优先返回活跃 Topic，并在总预算内附带少量 Timeline；具体数量在 Topic 页面的“参数”中调整。没有可用 Topic 或检索失败时自动回退纯 Timeline。
+- Topic 召回复用已保存的 Embedding，可选使用当前 Rerank Provider 精排，不调用 LLM。当前上下文来源覆盖、相关度门槛和多样性策略统一在 Topic 参数面板中调整。
 - Topic 是自动派生的只读数据。应编辑来源 Timeline，关联 Topic 会被标记为待重建并自动更新。
 - Topic 页面的“维护”会检查活跃 Timeline 当前版本是否已有活跃 Topic 索引，列出缺失项并默认全选；确认后仅对选中 Timeline 增量补建，不再使用固定 24 小时时间窗口。
-- 宽候选组按 `topic_memory.fragment_extraction_batch_size`（默认 12）分批提取；大型 Topic 组件再按 `topic_memory.synthesis_batch_size`（默认 12）分层合成，最终仍归并为同一个 Topic。可在 Topic 页面查看当前组件、批次、调用序号和耗时。
-- `topic_memory.llm_concurrency` 控制候选组、组内批次和同层 Topic 合成的共享 LLM 并发上限，默认 2；设为 1 使用串行模式。提高并发前应确认 Provider 与上游 API 的速率限制。
-- `topic_memory.rerank_concurrency` 独立控制片段匹配阶段的 Rerank 请求并发上限，默认 1、范围 1–32；设为 1 使用串行模式。Cloudflare 返回 429 时应降低该值。
+- 宽候选组默认按 12 条 Timeline 分批提取，大型 Topic 组件默认按 12 个片段分层合成；可在 Topic 页面右上角“参数”调整，并查看当前组件、批次、调用序号和耗时。
+- Topic 页面“参数”统一管理构建质量、召回和性能参数。覆盖值可单项或全部删除以跟随代码最新默认；召回参数立即生效，构建参数只影响新任务。
+- LLM 与 Rerank 并发默认均为 1；提高并发前应确认 Provider 与上游 API 的速率限制，Cloudflare 返回 429 时应降低 Rerank 并发。
 - Topic 片段匹配会同时使用 Embedding、Rerank 原始相关度和双向相对排名。完整候选排序可避免不同 Rerank 模型分数过度集中时绝对阈值失效；两个已形成的组件越大，合并所需的平均一致性会缓慢提高，单片段接入不受影响，从而阻止少数边界桥把不同检索意图连成超大 Topic。
 - 相关子话题图会忽略纯日期、时刻和拆分后的年月日结构词；`BW2026` 等含字母的命名标识仍会保留，避免共同发生日期被误当成话题关系证据。
 - 构建失败、取消或因插件重启中断后，Topic 页面会显示“从断点继续”。候选片段、向量、匹配、组件合成和已写入 Topic 都会按原 `run_uid` 复用；配置、Prompt、Provider、模型或输入发生变化时，只重算受影响阶段。
 - LLM 输出中的可验证结构错误会使用输入来源确定性修复并写入 `validation_repairs`；无法验证的模型引用会被丢弃，不会作为 Topic 来源保存。
 - 片段提取以“一个未来检索意图”为边界；相关子话题关系要求全库区分度与正文语义共同支持，不会仅因一个泛化关键词或共享 Timeline 建边。Topic 与原子置信度按独立时间簇校准，避免同一段连续对话被误当成多次独立证据。
-- 数据库 v9.4 迁移只增加 Topic 相关子话题关系结构，不自动调用模型，也不生成或改写 Topic；是否参与召回由 `topic_memory.enabled` 与 `topic_memory.recall_enabled` 控制。
+- 数据库 v9.5 迁移增加 Topic 参数稀疏覆盖结构，不自动调用模型，也不生成或改写 Topic；是否参与召回由 `topic_memory.enabled` 与 `topic_memory.recall_enabled` 控制。
 
 管理界面通过 AstrBot 官方插件页面（插件 → LivingMemory → Pages → dashboard）访问，无需额外配置。
 

@@ -32,6 +32,7 @@ from .models.identity_profile import AuthoritativeIdentityStore
 from .processors.memory_processor import MemoryProcessor
 from .providers.cloudflare_rerank import CloudflareRerankClient
 from .schedulers.decay_scheduler import DecayScheduler
+from .topic_settings import topic_setting_defaults
 from .validators.index_validator import IndexValidator
 
 FaissVecDB: Any = None
@@ -690,103 +691,14 @@ class PluginInitializer:
                     "recall_enabled": self.config_manager.get(
                         "topic_memory.recall_enabled", True
                     ),
-                    "recall_top_k": self.config_manager.get(
-                        "topic_memory.recall_top_k", 3
-                    ),
-                    "recall_candidate_multiplier": self.config_manager.get(
-                        "topic_memory.recall_candidate_multiplier", 4
-                    ),
-                    "recall_scan_limit": self.config_manager.get(
-                        "topic_memory.recall_scan_limit", 2000
-                    ),
-                    "recall_min_relevance": self.config_manager.get(
-                        "topic_memory.recall_min_relevance", 0.42
-                    ),
-                    "recall_relative_floor": self.config_manager.get(
-                        "topic_memory.recall_relative_floor", 0.70
-                    ),
-                    "recall_mmr_lambda": self.config_manager.get(
-                        "topic_memory.recall_mmr_lambda", 0.78
-                    ),
-                    "recall_use_rerank": self.config_manager.get(
-                        "topic_memory.recall_use_rerank", True
-                    ),
-                    "recall_context_overlap_threshold": self.config_manager.get(
-                        "topic_memory.recall_context_overlap_threshold", 0.8
-                    ),
-                    "timeline_supplement_k": self.config_manager.get(
-                        "topic_memory.timeline_supplement_k", 2
-                    ),
                     "auto_maintenance": self.config_manager.get(
                         "topic_memory.auto_maintenance", True
                     ),
-                    "auto_debounce_seconds": self.config_manager.get(
-                        "topic_memory.auto_debounce_seconds", 60.0
-                    ),
-                    "time_gap_hours": self.config_manager.get(
-                        "topic_memory.time_gap_hours", 6.0
-                    ),
-                    "candidate_batch_size": self.config_manager.get(
-                        "topic_memory.candidate_batch_size", 100
-                    ),
-                    "fragment_extraction_batch_size": self.config_manager.get(
-                        "topic_memory.fragment_extraction_batch_size", 12
-                    ),
-                    "candidate_similarity_threshold": self.config_manager.get(
-                        "topic_memory.candidate_similarity_threshold", 0.52
-                    ),
-                    "fragment_similarity_threshold": self.config_manager.get(
-                        "topic_memory.fragment_similarity_threshold", 0.78
-                    ),
-                    "rerank_candidate_floor": self.config_manager.get(
-                        "topic_memory.rerank_candidate_floor", 0.63
-                    ),
-                    "component_min_pair_similarity": self.config_manager.get(
-                        "topic_memory.component_min_pair_similarity", 0.52
-                    ),
-                    "component_min_average_similarity": self.config_manager.get(
-                        "topic_memory.component_min_average_similarity", 0.65
-                    ),
-                    "component_size_cohesion_penalty": self.config_manager.get(
-                        "topic_memory.component_size_cohesion_penalty", 0.005
-                    ),
-                    "rerank_threshold": self.config_manager.get(
-                        "topic_memory.rerank_threshold", 0.55
-                    ),
-                    "rerank_reciprocal_rank_threshold": self.config_manager.get(
-                        "topic_memory.rerank_reciprocal_rank_threshold", 0.60
-                    ),
-                    "rerank_top_n": self.config_manager.get(
-                        "topic_memory.rerank_top_n", 5
-                    ),
-                    "rerank_concurrency": self.config_manager.get(
-                        "topic_memory.rerank_concurrency", 1
-                    ),
-                    "rerank_failure_fallback": self.config_manager.get(
-                        "topic_memory.rerank_failure_fallback", True
-                    ),
-                    "related_topic_similarity_threshold": self.config_manager.get(
-                        "topic_memory.related_topic_similarity_threshold", 0.60
-                    ),
-                    "related_topic_top_n": self.config_manager.get(
-                        "topic_memory.related_topic_top_n", 3
-                    ),
-                    "existing_topic_match_threshold": self.config_manager.get(
-                        "topic_memory.existing_topic_match_threshold", 0.55
-                    ),
-                    "synthesis_batch_size": self.config_manager.get(
-                        "topic_memory.synthesis_batch_size", 12
-                    ),
-                    "embedding_batch_size": self.config_manager.get(
-                        "topic_memory.embedding_batch_size", 8
-                    ),
-                    "llm_concurrency": self.config_manager.get(
-                        "topic_memory.llm_concurrency", 2
-                    ),
-                    "llm_max_retries": self.config_manager.get(
-                        "topic_memory.llm_max_retries", 3
-                    ),
+                    **topic_setting_defaults(),
                 },
+                "topic_memory_legacy_overrides": self.config_manager.get_raw_section(
+                    "topic_memory"
+                ),
             }
 
             self.memory_engine = MemoryEngine(

@@ -47,6 +47,55 @@ async def test_selected_incremental_scan_persists_uid_scope_without_since():
     )
 
 
+@pytest.mark.asyncio
+async def test_incremental_scope_reuses_full_time_cluster_context():
+    from astrbot_plugin_livingmemory.core.models.topic_memory import (
+        TimelineTopicCandidate,
+    )
+
+    candidates = [
+        TimelineTopicCandidate(
+            memory_uid=f"timeline-{index}",
+            document_id=index,
+            source_revision=1,
+            memory_space_id="space-1",
+            session_id="session-1",
+            content="京都旅行" if index < 3 else "Rust 学习",
+            summary="京都旅行" if index < 3 else "Rust 学习",
+            started_at=started,
+            ended_at=started + 100,
+            features={"normalized_topics": [], "fact_fingerprints": [], "lexical_tokens": []},
+        )
+        for index, started in ((1, 1000.0), (2, 1200.0), (3, 50000.0))
+    ]
+    store = SimpleNamespace(
+        find_incremental_topic_scope=AsyncMock(
+            return_value={"topic_uids": [], "timeline_uids": []}
+        )
+    )
+    manager = TopicMaintenanceManager(":memory:", store)
+    manager.load_candidates = AsyncMock(return_value=candidates)
+    seeds = [candidates[1]]
+
+    scope = await manager.prepare_incremental_scope(
+        "space-1",
+        seeds,
+        time_gap_seconds=6 * 3600,
+        similarity_threshold=0.99,
+        max_timelines=20,
+    )
+
+    assert scope["seed_timeline_uids"] == ["timeline-2"]
+    assert set(scope["timeline_uids"]) == {
+        "timeline-1",
+        "timeline-2",
+    }
+    assert (
+        scope["time_cluster_keys"]["timeline-1"]
+        == scope["time_cluster_keys"]["timeline-2"]
+    )
+
+
 async def _create_timeline_db(tmp_path: Path) -> tuple[str, str]:
     db_path = str(tmp_path / "candidate_scan.db")
     session_id = "bot:FriendMessage:user-1"
