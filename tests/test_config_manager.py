@@ -104,6 +104,7 @@ def test_config_manager_preserves_topic_and_rerank_settings() -> None:
                 "enabled": True,
                 "account_id": "account",
                 "api_token": "token",
+                "score_mapping": "auto",
             },
         }
     )
@@ -117,3 +118,12 @@ def test_config_manager_preserves_topic_and_rerank_settings() -> None:
     assert manager.get("cloudflare_rerank.enabled") is True
     assert manager.get("cloudflare_rerank.account_id") == "account"
     assert manager.get("cloudflare_rerank.model") == "@cf/baai/bge-reranker-base"
+    assert manager.get("cloudflare_rerank.score_mapping") == "auto"
+
+
+def test_config_manager_migrates_legacy_rerank_score_mapping() -> None:
+    manager = ConfigManager(
+        {"cloudflare_rerank": {"apply_sigmoid": False}}
+    )
+
+    assert manager.get("cloudflare_rerank.score_mapping") == "identity"

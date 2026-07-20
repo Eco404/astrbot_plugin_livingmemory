@@ -389,8 +389,11 @@ class PluginInitializer:
                     retry_base_delay=self.config_manager.get(
                         "cloudflare_rerank.retry_base_delay", 1.0
                     ),
+                    score_mapping=self.config_manager.get(
+                        "cloudflare_rerank.score_mapping", None
+                    ),
                     apply_sigmoid=self.config_manager.get(
-                        "cloudflare_rerank.apply_sigmoid", True
+                        "cloudflare_rerank.apply_sigmoid", None
                     ),
                 )
                 if not silent:

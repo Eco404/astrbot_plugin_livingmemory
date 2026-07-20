@@ -1965,15 +1965,19 @@ body {
 
 .identity-list {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-2);
 }
 
 .identity-card {
-  padding: var(--space-5);
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--bg-card);
   box-shadow: var(--shadow-sm);
+}
+
+.identity-card.is-expanded {
+  padding: var(--space-4);
 }
 
 .identity-card-header {
@@ -1981,7 +1985,61 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+}
+
+.identity-card.is-expanded .identity-card-header {
   margin-bottom: var(--space-4);
+}
+
+.identity-card-summary {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.identity-card-summary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.identity-card-summary-text {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.identity-card-summary-text strong,
+.identity-card-summary-text span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.identity-card-summary-text span {
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.identity-card-chevron {
+  color: var(--text-tertiary);
+  font-size: 20px;
+  line-height: 1;
+  transition: transform var(--transition-fast);
+}
+
+.identity-card.is-expanded .identity-card-chevron {
+  transform: rotate(180deg);
 }
 
 .identity-fields {
@@ -2720,6 +2778,12 @@ body {
 
   .identity-fields {
     grid-template-columns: 1fr;
+  }
+
+  .identity-card-summary-text {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
   }
 
   .identity-field-wide {
