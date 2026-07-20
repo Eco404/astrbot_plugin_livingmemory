@@ -190,6 +190,10 @@ class TopicMemoryConfig(BaseModel):
     component_size_cohesion_penalty: float = Field(
         default=0.005, ge=0.0, le=0.05
     )
+    component_review_enabled: bool = True
+    component_review_min_fragments: int = Field(default=6, ge=3, le=100)
+    component_review_max_fragments: int = Field(default=48, ge=6, le=200)
+    component_review_failure_fallback: bool = True
     rerank_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
     rerank_reciprocal_rank_threshold: float = Field(
         default=0.60, ge=0.0, le=1.0

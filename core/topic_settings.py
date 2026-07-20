@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TOPIC_SETTINGS_REVISION = 1
+TOPIC_SETTINGS_REVISION = 2
 
 
 TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -26,6 +26,10 @@ TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "component_min_pair_similarity": {"default": 0.52, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "组件最低两两相似度", "effect": "rebuild"},
     "component_min_average_similarity": {"default": 0.65, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "组件最低平均相似度", "effect": "rebuild"},
     "component_size_cohesion_penalty": {"default": 0.005, "type": "float", "min": 0.0, "max": 0.05, "step": 0.001, "category": "build", "label": "大组件一致性增量", "effect": "rebuild"},
+    "component_review_enabled": {"default": True, "type": "bool", "category": "build", "label": "LLM 复核大组件结构", "effect": "rebuild"},
+    "component_review_min_fragments": {"default": 6, "type": "int", "min": 3, "max": 100, "category": "build", "label": "组件结构复核起始片段数", "effect": "rebuild"},
+    "component_review_max_fragments": {"default": 48, "type": "int", "min": 6, "max": 200, "category": "build", "label": "单次组件结构复核上限", "effect": "rebuild"},
+    "component_review_failure_fallback": {"default": True, "type": "bool", "category": "performance", "label": "组件复核失败时保留原组件", "effect": "next_build"},
     "rerank_threshold": {"default": 0.55, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "Rerank 归并阈值", "effect": "rebuild"},
     "rerank_reciprocal_rank_threshold": {"default": 0.60, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "Rerank 双向相对排名阈值", "effect": "rebuild"},
     "rerank_top_n": {"default": 5, "type": "int", "min": 1, "max": 100, "category": "build", "label": "Rerank 候选数量", "effect": "rebuild"},

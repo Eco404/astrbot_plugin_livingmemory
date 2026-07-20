@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -254,6 +255,59 @@ class _CorrectingSynthesisLLM(_GroundedLLM):
                 }
             )
         return await super().text_chat(prompt=prompt, system_prompt=system_prompt)
+
+
+class _ComponentReviewLLM:
+    provider_config = {"id": "review-llm", "model": "test"}
+
+    def __init__(self, *, invalid_first: bool = False, fail: bool = False):
+        self.invalid_first = invalid_first
+        self.fail = fail
+        self.calls = 0
+
+    async def text_chat(self, *, prompt: str, system_prompt: str):
+        self.calls += 1
+        if self.fail:
+            raise TimeoutError("component review unavailable")
+        input_text = prompt.split("INPUT:\n", 1)[1]
+        input_text = input_text.split("\n\nCORRECTION REQUIRED:", 1)[0]
+        payload = json.loads(input_text)
+        refs = [item["ref"] for item in payload["fragments"]]
+        if self.invalid_first and self.calls == 1:
+            refs = refs[:-1]
+        midpoint = max(1, len(refs) // 2)
+        groups = [
+            {"label": "前半", "reason": "测试拆分", "fragment_refs": refs[:midpoint]},
+            {"label": "后半", "reason": "测试拆分", "fragment_refs": refs[midpoint:]},
+        ]
+        return _Response(
+            {"groups": [group for group in groups if group["fragment_refs"]]}
+        )
+
+
+class _CheckpointStore:
+    def __init__(self):
+        self.checkpoints = {}
+
+    async def get_build_checkpoint(self, run_uid, checkpoint_key):
+        return self.checkpoints.get((run_uid, checkpoint_key))
+
+    async def save_build_checkpoint(
+        self,
+        *,
+        run_uid,
+        checkpoint_key,
+        stage,
+        input_hash,
+        payload,
+        metadata=None,
+    ):
+        self.checkpoints[(run_uid, checkpoint_key)] = {
+            "stage": stage,
+            "input_hash": input_hash,
+            "payload": payload,
+            "metadata": metadata or {},
+        }
 
 
 class _Embedding:
@@ -677,6 +731,158 @@ async def test_fragment_matching_reports_its_own_progress_stage():
     assert events
     assert all(event["stage"] == "fragment_matching" for event in events)
     assert events[-1]["current"] == events[-1]["total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_component_review_splits_large_component_and_preserves_scope():
+    llm = _ComponentReviewLLM()
+    manager = TopicBuildManager(":memory:", None, None, llm_provider=llm)
+    fragments = [_topic_fragment(index) for index in range(6)]
+
+    groups = await manager._review_component_direct(fragments)
+
+    assert groups == [
+        ["fragment-0", "fragment-1", "fragment-2"],
+        ["fragment-3", "fragment-4", "fragment-5"],
+    ]
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_component_review_repairs_invalid_fragment_coverage_once():
+    llm = _ComponentReviewLLM(invalid_first=True)
+    manager = TopicBuildManager(":memory:", None, None, llm_provider=llm)
+    fragments = [_topic_fragment(index) for index in range(6)]
+
+    groups = await manager._review_component_direct(fragments)
+
+    assert [uid for group in groups for uid in group] == [
+        f"fragment-{index}" for index in range(6)
+    ]
+    assert llm.calls == 2
+
+
+def test_component_review_rejects_unknown_duplicate_and_missing_refs():
+    manager = TopicBuildManager(":memory:", None, None)
+    fragments = [_topic_fragment(index) for index in range(3)]
+    _, refs = manager._component_review_llm_context(fragments)
+
+    with pytest.raises(TopicBuildValidationError, match="invalid fragment refs"):
+        manager._decode_component_review_refs(
+            {
+                "groups": [
+                    {"fragment_refs": ["P1", "P2"]},
+                    {"fragment_refs": ["P2", "P999"]},
+                ]
+            },
+            refs,
+            fragments,
+        )
+
+    with pytest.raises(TopicBuildValidationError, match="did not cover"):
+        manager._decode_component_review_refs(
+            {"groups": [{"fragment_refs": ["P1", "P2"]}]},
+            refs,
+            fragments,
+        )
+
+
+@pytest.mark.asyncio
+async def test_component_review_failure_falls_back_and_checkpoint_is_reused():
+    store = _CheckpointStore()
+    llm = _ComponentReviewLLM(fail=True)
+    manager = TopicBuildManager(
+        ":memory:",
+        store,
+        None,
+        llm_provider=llm,
+        config={"llm_max_retries": 1},
+    )
+    fragments = [_topic_fragment(index) for index in range(6)]
+
+    first = await manager._review_component_checkpointed("run-1", fragments)
+    calls_after_first = llm.calls
+    second = await manager._review_component_checkpointed("run-1", fragments)
+
+    assert first == second == [[f"fragment-{index}" for index in range(6)]]
+    assert calls_after_first == 1
+    assert llm.calls == calls_after_first
+    checkpoint = next(iter(store.checkpoints.values()))
+    assert checkpoint["stage"] == "component_review"
+    assert checkpoint["metadata"]["fallback"] is True
+
+
+@pytest.mark.asyncio
+async def test_component_review_recomputes_an_invalid_checkpoint():
+    store = _CheckpointStore()
+    llm = _ComponentReviewLLM()
+    manager = TopicBuildManager(
+        ":memory:",
+        store,
+        None,
+        llm_provider=llm,
+    )
+    fragments = [_topic_fragment(index) for index in range(6)]
+    _, fragment_refs = manager._component_review_llm_context(fragments)
+    component_key = hashlib.sha256(
+        "\n".join(sorted(item.fragment_uid for item in fragments)).encode()
+    ).hexdigest()
+    provider_id, model_id = manager._provider_identity(llm)
+    input_payload, _ = manager._component_review_llm_context(fragments)
+    input_hash = manager._checkpoint_hash(
+        {
+            "prompt_version": "topic-component-review-v1-retrieval-boundary",
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "fragments": input_payload,
+        }
+    )
+    store.checkpoints[("run-1", f"component_review:{component_key}")] = {
+        "input_hash": input_hash,
+        "payload": {"groups": [[fragment_refs["P1"]]]},
+    }
+
+    groups = await manager._review_component_checkpointed("run-1", fragments)
+
+    assert groups == [
+        ["fragment-0", "fragment-1", "fragment-2"],
+        ["fragment-3", "fragment-4", "fragment-5"],
+    ]
+    assert llm.calls == 1
+    checkpoint = store.checkpoints[("run-1", f"component_review:{component_key}")]
+    assert checkpoint["payload"]["groups"] == groups
+
+
+@pytest.mark.asyncio
+async def test_component_review_reports_progress_and_skips_small_components():
+    store = _CheckpointStore()
+    llm = _ComponentReviewLLM()
+    manager = TopicBuildManager(
+        ":memory:",
+        store,
+        None,
+        llm_provider=llm,
+        config={
+            "component_review_min_fragments": 6,
+            "llm_concurrency": 2,
+        },
+    )
+    fragments = [_topic_fragment(index) for index in range(8)]
+    events = []
+
+    groups = await manager._review_components_checkpointed(
+        "run-1",
+        fragments,
+        [list(range(6)), [6, 7]],
+        progress_callback=events.append,
+    )
+
+    assert groups == [[0, 1, 2], [3, 4, 5], [6, 7]]
+    assert llm.calls == 1
+    assert events
+    assert all(event["stage"] == "component_review" for event in events)
+    assert events[-1]["current"] == events[-1]["total"] == 2
+    assert any(event.get("review_output_groups") == 2 for event in events)
 
 
 @pytest.mark.asyncio

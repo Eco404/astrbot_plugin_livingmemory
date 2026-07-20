@@ -40,6 +40,7 @@ from .topic_maintenance_manager import TopicMaintenanceManager
 
 _FRAGMENT_PROMPT_VERSION = "topic-fragment-v7-single-retrieval-intent"
 _SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v4-authoritative-identities"
+_COMPONENT_REVIEW_PROMPT_VERSION = "topic-component-review-v1-retrieval-boundary"
 _MATCHING_ALGORITHM_VERSION = 6
 _RELATION_ALGORITHM_VERSION = 3
 _CONFIDENCE_CALIBRATION_VERSION = 1
@@ -345,6 +346,20 @@ class TopicBuildManager:
                 fragments,
                 progress_callback=progress_callback,
             )
+            matched_component_count = len(components)
+            await self.store.update_maintenance_run(
+                run_uid,
+                stage="component_review",
+                current_group_index=0,
+                total_groups=len(components),
+            )
+            components = await self._review_components_checkpointed(
+                run_uid,
+                fragments,
+                components,
+                progress_callback=progress_callback,
+            )
+            reviewed_component_count = len(components)
             await self.store.update_maintenance_run(
                 run_uid,
                 stage="topic_synthesis",
@@ -680,6 +695,8 @@ class TopicBuildManager:
                 "memory_space_id": memory_space_id,
                 "timeline_count": len(candidates),
                 "fragment_count": len(fragments),
+                "matched_component_count": matched_component_count,
+                "reviewed_component_count": reviewed_component_count,
                 "topic_count": len(built),
                 "topics": built,
                 "related_topic_count": relation_count,
@@ -1153,6 +1170,296 @@ class TopicBuildManager:
             metadata={"fragment_count": len(fragments)},
         )
         return synthesis
+
+    async def _review_components_checkpointed(
+        self,
+        run_uid: str,
+        fragments: list[TopicFragmentDraft],
+        components: list[list[int]],
+        *,
+        progress_callback=None,
+    ) -> list[list[int]]:
+        """Let the LLM split structurally mixed components before synthesis.
+
+        Embedding and rerank remain responsible for candidate connectivity.  This
+        stage only reviews components large enough to hide multiple retrieval
+        intents, and it may never add, drop, or duplicate a fragment.
+        """
+        total = len(components)
+        if not components:
+            await self._emit(
+                progress_callback,
+                run_uid,
+                "component_review",
+                0,
+                0,
+            )
+            return components
+
+        enabled = bool(self.config.get("component_review_enabled", True))
+        minimum = max(
+            3,
+            int(self.config.get("component_review_min_fragments", 6)),
+        )
+        maximum = max(
+            minimum,
+            int(self.config.get("component_review_max_fragments", 48)),
+        )
+        if not enabled:
+            await self._emit(
+                progress_callback,
+                run_uid,
+                "component_review",
+                total,
+                total,
+                activity="disabled",
+                item_kind="component_review",
+                reviewed_components=total,
+                component_review_concurrency=self.llm_concurrency,
+            )
+            return components
+
+        review_slots = asyncio.Semaphore(max(1, min(self.llm_concurrency, total)))
+        progress_lock = asyncio.Lock()
+        completed = 0
+        active = 0
+
+        async def emit_progress(
+            position: int,
+            fragment_count: int,
+            *,
+            active_delta: int = 0,
+            completed_delta: int = 0,
+            output_groups: int = 0,
+            activity: str = "stage_progress",
+        ) -> None:
+            nonlocal active, completed
+            async with progress_lock:
+                active += active_delta
+                completed += completed_delta
+                await self._emit(
+                    progress_callback,
+                    run_uid,
+                    "component_review",
+                    completed,
+                    total,
+                    activity=activity,
+                    item_kind="component_review",
+                    item_index=position,
+                    item_total=total,
+                    fragment_count=fragment_count,
+                    reviewed_components=completed,
+                    active_component_review_count=active,
+                    component_review_concurrency=self.llm_concurrency,
+                    review_output_groups=output_groups,
+                    llm_concurrency=self.llm_concurrency,
+                )
+
+        async def review_one(
+            position: int,
+            component: list[int],
+        ) -> list[list[int]]:
+            component_fragments = [fragments[index] for index in component]
+            if len(component) < minimum:
+                await emit_progress(
+                    position,
+                    len(component),
+                    completed_delta=1,
+                    output_groups=1,
+                    activity="below_review_threshold",
+                )
+                return [component]
+            if len(component) > maximum:
+                logger.warning(
+                    "[TopicMemory] 组件片段数超过单次结构复核上限，保留原组件 "
+                    "(run_uid=%s, fragments=%s, limit=%s)",
+                    run_uid,
+                    len(component),
+                    maximum,
+                )
+                await emit_progress(
+                    position,
+                    len(component),
+                    completed_delta=1,
+                    output_groups=1,
+                    activity="above_review_limit",
+                )
+                return [component]
+
+            async with review_slots:
+                await emit_progress(
+                    position,
+                    len(component),
+                    active_delta=1,
+                    activity="llm_call",
+                )
+                try:
+                    uid_groups = await self._review_component_checkpointed(
+                        run_uid,
+                        component_fragments,
+                    )
+                finally:
+                    # Completion is emitted after validation so the displayed group
+                    # count always describes the actual result.
+                    await emit_progress(
+                        position,
+                        len(component),
+                        active_delta=-1,
+                        activity="llm_call_completed",
+                    )
+            index_by_uid = {
+                fragments[index].fragment_uid: index for index in component
+            }
+            reviewed = [
+                [index_by_uid[uid] for uid in group]
+                for group in uid_groups
+            ]
+            await emit_progress(
+                position,
+                len(component),
+                completed_delta=1,
+                output_groups=len(reviewed),
+                activity="stage_progress",
+            )
+            return reviewed
+
+        reviewed_components = await self._gather_cancel_on_error(
+            [
+                review_one(position, component)
+                for position, component in enumerate(components, 1)
+            ]
+        )
+        flattened = [
+            group
+            for reviewed_component in reviewed_components
+            for group in reviewed_component
+        ]
+        if sorted(index for group in flattened for index in group) != list(
+            range(len(fragments))
+        ):
+            raise TopicBuildValidationError(
+                "component review did not preserve the complete fragment scope"
+            )
+        return flattened
+
+    async def _review_component_checkpointed(
+        self,
+        run_uid: str,
+        fragments: list[TopicFragmentDraft],
+    ) -> list[list[str]]:
+        component_key = hashlib.sha256(
+            "\n".join(sorted(item.fragment_uid for item in fragments)).encode()
+        ).hexdigest()
+        checkpoint_key = f"component_review:{component_key}"
+        provider_id, model_id = self._provider_identity(self.llm_provider)
+        input_payload, fragment_refs = self._component_review_llm_context(fragments)
+        input_hash = self._checkpoint_hash(
+            {
+                "prompt_version": _COMPONENT_REVIEW_PROMPT_VERSION,
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "fragments": input_payload,
+            }
+        )
+        checkpoint = await self.store.get_build_checkpoint(run_uid, checkpoint_key)
+        if checkpoint and checkpoint.get("input_hash") == input_hash:
+            payload = checkpoint.get("payload") or {}
+            try:
+                return self._validate_component_uid_groups(
+                    payload.get("groups"),
+                    fragments,
+                )
+            except TopicBuildValidationError as exc:
+                # A damaged or partially written checkpoint must not make a
+                # resumable build permanently unrecoverable. Recompute it and
+                # overwrite the checkpoint with a validated payload.
+                logger.warning(
+                    "[TopicMemory] 组件结构复核检查点无效，将重新计算 "
+                    "(run_uid=%s, checkpoint=%s): %s",
+                    run_uid,
+                    checkpoint_key,
+                    exc,
+                )
+
+        fallback_reason = ""
+        try:
+            groups = await self._review_component_direct(
+                fragments,
+                input_payload=input_payload,
+                fragment_refs=fragment_refs,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not bool(
+                self.config.get("component_review_failure_fallback", True)
+            ):
+                raise
+            fallback_reason = str(exc)[:500]
+            groups = [[item.fragment_uid for item in fragments]]
+            logger.warning(
+                "[TopicMemory] 组件结构复核失败，保留原组件 "
+                "(run_uid=%s, fragments=%s): %s",
+                run_uid,
+                len(fragments),
+                fallback_reason,
+            )
+
+        await self.store.save_build_checkpoint(
+            run_uid=run_uid,
+            checkpoint_key=checkpoint_key,
+            stage="component_review",
+            input_hash=input_hash,
+            payload={
+                "groups": groups,
+                "fallback_reason": fallback_reason,
+                "prompt_version": _COMPONENT_REVIEW_PROMPT_VERSION,
+            },
+            metadata={
+                "input_fragment_count": len(fragments),
+                "output_group_count": len(groups),
+                "fallback": bool(fallback_reason),
+            },
+        )
+        return groups
+
+    async def _review_component_direct(
+        self,
+        fragments: list[TopicFragmentDraft],
+        *,
+        input_payload: dict[str, Any] | None = None,
+        fragment_refs: dict[str, str] | None = None,
+    ) -> list[list[str]]:
+        if input_payload is None or fragment_refs is None:
+            input_payload, fragment_refs = self._component_review_llm_context(
+                fragments
+            )
+        input_json = json.dumps(input_payload, ensure_ascii=False)
+        prompt = self._component_review_prompt(input_json)
+        raw = await self._call_llm(prompt, self._component_review_system_prompt())
+        try:
+            parsed = self._parse_json_object(raw)
+            return self._decode_component_review_refs(
+                parsed,
+                fragment_refs,
+                fragments,
+            )
+        except TopicBuildValidationError as first_exc:
+            correction = self._validation_correction_prompt(
+                prompt,
+                raw,
+                first_exc,
+            )
+            corrected = await self._call_llm(
+                correction,
+                self._component_review_system_prompt(),
+            )
+            parsed = self._parse_json_object(corrected)
+            return self._decode_component_review_refs(
+                parsed,
+                fragment_refs,
+                fragments,
+            )
 
     async def _match_fragments(
         self,
@@ -3448,6 +3755,51 @@ INPUT:
         )
 
     @staticmethod
+    def _component_review_system_prompt() -> str:
+        return (
+            "You audit the internal structure of one proposed long-term memory "
+            "component. Return exactly one strict JSON object without Markdown. "
+            "You may only partition the supplied opaque fragment refs; never add, "
+            "drop, duplicate, or rewrite a ref. Use the dominant language of the input."
+        )
+
+    @staticmethod
+    def _component_review_prompt(input_json: str) -> str:
+        return f"""Review whether this proposed component represents one focused
+long-term Topic memory or several independently retrievable Topics.
+
+Decision rules:
+1. Keep one group when fragments describe the same continuing event, plan, project,
+   stable preference, relationship need, or recurring concern. Different dates alone
+   are never a reason to split a continuing Topic.
+2. Split when a future user would reasonably retrieve the parts with different
+   questions. Shared people, location, time proximity, work, weather, travel, sleep,
+   or companionship are only background signals and do not prove one Topic.
+3. Keep cause, consequence, decision, progress and outcome together when they belong
+   to the same underlying matter.
+4. A broad but stable relationship need may remain one Topic even when expressed in
+   several situations. Do not split it merely into morning, evening and bedtime.
+5. Do not keep unrelated commute, work status, visiting plans and rest events together
+   merely because they form one daily timeline.
+6. Prefer the smallest number of groups that gives each group one clear retrieval
+   intention. Avoid both a life-log super-topic and unnecessary singletons.
+7. authoritative_identities contains immutable profile facts, not grouping commands.
+   Never infer identity or gender from style, nickname, relationship or topic.
+8. Before returning, verify that every supplied P ref occurs exactly once across all
+   groups. Never emit a ref not present in the input.
+
+Output constraints:
+- Return exactly one JSON object and no Markdown or commentary.
+- `label` is a concise description of the retrieval intention, not new memory data.
+- `reason` briefly explains why the listed refs belong together.
+
+Required JSON schema:
+{{"groups":[{{"label":"...","reason":"...","fragment_refs":["P1"]}}]}}
+
+INPUT:
+{input_json}"""
+
+    @staticmethod
     def _synthesis_prompt(input_json: str) -> str:
         return f"""Synthesize one focused Topic memory from these semantically matched
 fragments.
@@ -3497,6 +3849,118 @@ atom = {{"type":"preference","content":"用户偏好不加糖的黑咖啡",
 
 INPUT:
 {input_json}"""
+
+    def _component_review_llm_context(
+        self,
+        fragments: list[TopicFragmentDraft],
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        payload: list[dict[str, Any]] = []
+        fragment_refs: dict[str, str] = {}
+        for index, fragment in enumerate(fragments, 1):
+            ref = f"P{index}"
+            fragment_refs[ref] = fragment.fragment_uid
+            payload.append(
+                {
+                    "ref": ref,
+                    "label": fragment.label,
+                    "summary": fragment.summary,
+                    "facts": [
+                        {
+                            "type": str(fact.get("type") or "factual"),
+                            "content": str(fact.get("content") or "").strip(),
+                        }
+                        for fact in fragment.facts[:8]
+                        if str(fact.get("content") or "").strip()
+                    ],
+                    "fact_count": len(fragment.facts),
+                    "keywords": list(fragment.keywords[:12]),
+                    "started_at": fragment.started_at,
+                    "ended_at": fragment.ended_at,
+                }
+            )
+        return {
+            "authoritative_identities": self._fragment_identity_payload(fragments),
+            "fragments": payload,
+        }, fragment_refs
+
+    def _decode_component_review_refs(
+        self,
+        parsed: dict[str, Any],
+        fragment_refs: dict[str, str],
+        fragments: list[TopicFragmentDraft],
+    ) -> list[list[str]]:
+        raw_groups = parsed.get("groups")
+        if not isinstance(raw_groups, list) or not raw_groups:
+            raise TopicBuildValidationError(
+                "component review groups must be a non-empty array"
+            )
+        groups: list[list[str]] = []
+        seen_refs: set[str] = set()
+        for index, group in enumerate(raw_groups):
+            if not isinstance(group, dict):
+                raise TopicBuildValidationError(
+                    f"component review group {index} must be an object"
+                )
+            refs = self._unique_strings(group.get("fragment_refs"))
+            if not refs:
+                raise TopicBuildValidationError(
+                    f"component review group {index} has no fragment refs"
+                )
+            unknown = [ref for ref in refs if ref not in fragment_refs]
+            duplicates = [ref for ref in refs if ref in seen_refs]
+            if unknown or duplicates:
+                raise TopicBuildValidationError(
+                    f"component review group {index} has invalid fragment refs: "
+                    f"unknown={unknown}, duplicate={duplicates}"
+                )
+            seen_refs.update(refs)
+            groups.append([fragment_refs[ref] for ref in refs])
+        missing = [ref for ref in fragment_refs if ref not in seen_refs]
+        if missing:
+            raise TopicBuildValidationError(
+                "component review did not cover fragment refs: "
+                + ", ".join(missing)
+            )
+        return self._validate_component_uid_groups(groups, fragments)
+
+    @staticmethod
+    def _validate_component_uid_groups(
+        raw_groups: Any,
+        fragments: list[TopicFragmentDraft],
+    ) -> list[list[str]]:
+        if not isinstance(raw_groups, list) or not raw_groups:
+            raise TopicBuildValidationError(
+                "component review checkpoint groups must be a non-empty array"
+            )
+        allowed = [fragment.fragment_uid for fragment in fragments]
+        allowed_set = set(allowed)
+        order = {uid: index for index, uid in enumerate(allowed)}
+        seen: set[str] = set()
+        groups: list[list[str]] = []
+        for index, raw_group in enumerate(raw_groups):
+            if not isinstance(raw_group, list) or not raw_group:
+                raise TopicBuildValidationError(
+                    f"component review checkpoint group {index} is invalid"
+                )
+            group = [str(uid or "").strip() for uid in raw_group]
+            if any(not uid for uid in group):
+                raise TopicBuildValidationError(
+                    f"component review checkpoint group {index} has an empty UID"
+                )
+            unknown = [uid for uid in group if uid not in allowed_set]
+            duplicates = [uid for uid in group if uid in seen]
+            if unknown or duplicates or len(group) != len(set(group)):
+                raise TopicBuildValidationError(
+                    f"component review checkpoint group {index} has invalid UIDs"
+                )
+            seen.update(group)
+            groups.append(sorted(group, key=order.__getitem__))
+        if seen != allowed_set:
+            raise TopicBuildValidationError(
+                "component review checkpoint does not preserve fragment scope"
+            )
+        groups.sort(key=lambda group: min(order[uid] for uid in group))
+        return groups
 
     def _fragment_llm_context(
         self, inputs: list[TimelineTopicCandidate]

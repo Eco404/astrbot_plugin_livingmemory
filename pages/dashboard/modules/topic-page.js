@@ -763,6 +763,18 @@ export class TopicPage {
         + ` · ${window.t("topic.progress.level")} ${level}`
         + callText;
     }
+    if (job.item_kind === "component_review") {
+      const reviewed = Number(job.reviewed_components ?? job.current ?? 0);
+      const total = Number(job.item_total || job.total || 0);
+      const active = Number(job.active_component_review_count || 0);
+      const concurrency = Number(job.component_review_concurrency || job.llm_concurrency || 1);
+      const groups = Number(job.review_output_groups || 0);
+      return `${window.t("topic.progress.reviewedComponents")} ${reviewed} / ${total}`
+        + ` · ${window.t("topic.progress.reviewingComponent")} #${Number(job.item_index || 0)}`
+        + ` · ${window.t("topic.progress.fragments")} ${Number(job.fragment_count || 0)}`
+        + (groups ? ` · ${window.t("topic.progress.reviewOutputGroups")} ${groups}` : "")
+        + ` · ${window.t("topic.progress.concurrency")} ${active} / ${concurrency}`;
+    }
     return callText.replace(/^ · /, "");
   }
 

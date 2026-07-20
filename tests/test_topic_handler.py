@@ -61,13 +61,14 @@ async def test_failed_build_overrides_completed_scan_stage(monkeypatch):
         ("candidate_scan", 5, 10, 7.5),
         ("fragment_extraction", 1, 2, 30.0),
         ("embedding", 1, 2, 52.5),
-        ("fragment_matching", 1, 2, 67.5),
-        ("topic_synthesis", 1, 2, 82.5),
-        ("materialization", 1, 2, 95.0),
+        ("fragment_matching", 1, 2, 66.0),
+        ("component_review", 1, 2, 77.0),
+        ("topic_synthesis", 1, 2, 87.0),
+        ("materialization", 1, 2, 96.0),
         ("completed", 0, 0, 100.0),
     ],
 )
-def test_overall_progress_uses_all_six_build_stages(
+def test_overall_progress_uses_all_build_stages(
     stage, current, total, expected
 ):
     assert TopicHandler._overall_percent(stage, current, total) == expected
@@ -139,7 +140,7 @@ async def test_job_progress_is_monotonic_within_a_concurrent_stage(monkeypatch):
     await asyncio.sleep(0)
 
     assert handler._jobs[job_uid]["current"] == 3
-    assert handler._jobs[job_uid]["overall_percent"] == 79.5
+    assert handler._jobs[job_uid]["overall_percent"] == 85.0
 
     release.set()
     await next(iter(handler._tasks))
@@ -412,7 +413,7 @@ def test_resumable_run_payload_preserves_failed_stage():
 
     assert payload["resumable"] is True
     assert payload["failed_stage"] == "topic_synthesis"
-    assert payload["overall_percent"] == 80.6
+    assert payload["overall_percent"] == 85.8
 
 
 @pytest.mark.asyncio
