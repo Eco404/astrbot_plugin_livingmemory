@@ -9,6 +9,7 @@ from .graph_keyword_retriever import GraphKeywordRetriever
 from .graph_retriever import GraphRetriever
 from .graph_vector_retriever import GraphVectorRetriever
 from .hybrid_retriever import HybridRetriever
+from .recall_pipeline import RecallPipeline, RecallPipelineResult, RecallQueryBranch
 from .rrf_fusion import BM25Result, FusedResult, RRFFusion, VectorResult
 from .vector_retriever import VectorRetriever
 
@@ -24,4 +25,7 @@ __all__ = [
     "GraphVectorRetriever",
     "GraphRetriever",
     "DualRouteRetriever",
+    "RecallPipeline",
+    "RecallPipelineResult",
+    "RecallQueryBranch",
 ]

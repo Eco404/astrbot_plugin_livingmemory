@@ -155,18 +155,24 @@ class HybridRetriever:
         if not query or not query.strip():
             return []
 
-        # 1. 并行执行两路检索
+        # 1. 并行执行两路检索。先扩大候选集，避免在 MMR 之前就截断到 k，
+        # 否则下面的多样性选择永远不会真正执行。
+        candidate_k = max(k, min(100, k * 2))
         (
             (bm25_results, bm25_error),
             (vector_results, vector_error),
         ) = await asyncio.gather(
             self._search_route(
                 "BM25",
-                self.bm25_retriever.search(query, k, session_id, persona_id),
+                self.bm25_retriever.search(
+                    query, candidate_k, session_id, persona_id
+                ),
             ),
             self._search_route(
                 "向量",
-                self.vector_retriever.search(query, k, session_id, persona_id),
+                self.vector_retriever.search(
+                    query, candidate_k, session_id, persona_id
+                ),
             ),
         )
 
@@ -201,7 +207,7 @@ class HybridRetriever:
         ]
 
         fused_results = self.rrf_fusion.fuse(
-            rrf_bm25_results, rrf_vector_results, top_k=k
+            rrf_bm25_results, rrf_vector_results, top_k=candidate_k
         )
 
         if not fused_results:
@@ -219,7 +225,7 @@ class HybridRetriever:
                 self._apply_mmr, weighted_results, k
             )
 
-        return weighted_results
+        return weighted_results[:k]
 
     def _apply_weighting(
         self, fused_results: list[FusedResult], current_time: float

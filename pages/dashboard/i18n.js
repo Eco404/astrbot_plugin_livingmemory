@@ -539,6 +539,13 @@
     "recall.fail":        { zh: "召回失败", en: "Recall failed", ru: "Ошибка поиска" },
     "recall.testFailed":  { zh: "召回测试失败", en: "Recall test failed", ru: "Ошибка теста поиска" },
     "recall.timeElapsed": { zh: "耗时 {0} 秒", en: "{0}s elapsed", ru: "Затрачено {0} с" },
+    "recall.diagnostics": { zh: "召回诊断", en: "Recall diagnostics", ru: "Диагностика поиска" },
+    "recall.candidateSummary": { zh: "候选 {0} · 入选 {1}", en: "{0} candidates · {1} selected", ru: "Кандидатов {0} · выбрано {1}" },
+    "recall.threshold": { zh: "本轮阈值", en: "Threshold", ru: "Порог" },
+    "recall.overlapSuppressed": { zh: "上下文重叠过滤", en: "Context overlaps", ru: "Перекрытия контекста" },
+    "recall.filteredCandidates": { zh: "查看 {0} 条未入选候选", en: "View {0} filtered candidates", ru: "Показать отфильтрованные: {0}" },
+    "recall.relevance": { zh: "相关度", en: "Relevance", ru: "Релевантность" },
+    "recall.branchCount": { zh: "命中查询分支", en: "Matched branches", ru: "Ветви запроса" },
 
     /* ---- Recall Results Metadata ---- */
     "recall.resultId":    { zh: "记忆 ID:", en: "Memory ID:", ru: "ID памяти:" },

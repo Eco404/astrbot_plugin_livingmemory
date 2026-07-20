@@ -74,6 +74,7 @@ export class RecallPage {
       this.showToast(e.message || window.t("recall.fail"), true);
       document.getElementById("recall-results").innerHTML = "";
       document.getElementById("recall-stats").classList.add("hidden");
+      document.getElementById("recall-diagnostics")?.classList.add("hidden");
       this.state._recallCache = null;
     } finally {
       if (searchBtn) searchBtn.disabled = false;
@@ -106,6 +107,8 @@ export class RecallPage {
       timeText.textContent = window.t("recall.timeElapsed", (time / 1000).toFixed(2));
     }
 
+    this.renderDiagnostics(data.diagnostics || {});
+
     const resultsEl = document.getElementById("recall-results");
     if (!resultsEl) return;
 
@@ -126,6 +129,7 @@ export class RecallPage {
       const importance = normalizeImportance(mem.metadata?.importance || 0.5).toFixed(1);
       const type = mem.metadata?.memory_type || "GENERAL";
       const status = mem.metadata?.status || "active";
+      const breakdown = mem.score_breakdown || {};
 
       const scoreNum = Number(score);
       const scoreCls = scoreNum >= 0.75 ? "high" : scoreNum >= 0.45 ? "medium" : "low";
@@ -143,6 +147,12 @@ export class RecallPage {
       html += '<span>' + window.t("detail.importance") + ': ' + importance + '/10</span>';
       if (mem.metadata?.session_id) {
         html += '<span>Session: ' + esc(String(mem.metadata.session_id)) + '</span>';
+      }
+      if (breakdown.recall_relevance_score != null) {
+        html += '<span>' + window.t("recall.relevance") + ': ' + Number(breakdown.recall_relevance_score).toFixed(3) + '</span>';
+      }
+      if (breakdown.recall_branch_count != null) {
+        html += '<span>' + window.t("recall.branchCount") + ': ' + Number(breakdown.recall_branch_count).toFixed(0) + '</span>';
       }
       html += '</div>';
       html += '</div>';
@@ -172,6 +182,48 @@ export class RecallPage {
         }
       });
     });
+  }
+
+  renderDiagnostics(diagnostics) {
+    const element = document.getElementById("recall-diagnostics");
+    if (!element) return;
+    const branches = diagnostics.query_branches || [];
+    const candidates = diagnostics.candidates || [];
+    if (!branches.length && !candidates.length) {
+      element.classList.add("hidden");
+      element.innerHTML = "";
+      return;
+    }
+
+    const filtered = candidates.filter(item => !item.selected);
+    let html = '<div class="recall-diagnostics-header">';
+    html += '<strong>' + window.t("recall.diagnostics") + '</strong>';
+    html += '<span>' + window.t("recall.candidateSummary", diagnostics.candidate_count || 0, diagnostics.selected_count || 0) + '</span>';
+    html += '<span>' + window.t("recall.threshold") + ': ' + Number(diagnostics.applied_threshold || 0).toFixed(3) + '</span>';
+    html += '<span>' + window.t("recall.overlapSuppressed") + ': ' + Number(diagnostics.overlap_suppressed || 0) + '</span>';
+    html += '</div>';
+    html += '<div class="recall-query-branches">';
+    branches.forEach(branch => {
+      html += '<div class="recall-query-branch">';
+      html += '<span class="type-tag">' + esc(branch.name) + '</span>';
+      html += '<span class="text-secondary">' + esc(branch.role) + ' · weight ' + Number(branch.weight).toFixed(2) + '</span>';
+      html += '<span class="recall-query-text">' + esc(branch.text || "") + '</span>';
+      html += '</div>';
+    });
+    html += '</div>';
+    if (filtered.length) {
+      html += '<details class="recall-filtered"><summary>' + window.t("recall.filteredCandidates", filtered.length) + '</summary>';
+      html += '<div class="recall-filtered-list">';
+      filtered.forEach(item => {
+        html += '<div><span class="cell-mono">ID ' + esc(String(item.memory_id)) + '</span>';
+        html += '<span>rel ' + Number(item.relevance_score || 0).toFixed(3) + '</span>';
+        html += '<span>score ' + Number(item.fused_score || 0).toFixed(3) + '</span>';
+        html += '<span>' + esc(item.filter_reason || "--") + '</span></div>';
+      });
+      html += '</div></details>';
+    }
+    element.innerHTML = html;
+    element.classList.remove("hidden");
   }
 
   /**

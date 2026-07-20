@@ -1518,12 +1518,12 @@ async def test_context_expansion_enriches_query(
     cm_mock.get_session_metadata = AsyncMock(return_value=0)
     cm_mock.update_session_metadata = AsyncMock()
     cm_mock.invalidate_cache = AsyncMock()
-    # 模拟返回 3 条消息（最新在前）: [当前消息, bot 回复, 用户上条]
+    # get_context 按时间升序返回；最后一条是刚存入的当前消息。
     cm_mock.get_context = AsyncMock(
         return_value=[
-            {"content": "当前用户消息"},
-            {"content": "Bot 的上一条回复"},
-            {"content": "用户之前说的事情"},
+            {"role": "user", "content": "用户之前说的事情"},
+            {"role": "assistant", "content": "Bot 的上一条回复"},
+            {"role": "user", "content": "当前用户消息"},
         ]
     )
 
@@ -1546,7 +1546,14 @@ async def test_context_expansion_enriches_query(
     )
 
     recalled = Mock(
-        content="mem_context", final_score=0.8, metadata={"importance": 0.9}
+        doc_id=1,
+        content="mem_context",
+        final_score=0.8,
+        rrf_score=0.03,
+        bm25_score=0.8,
+        vector_score=0.8,
+        score_breakdown={},
+        metadata={"importance": 0.9},
     )
     memory_engine.search_memories = AsyncMock(return_value=[recalled])
 
@@ -1561,10 +1568,12 @@ async def test_context_expansion_enriches_query(
         get_persona.return_value = "persona_1"
         await h.handle_memory_recall(event, req)
 
-    # 验证 search_memories 收到的 query 包含扩展内容
-    call_kwargs = memory_engine.search_memories.await_args.kwargs
-    assert "用户之前说的事情" in call_kwargs["query"]
-    assert "Bot 的上一条回复" in call_kwargs["query"]
+    # 默认忽略 Bot 回复，当前消息与历史用户消息分别检索。
+    queries = [
+        call.kwargs["query"]
+        for call in memory_engine.search_memories.await_args_list
+    ]
+    assert queries == ["当前用户消息", "用户之前说的事情"]
 
 
 @pytest.mark.asyncio
@@ -1597,11 +1606,20 @@ async def test_context_expansion_skips_when_empty(
     # 只返回一条消息（只有当前消息，无历史）
     h.conversation_manager.get_context = AsyncMock(
         return_value=[
-            {"content": "唯一一条消息"},
+            {"role": "user", "content": "唯一一条消息"},
         ]
     )
 
-    recalled = Mock(content="mem_skip", final_score=0.8, metadata={"importance": 0.9})
+    recalled = Mock(
+        doc_id=1,
+        content="mem_skip",
+        final_score=0.8,
+        rrf_score=0.03,
+        bm25_score=0.8,
+        vector_score=0.8,
+        score_breakdown={},
+        metadata={"importance": 0.9},
+    )
     memory_engine.search_memories = AsyncMock(return_value=[recalled])
 
     event = _make_event(group=False)

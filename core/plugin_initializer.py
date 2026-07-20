@@ -582,6 +582,18 @@ class PluginInitializer:
                 "importance_weight": self.config_manager.get(
                     "recall_engine.importance_weight", 1.0
                 ),
+                "candidate_multiplier": self.config_manager.get(
+                    "recall_engine.candidate_multiplier", 3
+                ),
+                "min_relevance_score": self.config_manager.get(
+                    "recall_engine.min_relevance_score", 0.38
+                ),
+                "relative_score_floor": self.config_manager.get(
+                    "recall_engine.relative_score_floor", 0.65
+                ),
+                "mmr_lambda": self.config_manager.get(
+                    "recall_engine.mmr_lambda", 0.72
+                ),
                 "search_cache_enabled": self.config_manager.get(
                     "recall_engine.search_cache_enabled", True
                 ),

@@ -29,12 +29,7 @@ from .event_handler_modules import (
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
 from .processors.memory_processor import MemoryProcessor
-from .utils import (
-    OperationContext,
-    format_memories_for_fake_tool_call,
-    format_memories_for_injection,
-    get_persona_id,
-)
+from .utils import get_persona_id
 from .utils.injection_adapter import InjectionAdapter
 
 # 预编译记忆注入清理正则（热路径优化：避免每次调用 re.compile）
@@ -84,6 +79,7 @@ class EventHandler:
             conversation_manager,
             self._message_utils,
             self._injection_adapter,
+            persona_resolver=lambda context, event: get_persona_id(context, event),
         )
 
         # 后台存储任务跟踪
