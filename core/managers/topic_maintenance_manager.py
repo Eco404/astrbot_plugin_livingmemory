@@ -50,6 +50,8 @@ class TopicMaintenanceManager:
         time_gap_seconds: float = 21600.0,
         similarity_threshold: float = 0.52,
         since: float | None = None,
+        timeline_uids: list[str] | None = None,
+        only_unindexed: bool = False,
         progress_callback: ProgressCallback | None = None,
         max_batches: int | None = None,
     ) -> dict[str, Any]:
@@ -61,10 +63,20 @@ class TopicMaintenanceManager:
         time_gap_seconds = max(60.0, float(time_gap_seconds))
         if not 0.0 <= float(similarity_threshold) <= 1.0:
             raise ValueError("similarity_threshold must be between 0 and 1")
-        if mode is TopicMaintenanceMode.INCREMENTAL and since is None:
-            raise ValueError("Incremental scans require a since timestamp")
+        selected_timeline_uids = self._normalized_uids(timeline_uids)
+        if mode is TopicMaintenanceMode.INCREMENTAL and (
+            since is None and selected_timeline_uids is None
+        ):
+            raise ValueError(
+                "Incremental scans require a since timestamp or selected Timeline IDs"
+            )
 
-        total = await self._count_timelines(memory_space_id, since=since)
+        total = await self._count_timelines(
+            memory_space_id,
+            since=since,
+            timeline_uids=selected_timeline_uids,
+            only_unindexed=only_unindexed,
+        )
         run = TopicMaintenanceRun(
             memory_space_id=memory_space_id,
             mode=mode,
@@ -74,6 +86,8 @@ class TopicMaintenanceManager:
                 "time_gap_seconds": time_gap_seconds,
                 "similarity_threshold": float(similarity_threshold),
                 "since": since,
+                "timeline_uids": selected_timeline_uids,
+                "only_unindexed": bool(only_unindexed),
                 "candidate_schema_version": 1,
             },
         )
@@ -104,6 +118,8 @@ class TopicMaintenanceManager:
         time_gap_seconds = max(60.0, float(config.get("time_gap_seconds", 21600.0)))
         similarity_threshold = float(config.get("similarity_threshold", 0.52))
         since = self._optional_float(config.get("since"))
+        timeline_uids = self._normalized_uids(config.get("timeline_uids"))
+        only_unindexed = bool(config.get("only_unindexed", False))
         memory_space_id = str(run["memory_space_id"])
         processed = await self.store.get_processed_timeline_uids(run_uid)
         processed_count = len(processed)
@@ -121,6 +137,8 @@ class TopicMaintenanceManager:
                     run_uid=run_uid,
                     limit=batch_size,
                     since=since,
+                    timeline_uids=timeline_uids,
+                    only_unindexed=only_unindexed,
                 )
                 if not batch:
                     break
@@ -153,7 +171,12 @@ class TopicMaintenanceManager:
                     return self._result(paused or run, [])
 
             candidates = await self.store.get_scan_items(run_uid)
-            current_total = await self._count_timelines(memory_space_id, since=since)
+            current_total = await self._count_timelines(
+                memory_space_id,
+                since=since,
+                timeline_uids=timeline_uids,
+                only_unindexed=only_unindexed,
+            )
             if len(candidates) < current_total:
                 await self.store.update_maintenance_run(
                     run_uid,
@@ -227,6 +250,8 @@ class TopicMaintenanceManager:
         memory_space_id: str,
         *,
         since: float | None,
+        timeline_uids: list[str] | None = None,
+        only_unindexed: bool = False,
     ) -> int:
         where = [
             "r.memory_space_id = ?",
@@ -237,6 +262,11 @@ class TopicMaintenanceManager:
         if since is not None:
             where.append("r.updated_at >= ?")
             params.append(float(since))
+        if timeline_uids is not None:
+            where.append("r.memory_uid IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(timeline_uids, ensure_ascii=False))
+        if only_unindexed:
+            where.append(self._unindexed_timeline_predicate())
         async with aiosqlite.connect(self.db_path) as db:
             row = await (
                 await db.execute(
@@ -253,6 +283,8 @@ class TopicMaintenanceManager:
         run_uid: str,
         limit: int,
         since: float | None,
+        timeline_uids: list[str] | None = None,
+        only_unindexed: bool = False,
     ) -> list[TimelineTopicCandidate]:
         where = [
             "r.memory_space_id = ?",
@@ -264,6 +296,11 @@ class TopicMaintenanceManager:
         if since is not None:
             where.append("r.updated_at >= ?")
             params.append(float(since))
+        if timeline_uids is not None:
+            where.append("r.memory_uid IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(timeline_uids, ensure_ascii=False))
+        if only_unindexed:
+            where.append(self._unindexed_timeline_predicate())
         params.append(int(limit))
 
         async with aiosqlite.connect(self.db_path) as db:
@@ -293,6 +330,93 @@ class TopicMaintenanceManager:
             atom_map = await self._load_atoms(db, [int(row["document_id"]) for row in rows])
 
         return [self._row_to_candidate(row, atom_map) for row in rows]
+
+    async def list_unindexed_timelines(
+        self,
+        memory_space_id: str,
+    ) -> list[dict[str, Any]]:
+        """List active Timeline revisions absent from the active Topic graph."""
+        if not str(memory_space_id or "").strip():
+            raise ValueError("memory_space_id is required")
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT r.memory_uid, r.revision, r.created_at, r.updated_at,
+                           d.text, d.metadata,
+                           s.started_at, s.ended_at
+                    FROM memory_registry r
+                    JOIN documents d ON d.id = r.document_id
+                    LEFT JOIN memory_source_spans s ON s.memory_uid = r.memory_uid
+                    WHERE r.memory_space_id = ?
+                      AND r.memory_layer = 'timeline'
+                      AND r.status = 'active'
+                      AND {self._unindexed_timeline_predicate()}
+                    ORDER BY COALESCE(s.started_at, r.created_at), r.document_id
+                    """,
+                    (memory_space_id,),
+                )
+            ).fetchall()
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            metadata = self._json_dict(row["metadata"])
+            summary = str(
+                metadata.get("canonical_summary")
+                or metadata.get("persona_summary")
+                or row["text"]
+                or ""
+            ).strip()
+            summary = re.sub(r"\s+", " ", summary)
+            items.append(
+                {
+                    "timeline_uid": str(row["memory_uid"]),
+                    "revision": max(1, int(row["revision"] or 1)),
+                    "summary": summary[:300],
+                    "topics": self._string_list(metadata.get("topics")),
+                    "created_at": self._optional_float(row["created_at"]),
+                    "updated_at": self._optional_float(row["updated_at"]),
+                    "started_at": self._optional_float(row["started_at"]),
+                    "ended_at": self._optional_float(row["ended_at"]),
+                }
+            )
+        return items
+
+    @staticmethod
+    def _unindexed_timeline_predicate() -> str:
+        return """
+        NOT EXISTS (
+            SELECT 1
+            FROM topic_timeline_links indexed_link
+            JOIN topic_memories indexed_topic
+              ON indexed_topic.topic_uid = indexed_link.topic_uid
+            WHERE indexed_link.timeline_uid = r.memory_uid
+              AND indexed_link.source_timeline_revision = r.revision
+              AND indexed_link.status = 'active'
+              AND indexed_topic.status = 'active'
+              AND indexed_topic.memory_space_id = r.memory_space_id
+        )
+        """.strip()
+
+    @classmethod
+    def _normalized_uids(cls, value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        if not isinstance(value, (list, tuple, set)):
+            raise ValueError("timeline_uids must be a list")
+        return cls._unique_strings(value)
+
+    @staticmethod
+    def _unique_strings(value: Any) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in value or []:
+            normalized = str(item or "").strip()
+            if normalized and normalized not in seen:
+                result.append(normalized)
+                seen.add(normalized)
+        return result
 
     async def _load_atoms(
         self,

@@ -162,6 +162,7 @@ class TopicBuildManager:
         *,
         mode: TopicMaintenanceMode = TopicMaintenanceMode.FULL,
         since: float | None = None,
+        timeline_uids: list[str] | None = None,
         reset_topics: bool = False,
         progress_callback=None,
     ) -> dict[str, Any]:
@@ -176,13 +177,15 @@ class TopicBuildManager:
                 reset_result = await self.store.clear_space(memory_space_id)
             if mode is TopicMaintenanceMode.INCREMENTAL:
                 existing = await self.store.list_topics(memory_space_id, limit=1)
-                if not existing:
+                if not existing and timeline_uids is None:
                     mode = TopicMaintenanceMode.FULL
                     since = None
             scan = await self.candidate_manager.start_scan(
                 memory_space_id,
                 mode=mode,
                 since=since,
+                timeline_uids=timeline_uids,
+                only_unindexed=timeline_uids is not None,
                 batch_size=int(self.config.get("candidate_batch_size", 100)),
                 time_gap_seconds=float(self.config.get("time_gap_hours", 6.0))
                 * 3600.0,
@@ -275,12 +278,14 @@ class TopicBuildManager:
                 [fragments[index] for index in component]
                 for component in components
             ]
+            synthesis_progress_lock = asyncio.Lock()
+            completed_initial_syntheses = 0
 
             def synthesis_progress_for(
                 position: int,
                 component_fragments: list[TopicFragmentDraft],
                 *,
-                stage_current: int,
+                stage_current: int | None = None,
             ):
                 async def synthesis_progress(
                     current: int,
@@ -292,7 +297,11 @@ class TopicBuildManager:
                         progress_callback,
                         run_uid,
                         "topic_synthesis",
-                        stage_current,
+                        (
+                            completed_initial_syntheses
+                            if stage_current is None
+                            else stage_current
+                        ),
                         len(components),
                         activity="llm_call",
                         item_kind="topic_component",
@@ -308,16 +317,41 @@ class TopicBuildManager:
 
                 return synthesis_progress
 
+            async def synthesize_initial_component(
+                position: int,
+                component_fragments: list[TopicFragmentDraft],
+            ) -> dict[str, Any]:
+                nonlocal completed_initial_syntheses
+                synthesis = await self._synthesize_component_checkpointed(
+                    run_uid,
+                    component_fragments,
+                    progress_callback=synthesis_progress_for(
+                        position,
+                        component_fragments,
+                    ),
+                )
+                async with synthesis_progress_lock:
+                    completed_initial_syntheses += 1
+                    await self._emit(
+                        progress_callback,
+                        run_uid,
+                        "topic_synthesis",
+                        completed_initial_syntheses,
+                        len(components),
+                        activity="stage_progress",
+                        item_kind="topic_component",
+                        item_index=position,
+                        item_total=len(components),
+                        fragment_count=len(component_fragments),
+                        llm_concurrency=self.llm_concurrency,
+                    )
+                return synthesis
+
             initial_syntheses = await self._gather_cancel_on_error(
                 [
-                    self._synthesize_component_checkpointed(
-                        run_uid,
+                    synthesize_initial_component(
+                        position,
                         component_fragments,
-                        progress_callback=synthesis_progress_for(
-                            position,
-                            component_fragments,
-                            stage_current=0,
-                        ),
                     )
                     for position, component_fragments in enumerate(
                         component_fragment_sets,
@@ -349,7 +383,7 @@ class TopicBuildManager:
                             progress_callback=synthesis_progress_for(
                                 position,
                                 component_fragments,
-                                stage_current=position - 1,
+                                stage_current=len(components),
                             ),
                         )
                 topic, atoms, links, sources = self._materialize_snapshot(
@@ -383,7 +417,7 @@ class TopicBuildManager:
                     progress_callback,
                     run_uid,
                     "topic_synthesis",
-                    position,
+                    len(components),
                     len(components),
                     activity="stage_progress",
                     item_kind="topic_component",

@@ -74,6 +74,78 @@ def test_overall_progress_uses_all_six_build_stages(
 
 
 @pytest.mark.asyncio
+async def test_lists_unindexed_timelines_for_selected_space(monkeypatch):
+    request = MagicMock()
+    request.args = {"memory_space_id": "space-1"}
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    candidate_manager = SimpleNamespace(
+        list_unindexed_timelines=AsyncMock(
+            return_value=[
+                {
+                    "timeline_uid": "timeline-1",
+                    "revision": 2,
+                    "summary": "尚未建立 Topic 索引",
+                }
+            ]
+        )
+    )
+    engine = SimpleNamespace(
+        topic_build_manager=SimpleNamespace(candidate_manager=candidate_manager)
+    )
+
+    response = await TopicHandler(PageApiUtils()).list_unindexed_timelines(engine)
+
+    assert response["status"] == "ok"
+    assert response["data"]["total"] == 1
+    assert response["data"]["items"][0]["timeline_uid"] == "timeline-1"
+    candidate_manager.list_unindexed_timelines.assert_awaited_once_with("space-1")
+
+
+@pytest.mark.asyncio
+async def test_job_progress_is_monotonic_within_a_concurrent_stage(monkeypatch):
+    release = asyncio.Event()
+
+    class OutOfOrderBuildManager:
+        async def build_space(self, memory_space_id, **kwargs):
+            callback = kwargs["progress_callback"]
+            await callback(
+                {"stage": "topic_synthesis", "current": 3, "total": 10}
+            )
+            await callback(
+                {"stage": "topic_synthesis", "current": 2, "total": 10}
+            )
+            await release.wait()
+            return {"status": "completed", "memory_space_id": memory_space_id}
+
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={"memory_space_id": "space-1", "mode": "full"}
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    handler = TopicHandler(PageApiUtils())
+    engine = SimpleNamespace(
+        topic_memory_enabled=True,
+        topic_build_manager=OutOfOrderBuildManager(),
+    )
+
+    response = await handler.start_build(engine)
+    job_uid = response["data"]["job_uid"]
+    await asyncio.sleep(0)
+
+    assert handler._jobs[job_uid]["current"] == 3
+    assert handler._jobs[job_uid]["overall_percent"] == 79.5
+
+    release.set()
+    await next(iter(handler._tasks))
+
+
+@pytest.mark.asyncio
 async def test_duplicate_manual_build_returns_existing_job(monkeypatch):
     release = asyncio.Event()
 
@@ -150,6 +222,46 @@ async def test_reset_full_build_is_forwarded_to_build_manager(monkeypatch):
 
     assert manager.kwargs["reset_topics"] is True
     assert handler._jobs[job_uid]["reset_topics"] is True
+    assert handler._jobs[job_uid]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_selected_unindexed_timelines_are_forwarded_without_time_window(
+    monkeypatch,
+):
+    class SelectedBuildManager:
+        def __init__(self):
+            self.kwargs = None
+
+        async def build_space(self, memory_space_id, **kwargs):
+            self.kwargs = kwargs
+            return {"status": "completed", "memory_space_id": memory_space_id}
+
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={
+            "memory_space_id": "space-1",
+            "mode": "incremental",
+            "timeline_uids": ["timeline-2", "timeline-1", "timeline-2"],
+        }
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    manager = SelectedBuildManager()
+    handler = TopicHandler(PageApiUtils())
+    engine = SimpleNamespace(
+        topic_memory_enabled=True,
+        topic_build_manager=manager,
+    )
+
+    response = await handler.start_build(engine)
+    job_uid = response["data"]["job_uid"]
+    await next(iter(handler._tasks))
+
+    assert manager.kwargs["timeline_uids"] == ["timeline-2", "timeline-1"]
+    assert manager.kwargs["since"] is None
     assert handler._jobs[job_uid]["status"] == "completed"
 
 

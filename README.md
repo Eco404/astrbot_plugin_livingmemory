@@ -66,6 +66,7 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 **Experimental Topic memory**:
 - Enable `topic_memory.enabled`, then run one full build from the Topic Memory page. Automatic maintenance can be controlled by `topic_memory.auto_maintenance`.
 - Topic memories are derived and read-only. Edit their source Timeline memories instead; dependent Topics are marked stale and rebuilt.
+- **Maintenance** checks whether each active Timeline revision has an active Topic index, lists missing entries with all selected by default, and incrementally processes only the confirmed selection instead of using a fixed 24-hour window.
 - Wide candidate groups are extracted in batches controlled by `topic_memory.fragment_extraction_batch_size` (default: 12). Large Topic components are then synthesized hierarchically using `topic_memory.synthesis_batch_size` (default: 12), while remaining one Topic with original provenance. The Topic page reports the active component, batch, LLM call, and elapsed time.
 - `topic_memory.llm_concurrency` sets the shared LLM concurrency limit across candidate groups, intra-group batches, and same-level Topic synthesis (default: 2); set it to 1 for sequential operation. Check the Provider and upstream API rate limits before increasing it.
 - `topic_memory.rerank_concurrency` independently limits concurrent rerank requests during fragment matching (default: 1, range: 1–32); increase it for parallel requests and lower it if Cloudflare starts returning HTTP 429.
