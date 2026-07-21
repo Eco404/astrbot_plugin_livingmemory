@@ -3512,7 +3512,7 @@ class TopicBuildManager:
                         ),
                         "attribution_confidence": self._score(
                             raw.get("attribution_confidence"),
-                            min(item.confidence for item in source_items),
+                            self._score(raw.get("confidence"), 0.7),
                         ),
                         "ambiguity_flags": self._unique_strings(
                             [
