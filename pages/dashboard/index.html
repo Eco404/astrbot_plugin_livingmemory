@@ -25,7 +25,7 @@
               <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
               <rect x="8" y="2" width="8" height="4" rx="1"/>
             </svg>
-            <span data-i18n="nav.memory">Memories</span>
+            <span data-i18n="nav.memory">Timeline 记忆</span>
           </button>
           <button class="nav-item" data-page="topic">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h13"/><circle cx="19" cy="12" r="2"/></svg>
@@ -127,7 +127,10 @@
         <!-- Page: Memory -->
         <section class="page" id="page-memory">
           <header class="page-header">
-            <span class="page-title" data-i18n="nav.memory">Memories</span>
+            <span class="page-title" data-i18n="nav.memory">Timeline 记忆</span>
+            <div class="page-actions">
+              <button class="btn btn-secondary btn-sm" id="timeline-settings" data-i18n="timeline.settings">参数</button>
+            </div>
           </header>
           <div class="page-body">
             <div class="filter-bar">
@@ -211,7 +214,6 @@
           </header>
           <div class="page-body topic-page-body">
             <div class="topic-overview-compact">
-              <div class="topic-warning" data-i18n="topic.warning">Topic 记忆由 Timeline 自动派生且不允许手动编辑；启用 Topic 优先召回后，会以 Topic 为主并用少量 Timeline 补充。</div>
               <div class="topic-overview-meta">
                 <div id="topic-flags" class="topic-flags text-secondary"></div>
                 <div class="topic-stats">
@@ -252,6 +254,14 @@
             <div class="recall-form-section">
               <textarea id="recall-query" class="input textarea" rows="3" data-i18n-placeholder="recall.queryPh" placeholder="Enter a query to test the dual-route four-mode hybrid retrieval engine..."></textarea>
               <div class="recall-form-row">
+                <div class="recall-form-field" style="max-width:220px">
+                  <label class="recall-form-label" data-i18n="recall.modeLabel">测试模式</label>
+                  <select id="recall-mode" class="select input input-sm">
+                    <option value="current" data-i18n="recall.mode.current">当前插件行为</option>
+                    <option value="timeline" data-i18n="recall.mode.timeline">仅 Timeline 召回</option>
+                    <option value="topic" data-i18n="recall.mode.topic">仅 Topic 召回</option>
+                  </select>
+                </div>
                 <div class="recall-form-field" style="max-width:200px">
                   <label class="recall-form-label" data-i18n="recall.kLabel">Results (k)</label>
                   <div class="slider-group">
@@ -261,7 +271,8 @@
                 </div>
                 <div class="recall-form-field" style="max-width:280px">
                   <label class="recall-form-label" data-i18n="recall.sessionLabel">Session ID (optional)</label>
-                  <input type="text" id="recall-session" class="input input-sm" data-i18n-placeholder="recall.sessionPh" placeholder="Filter by session..." />
+                  <input type="text" id="recall-session" class="input input-sm" list="recall-session-options" autocomplete="off" data-i18n-placeholder="recall.sessionPh" placeholder="Filter by session..." />
+                  <datalist id="recall-session-options"></datalist>
                 </div>
                 <button class="btn btn-primary" id="recall-search-btn" data-i18n="recall.searchBtn">Run Recall</button>
               </div>
@@ -427,7 +438,6 @@
           <button class="modal-close" id="topic-settings-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
         </div>
         <div class="modal-body topic-settings-body">
-          <div class="topic-settings-notice" data-i18n="topic.settingsNotice">召回参数保存后立即生效；构建参数只影响之后的新任务，不会自动改写已有 Topic。</div>
           <div id="topic-settings-status" class="text-secondary" aria-live="polite"></div>
           <div id="topic-settings-content" class="topic-settings-content"></div>
         </div>
@@ -436,6 +446,26 @@
           <span class="topic-settings-footer-spacer"></span>
           <button class="btn btn-secondary" id="topic-settings-cancel" type="button" data-i18n="common.cancel">取消</button>
           <button class="btn btn-primary" id="topic-settings-save" type="button" data-i18n="common.save">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Timeline Runtime Settings -->
+    <div class="modal-overlay" id="timeline-settings-overlay" aria-hidden="true">
+      <div class="modal topic-settings-modal" role="dialog" aria-modal="true" aria-labelledby="timeline-settings-title">
+        <div class="modal-header">
+          <div class="modal-title" id="timeline-settings-title" data-i18n="timeline.settingsTitle">Timeline 参数</div>
+          <button class="modal-close" id="timeline-settings-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body topic-settings-body">
+          <div id="timeline-settings-status" class="text-secondary" aria-live="polite"></div>
+          <div id="timeline-settings-content" class="topic-settings-content"></div>
+        </div>
+        <div class="modal-footer topic-settings-footer">
+          <button class="btn btn-ghost" id="timeline-settings-reset-all" type="button" data-i18n="topic.resetAllDefaults">全部恢复默认</button>
+          <span class="topic-settings-footer-spacer"></span>
+          <button class="btn btn-secondary" id="timeline-settings-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-primary" id="timeline-settings-save" type="button" data-i18n="common.save">保存</button>
         </div>
       </div>
     </div>

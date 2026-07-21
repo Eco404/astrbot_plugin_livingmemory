@@ -24,6 +24,7 @@ except ImportError:  # AstrBot versions without the optional rerank interface
 
 from ..storage.conversation_store import ConversationStore
 from ..storage.db_migration import DBMigration
+from ..storage.topic_memory_store import TopicMemoryStore
 from .base.config_manager import ConfigManager
 from .base.exceptions import InitializationError, ProviderNotReadyError
 from .managers.conversation_manager import ConversationManager
@@ -33,6 +34,13 @@ from .processors.memory_processor import MemoryProcessor
 from .providers.cloudflare_rerank import CloudflareRerankClient
 from .schedulers.decay_scheduler import DecayScheduler
 from .topic_settings import topic_setting_defaults
+from .timeline_settings import (
+    TIMELINE_SETTING_DEFINITIONS,
+    TIMELINE_SETTINGS_REVISION,
+    effective_timeline_settings,
+    timeline_setting_defaults,
+    validate_timeline_setting,
+)
 from .validators.index_validator import IndexValidator
 
 FaissVecDB: Any = None
@@ -562,6 +570,8 @@ class PluginInitializer:
             if self.config_manager.get("migration_settings.auto_migrate", True):
                 await self._check_and_migrate_database()
 
+            await self._initialize_timeline_runtime_settings(str(db_path))
+
             # 初始化MemoryEngine
             stopwords_dir = data_dir_path / "stopwords"
             stopwords_dir.mkdir(parents=True, exist_ok=True)
@@ -798,6 +808,114 @@ class PluginInitializer:
             self._initialization_failed = True
             self._initialization_error = str(e)
             raise InitializationError(f"初始化失败: {e}") from e
+
+    async def _initialize_timeline_runtime_settings(self, db_path: str) -> None:
+        """Import legacy custom values once, then apply sparse DB overrides."""
+        store = TopicMemoryStore(db_path)
+        await store.initialize()
+        stored = await store.get_timeline_setting_overrides()
+        if not stored.get("__legacy_imported_v1__"):
+            defaults = timeline_setting_defaults()
+            imported: dict[str, Any] = {}
+            for key in TIMELINE_SETTING_DEFINITIONS:
+                section, field = key.split(".", 1)
+                raw_section = self.config_manager.get_raw_section(section)
+                if field not in raw_section:
+                    continue
+                try:
+                    value = validate_timeline_setting(key, raw_section[field])
+                except ValueError:
+                    continue
+                if value != defaults[key]:
+                    imported[key] = value
+            imported["__legacy_imported_v1__"] = True
+            stored = await store.update_timeline_setting_overrides(
+                imported,
+                settings_revision=TIMELINE_SETTINGS_REVISION,
+            )
+        public = {
+            key: value
+            for key, value in stored.items()
+            if key in TIMELINE_SETTING_DEFINITIONS
+        }
+        self.config_manager.apply_runtime_overrides(
+            effective_timeline_settings(public)
+        )
+
+    async def get_timeline_runtime_settings(self) -> dict[str, Any]:
+        if not self.memory_engine:
+            raise RuntimeError("MemoryEngine 尚未初始化")
+        stored = await self.memory_engine.topic_memory_store.get_timeline_setting_overrides()
+        overrides = {
+            key: value
+            for key, value in stored.items()
+            if key in TIMELINE_SETTING_DEFINITIONS
+        }
+        return {
+            "settings_revision": TIMELINE_SETTINGS_REVISION,
+            "definitions": {
+                key: {**definition, "customized": key in overrides}
+                for key, definition in TIMELINE_SETTING_DEFINITIONS.items()
+            },
+            "overrides": overrides,
+            "effective": effective_timeline_settings(overrides),
+        }
+
+    async def update_timeline_runtime_settings(
+        self,
+        changes: dict[str, Any],
+        *,
+        reset_keys: list[str] | None = None,
+        reset_all: bool = False,
+    ) -> dict[str, Any]:
+        if not self.memory_engine:
+            raise RuntimeError("MemoryEngine 尚未初始化")
+        normalized = {
+            key: validate_timeline_setting(key, value)
+            for key, value in changes.items()
+        }
+        stored = await self.memory_engine.topic_memory_store.update_timeline_setting_overrides(
+            normalized,
+            reset_keys=reset_keys,
+            reset_all=reset_all,
+            settings_revision=TIMELINE_SETTINGS_REVISION,
+        )
+        public = {
+            key: value
+            for key, value in stored.items()
+            if key in TIMELINE_SETTING_DEFINITIONS
+        }
+        effective = effective_timeline_settings(public)
+        self.config_manager.apply_runtime_overrides(effective)
+        self.memory_engine.apply_timeline_runtime_settings(effective)
+        await self._apply_decay_scheduler_settings(effective)
+        return await self.get_timeline_runtime_settings()
+
+    async def _apply_decay_scheduler_settings(
+        self, effective: dict[str, Any]
+    ) -> None:
+        decay_rate = float(effective["importance_decay.decay_rate"])
+        cleanup_enabled = bool(
+            effective["forgetting_agent.auto_cleanup_enabled"]
+        )
+        if self.decay_scheduler is not None:
+            self.decay_scheduler.decay_rate = decay_rate
+            if decay_rate <= 0 and not cleanup_enabled:
+                await self.decay_scheduler.stop()
+                self.decay_scheduler = None
+            return
+        if not self.memory_engine or (decay_rate <= 0 and not cleanup_enabled):
+            return
+        scheduler = DecayScheduler(
+            memory_engine=self.memory_engine,
+            decay_rate=decay_rate,
+            data_dir=self.data_dir,
+            db_migration=self.db_migration,
+            backup_enabled=self.config_manager.get("backup_settings.enabled", True),
+            backup_keep_days=self.config_manager.get("backup_settings.keep_days", 7),
+        )
+        await scheduler.start()
+        self.decay_scheduler = scheduler
 
     async def _check_and_migrate_database(self):
         """检查并执行数据库迁移"""

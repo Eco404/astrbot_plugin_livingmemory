@@ -10,6 +10,27 @@ export class RecallPage {
     this.state = state;
     this.api = apiClient;
     this.peek = peekPanel;
+    this.sessionsLoaded = false;
+    this.sessionsLoading = null;
+  }
+
+  async fetchSessions(force = false) {
+    if (this.sessionsLoaded && !force) return;
+    if (this.sessionsLoading && !force) return this.sessionsLoading;
+    this.sessionsLoading = this.api.get("sessions", { flat: "true", limit: 500 })
+      .then(data => {
+        const list = document.getElementById("recall-session-options");
+        if (list) {
+          list.innerHTML = (data.items || []).map(item => {
+            const label = `${item.chat_type || ""} · ${item.target_id || ""} · ${item.platform_id || item.platform || ""}`;
+            return `<option value="${esc(item.session_id)}" label="${esc(label)}"></option>`;
+          }).join("");
+        }
+        this.sessionsLoaded = true;
+      })
+      .catch(error => console.warn("[LM] Failed to load recall sessions:", error))
+      .finally(() => { this.sessionsLoading = null; });
+    return this.sessionsLoading;
   }
 
   /**
@@ -50,6 +71,7 @@ export class RecallPage {
     const query = document.getElementById("recall-query").value.trim();
     const k = parseInt(document.getElementById("recall-k").value) || 5;
     const sessionId = document.getElementById("recall-session").value.trim();
+    const mode = document.getElementById("recall-mode")?.value || "current";
 
     if (!query) {
       this.showToast(window.t("recall.enterQuery"), true);
@@ -62,7 +84,7 @@ export class RecallPage {
     const startTime = Date.now();
 
     try {
-      const params = { query, k };
+      const params = { query, k, mode };
       if (sessionId) params.session_id = sessionId;
 
       const data = await this.api.post("recall/test", params);

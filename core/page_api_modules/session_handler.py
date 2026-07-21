@@ -62,6 +62,7 @@ class SessionHandler:
         platform_id = self.utils.optional_text(args.get("platform_id"))
         chat_type = self.utils.optional_text(args.get("chat_type"))
         target_query = str(args.get("target_query", "")).strip().casefold()
+        flat = str(args.get("flat", "")).strip().casefold() in {"1", "true", "yes", "on"}
         try:
             updated_after = self._optional_timestamp(args.get("updated_after"))
             updated_before = self._optional_timestamp(args.get("updated_before"))
@@ -113,7 +114,7 @@ class SessionHandler:
             # Layered mode deliberately stops here until both mandatory levels
             # are selected. This avoids preparing a large target dropdown while
             # the user is still choosing an account or chat type.
-            if not platform_id or not chat_type:
+            if not flat and (not platform_id or not chat_type):
                 return self.utils.ok(
                     {
                         "items": [],
@@ -134,14 +135,18 @@ class SessionHandler:
 
             filtered: list[dict[str, Any]] = []
             for row in account_rows:
-                if chat_type and row["chat_type"] != chat_type:
+                if not flat and chat_type and row["chat_type"] != chat_type:
                     continue
                 last_active = float(row["last_active_at"] or 0.0)
                 if updated_after is not None and last_active < updated_after:
                     continue
                 if updated_before is not None and last_active > updated_before:
                     continue
-                if target_query and target_query not in str(row["target_id"]).casefold():
+                searchable = " ".join(
+                    str(row.get(key, ""))
+                    for key in ("session_id", "platform", "platform_id", "target_id", "message_type")
+                ).casefold()
+                if target_query and target_query not in searchable:
                     continue
                 filtered.append(row)
 

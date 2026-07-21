@@ -9,7 +9,7 @@ from quart import request
 
 from astrbot.api import logger
 
-from ..retrieval.recall_pipeline import RecallPipeline
+from ..retrieval.recall_pipeline import RecallPipeline, RecallPipelineResult
 
 if TYPE_CHECKING:
     from .utils import PageApiUtils
@@ -39,7 +39,8 @@ class RecallHandler:
         Payload:
             - query: 查询文本（必需）
             - k: 返回结果数量（默认5，最大50）
-            - session_id: 会话ID过滤（可选）
+            - session_id: 会话ID过滤（可选，Topic 专测必需）
+            - mode: current | timeline | topic（默认 current）
 
         Returns:
             包含召回结果和性能指标的字典
@@ -55,6 +56,11 @@ class RecallHandler:
             return self.utils.error("k 必须是整数")
 
         session_id = self.utils.optional_text(payload.get("session_id"))
+        mode = str(payload.get("mode", "current") or "current").strip().lower()
+        if mode not in {"current", "timeline", "topic"}:
+            return self.utils.error("mode 必须是 current、timeline 或 topic")
+        if mode == "topic" and not session_id:
+            return self.utils.error("Topic 专项召回需要选择会话 ID，以确定记忆空间")
 
         expansion_enabled = self._config_value(
             config_manager, "recall_engine.inject_with_recent_context", False
@@ -77,54 +83,70 @@ class RecallHandler:
 
         try:
             start_time = time.time()
-            outcome = await RecallPipeline(memory_engine, config_manager).search(
-                current_query=query_text,
-                final_k=k,
-                session_id=session_id,
-                persona_id=None,
-                recent_messages=recent_messages,
-                expansion_enabled=bool(expansion_enabled),
-                assistant_mode=str(assistant_mode),
-                track_access=False,
-            )
+            pipeline = RecallPipeline(memory_engine, config_manager)
+            production_recall_enabled = int(
+                self._config_value(config_manager, "recall_engine.top_k", 5)
+            ) > 0
+            if mode == "topic" or (mode == "current" and not production_recall_enabled):
+                branches = pipeline.build_query_branches(
+                    query_text,
+                    recent_messages,
+                    expansion_enabled=bool(expansion_enabled),
+                    assistant_mode=str(assistant_mode),
+                )
+                outcome = RecallPipelineResult([], branches, [], 0, 0, 0.0)
+            else:
+                # The test endpoint supplies k directly. In Timeline-only mode
+                # this deliberately ignores the production auto-recall switch
+                # (recall_engine.top_k == 0).
+                outcome = await pipeline.search(
+                    current_query=query_text,
+                    final_k=k,
+                    session_id=session_id,
+                    persona_id=None,
+                    recent_messages=recent_messages,
+                    expansion_enabled=bool(expansion_enabled),
+                    assistant_mode=str(assistant_mode),
+                    track_access=False,
+                )
             results = outcome.results
             topic_outcome = None
             fragment_outcome = None
             fragment_results = []
             topic_space_id = None
-            topic_config = getattr(
-                memory_engine.topic_recall_pipeline, "config", {}
-            ) or {}
-            if (
-                getattr(memory_engine, "topic_memory_enabled", False) is True
-                and bool(
-                    self._config_value(
-                        config_manager, "topic_memory.recall_enabled", True
-                    )
-                )
-                and session_id
-            ):
+            topic_pipeline = getattr(memory_engine, "topic_recall_pipeline", None)
+            topic_config = getattr(topic_pipeline, "config", {}) or {}
+            topic_requested = mode == "topic" or (
+                mode == "current"
+                and production_recall_enabled
+                and getattr(memory_engine, "topic_memory_enabled", False) is True
+                and bool(self._config_value(config_manager, "topic_memory.recall_enabled", True))
+            )
+            if topic_requested and session_id:
                 try:
+                    if topic_pipeline is None:
+                        raise RuntimeError("Topic 召回管线尚未初始化")
                     spaces = await memory_engine.topic_memory_store.find_memory_spaces_for_session(
                         session_id
                     )
                     if spaces:
                         topic_space_id = spaces[0]
-                        topic_outcome = await memory_engine.topic_recall_pipeline.search(
+                        topic_outcome = await topic_pipeline.search(
                             branches=outcome.branches,
                             memory_space_id=topic_space_id,
-                            final_k=min(
-                                k,
-                                int(topic_config.get("recall_top_k", 3)),
+                            final_k=(
+                                k
+                                if mode == "topic"
+                                else min(k, int(topic_config.get("recall_top_k", 3)))
                             ),
                             track_access=False,
                         )
-                        if topic_outcome.results:
+                        if topic_outcome.results and mode == "current":
                             supplement_k = min(
                                 int(topic_config.get("timeline_supplement_k", 2)),
                                 max(0, k - len(topic_outcome.results)),
                             )
-                            fragment_outcome = await memory_engine.topic_recall_pipeline.search_fragment_supplements(
+                            fragment_outcome = await topic_pipeline.search_fragment_supplements(
                                 branches=outcome.branches,
                                 topic_results=topic_outcome.results,
                                 limit=supplement_k,
@@ -133,12 +155,14 @@ class RecallHandler:
                             if fragment_outcome.available_count:
                                 results = []
                             else:
-                                results = memory_engine.topic_recall_pipeline.select_timeline_supplements(
+                                results = topic_pipeline.select_timeline_supplements(
                                     results,
                                     topic_outcome.results,
                                     supplement_k,
                                 )
-                except Exception:
+                except Exception as exc:
+                    if mode == "topic":
+                        raise RuntimeError(f"Topic 召回阶段失败: {exc}") from exc
                     logger.warning(
                         "[PageAPI] Topic 召回失败，召回测试回退 Timeline",
                         exc_info=True,
@@ -266,9 +290,11 @@ class RecallHandler:
                 "query": query_text,
                 "k": k,
                 "session_id_filter": session_id,
+                "mode": mode,
                 "elapsed_time_ms": round(elapsed_time, 2),
                 "diagnostics": {
                     **outcome.diagnostics(),
+                    "mode": mode,
                     "topic_space_id": topic_space_id,
                     "topic": topic_outcome.diagnostics()
                     if topic_outcome is not None

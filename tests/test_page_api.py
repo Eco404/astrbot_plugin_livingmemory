@@ -574,6 +574,25 @@ class TestSessionCatalog:
         assert result["data"]["facets"]["platform_ids"] == ["bot-a"]
         assert result["data"]["items"] == []
 
+    @pytest.mark.asyncio
+    async def test_flat_catalog_returns_sessions_without_layer_selection(self, api):
+        sessions = [
+            SimpleNamespace(
+                session_id="bot-a:FriendMessage:user-1",
+                platform="qq",
+                created_at=10.0,
+                last_active_at=200.0,
+                message_count=3,
+            )
+        ]
+        store = SimpleNamespace(get_recent_sessions=AsyncMock(return_value=sessions))
+        api.plugin.initializer.conversation_manager = SimpleNamespace(store=store)
+        req = _mock_page_request(args={"flat": "true", "target_query": "user-1"})
+        with _patch_page_request(req):
+            result = await api.list_sessions()
+        assert result["status"] == "ok"
+        assert result["data"]["items"][0]["session_id"] == sessions[0].session_id
+
 
 class TestListMemories:
     @pytest.mark.asyncio
@@ -1389,13 +1408,108 @@ class TestTestRecall:
         assert "k" in result["message"]
 
     @pytest.mark.asyncio
+    async def test_invalid_mode(self, api):
+        req = _mock_page_request(get_json={"query": "hello", "mode": "both"})
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "error"
+        assert "mode" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_topic_mode_requires_session(self, api):
+        req = _mock_page_request(get_json={"query": "hello", "mode": "topic"})
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "error"
+        assert "会话 ID" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_topic_mode_bypasses_feature_switch_and_skips_timeline_search(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.topic_memory_enabled = False
+        engine.search_memories = AsyncMock(return_value=[])
+        engine.topic_memory_store = SimpleNamespace(
+            find_memory_spaces_for_session=AsyncMock(return_value=["space-1"])
+        )
+        topic = SimpleNamespace(
+            title="Topic title",
+            summary="Topic summary",
+            importance=0.8,
+            status=SimpleNamespace(value="active"),
+        )
+        topic_result = SimpleNamespace(
+            topic_uid="topic-1",
+            topic=topic,
+            final_score=0.9,
+            relevance_score=0.8,
+            embedding_score=0.7,
+            keyword_score=0.2,
+            base_relevance_score=0.8,
+            rerank_score=None,
+        )
+        outcome = SimpleNamespace(
+            results=[topic_result], diagnostics=lambda: {"selected_count": 1}
+        )
+        engine.topic_recall_pipeline = SimpleNamespace(
+            config={"recall_top_k": 1}, search=AsyncMock(return_value=outcome)
+        )
+        req = _mock_page_request(
+            get_json={
+                "query": "hello",
+                "mode": "topic",
+                "session_id": "bot:FriendMessage:user",
+                "k": 5,
+            }
+        )
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "ok"
+        assert result["data"]["mode"] == "topic"
+        assert result["data"]["results"][0]["metadata"]["memory_layer"] == "topic"
+        engine.search_memories.assert_not_awaited()
+        assert engine.topic_recall_pipeline.search.await_args.kwargs["final_k"] == 5
+
+    @pytest.mark.asyncio
     async def test_valid_recall(self, api):
         req = _mock_page_request(get_json={"query": "test", "k": 5})
         with _patch_page_request(req):
             result = await api.test_recall()
         assert result["status"] == "ok"
         assert result["data"]["query"] == "test"
+        assert result["data"]["mode"] == "current"
         assert result["data"]["total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_timeline_mode_ignores_disabled_production_top_k(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.search_memories = AsyncMock(return_value=[])
+        config = api.plugin.initializer.config_manager
+        config.get.side_effect = lambda key, default=None: (
+            0 if key == "recall_engine.top_k" else default
+        )
+        req = _mock_page_request(
+            get_json={"query": "test", "k": 4, "mode": "timeline"}
+        )
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "ok"
+        engine.search_memories.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_current_mode_respects_disabled_production_top_k(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.search_memories = AsyncMock(return_value=[])
+        config = api.plugin.initializer.config_manager
+        config.get.side_effect = lambda key, default=None: (
+            0 if key == "recall_engine.top_k" else default
+        )
+        req = _mock_page_request(
+            get_json={"query": "test", "k": 4, "mode": "current"}
+        )
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "ok"
+        engine.search_memories.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_recall_includes_score_breakdown_for_dashboard(self, api):
@@ -1648,7 +1762,7 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 29
+        assert len(plugin._api_routes) == 31
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
@@ -1660,6 +1774,8 @@ class TestRouteRegistration:
         assert f"{prefix}/memories/update/start" in paths
         assert f"{prefix}/memories/update/progress" in paths
         assert f"{prefix}/memories/batch-delete" in paths
+        assert f"{prefix}/timeline/settings" in paths
+        assert f"{prefix}/timeline/settings/update" in paths
         assert f"{prefix}/recall/test" in paths
         assert f"{prefix}/graph/overview" in paths
         assert f"{prefix}/graph/query" in paths

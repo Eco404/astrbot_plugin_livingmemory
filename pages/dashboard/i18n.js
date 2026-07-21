@@ -58,7 +58,7 @@
     "language.toast":     { zh: "语言：{0}", en: "Language: {0}", ru: "Язык: {0}" },
 
     /* ---- Navigation ---- */
-    "nav.memory":         { zh: "记忆管理", en: "Memory", ru: "Память" },
+    "nav.memory":         { zh: "Timeline 记忆", en: "Timeline Memory", ru: "Память Timeline" },
     "nav.topic":          { zh: "Topic 记忆", en: "Topic Memory", ru: "Тематическая память" },
     "nav.graph":          { zh: "知识图谱", en: "Knowledge Graph", ru: "Граф знаний" },
     "nav.recallTest":     { zh: "召回测试", en: "Recall Test", ru: "Тест поиска" },
@@ -580,6 +580,10 @@
     "recall.queryPh":     { zh: "输入你的查询语句，系统将使用混合检索（BM25+向量相似度）进行召回", en: "Enter your query. The system uses hybrid retrieval (BM25 + vector similarity).", ru: "Введите запрос. Система использует гибридный поиск (BM25 + векторы)." },
     "recall.countLabel":  { zh: "返回数量", en: "Result Count", ru: "Кол-во результатов" },
     "recall.kLabel":      { zh: "结果数 (k)", en: "Results (k)", ru: "Результаты (k)" },
+    "recall.modeLabel":   { zh: "测试模式", en: "Test mode", ru: "Режим теста" },
+    "recall.mode.current": { zh: "当前插件行为", en: "Current plugin behavior", ru: "Текущее поведение плагина" },
+    "recall.mode.timeline": { zh: "仅 Timeline 召回", en: "Timeline only", ru: "Только Timeline" },
+    "recall.mode.topic": { zh: "仅 Topic 召回", en: "Topic only", ru: "Только Topic" },
     "recall.countPh":     { zh: "返回的记忆数量", en: "Number of memories to return", ru: "Количество возвращаемых памятей" },
     "recall.sessionLabel":{ zh: "会话 ID (可选)", en: "Session ID (optional)", ru: "ID сессии (опц.)" },
     "recall.sessionPh":   { zh: "输入会话 ID 以过滤特定会话的记忆（支持多种格式）", en: "Enter session ID to filter memories (supports multiple formats)", ru: "Введите ID сессии для фильтрации (разные форматы)" },
@@ -611,6 +615,18 @@
     "recall.actorBoost": { zh: "人物匹配加分", en: "Actor match boost", ru: "Бонус совпадения участника" },
     "recall.selected": { zh: "已入选", en: "Selected", ru: "Выбрано" },
     "recall.filtered": { zh: "未入选", en: "Filtered", ru: "Отфильтровано" },
+
+    /* ---- Timeline runtime settings ---- */
+    "timeline.settings": { zh: "参数", en: "Settings", ru: "Параметры" },
+    "timeline.settingsTitle": { zh: "Timeline 参数", en: "Timeline settings", ru: "Параметры Timeline" },
+    "timeline.settingsCategory.recall": { zh: "召回与融合", en: "Recall and fusion", ru: "Поиск и объединение" },
+    "timeline.settingsCategory.generation": { zh: "记忆生成", en: "Memory generation", ru: "Создание памяти" },
+    "timeline.settingsCategory.isolation": { zh: "数据隔离", en: "Data isolation", ru: "Изоляция данных" },
+    "timeline.settingsCategory.lifecycle": { zh: "衰减与清理", en: "Decay and cleanup", ru: "Угасание и очистка" },
+    "timeline.settingsCategory.performance": { zh: "性能与缓存", en: "Performance and cache", ru: "Производительность и кэш" },
+    "timeline.settingsSaved": { zh: "Timeline 参数已保存并立即应用", en: "Timeline settings saved and applied", ru: "Параметры Timeline сохранены" },
+    "timeline.settingsLoadFailed": { zh: "Timeline 参数加载失败", en: "Failed to load Timeline settings", ru: "Не удалось загрузить параметры Timeline" },
+    "timeline.settingsSaveFailed": { zh: "Timeline 参数保存失败", en: "Failed to save Timeline settings", ru: "Не удалось сохранить параметры Timeline" },
 
     /* ---- Recall Results Metadata ---- */
     "recall.resultId":    { zh: "记忆 ID:", en: "Memory ID:", ru: "ID памяти:" },
