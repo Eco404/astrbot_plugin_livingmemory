@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import json
 import time
+from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -1197,6 +1199,115 @@ def test_related_topic_graph_rejects_one_generic_keyword_without_semantic_suppor
     assert manager._derive_topic_relations("run-1", topics) == []
 
 
+def test_related_topic_graph_accepts_strong_reciprocal_semantics_without_word_overlap():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "related_topic_similarity_threshold": 0.60,
+            "related_topic_top_n": 1,
+        },
+    )
+    topics = [
+        TopicMemory(
+            topic_uid="topic-attendance",
+            memory_space_id="space-1",
+            title="连续多日到岗记录",
+            summary="每天抵达办公室后报平安",
+            metadata={"embedding": [1.0, 0.0]},
+        ),
+        TopicMemory(
+            topic_uid="topic-overtime",
+            memory_space_id="space-1",
+            title="职场加班边界",
+            summary="处理临时工作并保护休息时间",
+            metadata={"embedding": [0.82, 0.5723635]},
+        ),
+    ]
+
+    relations = manager._derive_topic_relations("run-1", topics)
+
+    assert len(relations) == 1
+    assert relations[0].metadata["evidence_kind"] == (
+        "strong_reciprocal_semantics"
+    )
+    assert relations[0].metadata["directionality"] == "undirected"
+    assert relations[0].metadata["hierarchical"] is False
+
+
+def test_related_topic_graph_respects_per_topic_degree_budget():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "related_topic_similarity_threshold": 0.60,
+            "related_topic_top_n": 1,
+        },
+    )
+    topics = [
+        TopicMemory(
+            topic_uid=f"topic-{index}",
+            memory_space_id="space-1",
+            title=f"项目 X 子事项 {index}",
+            summary=f"项目 X 的连续工作内容 {index}",
+            metadata={
+                "embedding": [1.0, index * 0.01],
+                "keywords": ["project-x", f"item-{index}"],
+            },
+        )
+        for index in range(5)
+    ]
+
+    relations = manager._derive_topic_relations("run-1", topics)
+    degree = Counter(
+        uid
+        for relation in relations
+        for uid in (relation.left_topic_uid, relation.right_topic_uid)
+    )
+
+    assert relations
+    assert max(degree.values()) <= 1
+
+
+def test_attribution_confidence_is_capped_by_identity_evidence():
+    fallback = TimelineTopicCandidate(
+        memory_uid="fallback",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:user-1",
+        content="content",
+        summary="summary",
+        features={"evidence_status": "unavailable"},
+    )
+    bound = replace(
+        fallback,
+        memory_uid="bound",
+        role_bindings={
+            "narrator_actor_id": "qq:assistant:bot-1",
+            "actors": [{"actor_id": "qq:human:user-1"}],
+        },
+        features={"evidence_status": "not_needed"},
+    )
+    confirmed = replace(
+        bound,
+        memory_uid="confirmed",
+        features={"evidence_status": "attached"},
+    )
+
+    assert TopicBuildManager._calibrated_attribution_confidence(
+        [fallback], 0.99
+    ) == 0.78
+    assert TopicBuildManager._calibrated_attribution_confidence(
+        [bound], 0.99
+    ) == 0.95
+    assert TopicBuildManager._calibrated_attribution_confidence(
+        [confirmed], 0.99
+    ) == 0.99
+
+
 def test_related_topic_graph_does_not_treat_dates_as_semantic_evidence():
     manager = TopicBuildManager(
         ":memory:",
@@ -1588,6 +1699,12 @@ def test_fragment_role_map_preserves_bot_first_person_with_actor_anchor():
     assert payload["conversation_roles"]["human_participants"][0][
         "observed_names"
     ] == ["示例甲"]
+    assert payload["conversation_roles"]["human_participants"][0][
+        "resolution_sources"
+    ] == ["timeline_role_bindings"]
+    assert payload["conversation_roles"]["human_participants"][0][
+        "identity_confidence"
+    ] == 0.95
     manager._validate_role_anchored_fragment(
         "测试核对",
         "我陪示例甲核对测试结果",
@@ -1606,6 +1723,10 @@ def test_fragment_role_map_preserves_bot_first_person_with_actor_anchor():
         "narrative_schema_version": "first_person_assistant_roles_v2",
         "conversation_roles": manager._conversation_role_payload([candidate]),
     }
+    participant = manager._topic_participant_index([fragment])["participants"][0]
+    assert participant["confidence"] == 0.95
+    assert participant["resolution_status"] == "timeline_bound"
+    assert participant["resolution_sources"] == ["timeline_role_bindings"]
     synthesis_payload, _ = manager._synthesis_llm_context([fragment])
     assert "qq:assistant:bot-1" in json.dumps(synthesis_payload, ensure_ascii=False)
 

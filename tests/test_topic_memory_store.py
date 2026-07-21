@@ -10,6 +10,7 @@ from astrbot_plugin_livingmemory.core.models.memory_identity import (
     resolve_memory_space,
 )
 from astrbot_plugin_livingmemory.core.models.topic_memory import (
+    TimelineTopicCandidate,
     TopicAtomSource,
     TopicMaintenanceMode,
     TopicMaintenanceRun,
@@ -28,6 +29,35 @@ from astrbot_plugin_livingmemory.storage.topic_memory_store import (
     TopicRevisionConflict,
     TopicSourceValidationError,
 )
+
+
+def test_candidate_checkpoint_preserves_actor_and_source_provenance():
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-1",
+        document_id=1,
+        source_revision=2,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:user-1",
+        persona_id="persona-1",
+        content="content",
+        summary="summary",
+        role_bindings={
+            "narrator_actor_id": "qq:assistant:bot-1",
+            "actors": [{"actor_id": "qq:human:user-1"}],
+        },
+        source_window={"first_message_id": 10, "last_message_id": 20},
+        edit_origin="automatic",
+        traceability="full",
+    )
+
+    restored = TopicMemoryStore._dict_to_candidate(
+        TopicMemoryStore._candidate_to_dict(candidate)
+    )
+
+    assert restored.role_bindings == candidate.role_bindings
+    assert restored.source_window == candidate.source_window
+    assert restored.edit_origin == "automatic"
+    assert restored.traceability == "full"
 
 
 async def _register_timeline(

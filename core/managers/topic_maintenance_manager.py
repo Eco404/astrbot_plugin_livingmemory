@@ -328,6 +328,9 @@ class TopicMaintenanceManager:
                            r.memory_space_id, r.created_at AS registry_created_at,
                            d.text, d.metadata,
                            s.session_id AS source_session_id,
+                           s.first_message_id, s.last_message_id,
+                           s.start_index, s.end_index,
+                           s.traceability AS source_traceability,
                            s.started_at, s.ended_at
                     FROM memory_registry r
                     JOIN documents d ON d.id = r.document_id
@@ -380,6 +383,9 @@ class TopicMaintenanceManager:
                            r.memory_space_id, r.created_at AS registry_created_at,
                            d.text, d.metadata,
                            s.session_id AS source_session_id,
+                           s.first_message_id, s.last_message_id,
+                           s.start_index, s.end_index,
+                           s.traceability AS source_traceability,
                            s.started_at, s.ended_at
                     FROM memory_registry r
                     JOIN documents d ON d.id = r.document_id
@@ -631,6 +637,19 @@ class TopicMaintenanceManager:
                 *(f"atom:{item}" for item in atom_fingerprints),
             }
         )
+        source_window = self._json_dict(metadata.get("source_window"))
+        source_fields = {
+            "session_id": row["source_session_id"],
+            "first_message_id": row["first_message_id"],
+            "last_message_id": row["last_message_id"],
+            "start_index": row["start_index"],
+            "end_index": row["end_index"],
+            "started_at": row["started_at"],
+            "ended_at": row["ended_at"],
+        }
+        for key, value in source_fields.items():
+            if source_window.get(key) is None and value is not None:
+                source_window[key] = value
         return TimelineTopicCandidate(
             memory_uid=str(row["memory_uid"]),
             document_id=int(row["document_id"]),
@@ -639,9 +658,16 @@ class TopicMaintenanceManager:
             session_id=(row["source_session_id"] or metadata.get("session_id")),
             persona_id=(str(metadata.get("persona_id") or "").strip() or None),
             role_bindings=self._json_dict(metadata.get("role_bindings")),
-            source_window=self._json_dict(metadata.get("source_window")),
+            source_window=source_window,
             edit_origin=(str(metadata.get("edit_origin") or "").strip() or None),
-            traceability=(str(metadata.get("traceability") or "").strip() or None),
+            traceability=(
+                str(
+                    metadata.get("traceability")
+                    or row["source_traceability"]
+                    or ""
+                ).strip()
+                or None
+            ),
             content=content,
             summary=summary,
             topics=topics,

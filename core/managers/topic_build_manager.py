@@ -48,7 +48,7 @@ _SUPPORTED_NARRATIVE_SCHEMA_VERSIONS = {
     "third_person_roles_v1",
 }
 _MATCHING_ALGORITHM_VERSION = 6
-_RELATION_ALGORITHM_VERSION = 3
+_RELATION_ALGORITHM_VERSION = 4
 _CONFIDENCE_CALIBRATION_VERSION = 1
 
 
@@ -1990,11 +1990,12 @@ class TopicBuildManager:
         run_uid: str,
         topics: list[TopicMemory],
     ) -> list[TopicRelation]:
-        """Link reciprocal semantic neighbors while keeping leaf Topics separate."""
+        """Build a bounded, undirected related-topic graph from multiple signals."""
         threshold = float(
             self.config.get("related_topic_similarity_threshold", 0.60)
         )
-        top_n = max(1, int(self.config.get("related_topic_top_n", 3)))
+        max_degree = max(1, int(self.config.get("related_topic_top_n", 3)))
+        candidate_limit = max(5, max_degree * 2)
         rankings: dict[str, list[tuple[float, str]]] = {}
         topic_by_uid = {topic.topic_uid: topic for topic in topics}
         keyword_sets = {
@@ -2026,64 +2027,171 @@ class TopicBuildManager:
             rankings[topic.topic_uid] = sorted(
                 candidates,
                 key=lambda item: (-item[0], item[1]),
-            )[:top_n]
+            )
 
-        related_sets = {
-            uid: {other_uid for _, other_uid in candidates}
+        rank_positions = {
+            uid: {
+                other_uid: index
+                for index, (_, other_uid) in enumerate(candidates, 1)
+            }
             for uid, candidates in rankings.items()
         }
+        pair_candidates: dict[tuple[str, str], float] = {}
+        for left_uid, candidates in rankings.items():
+            for similarity, right_uid in candidates[:candidate_limit]:
+                pair = tuple(sorted((left_uid, right_uid)))
+                pair_candidates[pair] = max(
+                    float(similarity), pair_candidates.get(pair, 0.0)
+                )
+
+        eligible: list[dict[str, Any]] = []
+        for (left_uid, right_uid), similarity in pair_candidates.items():
+            left_rank = rank_positions[left_uid].get(right_uid, 10**9)
+            right_rank = rank_positions[right_uid].get(left_uid, 10**9)
+            reciprocal_core = left_rank <= max_degree and right_rank <= max_degree
+            reciprocal_candidate = (
+                left_rank <= candidate_limit and right_rank <= candidate_limit
+            )
+            context = self._topic_relation_context(
+                topic_by_uid[left_uid],
+                topic_by_uid[right_uid],
+                topic_count=len(topics),
+                keyword_document_frequency=keyword_document_frequency,
+                text_document_frequency=text_document_frequency,
+                left_keywords=keyword_sets[left_uid],
+                right_keywords=keyword_sets[right_uid],
+                left_text_tokens=text_token_sets[left_uid],
+                right_text_tokens=text_token_sets[right_uid],
+                semantic_similarity=similarity,
+                strong_reciprocal=reciprocal_core,
+            )
+            if not context["contextual_match"]:
+                continue
+            evidence_bonus = {
+                "multiple_discriminative_keywords": 0.040,
+                "single_discriminative_keyword": 0.025,
+                "shared_distinctive_identifier": 0.035,
+                "shared_timeline_with_semantic_support": 0.035,
+                "weighted_lexical_overlap": 0.025,
+                "strong_reciprocal_semantics": 0.015,
+            }.get(str(context["evidence_kind"]), 0.0)
+            selection_score = (
+                float(similarity)
+                + (0.035 if reciprocal_core else 0.0)
+                + (0.015 if reciprocal_candidate else 0.0)
+                + evidence_bonus
+                + min(0.025, float(context["source_overlap"]) * 0.05)
+            )
+            eligible.append(
+                {
+                    "left_uid": left_uid,
+                    "right_uid": right_uid,
+                    "similarity": float(similarity),
+                    "selection_score": selection_score,
+                    "left_rank": left_rank,
+                    "right_rank": right_rank,
+                    "reciprocal_core": reciprocal_core,
+                    "reciprocal_candidate": reciprocal_candidate,
+                    "context": context,
+                }
+            )
+
+        eligible.sort(
+            key=lambda item: (
+                -float(item["selection_score"]),
+                str(item["left_uid"]),
+                str(item["right_uid"]),
+            )
+        )
+        selected: dict[tuple[str, str], dict[str, Any]] = {}
+        degree: Counter[str] = Counter()
+
+        # Preserve every supported reciprocal core edge first.  Because each
+        # endpoint can have at most ``max_degree`` reciprocal Top-N neighbors,
+        # this cannot exceed the degree budget and prevents a merely unilateral
+        # edge from displacing an obvious mutual relationship.
+        for item in eligible:
+            if not item["reciprocal_core"]:
+                continue
+            pair = (str(item["left_uid"]), str(item["right_uid"]))
+            selected[pair] = item
+            degree[pair[0]] += 1
+            degree[pair[1]] += 1
+
+        # Then give each remaining Topic a chance to keep its strongest
+        # supported unilateral edge.
+        best_by_topic: dict[str, dict[str, Any]] = {}
+        for item in eligible:
+            for uid in (str(item["left_uid"]), str(item["right_uid"])):
+                best_by_topic.setdefault(uid, item)
+        for uid in sorted(best_by_topic):
+            item = best_by_topic[uid]
+            pair = (str(item["left_uid"]), str(item["right_uid"]))
+            if pair in selected:
+                continue
+            if degree[pair[0]] >= max_degree or degree[pair[1]] >= max_degree:
+                continue
+            selected[pair] = item
+            degree[pair[0]] += 1
+            degree[pair[1]] += 1
+
+        # Then fill the remaining degree budget with the strongest edges.
+        for item in eligible:
+            pair = (str(item["left_uid"]), str(item["right_uid"]))
+            if pair in selected:
+                continue
+            if degree[pair[0]] >= max_degree or degree[pair[1]] >= max_degree:
+                continue
+            selected[pair] = item
+            degree[pair[0]] += 1
+            degree[pair[1]] += 1
+
         relations = []
-        for left_uid in sorted(topic_by_uid):
-            for similarity, right_uid in rankings.get(left_uid, []):
-                if left_uid >= right_uid or left_uid not in related_sets.get(right_uid, set()):
-                    continue
-                context = self._topic_relation_context(
-                    topic_by_uid[left_uid],
-                    topic_by_uid[right_uid],
-                    topic_count=len(topics),
-                    keyword_document_frequency=keyword_document_frequency,
-                    text_document_frequency=text_document_frequency,
-                    left_keywords=keyword_sets[left_uid],
-                    right_keywords=keyword_sets[right_uid],
-                    left_text_tokens=text_token_sets[left_uid],
-                    right_text_tokens=text_token_sets[right_uid],
+        for (left_uid, right_uid), item in sorted(selected.items()):
+            similarity = float(item["similarity"])
+            context = dict(item["context"])
+            confidence = min(
+                0.99,
+                similarity
+                + (0.03 if item["reciprocal_core"] else 0.0)
+                + (
+                    0.02
+                    if context["evidence_kind"]
+                    != "strong_reciprocal_semantics"
+                    else 0.0
+                ),
+            )
+            relation_uid = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"livingmemory:topic-relation:{left_uid}:{right_uid}:related_subtopic",
                 )
-                if not context["contextual_match"]:
-                    continue
-                left_rank = next(
-                    index
-                    for index, (_, uid) in enumerate(rankings[left_uid], 1)
-                    if uid == right_uid
+            )
+            relations.append(
+                TopicRelation(
+                    relation_uid=relation_uid,
+                    memory_space_id=topic_by_uid[left_uid].memory_space_id,
+                    left_topic_uid=left_uid,
+                    right_topic_uid=right_uid,
+                    confidence=round(float(confidence), 6),
+                    semantic_similarity=round(float(similarity), 6),
+                    build_run_uid=run_uid,
+                    metadata={
+                        "algorithm_version": _RELATION_ALGORITHM_VERSION,
+                        "directionality": "undirected",
+                        "hierarchical": False,
+                        "left_rank": int(item["left_rank"]),
+                        "right_rank": int(item["right_rank"]),
+                        "reciprocal_top_n": bool(item["reciprocal_core"]),
+                        "candidate_limit": candidate_limit,
+                        "max_degree": max_degree,
+                        "selection_score": round(
+                            float(item["selection_score"]), 6
+                        ),
+                        **context,
+                    },
                 )
-                right_rank = next(
-                    index
-                    for index, (_, uid) in enumerate(rankings[right_uid], 1)
-                    if uid == left_uid
-                )
-                relation_uid = str(
-                    uuid.uuid5(
-                        uuid.NAMESPACE_URL,
-                        f"livingmemory:topic-relation:{left_uid}:{right_uid}:related_subtopic",
-                    )
-                )
-                relations.append(
-                    TopicRelation(
-                        relation_uid=relation_uid,
-                        memory_space_id=topic_by_uid[left_uid].memory_space_id,
-                        left_topic_uid=left_uid,
-                        right_topic_uid=right_uid,
-                        confidence=round(float(similarity), 6),
-                        semantic_similarity=round(float(similarity), 6),
-                        build_run_uid=run_uid,
-                        metadata={
-                            "algorithm_version": _RELATION_ALGORITHM_VERSION,
-                            "left_rank": left_rank,
-                            "right_rank": right_rank,
-                            "reciprocal_top_n": top_n,
-                            **context,
-                        },
-                    )
-                )
+            )
         return relations
 
     @classmethod
@@ -2099,6 +2207,8 @@ class TopicBuildManager:
         right_keywords: set[str] | None = None,
         left_text_tokens: set[str] | None = None,
         right_text_tokens: set[str] | None = None,
+        semantic_similarity: float = 0.0,
+        strong_reciprocal: bool = False,
     ) -> dict[str, Any]:
         """Require multiple, corpus-aware signals for a related-topic edge."""
         left_sources = set(left.metadata.get("source_timeline_uids", []))
@@ -2119,6 +2229,14 @@ class TopicBuildManager:
             for term in left_keywords & right_keywords
             if keyword_document_frequency.get(term, 0) <= generic_frequency_limit
         )
+        keyword_rarities = {
+            term: math.log(
+                (max(2, topic_count) + 1.0)
+                / (keyword_document_frequency.get(term, 0) + 1.0)
+            )
+            / math.log(max(2, topic_count) + 1.0)
+            for term in shared_keywords
+        }
         left_text_tokens = left_text_tokens or cls._relation_text_terms(
             f"{left.title} {left.summary}"
         )
@@ -2137,6 +2255,12 @@ class TopicBuildManager:
         evidence_kind = ""
         if len(shared_keywords) >= 2:
             evidence_kind = "multiple_discriminative_keywords"
+        elif (
+            shared_keywords
+            and max(keyword_rarities.values(), default=0.0) >= 0.40
+            and semantic_similarity >= 0.68
+        ):
+            evidence_kind = "single_discriminative_keyword"
         elif lexical_similarity >= 0.08:
             evidence_kind = "weighted_lexical_overlap"
         elif (
@@ -2154,6 +2278,8 @@ class TopicBuildManager:
             or source_overlap >= 0.10
         ):
             evidence_kind = "shared_timeline_with_semantic_support"
+        elif strong_reciprocal and semantic_similarity >= 0.81:
+            evidence_kind = "strong_reciprocal_semantics"
         contextual_match = bool(evidence_kind)
         return {
             "contextual_match": contextual_match,
@@ -2161,6 +2287,10 @@ class TopicBuildManager:
             "shared_timeline_uids": shared_sources,
             "source_overlap": round(float(source_overlap), 6),
             "shared_keywords": shared_keywords[:20],
+            "shared_keyword_rarities": {
+                key: round(float(value), 6)
+                for key, value in sorted(keyword_rarities.items())[:20]
+            },
             "lexical_similarity": round(float(lexical_similarity), 6),
             "generic_keyword_frequency_limit": generic_frequency_limit,
         }
@@ -3511,8 +3641,14 @@ class TopicBuildManager:
                             source_items
                         ),
                         "attribution_confidence": self._score(
-                            raw.get("attribution_confidence"),
-                            self._score(raw.get("confidence"), 0.7),
+                            self._calibrated_attribution_confidence(
+                                source_items,
+                                self._score(
+                                    raw.get("attribution_confidence"),
+                                    self._score(raw.get("confidence"), 0.7),
+                                ),
+                            ),
+                            0.7,
                         ),
                         "ambiguity_flags": self._unique_strings(
                             [
@@ -4485,12 +4621,31 @@ INPUT:
                 for name in value.get("observed_names", []):
                     if name not in existing.setdefault("observed_names", []):
                         existing["observed_names"].append(name)
+                for source in value.get("resolution_sources", []):
+                    if source not in existing.setdefault("resolution_sources", []):
+                        existing["resolution_sources"].append(source)
+                existing["identity_confidence"] = max(
+                    float(existing.get("identity_confidence", 0.0)),
+                    float(value.get("identity_confidence", 0.0)),
+                )
+                existing["resolution_status"] = self._actor_resolution_status(
+                    float(existing["identity_confidence"])
+                )
                 return
             target.append(value)
 
         for item in inputs:
             bindings = item.role_bindings if isinstance(item.role_bindings, dict) else {}
             narrator = str(bindings.get("narrator_actor_id") or "").strip()
+            evidence_status = str(
+                item.features.get("evidence_status", "not_needed")
+            )
+            if evidence_status in {"attached", "identity_backfilled"}:
+                binding_source = "raw_message_span"
+                binding_confidence = 1.0
+            else:
+                binding_source = "timeline_role_bindings"
+                binding_confidence = 0.95
             for actor in bindings.get("actors", []):
                 if not isinstance(actor, dict):
                     continue
@@ -4507,6 +4662,11 @@ INPUT:
                     )
                     if key in actor
                 }
+                normalized["resolution_sources"] = [binding_source]
+                normalized["identity_confidence"] = binding_confidence
+                normalized["resolution_status"] = self._actor_resolution_status(
+                    binding_confidence
+                )
                 if actor.get("actor_type") == "assistant":
                     append_unique(assistants, normalized)
                 else:
@@ -4521,6 +4681,9 @@ INPUT:
                         "observed_names": [item.persona_id or "助手"],
                         "persona_id": item.persona_id or "default",
                         "synthetic_narrator": True,
+                        "resolution_sources": ["persona_fallback"],
+                        "identity_confidence": 0.68,
+                        "resolution_status": "inferred",
                     },
                 )
             timeline_narrators[item.memory_uid] = narrator
@@ -4539,6 +4702,9 @@ INPUT:
                     "sender_id": identity.get("user_id"),
                     "observed_names": [identity.get("display_name")],
                     "authoritative_identity": identity,
+                    "resolution_sources": ["authoritative_profile_fallback"],
+                    "identity_confidence": 0.82,
+                    "resolution_status": "profile_inferred",
                 },
             )
         return {
@@ -4548,6 +4714,40 @@ INPUT:
             "assistant_personas": assistants,
             "timeline_narrators": timeline_narrators,
         }
+
+    @staticmethod
+    def _actor_resolution_status(confidence: float) -> str:
+        if confidence >= 0.99:
+            return "evidence_confirmed"
+        if confidence >= 0.90:
+            return "timeline_bound"
+        if confidence >= 0.80:
+            return "profile_inferred"
+        return "inferred"
+
+    @classmethod
+    def _calibrated_attribution_confidence(
+        cls,
+        inputs: list[TimelineTopicCandidate],
+        proposed: float,
+    ) -> float:
+        """Cap model certainty at the strongest available identity evidence."""
+        statuses = {
+            str(item.features.get("evidence_status", "not_needed"))
+            for item in inputs
+        }
+        has_complete_bindings = all(
+            bool(item.role_bindings.get("actors"))
+            and bool(item.role_bindings.get("narrator_actor_id"))
+            for item in inputs
+        )
+        if statuses and statuses <= {"attached", "identity_backfilled"}:
+            ceiling = 0.99
+        elif has_complete_bindings:
+            ceiling = 0.95
+        else:
+            ceiling = 0.78
+        return round(min(max(0.0, float(proposed)), ceiling), 6)
 
     @classmethod
     def _fragment_role_payload(
@@ -4618,10 +4818,28 @@ INPUT:
                             "roles": [],
                             "fragment_uids": [],
                             "timeline_uids": [],
-                            "resolution_status": "resolved",
-                            "confidence": 1.0,
+                            "resolution_status": str(
+                                actor.get("resolution_status") or "inferred"
+                            ),
+                            "confidence": float(
+                                actor.get("identity_confidence", 0.68)
+                            ),
+                            "resolution_sources": [],
                         },
                     )
+                    actor_confidence = float(
+                        actor.get("identity_confidence", 0.68)
+                    )
+                    if actor_confidence > float(entry["confidence"]):
+                        entry["confidence"] = actor_confidence
+                        entry["resolution_status"] = str(
+                            actor.get("resolution_status")
+                            or cls._actor_resolution_status(actor_confidence)
+                        )
+                    for source in actor.get("resolution_sources", []):
+                        source = str(source).strip()
+                        if source and source not in entry["resolution_sources"]:
+                            entry["resolution_sources"].append(source)
                     for name in actor.get("observed_names", []):
                         name = str(name).strip()
                         if name and name not in entry["display_names"]:

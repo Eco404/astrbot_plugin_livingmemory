@@ -1730,9 +1730,18 @@ class TopicMemoryStore:
             rows = await (
                 await db.execute(
                     """
-                    SELECT i.candidate_payload
+                    SELECT i.candidate_payload, d.metadata AS document_metadata,
+                           s.session_id AS source_session_id,
+                           s.first_message_id, s.last_message_id,
+                           s.start_index, s.end_index,
+                           s.started_at AS source_started_at,
+                           s.ended_at AS source_ended_at,
+                           s.traceability AS source_traceability
                     FROM topic_maintenance_items i
                     JOIN memory_registry r ON r.memory_uid = i.timeline_uid
+                    JOIN documents d ON d.id = r.document_id
+                    LEFT JOIN memory_source_spans s
+                      ON s.memory_uid = i.timeline_uid
                     WHERE i.run_uid = ? AND i.status = 'processed'
                       AND i.source_revision = r.revision
                     ORDER BY i.processed_at, i.timeline_uid
@@ -1743,6 +1752,39 @@ class TopicMemoryStore:
         candidates: list[TimelineTopicCandidate] = []
         for row in rows:
             payload = self._from_json(row["candidate_payload"])
+            # Candidate checkpoints created before v9.7 did not persist actor
+            # bindings or immutable source spans.  Rehydrate them from the
+            # canonical Timeline row so resuming an old run does not silently
+            # discard identity evidence.
+            document_metadata = self._from_json(row["document_metadata"])
+            if not isinstance(payload.get("role_bindings"), dict):
+                payload["role_bindings"] = document_metadata.get(
+                    "role_bindings", {}
+                )
+            if not isinstance(payload.get("source_window"), dict):
+                payload["source_window"] = document_metadata.get(
+                    "source_window", {}
+                )
+            source_window = dict(payload.get("source_window") or {})
+            source_fields = {
+                "session_id": row["source_session_id"],
+                "first_message_id": row["first_message_id"],
+                "last_message_id": row["last_message_id"],
+                "start_index": row["start_index"],
+                "end_index": row["end_index"],
+                "started_at": row["source_started_at"],
+                "ended_at": row["source_ended_at"],
+            }
+            for key, value in source_fields.items():
+                if source_window.get(key) is None and value is not None:
+                    source_window[key] = value
+            payload["source_window"] = source_window
+            payload.setdefault(
+                "traceability",
+                document_metadata.get("traceability")
+                or row["source_traceability"],
+            )
+            payload.setdefault("edit_origin", document_metadata.get("edit_origin"))
             candidates.append(self._dict_to_candidate(payload))
         return candidates
 
@@ -2526,6 +2568,10 @@ class TopicMemoryStore:
             "memory_space_id": candidate.memory_space_id,
             "session_id": candidate.session_id,
             "persona_id": candidate.persona_id,
+            "role_bindings": candidate.role_bindings,
+            "source_window": candidate.source_window,
+            "edit_origin": candidate.edit_origin,
+            "traceability": candidate.traceability,
             "content": candidate.content,
             "summary": candidate.summary,
             "topics": candidate.topics,
@@ -2570,6 +2616,20 @@ class TopicMemoryStore:
             memory_space_id=str(payload.get("memory_space_id") or ""),
             session_id=payload.get("session_id"),
             persona_id=(str(payload.get("persona_id") or "").strip() or None),
+            role_bindings=(
+                payload.get("role_bindings", {})
+                if isinstance(payload.get("role_bindings"), dict)
+                else {}
+            ),
+            source_window=(
+                payload.get("source_window", {})
+                if isinstance(payload.get("source_window"), dict)
+                else {}
+            ),
+            edit_origin=(str(payload.get("edit_origin") or "").strip() or None),
+            traceability=(
+                str(payload.get("traceability") or "").strip() or None
+            ),
             content=str(payload.get("content") or ""),
             summary=str(payload.get("summary") or ""),
             topics=[str(item) for item in payload.get("topics", [])],
