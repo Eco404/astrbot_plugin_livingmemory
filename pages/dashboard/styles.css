@@ -2141,6 +2141,31 @@ body {
   font-family: inherit;
 }
 
+.identity-field select + input {
+  margin-top: var(--space-1);
+}
+
+.identity-platform-warning {
+  color: var(--warning);
+  line-height: 1.5;
+}
+
+.topic-maintenance-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.topic-maintenance-action p {
+  margin: var(--space-1) 0 0;
+}
+
 .identity-state {
   padding: var(--space-8);
   border: 1px dashed var(--border);

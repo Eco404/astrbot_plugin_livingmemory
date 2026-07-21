@@ -11,10 +11,12 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .platform_identity import canonical_platform
+
 
 def stable_actor_id(platform: str | None, sender_id: str, actor_type: str) -> str:
     """Return a platform-scoped identity that is independent from display names."""
-    platform_key = str(platform or "unknown").strip().casefold() or "unknown"
+    platform_key = canonical_platform(platform) or "unknown"
     type_key = "assistant" if actor_type == "assistant" else "human"
     sender_key = str(sender_id or "unknown").strip() or "unknown"
     return f"{platform_key}:{type_key}:{sender_key}"
@@ -37,17 +39,15 @@ def build_role_bindings(
             or bool(message.metadata.get("is_bot_message"))
             else "human"
         )
-        actor_id = str(message.metadata.get("actor_id") or "").strip()
-        if not actor_id:
-            actor_id = stable_actor_id(
-                message.platform, message.sender_id, actor_type
-            )
+        # Recompute legacy IDs so adapter aliases such as ``aiocqhttp`` and
+        # profile platform ``qq`` resolve to one logical participant.
+        actor_id = stable_actor_id(message.platform, message.sender_id, actor_type)
         actor = actors.setdefault(
             actor_id,
             {
                 "actor_id": actor_id,
                 "actor_type": actor_type,
-                "platform": str(message.platform or "unknown"),
+                "platform": canonical_platform(message.platform) or "unknown",
                 "sender_id": str(message.sender_id),
                 "observed_names": [],
             },

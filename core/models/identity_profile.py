@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from .platform_identity import canonical_platform, normalize_platform_token
+
 
 @dataclass(frozen=True, slots=True)
 class AuthoritativeIdentityProfile:
@@ -22,20 +24,29 @@ class AuthoritativeIdentityProfile:
     gender: str = ""
     pronouns: tuple[str, ...] = ()
     notes: str = ""
+    platform_aliases: tuple[str, ...] = ()
+    platform_instances: tuple[str, ...] = ()
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "AuthoritativeIdentityProfile":
         user_id = str(value.get("user_id") or "").strip()
         if not user_id:
             raise ValueError("authoritative identity profile requires user_id")
+        raw_platform = str(value.get("platform") or "").strip()
+        canonical = canonical_platform(raw_platform)
+        aliases = list(cls._strings(value.get("platform_aliases")))
+        if raw_platform and normalize_platform_token(raw_platform) != canonical:
+            aliases.insert(0, raw_platform)
         profile = cls(
             user_id=user_id,
-            platform=str(value.get("platform") or "").strip(),
+            platform=canonical,
             display_name=str(value.get("display_name") or "").strip(),
             aliases=cls._strings(value.get("aliases")),
             gender=str(value.get("gender") or "").strip(),
             pronouns=cls._strings(value.get("pronouns")),
             notes=str(value.get("notes") or "").strip(),
+            platform_aliases=tuple(dict.fromkeys(aliases)),
+            platform_instances=cls._strings(value.get("platform_instances")),
         )
         profile._validate_lengths()
         return profile
@@ -108,6 +119,14 @@ class AuthoritativeIdentityProfile:
             if value not in ("", [], ())
         }
 
+    def to_storage_dict(self) -> dict[str, Any]:
+        payload = self.to_prompt_dict()
+        if self.platform_aliases:
+            payload["platform_aliases"] = list(self.platform_aliases)
+        if self.platform_instances:
+            payload["platform_instances"] = list(self.platform_instances)
+        return payload
+
     def _validate_lengths(self) -> None:
         limits = {
             "user_id": (self.user_id, 256),
@@ -127,21 +146,25 @@ class AuthoritativeIdentityProfile:
             len(value) > 100 for value in self.pronouns
         ):
             raise ValueError("authoritative identity pronouns exceed allowed limits")
+        if len(self.platform_aliases) > 30 or any(
+            len(value) > 100 for value in self.platform_aliases
+        ):
+            raise ValueError("authoritative identity platform aliases exceed limits")
+        if len(self.platform_instances) > 30 or any(
+            len(value) > 256 for value in self.platform_instances
+        ):
+            raise ValueError("authoritative identity platform instances exceed limits")
 
     def _platform_matches(self, platform: str | None) -> bool:
-        expected = self._normalize(self.platform)
-        actual = self._normalize(platform)
+        expected = canonical_platform(self.platform)
+        actual = canonical_platform(platform)
         if not expected or not actual:
             return True
-        return expected == actual or expected in actual or actual in expected
+        return expected == actual
 
     @staticmethod
     def _normalize(value: Any) -> str:
-        return "".join(
-            character
-            for character in str(value or "").casefold()
-            if character.isalnum()
-        )
+        return normalize_platform_token(value).replace("_", "")
 
 
 def parse_authoritative_identity_profiles(
@@ -176,7 +199,7 @@ def parse_authoritative_identity_profiles(
 class AuthoritativeIdentityStore:
     """Small atomic JSON store shared by WebUI and generation pipelines."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(
         self,
@@ -236,7 +259,7 @@ class AuthoritativeIdentityStore:
             payload = {
                 "version": self.VERSION,
                 "updated_at": updated_at,
-                "profiles": identity_prompt_payload(profiles),
+                "profiles": [profile.to_storage_dict() for profile in profiles],
             }
             temporary = self.path.with_name(f".{self.path.name}.tmp")
             temporary.write_text(
@@ -253,7 +276,7 @@ class AuthoritativeIdentityStore:
         return {
             "version": self.VERSION,
             "updated_at": self.updated_at,
-            "profiles": identity_prompt_payload(self._profiles),
+            "profiles": [profile.to_storage_dict() for profile in self._profiles],
             "load_error": self.load_error or None,
         }
 

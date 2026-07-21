@@ -1199,6 +1199,74 @@ def test_related_topic_graph_rejects_one_generic_keyword_without_semantic_suppor
     assert manager._derive_topic_relations("run-1", topics) == []
 
 
+def test_related_topic_graph_collapses_overlapping_ngrams_and_is_order_stable():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "related_topic_similarity_threshold": 0.60,
+            "related_topic_top_n": 2,
+        },
+    )
+    topics = [
+        TopicMemory(
+            topic_uid="topic-identity",
+            memory_space_id="space-1",
+            title="人物身份核对",
+            summary="确认人物资料",
+            metadata={
+                "embedding": [1.0, 0.0, 0.0],
+                "keywords": ["机器人"],
+            },
+        ),
+        TopicMemory(
+            topic_uid="topic-debug",
+            memory_space_id="space-1",
+            title="机器人调试",
+            summary="检查程序日志",
+            metadata={
+                "embedding": [0.64, 0.768, 0.0],
+                "keywords": ["机器人"],
+            },
+        ),
+        TopicMemory(
+            topic_uid="topic-work-a",
+            memory_space_id="space-1",
+            title="项目上线准备",
+            summary="部署 project-x 服务",
+            metadata={
+                "embedding": [0.0, 1.0, 0.0],
+                "keywords": ["project-x", "部署"],
+            },
+        ),
+        TopicMemory(
+            topic_uid="topic-work-b",
+            memory_space_id="space-1",
+            title="项目部署复盘",
+            summary="复盘 project-x 上线",
+            metadata={
+                "embedding": [0.0, 0.98, 0.2],
+                "keywords": ["project-x", "上线"],
+            },
+        ),
+    ]
+
+    forward = manager._derive_topic_relations("run-1", topics)
+    reversed_result = manager._derive_topic_relations("run-1", list(reversed(topics)))
+    forward_pairs = {
+        (item.left_topic_uid, item.right_topic_uid) for item in forward
+    }
+    reversed_pairs = {
+        (item.left_topic_uid, item.right_topic_uid) for item in reversed_result
+    }
+
+    assert forward_pairs == reversed_pairs
+    assert ("topic-identity", "topic-debug") not in forward_pairs
+    assert ("topic-work-a", "topic-work-b") in forward_pairs
+    assert all(item.metadata["algorithm_version"] == 6 for item in forward)
+
+
 def test_related_topic_graph_accepts_strong_reciprocal_semantics_without_word_overlap():
     manager = TopicBuildManager(
         ":memory:",
@@ -1360,6 +1428,7 @@ def test_related_topic_context_uses_source_overlap_not_shared_source_alone():
             summary="浏览展台并购买周边",
             metadata={"source_timeline_uids": ["timeline-event"]},
         ),
+        semantic_similarity=0.80,
     )
     accidental_overlap = TopicBuildManager._topic_relation_context(
         TopicMemory(
@@ -1383,6 +1452,62 @@ def test_related_topic_context_uses_source_overlap_not_shared_source_alone():
     assert shared_event["contextual_match"] is True
     assert shared_event["evidence_kind"] == "shared_timeline_with_semantic_support"
     assert accidental_overlap["contextual_match"] is False
+
+
+def test_related_topic_graph_rescues_high_confidence_isolated_topic():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "related_topic_similarity_threshold": 0.60,
+            "related_topic_top_n": 2,
+        },
+    )
+    topics = [
+        TopicMemory(
+            topic_uid="topic-a",
+            memory_space_id="space-1",
+            title="核心工作",
+            summary="项目持续推进",
+            metadata={
+                "embedding": [1.0, 0.0],
+                "keywords": ["core", "anchor-d"],
+            },
+        ),
+        TopicMemory(
+            topic_uid="topic-b",
+            memory_space_id="space-1",
+            title="核心事项 B",
+            summary="工作步骤 B",
+            metadata={"embedding": [0.995, 0.1], "keywords": ["core"]},
+        ),
+        TopicMemory(
+            topic_uid="topic-c",
+            memory_space_id="space-1",
+            title="核心事项 C",
+            summary="工作步骤 C",
+            metadata={"embedding": [0.98, 0.2], "keywords": ["core"]},
+        ),
+        TopicMemory(
+            topic_uid="topic-d",
+            memory_space_id="space-1",
+            title="补充事项 D",
+            summary="相关工作的独立补充",
+            metadata={"embedding": [0.95, -0.1], "keywords": ["anchor-d"]},
+        ),
+    ]
+
+    relations = manager._derive_topic_relations("run-1", topics)
+    degree = Counter(
+        uid
+        for relation in relations
+        for uid in (relation.left_topic_uid, relation.right_topic_uid)
+    )
+
+    assert degree["topic-d"] >= 1
+    assert all(degree[topic.topic_uid] >= 1 for topic in topics)
+    assert max(degree.values()) <= 2
 
 
 def test_confidence_calibration_counts_independent_time_clusters_more_strongly():
@@ -1694,7 +1819,7 @@ def test_fragment_role_map_preserves_bot_first_person_with_actor_anchor():
         "first_person_assistant"
     )
     assert payload["conversation_roles"]["timeline_narrators"] == {
-        "T1": "qq:assistant:bot-1"
+        "T1": "assistant-persona:测试助手"
     }
     assert payload["conversation_roles"]["human_participants"][0][
         "observed_names"
@@ -1728,7 +1853,205 @@ def test_fragment_role_map_preserves_bot_first_person_with_actor_anchor():
     assert participant["resolution_status"] == "timeline_bound"
     assert participant["resolution_sources"] == ["timeline_role_bindings"]
     synthesis_payload, _ = manager._synthesis_llm_context([fragment])
-    assert "qq:assistant:bot-1" in json.dumps(synthesis_payload, ensure_ascii=False)
+    assert "assistant-persona:测试助手" in json.dumps(
+        synthesis_payload, ensure_ascii=False
+    )
+
+
+def test_generic_human_role_repair_requires_one_unambiguous_human():
+    manager = TopicBuildManager(":memory:", None, None)
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-role-repair",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:u1",
+        persona_id="测试助手",
+        content="我陪示例甲核对结果",
+        summary="我陪示例甲核对结果",
+        role_bindings={
+            "narrator_actor_id": "qq:assistant:bot-1",
+            "actors": [
+                {
+                    "actor_id": "qq:assistant:bot-1",
+                    "actor_type": "assistant",
+                    "platform": "qq",
+                    "sender_id": "bot-1",
+                    "observed_names": ["测试助手"],
+                },
+                {
+                    "actor_id": "qq:human:u1",
+                    "actor_type": "human",
+                    "platform": "qq",
+                    "sender_id": "u1",
+                    "observed_names": ["示例甲"],
+                },
+            ],
+        },
+    )
+
+    repaired, audit = manager._repair_unambiguous_generic_human_roles(
+        "我提醒用户检查用户设置，并等待对方回复", [candidate]
+    )
+
+    assert repaired == "我提醒示例甲检查用户设置，并等待示例甲回复"
+    assert audit[0]["actor_id"] == "qq:human:u1"
+    second_human = {
+        "actor_id": "qq:human:u2",
+        "actor_type": "human",
+        "platform": "qq",
+        "sender_id": "u2",
+        "observed_names": ["小明"],
+    }
+    group_candidate = replace(
+        candidate,
+        role_bindings={
+            **candidate.role_bindings,
+            "actors": [*candidate.role_bindings["actors"], second_human],
+        },
+    )
+    unchanged, audit = manager._repair_unambiguous_generic_human_roles(
+        "用户提醒对方", [group_candidate]
+    )
+    assert unchanged == "用户提醒对方"
+    assert audit == []
+
+
+def test_fragment_validation_repairs_unambiguous_generic_human_role_in_place():
+    manager = TopicBuildManager(":memory:", None, None)
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-role-repair-validation",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:u1",
+        persona_id="测试助手",
+        content="我提醒示例甲检查结果",
+        summary="我提醒示例甲检查结果",
+        role_bindings={
+            "narrator_actor_id": "qq:assistant:bot-1",
+            "actors": [
+                {
+                    "actor_id": "qq:assistant:bot-1",
+                    "actor_type": "assistant",
+                    "platform": "qq",
+                    "sender_id": "bot-1",
+                    "observed_names": ["测试助手"],
+                },
+                {
+                    "actor_id": "qq:human:u1",
+                    "actor_type": "human",
+                    "platform": "qq",
+                    "sender_id": "u1",
+                    "observed_names": ["示例甲"],
+                },
+            ],
+        },
+    )
+    group = TopicCandidateGroup(
+        run_uid="run-role-repair",
+        group_index=0,
+        memory_space_id="space-1",
+        label="测试",
+        timeline_uids=[candidate.memory_uid],
+        time_cluster_keys=[],
+        cohesion=1.0,
+        group_uid="group-role-repair",
+    )
+
+    fragment = manager._validate_fragments(
+        {
+            "fragments": [
+                {
+                    "label": "提醒用户",
+                    "summary": "我提醒对方检查结果",
+                    "timeline_uids": [candidate.memory_uid],
+                    "facts": [
+                        {
+                            "content": "用户已收到提醒",
+                            "source_timeline_uids": [candidate.memory_uid],
+                        }
+                    ],
+                }
+            ]
+        },
+        "run-role-repair",
+        group,
+        [candidate],
+        "prompt-hash",
+        "input-hash",
+        "provider-1",
+        "model-1",
+    )[0]
+
+    assert fragment.label == "提醒示例甲"
+    assert fragment.summary == "我提醒示例甲检查结果"
+    assert fragment.facts[0]["content"] == "示例甲已收到提醒"
+    assert fragment.metadata["narrative_schema_version"] == (
+        "first_person_assistant_roles_v2"
+    )
+    assert fragment.metadata["validation_repairs"][-1]["type"] == (
+        "unambiguous_generic_human_role_repair"
+    )
+
+
+def test_role_payload_merges_qq_adapter_alias_with_authoritative_profile():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        identity_profile_store=AuthoritativeIdentityStore(
+            profiles=[
+                {
+                    "platform": "qq",
+                    "user_id": "10000001",
+                    "display_name": "示例甲",
+                }
+            ]
+        ),
+    )
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-alias-role-map",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="QQ20000001:FriendMessage:10000001",
+        persona_id="测试助手",
+        content="示例甲完成了测试",
+        summary="示例甲完成了测试",
+        role_bindings={
+            "narrator_actor_id": "aiocqhttp:assistant:bot-1",
+            "actors": [
+                {
+                    "actor_id": "aiocqhttp:assistant:bot-1",
+                    "actor_type": "assistant",
+                    "platform": "aiocqhttp",
+                    "sender_id": "bot-1",
+                    "observed_names": ["测试助手"],
+                },
+                {
+                    "actor_id": "aiocqhttp:human:10000001",
+                    "actor_type": "human",
+                    "platform": "aiocqhttp",
+                    "sender_id": "10000001",
+                    "observed_names": ["示例甲"],
+                },
+            ],
+        },
+    )
+
+    roles = manager._conversation_role_payload([candidate])
+
+    assert roles["timeline_narrators"][candidate.memory_uid] == (
+        "assistant-persona:测试助手"
+    )
+    assert len(roles["human_participants"]) == 1
+    human = roles["human_participants"][0]
+    assert human["actor_id"] == "qq:human:10000001"
+    assert human["resolution_sources"] == [
+        "timeline_role_bindings",
+        "authoritative_profile_fallback",
+    ]
 
 
 @pytest.mark.asyncio

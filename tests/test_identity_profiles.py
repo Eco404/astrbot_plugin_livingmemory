@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -7,6 +8,8 @@ import pytest
 from astrbot_plugin_livingmemory.core.models.identity_profile import (
     AuthoritativeIdentityStore,
 )
+from astrbot_plugin_livingmemory.core.models.conversation_models import stable_actor_id
+from astrbot_plugin_livingmemory.core.models.platform_identity import canonical_platform
 from astrbot_plugin_livingmemory.core.page_api_modules.identity_handler import (
     IdentityHandler,
 )
@@ -61,6 +64,67 @@ def test_identity_store_rejects_overlapping_platform_aliases() -> None:
                 {**_profile(), "platform": "qq_official"},
             ]
         )
+
+
+def test_platform_aliases_share_one_canonical_actor_identity() -> None:
+    assert canonical_platform("aiocqhttp") == "qq"
+    assert canonical_platform("qq_official_webhook") == "qq"
+    assert stable_actor_id("aiocqhttp", "42", "human") == "qq:human:42"
+    assert stable_actor_id("custom_adapter", "42", "human") == (
+        "custom_adapter:human:42"
+    )
+
+
+def test_identity_store_preserves_selected_platform_provenance(tmp_path) -> None:
+    store = AuthoritativeIdentityStore(tmp_path / "authoritative_identities.json")
+    store.replace_profiles(
+        [
+            {
+                **_profile(),
+                "platform": "aiocqhttp",
+                "platform_instances": ["QQ20000001"],
+            }
+        ]
+    )
+
+    payload = AuthoritativeIdentityStore(store.path).payload()["profiles"][0]
+    assert payload["platform"] == "qq"
+    assert payload["platform_aliases"] == ["aiocqhttp"]
+    assert payload["platform_instances"] == ["QQ20000001"]
+
+
+@pytest.mark.asyncio
+async def test_identity_handler_combines_runtime_history_and_profile_platforms() -> None:
+    store = AuthoritativeIdentityStore(
+        profiles=[{**_profile(), "platform": "qq_official"}]
+    )
+    runtime = SimpleNamespace(
+        meta=lambda: SimpleNamespace(
+            name="aiocqhttp",
+            id="QQ20000001",
+            adapter_display_name="QQ",
+        )
+    )
+    platform_manager = SimpleNamespace(get_insts=lambda: [runtime])
+    conversation_manager = SimpleNamespace(
+        store=SimpleNamespace(
+            get_recent_sessions=AsyncMock(
+                return_value=[SimpleNamespace(platform="aiocqhttp")]
+            )
+        )
+    )
+
+    response = await IdentityHandler(PageApiUtils()).list_profiles(
+        store,
+        platform_manager=platform_manager,
+        conversation_manager=conversation_manager,
+    )
+
+    option = response["data"]["platform_options"][0]
+    assert option["value"] == "qq"
+    assert option["instance_ids"] == ["QQ20000001"]
+    assert {"runtime", "history", "profile"} <= set(option["sources"])
+    assert response["data"]["profiles"][0]["platform"] == "qq"
 
 
 @pytest.mark.asyncio

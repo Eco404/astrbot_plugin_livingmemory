@@ -106,6 +106,34 @@ async def test_lists_unindexed_timelines_for_selected_space(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_recomputes_only_topic_relations(monkeypatch):
+    request = MagicMock()
+    request.get_json = AsyncMock(return_value={"memory_space_id": "space-1"})
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    manager = SimpleNamespace(
+        has_active_builds=lambda: False,
+        recompute_topic_relations=AsyncMock(
+            return_value={
+                "memory_space_id": "space-1",
+                "topic_count": 64,
+                "relation_count": 42,
+                "algorithm_version": 5,
+            }
+        ),
+    )
+    engine = SimpleNamespace(topic_build_manager=manager)
+
+    response = await TopicHandler(PageApiUtils()).recompute_relations(engine)
+
+    assert response["status"] == "ok"
+    assert response["data"]["relation_count"] == 42
+    manager.recompute_topic_relations.assert_awaited_once_with("space-1")
+
+
+@pytest.mark.asyncio
 async def test_job_progress_is_monotonic_within_a_concurrent_stage(monkeypatch):
     release = asyncio.Event()
 

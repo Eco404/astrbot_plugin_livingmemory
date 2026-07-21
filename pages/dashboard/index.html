@@ -383,6 +383,13 @@
         </div>
         <div class="modal-body">
           <p class="topic-maintenance-intro text-secondary" id="topic-maintenance-intro" data-i18n="topic.maintenanceIntro">检查尚未被活跃 Topic 以当前版本索引的 Timeline，确认后仅补建所选条目。</p>
+          <div class="topic-maintenance-action">
+            <div>
+              <strong data-i18n="topic.recomputeRelationsTitle">重新计算相关话题</strong>
+              <p class="text-secondary" data-i18n="topic.recomputeRelationsIntro">使用现有 Topic 向量和参数替换关系图，不重新构建 Topic，也不调用 LLM。</p>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="topic-recompute-relations" type="button" data-i18n="topic.recomputeRelations">立即重算</button>
+          </div>
           <div class="topic-maintenance-toolbar">
             <div id="topic-maintenance-status" class="text-secondary" aria-live="polite"></div>
             <button class="btn btn-secondary btn-sm" id="topic-maintenance-detect" type="button" data-i18n="topic.detectUnindexed">重新检查</button>
