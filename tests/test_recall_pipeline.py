@@ -64,6 +64,7 @@ def test_query_branches_remove_current_and_control_assistant_weight():
     )
     assert [item.name for item in excluded] == ["current", "recent_user"]
     assert excluded[1].text == "之前说下雨了 | 陪我聊聊天"
+    assert excluded[1].weight == pytest.approx(0.45)
 
     low = pipeline.build_query_branches(
         "现在改插件遇到暴雨",
@@ -76,7 +77,7 @@ def test_query_branches_remove_current_and_control_assistant_weight():
         "recent_user",
         "recent_assistant",
     ]
-    assert low[-1].weight == pytest.approx(0.25)
+    assert low[-1].weight == pytest.approx(0.20)
 
     normal = pipeline.build_query_branches(
         "现在改插件遇到暴雨",
@@ -84,7 +85,36 @@ def test_query_branches_remove_current_and_control_assistant_weight():
         expansion_enabled=True,
         assistant_mode="normal",
     )
-    assert normal[-1].weight == pytest.approx(normal[1].weight)
+    assert normal[-1].weight == pytest.approx(0.40)
+
+
+def test_query_branch_weights_are_runtime_configurable():
+    pipeline = RecallPipeline(
+        _FakeEngine({}),
+        {
+            "recent_user_weight": 0.25,
+            "recent_assistant_weight": 0.30,
+        },
+    )
+    messages = [
+        {"role": "user", "content": "历史用户消息"},
+        {"role": "assistant", "content": "历史 Bot 回复"},
+    ]
+    normal = pipeline.build_query_branches(
+        "当前问题",
+        messages,
+        expansion_enabled=True,
+        assistant_mode="normal",
+    )
+    assert normal[1].weight == pytest.approx(0.25)
+    assert normal[2].weight == pytest.approx(0.30)
+    low = pipeline.build_query_branches(
+        "当前问题",
+        messages,
+        expansion_enabled=True,
+        assistant_mode="low_weight",
+    )
+    assert low[2].weight == pytest.approx(0.15)
 
 
 @pytest.mark.asyncio
@@ -178,4 +208,3 @@ def test_injection_does_not_repeat_key_fact_already_in_content():
         ]
     )
     assert rendered.count(fact) == 1
-

@@ -2741,7 +2741,7 @@ body {
 .timeline-setting-input[type="number"] { width: 120px; }
 .topic-setting-input[type="checkbox"],
 .timeline-setting-input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
-.timeline-setting-input[type="select"],
+select.topic-setting-input,
 select.timeline-setting-input { width: min(220px, 100%); }
 .topic-setting-source { padding: 3px 8px; border-radius: 999px; color: var(--accent); background: var(--accent-light); font-size: 12px; white-space: nowrap; }
 .topic-setting-source.is-custom { color: var(--accent); background: var(--accent-light); }

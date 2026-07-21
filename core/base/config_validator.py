@@ -76,6 +76,12 @@ class RecallEngineConfig(BaseModel):
         default="exclude",
         description="跨轮扩展时 Bot 回复的参与方式",
     )
+    recent_user_weight: float = Field(
+        default=0.45, ge=0.0, le=1.0, description="历史用户消息查询分支权重"
+    )
+    recent_assistant_weight: float = Field(
+        default=0.40, ge=0.0, le=1.0, description="Bot 历史回复查询分支权重"
+    )
     candidate_multiplier: int = Field(
         default=3, ge=1, le=10, description="最终筛选前的候选数量倍率"
     )

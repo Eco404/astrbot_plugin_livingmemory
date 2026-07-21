@@ -5,7 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 
-TIMELINE_SETTINGS_REVISION = 1
+TIMELINE_SETTINGS_REVISION = 2
+
+SHARED_QUERY_SETTING_KEYS = frozenset(
+    {
+        "recall_engine.inject_with_recent_context",
+        "recall_engine.assistant_context_mode",
+        "recall_engine.recent_user_weight",
+        "recall_engine.recent_assistant_weight",
+    }
+)
 
 
 TIMELINE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -15,6 +24,8 @@ TIMELINE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "recall_engine.fallback_to_vector": {"default": True, "type": "bool", "category": "recall", "label": "失败时回退纯向量", "description": "混合检索失败或没有结果时尝试纯向量检索。"},
     "recall_engine.inject_with_recent_context": {"default": False, "type": "bool", "category": "recall", "label": "跨轮次上下文扩展", "description": "使用最近对话补充查询分支；当前消息始终为主查询。"},
     "recall_engine.assistant_context_mode": {"default": "exclude", "type": "select", "options": ["exclude", "low_weight", "normal"], "category": "recall", "label": "跨轮扩展中的 Bot 回复", "option_labels": {"exclude": "不查询", "low_weight": "低权重", "normal": "正常查询"}, "description": "控制 Bot 回复是否参与跨轮次扩展，仅在开启跨轮扩展时生效。"},
+    "recall_engine.recent_user_weight": {"default": 0.45, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "recall", "label": "recent_user 查询权重", "description": "最近历史用户消息查询分支的权重；当前用户消息始终为 1.0。"},
+    "recall_engine.recent_assistant_weight": {"default": 0.40, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "recall", "label": "recent_assistant 查询权重", "description": "Bot 历史回复在“正常查询”下的权重；“低权重”模式使用该值的一半。"},
     "recall_engine.candidate_multiplier": {"default": 3, "type": "int", "min": 1, "max": 10, "category": "recall", "label": "候选倍率", "description": "先检索最终数量的若干倍候选，再执行相关度过滤和多样性选择。"},
     "recall_engine.min_relevance_score": {"default": 0.38, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "最低相关度", "description": "低于该综合相关度的 Timeline 不会进入自动召回结果。"},
     "recall_engine.relative_score_floor": {"default": 0.65, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "相对相关度下限", "description": "候选还需达到本轮最佳候选相关度的该比例。"},
@@ -81,6 +92,7 @@ def validate_timeline_setting(key: str, value: Any) -> Any:
 __all__ = [
     "TIMELINE_SETTING_DEFINITIONS",
     "TIMELINE_SETTINGS_REVISION",
+    "SHARED_QUERY_SETTING_KEYS",
     "effective_timeline_settings",
     "timeline_setting_defaults",
     "validate_timeline_setting",
