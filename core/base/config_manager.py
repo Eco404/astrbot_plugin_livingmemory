@@ -27,6 +27,7 @@ class ConfigManager:
         """
         self._raw_config = user_config or {}
         self._config: dict[str, Any] = {}
+        self._runtime_overrides: dict[str, Any] = {}
         self._config_obj = None
         self._load_config()
 
@@ -58,6 +59,8 @@ class ConfigManager:
         Returns:
             配置值
         """
+        if key in self._runtime_overrides:
+            return self._runtime_overrides[key]
         keys = key.split(".")
         value = self._config
 
@@ -81,7 +84,20 @@ class ConfigManager:
         Returns:
             配置节字典
         """
-        return self._config.get(section, {})
+        base = self._config.get(section, {})
+        result = dict(base) if isinstance(base, dict) else {}
+        prefix = f"{section}."
+        for key, value in self._runtime_overrides.items():
+            if key.startswith(prefix) and "." not in key[len(prefix):]:
+                result[key[len(prefix):]] = value
+        return result
+
+    def apply_runtime_overrides(self, overrides: dict[str, Any]) -> None:
+        """Replace WebUI-owned runtime overrides without mutating plugin config."""
+        self._runtime_overrides = dict(overrides)
+
+    def get_runtime_overrides(self) -> dict[str, Any]:
+        return dict(self._runtime_overrides)
 
     def get_raw_section(self, section: str) -> dict[str, Any]:
         """Return explicitly persisted values without injecting schema defaults."""

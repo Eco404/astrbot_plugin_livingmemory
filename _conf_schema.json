@@ -158,33 +158,9 @@
     },
     "recall_engine": {
         "description": "记忆召回",
-        "hint": "控制记忆检索和注入到对话的行为",
+        "hint": "这里只保留请求注入行为。Timeline 召回、过滤、融合、缓存、生成和生命周期参数请在插件 WebUI 的 Timeline 记忆页面右上角“参数”中调整。",
         "type": "object",
         "items": {
-            "top_k": {
-                "description": "单次召回数量",
-                "hint": "每次检索返回的最相关记忆条数。设为 0 可跳过自动召回和注入，仅保留历史注入片段清理。建议 3-10。",
-                "type": "int",
-                "default": 5
-            },
-            "max_k": {
-                "description": "主动检索最大数量",
-                "hint": "Agent 主动调用长期记忆检索工具时允许返回的最大记忆条数。用于限制工具单次召回规模，建议 5-10。",
-                "type": "int",
-                "default": 10
-            },
-            "importance_weight": {
-                "description": "重要性权重",
-                "hint": "混合评分中记忆重要性的占比系数。值越大，重要性高的记忆越优先被召回。",
-                "type": "float",
-                "default": 1.0
-            },
-            "fallback_to_vector": {
-                "description": "降级到纯向量检索",
-                "hint": "混合检索失败或结果为空时，自动降级为纯向量检索。建议开启。",
-                "type": "bool",
-                "default": true
-            },
             "injection_method": {
                 "description": "记忆注入位置",
                 "hint": "记忆注入到 LLM 请求的位置。extra_user_content(推荐)：追加到用户消息末尾，不影响前缀缓存且不污染对话历史。user_message_before：作为用户消息前缀。user_message_after：作为用户消息后缀。fake_tool_call：伪造工具调用消息对注入到对话历史，使 LLM 自然地理解这是检索结果。fake_tool_call_deepseek_v4：⚠️已废弃，选择后自动回退至 fake_tool_call。Gemini 下若选择 fake_tool_call 会自动降级为 extra_user_content。system_prompt：⚠️已废弃，选择后自动回退至 extra_user_content。",
@@ -204,146 +180,6 @@
                 "hint": "注入新记忆前自动删除历史中已注入的旧记忆片段，避免重复累积和 token 浪费。建议开启。",
                 "type": "bool",
                 "default": true
-            },
-            "inject_with_recent_context": {
-                "description": "启用跨轮次上下文扩展检索",
-                "hint": "启用后，将最近 2 轮中的用户消息作为低权重查询补充。当前消息始终是主要查询；Bot 回复是否参与由下方选项控制。",
-                "type": "bool",
-                "default": false
-            },
-            "assistant_context_mode": {
-                "description": "跨轮扩展中的 Bot 回复",
-                "hint": "不查询：忽略 Bot 回复，避免复述放大关键词（推荐）；低权重：Bot 回复单独检索但只提供弱信号；正常查询：Bot 回复与历史用户消息使用相同权重。仅在开启跨轮次扩展时生效。",
-                "type": "string",
-                "default": "exclude",
-                "options": [
-                    "exclude",
-                    "low_weight",
-                    "normal"
-                ]
-            },
-            "candidate_multiplier": {
-                "description": "召回候选倍率",
-                "hint": "先检索最终数量的若干倍候选，再执行相关度过滤和多样性选择。数值越大越全面，但检索开销也越高。",
-                "type": "int",
-                "default": 3
-            },
-            "min_relevance_score": {
-                "description": "最低召回相关度",
-                "hint": "低于该相关度的记忆不会注入。最终返回数量允许少于单次召回数量。",
-                "type": "float",
-                "default": 0.38
-            },
-            "relative_score_floor": {
-                "description": "相对相关度下限",
-                "hint": "候选还需达到本轮最佳候选相关度的一定比例，用于滤除明显落后的尾部结果。",
-                "type": "float",
-                "default": 0.65
-            },
-            "mmr_lambda": {
-                "description": "召回相关性与多样性平衡",
-                "hint": "越接近 1 越重视相关性，越接近 0 越倾向避免内容重复。",
-                "type": "float",
-                "default": 0.72
-            },
-            "context_overlap_suppression": {
-                "description": "抑制当前上下文中的重复记忆",
-                "hint": "当 Timeline 的来源消息仍位于模型当前原始对话上下文中时，不再重复注入整条长期记忆。建议开启。",
-                "type": "bool",
-                "default": true
-            },
-            "search_cache_enabled": {
-                "description": "启用短期检索缓存",
-                "hint": "短时间内相同会话和相同查询会复用检索结果，降低连续追问时的 SQLite/FAISS 开销。",
-                "type": "bool",
-                "default": true
-            },
-            "search_cache_ttl_seconds": {
-                "description": "检索缓存 TTL 秒数",
-                "hint": "缓存保留时间。写入、更新、删除记忆时会自动失效。设为 0 可关闭缓存。",
-                "type": "float",
-                "default": 45.0
-            },
-            "search_cache_max_size": {
-                "description": "检索缓存最大条目数",
-                "hint": "限制内存中保留的检索结果数量。超过上限时自动淘汰最久未使用的结果。",
-                "type": "int",
-                "default": 256
-            }
-        }
-    },
-    "importance_decay": {
-        "description": "重要性衰减",
-        "hint": "随时间逐步降低旧记忆的重要性，防止旧信息长期占据高权重",
-        "type": "object",
-        "items": {
-            "decay_rate": {
-                "description": "每日衰减率",
-                "hint": "每天对记忆重要性的衰减比例。0.01 表示每天降低 1%。设为 0 可禁用衰减。",
-                "type": "float",
-                "default": 0.01
-            },
-            "access_decay_window_days": {
-                "description": "访问强化窗口(天)",
-                "hint": "在该窗口内被访问过的记忆，会根据访问次数降低有效衰减率。",
-                "type": "float",
-                "default": 30.0
-            },
-            "access_decay_max_count": {
-                "description": "访问强化次数上限",
-                "hint": "达到该访问次数时获得最大衰减保护；超过后不会继续增强。",
-                "type": "int",
-                "default": 10
-            },
-            "access_count_decay_multiplier": {
-                "description": "访问次数保留比例",
-                "hint": "每次每日衰减后访问次数按该比例回落，避免旧热点记忆永久不衰减。",
-                "type": "float",
-                "default": 0.5
-            }
-        }
-    },
-    "fusion_strategy": {
-        "description": "检索融合策略",
-        "hint": "BM25 和向量检索结果的融合参数（内部使用 RRF 算法）",
-        "type": "object",
-        "items": {
-            "rrf_k": {
-                "description": "RRF 融合参数 k",
-                "hint": "值越小越强调排名靠前的结果，值越大融合越平滑。推荐 30-120，默认 60。",
-                "type": "int",
-                "default": 60
-            }
-        }
-    },
-    "filtering_settings": {
-        "description": "记忆隔离设置",
-        "type": "object",
-        "items": {
-            "use_persona_filtering": {
-                "description": "按人格隔离记忆",
-                "hint": "开启后只召回与当前人格相关的记忆，不同人格的记忆互不干扰。",
-                "type": "bool",
-                "default": true
-            },
-            "use_session_filtering": {
-                "description": "按会话隔离记忆",
-                "hint": "开启后每个会话的记忆独立存储，不同会话之间不共享记忆。",
-                "type": "bool",
-                "default": true
-            }
-        }
-    },
-    "reflection_engine": {
-        "description": "记忆生成设置",
-        "hint": "控制何时触发对话总结并生成记忆",
-        "type": "object",
-        "items": {
-            "summary_trigger_rounds": {
-                "description": "总结触发轮次",
-                "hint": "累计对话达到该轮次（一问一答为一轮）后触发总结并写入记忆。",
-                "type": "int",
-                "default": 10
             }
         }
     },
@@ -553,31 +389,6 @@
                 "hint": "超过该天数的旧备份文件将被自动删除。默认保留 7 天。",
                 "type": "int",
                 "default": 7
-            }
-        }
-    },
-    "forgetting_agent": {
-        "description": "自动清理设置",
-        "hint": "定期清理时间久远且重要性低的旧记忆，控制记忆库规模",
-        "type": "object",
-        "items": {
-            "auto_cleanup_enabled": {
-                "description": "启用每日自动清理",
-                "hint": "每日重要性衰减后自动清理符合条件的旧记忆。",
-                "type": "bool",
-                "default": true
-            },
-            "cleanup_days_threshold": {
-                "description": "清理天数阈值（天）",
-                "hint": "记忆创建超过该天数后进入清理候选。需同时满足重要性低于阈值才会被删除。",
-                "type": "int",
-                "default": 30
-            },
-            "cleanup_importance_threshold": {
-                "description": "清理重要性阈值",
-                "hint": "重要性低于该值的旧记忆才会被清理。0.3 表示重要性低于 30% 的记忆。",
-                "type": "float",
-                "default": 0.3
             }
         }
     }

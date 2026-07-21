@@ -13,6 +13,7 @@ import {
   SessionPicker,
   SystemPage,
   TopicPage,
+  TimelinePage,
   esc,
   statusPill,
   nodeBadge,
@@ -59,6 +60,7 @@ import {
   const systemPage = new SystemPage(state, api);
   const sessionPicker = new SessionPicker(api, showToast);
   const topicPage = new TopicPage(api, showToast);
+  const timelinePage = new TimelinePage(api, showToast);
 
   /* ================================================================
      Theme Management
@@ -143,7 +145,7 @@ import {
     if (name === "topic") topicPage.fetch();
     if (name === "models") modelPage.fetch();
     if (name === "identities") identityPage.fetch();
-    if (name === "recall") { /* 召回页面按需加载 */ }
+    if (name === "recall") recallPage.fetchSessions();
     if (name === "system") systemPage.fetch();
   }
 
@@ -291,6 +293,7 @@ import {
     recallPage.initEventListeners();
     sessionPicker.init();
     topicPage.initEventListeners();
+    timelinePage.initEventListeners();
     modelPage.initEventListeners();
     identityPage.initEventListeners();
 

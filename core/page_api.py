@@ -22,6 +22,7 @@ from .page_api_modules import (
     SessionHandler,
     StatsHandler,
     TopicHandler,
+    TimelineHandler,
 )
 
 PLUGIN_NAME = "astrbot_plugin_livingmemory"
@@ -46,6 +47,7 @@ class PluginPageApi:
         self.graph_handler = GraphHandler(self.utils)
         self.identity_handler = IdentityHandler(self.utils)
         self.topic_handler = TopicHandler(self.utils)
+        self.timeline_handler = TimelineHandler(self.utils)
 
         # BackupHandler 需要 data_dir，延迟初始化
         self._backup_handler = None
@@ -122,6 +124,18 @@ class PluginPageApi:
             self.batch_update_memories,
             ["POST"],
             "LivingMemory Page batch update memories",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/settings",
+            self.get_timeline_settings,
+            ["GET"],
+            "LivingMemory Page Timeline settings",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/settings/update",
+            self.update_timeline_settings,
+            ["POST"],
+            "LivingMemory Page update Timeline settings",
         )
         register(
             f"{PAGE_API_PREFIX}/recall/test",
@@ -318,6 +332,18 @@ class PluginPageApi:
         if error:
             return error
         return await self.memory_handler.batch_update_memories(ready["memory_engine"])
+
+    async def get_timeline_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.get_settings(self.plugin.initializer)
+
+    async def update_timeline_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.update_settings(self.plugin.initializer)
 
     async def test_recall(self):
         """测试记忆召回功能"""

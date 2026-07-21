@@ -612,6 +612,17 @@ class TopicMemoryStore:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS timeline_setting_overrides (
+                setting_key TEXT PRIMARY KEY,
+                setting_value TEXT NOT NULL,
+                settings_revision INTEGER NOT NULL DEFAULT 1,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
 
     async def get_topic_setting_overrides(self) -> dict[str, Any]:
         """Return only explicit runtime overrides; defaults never persist here."""
@@ -628,6 +639,72 @@ class TopicMemoryStore:
             except (TypeError, ValueError, json.JSONDecodeError):
                 continue
         return result
+
+    async def get_timeline_setting_overrides(self) -> dict[str, Any]:
+        """Return explicit Timeline runtime overrides and import markers."""
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    "SELECT setting_key, setting_value FROM timeline_setting_overrides"
+                )
+            ).fetchall()
+        result: dict[str, Any] = {}
+        for row in rows:
+            try:
+                result[str(row["setting_key"])] = json.loads(row["setting_value"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        return result
+
+    async def update_timeline_setting_overrides(
+        self,
+        changes: dict[str, Any],
+        *,
+        reset_keys: list[str] | None = None,
+        reset_all: bool = False,
+        settings_revision: int = 1,
+    ) -> dict[str, Any]:
+        """Atomically update sparse Timeline overrides."""
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                if reset_all:
+                    await db.execute(
+                        "DELETE FROM timeline_setting_overrides "
+                        "WHERE setting_key NOT LIKE '__%'"
+                    )
+                elif reset_keys:
+                    placeholders = ",".join("?" * len(reset_keys))
+                    await db.execute(
+                        f"DELETE FROM timeline_setting_overrides "
+                        f"WHERE setting_key IN ({placeholders})",
+                        list(reset_keys),
+                    )
+                for key, value in changes.items():
+                    await db.execute(
+                        """
+                        INSERT INTO timeline_setting_overrides (
+                            setting_key, setting_value, settings_revision,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(setting_key) DO UPDATE SET
+                            setting_value = excluded.setting_value,
+                            settings_revision = excluded.settings_revision,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            str(key),
+                            self._to_json(value),
+                            max(1, int(settings_revision)),
+                            now,
+                            now,
+                        ),
+                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return await self.get_timeline_setting_overrides()
 
     async def update_topic_setting_overrides(
         self,

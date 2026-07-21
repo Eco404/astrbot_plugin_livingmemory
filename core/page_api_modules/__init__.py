@@ -11,6 +11,7 @@ from .recall_handler import RecallHandler
 from .session_handler import SessionHandler
 from .stats_handler import StatsHandler
 from .topic_handler import TopicHandler
+from .timeline_handler import TimelineHandler
 from .utils import PageApiUtils
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "IdentityHandler",
     "BackupHandler",
     "TopicHandler",
+    "TimelineHandler",
     "PageApiUtils",
 ]

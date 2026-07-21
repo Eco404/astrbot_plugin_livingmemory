@@ -2737,8 +2737,12 @@ body {
 .topic-setting-copy small { overflow-wrap: anywhere; }
 .topic-setting-description { max-width: 48rem; line-height: 1.45; font-family: inherit; }
 .topic-setting-control { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-.topic-setting-input[type="number"] { width: 120px; }
-.topic-setting-input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+.topic-setting-input[type="number"],
+.timeline-setting-input[type="number"] { width: 120px; }
+.topic-setting-input[type="checkbox"],
+.timeline-setting-input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+.timeline-setting-input[type="select"],
+select.timeline-setting-input { width: min(220px, 100%); }
 .topic-setting-source { padding: 3px 8px; border-radius: 999px; color: var(--accent); background: var(--accent-light); font-size: 12px; white-space: nowrap; }
 .topic-setting-source.is-custom { color: var(--accent); background: var(--accent-light); }
 .topic-setting-default { text-align: right; font-size: 12px; }

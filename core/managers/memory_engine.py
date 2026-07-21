@@ -705,6 +705,66 @@ class MemoryEngine:
         self._invalidate_search_cache()
         return effective
 
+    def apply_timeline_runtime_settings(self, effective: dict[str, Any]) -> None:
+        """Apply validated Timeline settings to long-lived retrieval consumers."""
+        mapping = {
+            "fusion_strategy.rrf_k": "rrf_k",
+            "importance_decay.decay_rate": "decay_rate",
+            "importance_decay.access_decay_window_days": "access_decay_window_days",
+            "importance_decay.access_decay_max_count": "access_decay_max_count",
+            "importance_decay.access_count_decay_multiplier": "access_count_decay_multiplier",
+            "recall_engine.importance_weight": "importance_weight",
+            "recall_engine.candidate_multiplier": "candidate_multiplier",
+            "recall_engine.min_relevance_score": "min_relevance_score",
+            "recall_engine.relative_score_floor": "relative_score_floor",
+            "recall_engine.mmr_lambda": "mmr_lambda",
+            "recall_engine.search_cache_enabled": "search_cache_enabled",
+            "recall_engine.search_cache_ttl_seconds": "search_cache_ttl_seconds",
+            "recall_engine.search_cache_max_size": "search_cache_max_size",
+            "recall_engine.fallback_to_vector": "fallback_enabled",
+            "forgetting_agent.cleanup_days_threshold": "cleanup_days_threshold",
+            "forgetting_agent.cleanup_importance_threshold": "cleanup_importance_threshold",
+            "forgetting_agent.auto_cleanup_enabled": "auto_cleanup_enabled",
+        }
+        for source, target in mapping.items():
+            if source in effective:
+                self.config[target] = effective[source]
+        if self.rrf_fusion is not None:
+            self.rrf_fusion.k = int(self.config.get("rrf_k", 60))
+        if self.hybrid_retriever is not None:
+            self.hybrid_retriever.decay_rate = float(
+                self.config.get("decay_rate", 0.01)
+            )
+            self.hybrid_retriever.importance_weight = float(
+                self.config.get("importance_weight", 1.0)
+            )
+            self.hybrid_retriever.fallback_enabled = bool(
+                self.config.get("fallback_enabled", True)
+            )
+            self.hybrid_retriever.mmr_lambda = float(
+                self.config.get("mmr_lambda", 0.72)
+            )
+        if self.graph_retriever is not None:
+            self.graph_retriever.decay_rate = float(
+                self.config.get("decay_rate", 0.01)
+            )
+        topic_config = dict(self.topic_recall_pipeline.config)
+        topic_config["recall_decay_rate"] = float(
+            self.config.get("decay_rate", 0.01)
+        )
+        self.topic_retriever.config = dict(topic_config)
+        self.topic_recall_pipeline.config = dict(topic_config)
+        self._search_cache_enabled = bool(
+            self.config.get("search_cache_enabled", True)
+        )
+        self._search_cache_ttl = float(
+            self.config.get("search_cache_ttl_seconds", 45.0)
+        )
+        self._search_cache_max_size = int(
+            self.config.get("search_cache_max_size", 256)
+        )
+        self._invalidate_search_cache()
+
     async def get_topic_runtime_settings(self) -> dict[str, Any]:
         stored = await self.topic_memory_store.get_topic_setting_overrides()
         overrides = {

@@ -11,4 +11,5 @@ export { RecallPage } from "./recall-page.js";
 export { SystemPage } from "./system-page.js";
 export { SessionPicker } from "./session-picker.js";
 export { TopicPage } from "./topic-page.js";
+export { TimelinePage } from "./timeline-page.js";
 export * from "./utils.js";
