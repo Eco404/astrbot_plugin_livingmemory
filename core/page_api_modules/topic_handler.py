@@ -14,6 +14,12 @@ from astrbot.api import logger
 
 from ..models.memory_identity import resolve_memory_space
 from ..models.topic_memory import TopicMaintenanceMode
+from ..timeline_settings import (
+    SHARED_QUERY_SETTING_KEYS,
+    TIMELINE_SETTING_DEFINITIONS,
+    validate_timeline_setting,
+)
+from ..topic_settings import TOPIC_SETTING_DEFINITIONS, validate_topic_setting
 
 if TYPE_CHECKING:
     from .utils import PageApiUtils
@@ -138,19 +144,35 @@ class TopicHandler:
             logger.error("[PageAPI] 获取 Topic 列表失败", exc_info=True)
             return self.utils.error(str(exc))
 
-    async def get_settings(self, memory_engine) -> dict[str, Any]:
+    async def _combined_settings(self, memory_engine, initializer) -> dict[str, Any]:
+        payload = await memory_engine.get_topic_runtime_settings()
+        timeline = await initializer.get_timeline_runtime_settings()
+        for key in SHARED_QUERY_SETTING_KEYS:
+            definition = dict(TIMELINE_SETTING_DEFINITIONS[key])
+            definition["shared_query_setting"] = True
+            definition["description"] = (
+                f"{definition.get('description', '')} "
+                "与 Timeline 参数面板共享，在任一页修改都会同步生效。"
+            ).strip()
+            payload["definitions"][key] = definition
+            payload["effective"][key] = timeline["effective"][key]
+            if key in timeline["overrides"]:
+                payload["overrides"][key] = timeline["overrides"][key]
+        payload["build_active"] = bool(
+            self.has_active_jobs()
+            or memory_engine.topic_build_manager.has_active_builds()
+        )
+        return payload
+
+    async def get_settings(self, memory_engine, initializer) -> dict[str, Any]:
         try:
-            payload = await memory_engine.get_topic_runtime_settings()
-            payload["build_active"] = bool(
-                self.has_active_jobs()
-                or memory_engine.topic_build_manager.has_active_builds()
-            )
+            payload = await self._combined_settings(memory_engine, initializer)
             return self.utils.ok(payload)
         except Exception as exc:
             logger.error("[PageAPI] 获取 Topic 参数失败", exc_info=True)
             return self.utils.error(str(exc))
 
-    async def update_settings(self, memory_engine) -> dict[str, Any]:
+    async def update_settings(self, memory_engine, initializer) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         changes = payload.get("changes", {})
         reset_keys = payload.get("reset_keys", [])
@@ -164,12 +186,43 @@ class TopicHandler:
         if self.has_active_jobs() or memory_engine.topic_build_manager.has_active_builds():
             return self.utils.error("Topic 构建正在运行，暂时不能修改参数")
         try:
-            result = await memory_engine.update_topic_runtime_settings(
-                changes,
-                reset_keys=reset_keys,
-                reset_all=reset_all,
-            )
-            result["build_active"] = False
+            known = set(TOPIC_SETTING_DEFINITIONS) | set(SHARED_QUERY_SETTING_KEYS)
+            unknown = (set(changes) | {str(key) for key in reset_keys}) - known
+            if unknown:
+                raise ValueError("未知 Topic 参数: " + ", ".join(sorted(unknown)))
+            topic_changes = {
+                key: validate_topic_setting(key, value)
+                for key, value in changes.items()
+                if key in TOPIC_SETTING_DEFINITIONS
+            }
+            shared_changes = {
+                key: validate_timeline_setting(key, value)
+                for key, value in changes.items()
+                if key in SHARED_QUERY_SETTING_KEYS
+            }
+            topic_reset_keys = [
+                str(key) for key in reset_keys if str(key) in TOPIC_SETTING_DEFINITIONS
+            ]
+            shared_reset_keys = [
+                str(key) for key in reset_keys if str(key) in SHARED_QUERY_SETTING_KEYS
+            ]
+            if topic_changes or topic_reset_keys or reset_all:
+                await memory_engine.update_topic_runtime_settings(
+                    topic_changes,
+                    reset_keys=topic_reset_keys,
+                    reset_all=reset_all,
+                )
+            if shared_changes or shared_reset_keys or reset_all:
+                await initializer.update_timeline_runtime_settings(
+                    shared_changes,
+                    reset_keys=(
+                        list(SHARED_QUERY_SETTING_KEYS)
+                        if reset_all
+                        else shared_reset_keys
+                    ),
+                    reset_all=False,
+                )
+            result = await self._combined_settings(memory_engine, initializer)
             return self.utils.ok(result)
         except (TypeError, ValueError, RuntimeError) as exc:
             return self.utils.error(str(exc))

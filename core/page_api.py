@@ -396,13 +396,17 @@ class PluginPageApi:
         ready, error = await self._ensure_plugin_ready()
         if error:
             return error
-        return await self.topic_handler.get_settings(ready["memory_engine"])
+        return await self.topic_handler.get_settings(
+            ready["memory_engine"], self.plugin.initializer
+        )
 
     async def update_topic_settings(self):
         ready, error = await self._ensure_plugin_ready()
         if error:
             return error
-        return await self.topic_handler.update_settings(ready["memory_engine"])
+        return await self.topic_handler.update_settings(
+            ready["memory_engine"], self.plugin.initializer
+        )
 
     async def list_unindexed_topic_timelines(self):
         ready, error = await self._ensure_plugin_ready()

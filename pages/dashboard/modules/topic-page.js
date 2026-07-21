@@ -328,7 +328,9 @@ export class TopicPage {
           const value = effective[key];
           const input = definition.type === "bool"
             ? `<input class="topic-setting-input" data-setting-key="${esc(key)}" type="checkbox" ${value ? "checked" : ""}>`
-            : `<input class="input topic-setting-input" data-setting-key="${esc(key)}" type="number" value="${esc(value)}" min="${esc(definition.min)}" max="${esc(definition.max)}" step="${esc(definition.step || 1)}">`;
+            : definition.type === "select"
+              ? `<select class="select input topic-setting-input" data-setting-key="${esc(key)}">${(definition.options || []).map(option => `<option value="${esc(option)}" ${option === value ? "selected" : ""}>${esc(definition.option_labels?.[option] || option)}</option>`).join("")}</select>`
+              : `<input class="input topic-setting-input" data-setting-key="${esc(key)}" type="number" value="${esc(value)}" min="${esc(definition.min)}" max="${esc(definition.max)}" step="${esc(definition.step || 1)}">`;
           return `<div class="topic-setting-row" data-setting-row="${esc(key)}">
             <div class="topic-setting-copy"><strong>${esc(definition.label || key)}</strong><small class="topic-setting-description text-secondary">${esc(definition.description || "")}</small><small class="text-tertiary text-mono">${esc(key)}</small></div>
             <div class="topic-setting-control">${input}<span class="topic-setting-source ${customized ? "is-custom" : ""}" data-setting-source>${esc(window.t(customized ? "topic.customValue" : "topic.defaultValue"))}</span><button class="btn btn-ghost btn-sm topic-setting-reset" type="button" data-reset-setting="${esc(key)}" ${customized ? "" : "disabled"}>${esc(window.t("topic.resetDefault"))}</button></div>
@@ -374,9 +376,10 @@ export class TopicPage {
         const key = input.dataset.settingKey;
         const definition = this.settingsData.definitions[key];
         const value = definition.type === "bool" ? input.checked
+          : definition.type === "select" ? input.value
           : definition.type === "int" ? Number.parseInt(input.value, 10)
           : Number.parseFloat(input.value);
-        if (!Number.isFinite(value) && definition.type !== "bool") throw new Error(`${definition.label}: ${window.t("topic.invalidSetting")}`);
+        if (!Number.isFinite(value) && !["bool", "select"].includes(definition.type)) throw new Error(`${definition.label}: ${window.t("topic.invalidSetting")}`);
         if (value === definition.default) this.settingsResetKeys.add(key);
         else changes[key] = value;
       });

@@ -150,9 +150,19 @@ def _patch_page_request(req: MagicMock):
     import astrbot_plugin_livingmemory.core.page_api_modules.memory_handler as memory_mod
     import astrbot_plugin_livingmemory.core.page_api_modules.recall_handler as recall_mod
     import astrbot_plugin_livingmemory.core.page_api_modules.session_handler as session_mod
+    import astrbot_plugin_livingmemory.core.page_api_modules.timeline_handler as timeline_mod
+    import astrbot_plugin_livingmemory.core.page_api_modules.topic_handler as topic_mod
 
     # Patch all modules that use request
-    modules = [mod, memory_mod, recall_mod, graph_mod, session_mod]
+    modules = [
+        mod,
+        memory_mod,
+        recall_mod,
+        graph_mod,
+        session_mod,
+        timeline_mod,
+        topic_mod,
+    ]
     old_values = []
 
     for module in modules:
@@ -1536,6 +1546,102 @@ class TestTestRecall:
         item = result["data"]["results"][0]
         assert item["score_breakdown"]["graph_vector_score"] == 0.4
         assert item["metadata"]["document_keyword_score"] == 0.1
+
+
+class TestSharedTopicQuerySettings:
+    @staticmethod
+    def _topic_payload():
+        return {
+            "definitions": {
+                "recall_top_k": {
+                    "default": 3,
+                    "type": "int",
+                    "category": "recall",
+                }
+            },
+            "overrides": {},
+            "effective": {"recall_top_k": 3},
+        }
+
+    @staticmethod
+    def _timeline_payload():
+        from astrbot_plugin_livingmemory.core.timeline_settings import (
+            TIMELINE_SETTING_DEFINITIONS,
+            effective_timeline_settings,
+        )
+
+        return {
+            "definitions": TIMELINE_SETTING_DEFINITIONS,
+            "overrides": {"recall_engine.recent_user_weight": 0.30},
+            "effective": effective_timeline_settings(
+                {"recall_engine.recent_user_weight": 0.30}
+            ),
+        }
+
+    @pytest.mark.asyncio
+    async def test_topic_settings_include_shared_query_controls(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.get_topic_runtime_settings = AsyncMock(
+            return_value=self._topic_payload()
+        )
+        engine.topic_build_manager = SimpleNamespace(
+            has_active_builds=lambda: False
+        )
+        api.plugin.initializer.get_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+
+        result = await api.get_topic_settings()
+
+        assert result["status"] == "ok"
+        data = result["data"]
+        assert data["effective"]["recall_engine.recent_user_weight"] == 0.30
+        assert data["definitions"]["recall_engine.inject_with_recent_context"][
+            "shared_query_setting"
+        ] is True
+
+    @pytest.mark.asyncio
+    async def test_topic_update_splits_topic_and_shared_changes(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.get_topic_runtime_settings = AsyncMock(
+            return_value=self._topic_payload()
+        )
+        engine.update_topic_runtime_settings = AsyncMock(
+            return_value=self._topic_payload()
+        )
+        engine.topic_build_manager = SimpleNamespace(
+            has_active_builds=lambda: False
+        )
+        initializer = api.plugin.initializer
+        initializer.get_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+        initializer.update_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+        req = _mock_page_request(
+            get_json={
+                "changes": {
+                    "recall_top_k": 4,
+                    "recall_engine.recent_user_weight": 0.25,
+                },
+                "reset_keys": ["recall_engine.assistant_context_mode"],
+                "reset_all": False,
+            }
+        )
+
+        with _patch_page_request(req):
+            result = await api.update_topic_settings()
+
+        assert result["status"] == "ok"
+        engine.update_topic_runtime_settings.assert_awaited_once_with(
+            {"recall_top_k": 4}, reset_keys=[], reset_all=False
+        )
+        initializer.update_timeline_runtime_settings.assert_awaited_once_with(
+            {"recall_engine.recent_user_weight": 0.25},
+            reset_keys=["recall_engine.assistant_context_mode"],
+            reset_all=False,
+        )
 
 
 class TestGraphEndpoints:

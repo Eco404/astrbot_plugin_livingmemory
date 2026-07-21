@@ -83,8 +83,8 @@ class RecallPipelineResult:
 class RecallPipeline:
     """Build weighted query branches, retrieve, filter and diversify results."""
 
-    _USER_CONTEXT_WEIGHT = 0.65
-    _ASSISTANT_LOW_WEIGHT = 0.25
+    _USER_CONTEXT_WEIGHT = 0.45
+    _ASSISTANT_CONTEXT_WEIGHT = 0.40
     _CROSS_BRANCH_BONUS = 0.03
 
     def __init__(self, memory_engine, config_manager=None):
@@ -95,13 +95,13 @@ class RecallPipeline:
         manager = self.config_manager
         if manager is None:
             return default
-        getter = getattr(manager, "get", None)
-        if callable(getter):
-            return getter(f"recall_engine.{key}", default)
         if isinstance(manager, dict):
             recall = manager.get("recall_engine", manager)
             if isinstance(recall, dict):
                 return recall.get(key, default)
+        getter = getattr(manager, "get", None)
+        if callable(getter):
+            return getter(f"recall_engine.{key}", default)
         return default
 
     @classmethod
@@ -157,21 +157,32 @@ class RecallPipeline:
         )[-4:]
         user_parts = self._unique_role_parts(normalized_messages, "user")
         assistant_parts = self._unique_role_parts(normalized_messages, "assistant")
+        user_weight = self._clamp(
+            float(self._config("recent_user_weight", self._USER_CONTEXT_WEIGHT))
+        )
+        assistant_weight = self._clamp(
+            float(
+                self._config(
+                    "recent_assistant_weight",
+                    self._ASSISTANT_CONTEXT_WEIGHT,
+                )
+            )
+        )
 
         if user_parts:
             branches.append(
                 RecallQueryBranch(
                     name="recent_user",
                     text=" | ".join(user_parts),
-                    weight=self._USER_CONTEXT_WEIGHT,
+                    weight=user_weight,
                     role="user",
                 )
             )
         if assistant_parts and mode != "exclude":
             weight = (
-                self._ASSISTANT_LOW_WEIGHT
+                assistant_weight * 0.5
                 if mode == "low_weight"
-                else self._USER_CONTEXT_WEIGHT
+                else assistant_weight
             )
             branches.append(
                 RecallQueryBranch(
