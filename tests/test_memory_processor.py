@@ -519,8 +519,8 @@ async def test_process_group_chat_sets_interaction_type():
 
 
 @pytest.mark.asyncio
-async def test_process_group_chat_extracts_participants():
-    """群聊路径应正确提取 participants 字段。"""
+async def test_process_group_chat_extracts_participants_from_message_identity():
+    """Participant display data must come from messages, not LLM inventions."""
     llm = _DummyLLMProvider(
         """{
             "summary":"群聊讨论了 AI 工具的使用效果",
@@ -542,7 +542,18 @@ async def test_process_group_chat_extracts_participants():
     assert "participants" in metadata
     assert "张三" in metadata["participants"]
     assert "李四" in metadata["participants"]
-    assert "王五" in metadata["participants"]
+    assert "王五" not in metadata["participants"]
+    assert "我(Bot: Bot)" in metadata["participants"]
+    assert metadata["role_bindings"]["narrator_actor_id"] == (
+        "aiocqhttp:assistant:bot"
+    )
+    assert {
+        actor["actor_id"] for actor in metadata["role_bindings"]["actors"]
+    } == {
+        "aiocqhttp:human:10001",
+        "aiocqhttp:human:10002",
+        "aiocqhttp:assistant:bot",
+    }
 
 
 @pytest.mark.asyncio
@@ -576,8 +587,8 @@ async def test_process_group_chat_dual_channel_summary():
 
 
 @pytest.mark.asyncio
-async def test_process_group_chat_missing_participants_uses_default():
-    """群聊 LLM 响应缺少 participants 字段时，应使用空列表默认值。"""
+async def test_process_group_chat_missing_llm_participants_uses_actor_snapshot():
+    """Missing LLM participants must not discard deterministic speakers."""
     llm = _DummyLLMProvider(
         """{
             "summary":"群聊讨论了一些话题",
@@ -598,6 +609,7 @@ async def test_process_group_chat_missing_participants_uses_default():
     # 缺少 participants 时应补充默认空列表
     assert "participants" in metadata
     assert isinstance(metadata["participants"], list)
+    assert metadata["participants"] == ["张三", "李四", "我(Bot: Bot)"]
 
 
 @pytest.mark.asyncio

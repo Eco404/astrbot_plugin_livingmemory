@@ -18,6 +18,7 @@ from astrbot_plugin_livingmemory.core.managers.topic_build_manager import (
 from astrbot_plugin_livingmemory.core.models.identity_profile import (
     AuthoritativeIdentityStore,
 )
+from astrbot_plugin_livingmemory.core.models.conversation_models import Message
 from astrbot_plugin_livingmemory.core.managers.topic_maintenance_manager import (
     TopicMaintenanceManager,
 )
@@ -1533,7 +1534,7 @@ def test_topic_prompts_include_only_matching_authoritative_identity_profiles():
     assert "authoritative_identities" in manager._synthesis_prompt("{}")
 
 
-def test_fragment_role_map_converts_bot_first_person_to_named_third_person():
+def test_fragment_role_map_preserves_bot_first_person_with_actor_anchor():
     manager = TopicBuildManager(
         ":memory:",
         None,
@@ -1558,6 +1559,22 @@ def test_fragment_role_map_converts_bot_first_person_to_named_third_person():
         persona_id="测试助手",
         content="我陪示例甲核对了测试结果",
         summary="我陪示例甲核对测试结果",
+        role_bindings={
+            "schema_version": 1,
+            "narrator_actor_id": "qq:assistant:bot-1",
+            "actors": [
+                {
+                    "actor_id": "qq:assistant:bot-1",
+                    "actor_type": "assistant",
+                    "observed_names": ["测试助手"],
+                },
+                {
+                    "actor_id": "qq:human:10000001",
+                    "actor_type": "human",
+                    "observed_names": ["示例甲"],
+                },
+            ],
+        },
     )
 
     payload, _, _ = manager._fragment_llm_context([candidate])
@@ -1565,39 +1582,93 @@ def test_fragment_role_map_converts_bot_first_person_to_named_third_person():
     assert payload["conversation_roles"]["timeline_narration"] == (
         "first_person_assistant"
     )
-    assert payload["conversation_roles"]["timeline_narrators"] == {"T1": "测试助手"}
+    assert payload["conversation_roles"]["timeline_narrators"] == {
+        "T1": "qq:assistant:bot-1"
+    }
     assert payload["conversation_roles"]["human_participants"][0][
-        "display_name"
-    ] == "示例甲"
-    with pytest.raises(TopicBuildValidationError, match="first-person"):
-        manager._validate_third_person_fragment(
-            "测试核对",
-            "我陪示例甲核对测试结果",
-            [],
-            [candidate],
-        )
-    with pytest.raises(TopicBuildValidationError, match="display name"):
-        manager._validate_third_person_fragment(
-            "测试核对",
-            "唯陪用户核对测试结果",
-            [],
-            [candidate],
-        )
-    manager._validate_third_person_fragment(
+        "observed_names"
+    ] == ["示例甲"]
+    manager._validate_role_anchored_fragment(
         "测试核对",
-        "唯陪示例甲核对测试结果",
-        [{"content": "示例甲确认结果符合预期"}],
+        "我陪示例甲核对测试结果",
+        [],
         [candidate],
     )
+    with pytest.raises(TopicBuildValidationError, match="display name"):
+        manager._validate_role_anchored_fragment(
+            "测试核对",
+            "我陪用户核对测试结果",
+            [],
+            [candidate],
+        )
     fragment = _topic_fragment(1)
     fragment.metadata = {
-        "narrative_schema_version": "third_person_roles_v1",
+        "narrative_schema_version": "first_person_assistant_roles_v2",
         "conversation_roles": manager._conversation_role_payload([candidate]),
     }
     synthesis_payload, _ = manager._synthesis_llm_context([fragment])
-    assert "timeline-role-map" not in json.dumps(
-        synthesis_payload, ensure_ascii=False
+    assert "qq:assistant:bot-1" in json.dumps(synthesis_payload, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_legacy_group_timeline_loads_raw_identity_evidence():
+    messages = [
+        Message(
+            id=10,
+            session_id="qq:GroupMessage:g1",
+            role="user",
+            content="我觉得应该测试",
+            sender_id="u1",
+            sender_name="示例甲",
+            group_id="g1",
+            platform="qq",
+        ),
+        Message(
+            id=11,
+            session_id="qq:GroupMessage:g1",
+            role="assistant",
+            content="我会协助测试",
+            sender_id="bot1",
+            sender_name="示例甲",
+            group_id="g1",
+            platform="qq",
+            metadata={"is_bot_message": True},
+        ),
+    ]
+    evidence_store = SimpleNamespace(
+        get_messages_by_id_span=AsyncMock(return_value=messages)
     )
+    manager = TopicBuildManager(
+        ":memory:", None, None, conversation_store=evidence_store
+    )
+    candidate = TimelineTopicCandidate(
+        memory_uid="legacy-group",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:GroupMessage:g1",
+        content="我和示例甲讨论测试",
+        summary="我和示例甲讨论测试",
+        source_window={"first_message_id": 10, "last_message_id": 11},
+    )
+
+    await manager._prepare_candidate_evidence([candidate])
+
+    assert candidate.role_bindings["narrator_actor_id"] == "qq:assistant:bot1"
+    assistant = next(
+        actor
+        for actor in candidate.role_bindings["actors"]
+        if actor["actor_type"] == "assistant"
+    )
+    assert assistant["observed_names"] == ["助手"]
+    assert "assistant_name_collides_with_human" in candidate.features[
+        "ambiguity_flags"
+    ]
+    assert candidate.features["evidence_status"] == "attached"
+    assert [item["message_id"] for item in candidate.features["raw_evidence"]] == [
+        10,
+        11,
+    ]
 
 
 @pytest.mark.asyncio

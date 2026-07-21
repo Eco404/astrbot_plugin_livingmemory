@@ -200,7 +200,7 @@ class TopicRecallPipeline:
         visible_message_start_index: int | None = None,
         visible_message_end_index: int | None = None,
     ) -> TopicFragmentRecallOutcome:
-        """Recall formal third-person fragments owned by the selected Topics."""
+        """Recall formal role-anchored fragments owned by selected Topics."""
         if not topic_results or limit <= 0:
             return TopicFragmentRecallOutcome([], [], 0, 0.0)
         rows = await self.retriever.store.list_active_fragments_for_topics(
@@ -210,7 +210,7 @@ class TopicRecallPipeline:
             row
             for row in rows
             if row["fragment"].metadata.get("narrative_schema_version")
-            == "third_person_roles_v1"
+            in {"first_person_assistant_roles_v2", "third_person_roles_v1"}
         ]
         available_count = len(safe_rows)
         if not safe_rows or not branches:

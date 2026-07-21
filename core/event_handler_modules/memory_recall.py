@@ -482,7 +482,10 @@ class MemoryRecall:
                 "confidence": item.fragment.confidence,
                 "source_timeline_count": len(item.fragment.timeline_uids),
                 "context_coverage": item.context_coverage,
-                "narrative_perspective": "third_person",
+                "narrative_perspective": "first_person_assistant",
+                "narrator_actor_id": item.fragment.metadata.get(
+                    "conversation_roles", {}
+                ).get("timeline_narrators", {}),
                 "started_at": item.fragment.started_at,
                 "ended_at": item.fragment.ended_at,
             },

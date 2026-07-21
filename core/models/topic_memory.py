@@ -179,6 +179,10 @@ class TimelineTopicCandidate:
     time_cluster_key: str = ""
     features: dict[str, Any] = field(default_factory=dict)
     persona_id: str | None = None
+    role_bindings: dict[str, Any] = field(default_factory=dict)
+    source_window: dict[str, Any] = field(default_factory=dict)
+    edit_origin: str | None = None
+    traceability: str | None = None
 
 
 @dataclass(slots=True)

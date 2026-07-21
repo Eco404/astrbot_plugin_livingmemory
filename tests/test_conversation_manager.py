@@ -33,6 +33,9 @@ class _DummyEvent:
     def get_platform_name(self):
         return "test"
 
+    def get_self_id(self):
+        return "bot-1"
+
 
 class _DummyTelegramEvent(_DummyEvent):
     def __init__(
@@ -85,11 +88,37 @@ async def test_conversation_manager_add_and_get_context(tmp_path: Path):
 
     messages = await manager.get_messages("test:private:s1", limit=10)
     assert len(messages) == 2
+    assert messages[0].metadata["actor_id"] == "test:human:u1"
+    assert messages[1].sender_id == "bot-1"
+    assert messages[1].sender_name == "bot-1"
+    assert messages[1].metadata["actor_id"] == "test:assistant:bot-1"
 
     session = await manager.get_session_info("test:private:s1")
     assert session is not None
     assert session.message_count == 2
 
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_group_assistant_never_inherits_triggering_user_name(tmp_path: Path):
+    store = ConversationStore(str(tmp_path / "group-identity.db"))
+    await store.initialize()
+    manager = ConversationManager(store=store)
+    event = _DummyEvent("test:GroupMessage:g1", group=True)
+
+    message = await manager.add_message_from_event(
+        event, role="assistant", content="reply"
+    )
+
+    assert message.sender_id == "bot-1"
+    assert message.sender_name == "bot-1"
+    assert message.sender_name != event.get_sender_name()
+    assert message.metadata == {
+        "is_bot_message": True,
+        "actor_type": "assistant",
+        "actor_id": "test:assistant:bot-1",
+    }
     await store.close()
 
 
