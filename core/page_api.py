@@ -184,6 +184,12 @@ class PluginPageApi:
             "LivingMemory Page unindexed Timeline list",
         )
         register(
+            f"{PAGE_API_PREFIX}/topics/relations/recompute",
+            self.recompute_topic_relations,
+            ["POST"],
+            "LivingMemory Page recompute Topic relations",
+        )
+        register(
             f"{PAGE_API_PREFIX}/topics/build/start",
             self.start_topic_build,
             ["POST"],
@@ -407,7 +413,17 @@ class PluginPageApi:
         store = ready.get("identity_profile_store")
         if store is None:
             return self.utils.error("人物资料存储尚未初始化")
-        return await self.identity_handler.list_profiles(store)
+        return await self.identity_handler.list_profiles(
+            store,
+            platform_manager=getattr(self.plugin.context, "platform_manager", None),
+            conversation_manager=ready.get("conversation_manager"),
+        )
+
+    async def recompute_topic_relations(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.recompute_relations(ready["memory_engine"])
 
     async def save_identity_profiles(self):
         ready, error = await self._ensure_plugin_ready()
@@ -423,6 +439,8 @@ class PluginPageApi:
         return await self.identity_handler.save_profiles(
             store,
             topic_build_active=topic_build_active,
+            platform_manager=getattr(self.plugin.context, "platform_manager", None),
+            conversation_manager=ready.get("conversation_manager"),
         )
 
     # ==================== 辅助方法 ====================

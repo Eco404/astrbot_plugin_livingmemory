@@ -22,6 +22,7 @@ from ..models.identity_profile import (
     identity_prompt_payload,
 )
 from ..models.conversation_models import build_role_bindings, stable_actor_id
+from ..models.platform_identity import canonical_platform
 from ..models.topic_memory import (
     TimelineTopicCandidate,
     TopicAtomSource,
@@ -39,8 +40,8 @@ from ..topic_settings import TOPIC_SETTINGS_REVISION
 from .topic_maintenance_manager import TopicMaintenanceManager
 
 
-_FRAGMENT_PROMPT_VERSION = "topic-fragment-v9-first-person-actor-anchor"
-_SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v6-first-person-actor-anchor"
+_FRAGMENT_PROMPT_VERSION = "topic-fragment-v10-canonical-actor-anchor"
+_SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v7-canonical-actor-anchor"
 _COMPONENT_REVIEW_PROMPT_VERSION = "topic-component-review-v1-retrieval-boundary"
 _NARRATIVE_SCHEMA_VERSION = "first_person_assistant_roles_v2"
 _SUPPORTED_NARRATIVE_SCHEMA_VERSIONS = {
@@ -48,7 +49,7 @@ _SUPPORTED_NARRATIVE_SCHEMA_VERSIONS = {
     "third_person_roles_v1",
 }
 _MATCHING_ALGORITHM_VERSION = 6
-_RELATION_ALGORITHM_VERSION = 4
+_RELATION_ALGORITHM_VERSION = 6
 _CONFIDENCE_CALIBRATION_VERSION = 1
 
 
@@ -178,6 +179,32 @@ class TopicBuildManager:
     def has_active_builds(self) -> bool:
         """Return whether a build currently holds one of this manager's space locks."""
         return any(lock.locked() for lock in self._space_locks.values())
+
+    async def recompute_topic_relations(self, memory_space_id: str) -> dict[str, Any]:
+        """Replace only the derived relation graph using persisted Topic data."""
+        if not memory_space_id:
+            raise ValueError("memory_space_id is required")
+        lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeError("Topic build is already running for this memory space")
+        async with lock:
+            topics = await self.store.list_topics(
+                memory_space_id,
+                status=TopicMemoryStatus.ACTIVE,
+                limit=5000,
+            )
+            run_uid = f"relation-recompute:{uuid.uuid4()}"
+            relations = self._derive_topic_relations(run_uid, topics)
+            relation_count = await self.store.replace_topic_relations(
+                memory_space_id,
+                relations,
+            )
+            return {
+                "memory_space_id": memory_space_id,
+                "topic_count": len(topics),
+                "relation_count": relation_count,
+                "algorithm_version": _RELATION_ALGORITHM_VERSION,
+            }
 
     async def build_space(
         self,
@@ -1995,7 +2022,7 @@ class TopicBuildManager:
             self.config.get("related_topic_similarity_threshold", 0.60)
         )
         max_degree = max(1, int(self.config.get("related_topic_top_n", 3)))
-        candidate_limit = max(5, max_degree * 2)
+        candidate_limit = max(8, max_degree * 4)
         rankings: dict[str, list[tuple[float, str]]] = {}
         topic_by_uid = {topic.topic_uid: topic for topic in topics}
         keyword_sets = {
@@ -2036,6 +2063,17 @@ class TopicBuildManager:
             }
             for uid, candidates in rankings.items()
         }
+        rank_margins: dict[str, dict[str, float]] = {}
+        for uid, candidates in rankings.items():
+            margins: dict[str, float] = {}
+            for index, (similarity, other_uid) in enumerate(candidates):
+                next_similarity = (
+                    float(candidates[index + 1][0])
+                    if index + 1 < len(candidates)
+                    else threshold
+                )
+                margins[other_uid] = max(0.0, float(similarity) - next_similarity)
+            rank_margins[uid] = margins
         pair_candidates: dict[tuple[str, str], float] = {}
         for left_uid, candidates in rankings.items():
             for similarity, right_uid in candidates[:candidate_limit]:
@@ -2052,6 +2090,15 @@ class TopicBuildManager:
             reciprocal_candidate = (
                 left_rank <= candidate_limit and right_rank <= candidate_limit
             )
+            mutual_nearest = left_rank == 1 and right_rank == 1
+            distinctive_mutual = len(topics) >= 4 and mutual_nearest and (
+                similarity >= max(0.78, threshold + 0.12)
+                or (
+                    similarity >= max(0.72, threshold + 0.10)
+                    and rank_margins[left_uid].get(right_uid, 0.0) >= 0.025
+                    and rank_margins[right_uid].get(left_uid, 0.0) >= 0.025
+                )
+            )
             context = self._topic_relation_context(
                 topic_by_uid[left_uid],
                 topic_by_uid[right_uid],
@@ -2064,6 +2111,9 @@ class TopicBuildManager:
                 right_text_tokens=text_token_sets[right_uid],
                 semantic_similarity=similarity,
                 strong_reciprocal=reciprocal_core,
+                neighborhood_supported=reciprocal_candidate,
+                distinctive_mutual=distinctive_mutual,
+                relation_threshold=threshold,
             )
             if not context["contextual_match"]:
                 continue
@@ -2071,16 +2121,18 @@ class TopicBuildManager:
                 "multiple_discriminative_keywords": 0.040,
                 "single_discriminative_keyword": 0.025,
                 "shared_distinctive_identifier": 0.035,
-                "shared_timeline_with_semantic_support": 0.035,
+                "shared_timeline_with_semantic_support": 0.010,
                 "weighted_lexical_overlap": 0.025,
                 "strong_reciprocal_semantics": 0.015,
+                "strong_neighborhood_semantics": 0.010,
+                "distinctive_mutual_semantics": 0.020,
             }.get(str(context["evidence_kind"]), 0.0)
             selection_score = (
                 float(similarity)
                 + (0.035 if reciprocal_core else 0.0)
                 + (0.015 if reciprocal_candidate else 0.0)
                 + evidence_bonus
-                + min(0.025, float(context["source_overlap"]) * 0.05)
+                + min(0.010, float(context["source_overlap"]) * 0.01)
             )
             eligible.append(
                 {
@@ -2092,6 +2144,9 @@ class TopicBuildManager:
                     "right_rank": right_rank,
                     "reciprocal_core": reciprocal_core,
                     "reciprocal_candidate": reciprocal_candidate,
+                    "mutual_nearest": mutual_nearest,
+                    "left_margin": rank_margins[left_uid].get(right_uid, 0.0),
+                    "right_margin": rank_margins[right_uid].get(left_uid, 0.0),
                     "context": context,
                 }
             )
@@ -2105,43 +2160,115 @@ class TopicBuildManager:
         )
         selected: dict[tuple[str, str], dict[str, Any]] = {}
         degree: Counter[str] = Counter()
+        coverage_bonus = 0.10
 
-        # Preserve every supported reciprocal core edge first.  Because each
-        # endpoint can have at most ``max_degree`` reciprocal Top-N neighbors,
-        # this cannot exceed the degree budget and prevents a merely unilateral
-        # edge from displacing an obvious mutual relationship.
-        for item in eligible:
-            if not item["reciprocal_core"]:
-                continue
+        # Optimize one explicit objective instead of running several ordering-
+        # sensitive greedy passes.  An uncovered endpoint is valuable, but a
+        # weak edge cannot outrank a substantially stronger supported edge.
+        while True:
+            feasible: list[tuple[float, dict[str, Any]]] = []
+            for item in eligible:
+                pair = (str(item["left_uid"]), str(item["right_uid"]))
+                if pair in selected:
+                    continue
+                if degree[pair[0]] >= max_degree or degree[pair[1]] >= max_degree:
+                    continue
+                marginal = float(item["selection_score"]) + coverage_bonus * sum(
+                    degree[uid] == 0 for uid in pair
+                )
+                feasible.append((marginal, item))
+            if not feasible:
+                break
+            _marginal, item = max(
+                feasible,
+                key=lambda entry: (
+                    entry[0],
+                    float(entry[1]["selection_score"]),
+                    -max(int(entry[1]["left_rank"]), int(entry[1]["right_rank"])),
+                    str(entry[1]["right_uid"]),
+                    str(entry[1]["left_uid"]),
+                ),
+            )
             pair = (str(item["left_uid"]), str(item["right_uid"]))
+            item["selection_reason"] = (
+                "coverage_quality_objective"
+                if degree[pair[0]] == 0 or degree[pair[1]] == 0
+                else "quality_fill"
+            )
             selected[pair] = item
             degree[pair[0]] += 1
             degree[pair[1]] += 1
 
-        # Then give each remaining Topic a chance to keep its strongest
-        # supported unilateral edge.
-        best_by_topic: dict[str, dict[str, Any]] = {}
-        for item in eligible:
-            for uid in (str(item["left_uid"]), str(item["right_uid"])):
-                best_by_topic.setdefault(uid, item)
-        for uid in sorted(best_by_topic):
-            item = best_by_topic[uid]
+        # If an eligible Topic is still isolated only because its neighbor is
+        # saturated, globally choose the best safe edge swap.  The displaced
+        # endpoint must remain connected, so coverage can improve but never
+        # regress.  Re-evaluating all plans after every swap avoids UID/list
+        # ordering deciding which orphan wins.
+        while True:
+            swap_plans: list[
+                tuple[float, dict[str, Any], list[tuple[str, str]]]
+            ] = []
+            for item in eligible:
+                pair = (str(item["left_uid"]), str(item["right_uid"]))
+                if pair in selected or not any(degree[uid] == 0 for uid in pair):
+                    continue
+                replacements: list[tuple[str, str]] = []
+                valid = True
+                for endpoint in (uid for uid in pair if degree[uid] >= max_degree):
+                    choices = []
+                    for old_pair, old_item in selected.items():
+                        if endpoint not in old_pair:
+                            continue
+                        other_uid = old_pair[1] if old_pair[0] == endpoint else old_pair[0]
+                        if degree[other_uid] <= 1:
+                            continue
+                        choices.append((old_pair, old_item))
+                    if not choices:
+                        valid = False
+                        break
+                    weakest_pair, _weakest_item = min(
+                        choices,
+                        key=lambda entry: (
+                            float(entry[1]["selection_score"]),
+                            entry[0],
+                        ),
+                    )
+                    if weakest_pair not in replacements:
+                        replacements.append(weakest_pair)
+                if not valid:
+                    continue
+                projected = Counter(degree)
+                removed_quality = 0.0
+                for old_pair in replacements:
+                    old_item = selected[old_pair]
+                    projected[old_pair[0]] -= 1
+                    projected[old_pair[1]] -= 1
+                    removed_quality += float(old_item["selection_score"])
+                if any(projected[uid] >= max_degree for uid in pair):
+                    continue
+                coverage_gain = sum(projected[uid] == 0 for uid in pair)
+                quality_delta = float(item["selection_score"]) - removed_quality
+                objective_delta = coverage_bonus * coverage_gain + quality_delta
+                if objective_delta < 0.0:
+                    continue
+                swap_plans.append((objective_delta, item, replacements))
+            if not swap_plans:
+                break
+            _delta, item, replacements = max(
+                swap_plans,
+                key=lambda plan: (
+                    plan[0],
+                    float(plan[1]["selection_score"]),
+                    str(plan[1]["right_uid"]),
+                    str(plan[1]["left_uid"]),
+                ),
+            )
+            for old_pair in replacements:
+                selected.pop(old_pair)
+                degree[old_pair[0]] -= 1
+                degree[old_pair[1]] -= 1
             pair = (str(item["left_uid"]), str(item["right_uid"]))
-            if pair in selected:
-                continue
-            if degree[pair[0]] >= max_degree or degree[pair[1]] >= max_degree:
-                continue
-            selected[pair] = item
-            degree[pair[0]] += 1
-            degree[pair[1]] += 1
-
-        # Then fill the remaining degree budget with the strongest edges.
-        for item in eligible:
-            pair = (str(item["left_uid"]), str(item["right_uid"]))
-            if pair in selected:
-                continue
-            if degree[pair[0]] >= max_degree or degree[pair[1]] >= max_degree:
-                continue
+            item["selection_reason"] = "orphan_coverage_swap"
             selected[pair] = item
             degree[pair[0]] += 1
             degree[pair[1]] += 1
@@ -2188,6 +2315,14 @@ class TopicBuildManager:
                         "selection_score": round(
                             float(item["selection_score"]), 6
                         ),
+                        "selection_reason": str(item["selection_reason"]),
+                        "mutual_nearest": bool(item["mutual_nearest"]),
+                        "left_similarity_margin": round(
+                            float(item["left_margin"]), 6
+                        ),
+                        "right_similarity_margin": round(
+                            float(item["right_margin"]), 6
+                        ),
                         **context,
                     },
                 )
@@ -2209,6 +2344,9 @@ class TopicBuildManager:
         right_text_tokens: set[str] | None = None,
         semantic_similarity: float = 0.0,
         strong_reciprocal: bool = False,
+        neighborhood_supported: bool = False,
+        distinctive_mutual: bool = False,
+        relation_threshold: float = 0.60,
     ) -> dict[str, Any]:
         """Require multiple, corpus-aware signals for a related-topic edge."""
         left_sources = set(left.metadata.get("source_timeline_uids", []))
@@ -2223,11 +2361,12 @@ class TopicBuildManager:
         keyword_document_frequency = keyword_document_frequency or Counter(
             term for terms in (left_keywords, right_keywords) for term in terms
         )
-        generic_frequency_limit = max(2, math.ceil(max(2, topic_count) * 0.20))
-        shared_keywords = sorted(
+        generic_frequency_limit = max(2, math.ceil(max(2, topic_count) * 0.15))
+        shared_keywords = cls._collapse_redundant_relation_terms(
             term
             for term in left_keywords & right_keywords
             if keyword_document_frequency.get(term, 0) <= generic_frequency_limit
+            and not cls._is_generic_relation_term(term)
         )
         keyword_rarities = {
             term: math.log(
@@ -2253,33 +2392,61 @@ class TopicBuildManager:
             max(2, topic_count),
         )
         evidence_kind = ""
-        if len(shared_keywords) >= 2:
-            evidence_kind = "multiple_discriminative_keywords"
-        elif (
-            shared_keywords
-            and max(keyword_rarities.values(), default=0.0) >= 0.40
-            and semantic_similarity >= 0.68
+        strongest_keyword_rarity = max(keyword_rarities.values(), default=0.0)
+        if (
+            len(shared_keywords) >= 2
+            and semantic_similarity >= max(0.62, relation_threshold + 0.02)
         ):
-            evidence_kind = "single_discriminative_keyword"
-        elif lexical_similarity >= 0.08:
-            evidence_kind = "weighted_lexical_overlap"
+            evidence_kind = "multiple_discriminative_keywords"
         elif (
             any(
                 re.fullmatch(r"[a-z0-9_-]{2,}", term)
                 and re.search(r"[a-z]", term)
                 for term in shared_keywords
             )
-            and lexical_similarity >= 0.04
+            and semantic_similarity >= relation_threshold
         ):
             evidence_kind = "shared_distinctive_identifier"
-        elif shared_sources and (
+        elif (
             shared_keywords
-            or lexical_similarity >= 0.04
-            or source_overlap >= 0.10
+            and strongest_keyword_rarity >= 0.40
+            and semantic_similarity
+            >= (
+                max(0.62, relation_threshold + 0.02)
+                if strongest_keyword_rarity >= 0.70
+                or (
+                    strongest_keyword_rarity >= 0.65
+                    and neighborhood_supported
+                )
+                else max(0.68, relation_threshold + 0.08)
+            )
+        ):
+            evidence_kind = "single_discriminative_keyword"
+        elif (
+            lexical_similarity >= 0.08
+            and semantic_similarity >= max(0.68, relation_threshold + 0.08)
+        ):
+            evidence_kind = "weighted_lexical_overlap"
+        elif (
+            shared_sources
+            and semantic_similarity >= 0.74
+            and (
+                shared_keywords
+                or lexical_similarity >= 0.025
+                or (source_overlap >= 0.50 and semantic_similarity >= 0.78)
+            )
         ):
             evidence_kind = "shared_timeline_with_semantic_support"
         elif strong_reciprocal and semantic_similarity >= 0.81:
             evidence_kind = "strong_reciprocal_semantics"
+        elif (
+            topic_count >= 8
+            and neighborhood_supported
+            and semantic_similarity >= 0.78
+        ):
+            evidence_kind = "strong_neighborhood_semantics"
+        elif distinctive_mutual:
+            evidence_kind = "distinctive_mutual_semantics"
         contextual_match = bool(evidence_kind)
         return {
             "contextual_match": contextual_match,
@@ -2304,7 +2471,6 @@ class TopicBuildManager:
             if normalized:
                 terms.add(normalized)
                 terms.update(re.findall(r"[a-z0-9_-]{2,}", raw_keyword))
-                terms.update(TopicMaintenanceManager.tokenize(raw_keyword))
         return {
             term for term in terms if not cls._is_structural_time_term(term)
         }
@@ -2315,6 +2481,31 @@ class TopicBuildManager:
             term
             for term in TopicMaintenanceManager.tokenize(value)
             if not cls._is_structural_time_term(term)
+            and not cls._is_generic_relation_term(term)
+        }
+
+    @classmethod
+    def _collapse_redundant_relation_terms(
+        cls, values: Iterable[str]
+    ) -> list[str]:
+        """Count overlapping n-grams from one concept as one evidence signal."""
+        result: list[str] = []
+        for term in sorted({str(value) for value in values}, key=lambda v: (-len(v), v)):
+            if any(term in existing or existing in term for existing in result):
+                continue
+            result.append(term)
+        return sorted(result)
+
+    @staticmethod
+    def _is_generic_relation_term(value: str) -> bool:
+        """Reject participant, discourse and abstract connector terms as evidence."""
+        return str(value or "").strip().casefold() in {
+            "我", "你", "他", "她", "它", "我们", "你们", "他们", "她们",
+            "我的", "你的", "他的", "她的", "对方", "用户", "助手", "机器人",
+            "名字", "身份", "确认", "相关", "有关", "内容", "事情", "情况",
+            "问题", "状态", "安排", "计划", "记录", "日常", "近期", "近况",
+            "交流", "互动", "持续", "需要", "需求", "方面", "现场", "边界",
+            "项目",
         }
 
     @staticmethod
@@ -3420,8 +3611,7 @@ class TopicBuildManager:
                     {
                         "message_id": message.id,
                         "role": message.role,
-                        "actor_id": message.metadata.get("actor_id")
-                        or stable_actor_id(
+                        "actor_id": stable_actor_id(
                             message.platform,
                             message.sender_id,
                             "assistant"
@@ -3596,6 +3786,29 @@ class TopicBuildManager:
             if not label or not summary:
                 raise TopicBuildValidationError("fragment label and summary are required")
             source_items = [allowed[uid] for uid in timeline_uids]
+            role_repairs: list[dict[str, Any]] = []
+            label, repaired = self._repair_unambiguous_generic_human_roles(
+                label, source_items
+            )
+            role_repairs.extend(repaired)
+            summary, repaired = self._repair_unambiguous_generic_human_roles(
+                summary, source_items
+            )
+            role_repairs.extend(repaired)
+            for fact in normalized_facts:
+                fact["content"], repaired = (
+                    self._repair_unambiguous_generic_human_roles(
+                        str(fact["content"]), source_items
+                    )
+                )
+                role_repairs.extend(repaired)
+            if role_repairs:
+                validation_repairs.append(
+                    {
+                        "type": "unambiguous_generic_human_role_repair",
+                        "replacements": role_repairs,
+                    }
+                )
             self._validate_role_anchored_fragment(
                 label,
                 summary,
@@ -4631,12 +4844,17 @@ INPUT:
                 existing["resolution_status"] = self._actor_resolution_status(
                     float(existing["identity_confidence"])
                 )
+                if value.get("authoritative_identity"):
+                    existing["authoritative_identity"] = value[
+                        "authoritative_identity"
+                    ]
                 return
             target.append(value)
 
         for item in inputs:
             bindings = item.role_bindings if isinstance(item.role_bindings, dict) else {}
             narrator = str(bindings.get("narrator_actor_id") or "").strip()
+            normalized_actor_ids: dict[str, str] = {}
             evidence_status = str(
                 item.features.get("evidence_status", "not_needed")
             )
@@ -4662,15 +4880,34 @@ INPUT:
                     )
                     if key in actor
                 }
+                actor_type = str(actor.get("actor_type") or "human")
+                sender_id = str(actor.get("sender_id") or "").strip()
+                platform = canonical_platform(actor.get("platform"))
+                if actor_type == "assistant" and item.persona_id:
+                    normalized_actor_id = f"assistant-persona:{item.persona_id}"
+                elif sender_id:
+                    normalized_actor_id = stable_actor_id(
+                        platform,
+                        sender_id,
+                        actor_type,
+                    )
+                else:
+                    normalized_actor_id = str(actor.get("actor_id") or "").strip()
+                original_actor_id = str(actor.get("actor_id") or "").strip()
+                if original_actor_id:
+                    normalized_actor_ids[original_actor_id] = normalized_actor_id
+                normalized["actor_id"] = normalized_actor_id
+                normalized["platform"] = platform or "unknown"
                 normalized["resolution_sources"] = [binding_source]
                 normalized["identity_confidence"] = binding_confidence
                 normalized["resolution_status"] = self._actor_resolution_status(
                     binding_confidence
                 )
-                if actor.get("actor_type") == "assistant":
+                if actor_type == "assistant":
                     append_unique(assistants, normalized)
                 else:
                     append_unique(humans, normalized)
+            narrator = normalized_actor_ids.get(narrator, narrator)
             if not narrator:
                 narrator = f"assistant-persona:{item.persona_id or 'default'}"
                 append_unique(
@@ -4689,9 +4926,27 @@ INPUT:
             timeline_narrators[item.memory_uid] = narrator
 
         for identity in self._candidate_identity_payload(inputs):
+            identity_sender_id = str(
+                identity.get("user_id")
+                or identity.get("display_name")
+                or "unknown"
+            )
+            identity_platform = canonical_platform(identity.get("platform"))
+            wildcard_matches = [
+                actor
+                for actor in humans
+                if not identity_platform
+                and str(actor.get("sender_id") or "").casefold()
+                == identity_sender_id.casefold()
+            ]
             actor_id = (
-                f"{identity.get('platform') or 'unknown'}:human:"
-                f"{identity.get('user_id') or identity.get('display_name') or 'unknown'}"
+                str(wildcard_matches[0]["actor_id"])
+                if len(wildcard_matches) == 1
+                else stable_actor_id(
+                    identity_platform,
+                    identity_sender_id,
+                    "human",
+                )
             )
             append_unique(
                 humans,
@@ -4899,6 +5154,41 @@ INPUT:
                 "fragment must use the mapped human display name instead of a "
                 "generic role"
             )
+
+    def _repair_unambiguous_generic_human_roles(
+        self,
+        value: str,
+        inputs: list[TimelineTopicCandidate],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Repair generic human labels only when one stable human is in scope."""
+        roles = self._conversation_role_payload(inputs)
+        humans = {
+            str(item.get("actor_id") or ""): item
+            for item in roles.get("human_participants", [])
+            if str(item.get("actor_id") or "")
+        }
+        if len(humans) != 1:
+            return value, []
+        human = next(iter(humans.values()))
+        names = self._unique_strings(human.get("observed_names"))
+        names = [name for name in names if name not in {"用户", "对方", "叙述者"}]
+        if not names:
+            return value, []
+        replacement = names[0]
+        pattern = re.compile(
+            r"用户(?!体验|界面|配置|数据|需求|反馈|账户|账号|权限|设置)|对方|叙述者"
+        )
+        repaired, count = pattern.subn(replacement, value)
+        if not count:
+            return value, []
+        return repaired, [
+            {
+                "from": "generic_human_role",
+                "to": replacement,
+                "count": count,
+                "actor_id": str(human.get("actor_id") or ""),
+            }
+        ]
 
     def _validate_role_anchored_synthesis(
         self,

@@ -224,6 +224,24 @@ class TopicHandler:
             logger.error("[PageAPI] 检测未索引 Timeline 失败", exc_info=True)
             return self.utils.error(str(exc))
 
+    async def recompute_relations(self, memory_engine) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        memory_space_id = self.utils.optional_text(payload.get("memory_space_id"))
+        if not memory_space_id:
+            return self.utils.error("memory_space_id 不能为空")
+        if self.has_active_jobs() or memory_engine.topic_build_manager.has_active_builds():
+            return self.utils.error("Topic 构建正在运行，暂时不能重算相关话题")
+        try:
+            result = await memory_engine.topic_build_manager.recompute_topic_relations(
+                memory_space_id
+            )
+            return self.utils.ok(result)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+        except Exception as exc:
+            logger.error("[PageAPI] 重算 Topic 关系失败", exc_info=True)
+            return self.utils.error(str(exc))
+
     async def start_build(self, memory_engine) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         if not memory_engine.topic_memory_enabled:

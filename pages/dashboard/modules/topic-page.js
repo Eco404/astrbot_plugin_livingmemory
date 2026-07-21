@@ -39,6 +39,7 @@ export class TopicPage {
     document.getElementById("topic-maintenance-close")?.addEventListener("click", () => this.closeMaintenance());
     document.getElementById("topic-maintenance-cancel")?.addEventListener("click", () => this.closeMaintenance());
     document.getElementById("topic-maintenance-detect")?.addEventListener("click", () => this.detectUnindexedTimelines());
+    document.getElementById("topic-recompute-relations")?.addEventListener("click", () => this.recomputeRelations());
     document.getElementById("topic-maintenance-select-all")?.addEventListener("change", event => {
       document.querySelectorAll("#topic-maintenance-list .topic-maintenance-checkbox").forEach(input => {
         input.checked = event.currentTarget.checked;
@@ -452,6 +453,27 @@ export class TopicPage {
     }
   }
 
+  async recomputeRelations() {
+    if (!this.currentSpace() || this.activeJobUid) return;
+    const button = document.getElementById("topic-recompute-relations");
+    const status = document.getElementById("topic-maintenance-status");
+    if (button) button.disabled = true;
+    if (status) status.textContent = window.t("topic.recomputingRelations");
+    try {
+      const result = await this.api.post("topics/relations/recompute", {
+        memory_space_id: this.currentSpace(),
+      });
+      if (status) status.textContent = window.t("topic.recomputedRelations", Number(result.relation_count || 0));
+      this.showToast(window.t("topic.recomputedRelations", Number(result.relation_count || 0)));
+      await this.fetch();
+    } catch (error) {
+      if (status) status.textContent = error.message || window.t("topic.recomputeRelationsFailed");
+      this.showToast(error.message || window.t("topic.recomputeRelationsFailed"), true);
+    } finally {
+      if (button) button.disabled = Boolean(this.activeJobUid);
+    }
+  }
+
   updateMaintenanceSelection() {
     const checkboxes = Array.from(document.querySelectorAll("#topic-maintenance-list .topic-maintenance-checkbox"));
     const selected = checkboxes.filter(input => input.checked).length;
@@ -651,7 +673,7 @@ export class TopicPage {
   }
 
   setBuildButtonsDisabled(disabled) {
-    ["topic-build-full", "topic-maintenance"].forEach(id => {
+    ["topic-build-full", "topic-maintenance", "topic-recompute-relations"].forEach(id => {
       const button = document.getElementById(id);
       if (button) button.disabled = Boolean(disabled);
     });

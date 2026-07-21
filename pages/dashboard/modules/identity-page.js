@@ -5,6 +5,7 @@ export class IdentityPage {
     this.api = api;
     this.showToast = showToast;
     this.profiles = [];
+    this.platformOptions = [];
     this.expandedProfiles = new Set();
     this.dirty = false;
     this.loaded = false;
@@ -38,8 +39,9 @@ export class IdentityPage {
     container.innerHTML = `<div class="identity-state">${esc(window.t("common.loading"))}</div>`;
     try {
       const data = await this.api.get("identities");
+      this.platformOptions = Array.isArray(data.platform_options) ? data.platform_options : [];
       this.profiles = Array.isArray(data.profiles)
-        ? data.profiles.map(profile => this.normalize(profile))
+        ? data.profiles.map(profile => this.normalize(profile, true))
         : [];
       this.expandedProfiles.clear();
       this.dirty = false;
@@ -51,9 +53,14 @@ export class IdentityPage {
     }
   }
 
-  normalize(profile = {}) {
+  normalize(profile = {}, existing = false) {
+    const platform = String(profile.platform || "");
+    const known = this.platformOptions.some(option => option.value === platform);
     return {
-      platform: String(profile.platform || ""),
+      platform,
+      platform_aliases: Array.isArray(profile.platform_aliases) ? profile.platform_aliases.map(String) : [],
+      platform_instances: Array.isArray(profile.platform_instances) ? profile.platform_instances.map(String) : [],
+      _platformMode: platform ? (known ? "selected" : "custom") : (existing ? "wildcard" : "unset"),
       user_id: String(profile.user_id || ""),
       display_name: String(profile.display_name || ""),
       aliases: Array.isArray(profile.aliases) ? profile.aliases.map(String) : [],
@@ -65,6 +72,7 @@ export class IdentityPage {
 
   add() {
     const profile = this.normalize();
+    if (this.platformOptions.length === 1) this.selectPlatform(profile, this.platformOptions[0].value);
     this.profiles.push(profile);
     this.expandedProfiles.add(profile);
     this.dirty = true;
@@ -92,6 +100,32 @@ export class IdentityPage {
   }
 
   updateField(event) {
+    const platformMode = event.target.closest("[data-identity-platform-mode]");
+    if (platformMode) {
+      const index = Number(platformMode.dataset.identityIndex);
+      const profile = this.profiles[index];
+      if (!profile) return;
+      const value = platformMode.value;
+      if (value === "__wildcard__") {
+        profile.platform = "";
+        profile.platform_aliases = [];
+        profile.platform_instances = [];
+        profile._platformMode = "wildcard";
+      } else if (value === "__custom__") {
+        profile.platform = "";
+        profile.platform_aliases = [];
+        profile.platform_instances = [];
+        profile._platformMode = "custom";
+      } else if (value) {
+        this.selectPlatform(profile, value);
+      } else {
+        profile.platform = "";
+        profile._platformMode = "unset";
+      }
+      this.dirty = true;
+      this.render();
+      return;
+    }
     const input = event.target.closest("[data-identity-field]");
     if (!input) return;
     const index = Number(input.dataset.identityIndex);
@@ -101,9 +135,18 @@ export class IdentityPage {
       this.profiles[index][field] = this.splitList(input.value);
     } else {
       this.profiles[index][field] = input.value;
+      if (field === "platform") this.profiles[index]._platformMode = "custom";
     }
     this.dirty = true;
     this.updateSaveState();
+  }
+
+  selectPlatform(profile, value) {
+    const option = this.platformOptions.find(item => item.value === value);
+    profile.platform = value;
+    profile.platform_aliases = option?.aliases || [];
+    profile.platform_instances = option?.instance_ids || [];
+    profile._platformMode = "selected";
   }
 
   splitList(value) {
@@ -120,6 +163,7 @@ export class IdentityPage {
       const profile = this.profiles[index];
       profile.user_id = profile.user_id.trim();
       profile.platform = profile.platform.trim();
+      if (profile._platformMode === "unset") throw new Error(window.t("identity.platformRequired", index + 1));
       if (!profile.user_id) throw new Error(window.t("identity.userIdRequired", index + 1));
       const platform = profile.platform.toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
       const userId = profile.user_id.toLocaleLowerCase();
@@ -143,7 +187,8 @@ export class IdentityPage {
     if (button) button.disabled = true;
     try {
       const data = await this.api.post("identities/save", { profiles: this.profiles });
-      this.profiles = (data.profiles || []).map(profile => this.normalize(profile));
+      this.platformOptions = Array.isArray(data.platform_options) ? data.platform_options : this.platformOptions;
+      this.profiles = (data.profiles || []).map(profile => this.normalize(profile, true));
       this.expandedProfiles.clear();
       this.dirty = false;
       this.loaded = true;
@@ -182,6 +227,31 @@ export class IdentityPage {
         <input class="input" type="text" value="${this.attr(value)}" placeholder="${this.attr(window.t(placeholder))}"
           data-identity-index="${index}" data-identity-field="${name}" />
       </label>`;
+    const selectedMode = profile._platformMode === "wildcard"
+      ? "__wildcard__"
+      : profile._platformMode === "custom"
+        ? "__custom__"
+        : profile._platformMode === "selected"
+          ? profile.platform
+          : "";
+    const platformOptions = this.platformOptions.map(option => {
+      const details = [option.display_name || option.value, option.instance_ids?.join(", "), option.value]
+        .filter(Boolean).filter((value, position, values) => values.indexOf(value) === position).join(" · ");
+      return `<option value="${this.attr(option.value)}"${selectedMode === option.value ? " selected" : ""}>${esc(details)}</option>`;
+    }).join("");
+    const platformField = `
+      <label class="identity-field">
+        <span>${esc(window.t("identity.platform"))}</span>
+        <select class="input" data-identity-index="${index}" data-identity-platform-mode>
+          <option value=""${selectedMode === "" ? " selected" : ""}>${esc(window.t("identity.platformChoose"))}</option>
+          ${platformOptions}
+          <option value="__wildcard__"${selectedMode === "__wildcard__" ? " selected" : ""}>${esc(window.t("identity.platformWildcard"))}</option>
+          <option value="__custom__"${selectedMode === "__custom__" ? " selected" : ""}>${esc(window.t("identity.platformCustom"))}</option>
+        </select>
+        ${profile._platformMode === "custom" ? `<input class="input" type="text" value="${this.attr(profile.platform)}"
+          placeholder="${this.attr(window.t("identity.platformPh"))}" data-identity-index="${index}" data-identity-field="platform" />` : ""}
+        ${profile._platformMode === "wildcard" ? `<small class="identity-platform-warning">${esc(window.t("identity.platformWildcardWarning"))}</small>` : ""}
+      </label>`;
     return `
       <article class="identity-card${expanded ? " is-expanded" : ""}">
         <div class="identity-card-header">
@@ -196,7 +266,7 @@ export class IdentityPage {
           <button class="btn btn-danger btn-sm" type="button" data-identity-remove="${index}">${esc(window.t("identity.remove"))}</button>
         </div>
         ${expanded ? `<div class="identity-fields">
-          ${field("platform", "identity.platform", profile.platform, "identity.platformPh")}
+          ${platformField}
           ${field("user_id", "identity.userId", profile.user_id, "identity.userIdPh")}
           ${field("display_name", "identity.displayName", profile.display_name, "identity.displayNamePh")}
           ${field("aliases", "identity.aliases", profile.aliases.join(", "), "identity.aliasesPh")}
