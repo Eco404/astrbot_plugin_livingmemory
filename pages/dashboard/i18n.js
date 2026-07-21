@@ -192,7 +192,7 @@
     "topic.atoms":        { zh: "独立原子", en: "Independent atoms", ru: "Независимые атомы" },
     "topic.links":        { zh: "Timeline 索引", en: "Timeline links", ru: "Связи Timeline" },
     "topic.relations":    { zh: "相关关系", en: "Related links", ru: "Связанные темы" },
-    "topic.relatedTopics": { zh: "相关子话题", en: "Related subtopics", ru: "Связанные подтемы" },
+    "topic.relatedTopics": { zh: "相关话题", en: "Related topics", ru: "Связанные темы" },
     "topic.chooseSpace":  { zh: "请选择记忆空间", en: "Select a memory space", ru: "Выберите пространство памяти" },
     "topic.empty":        { zh: "该空间尚未构建 Topic", en: "No topics built for this space", ru: "Для этого пространства тем пока нет" },
     "topic.readOnly":     { zh: "自动维护，只读", en: "Auto-maintained, read-only", ru: "Автоматически, только чтение" },
