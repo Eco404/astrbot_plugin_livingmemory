@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import math
 import random
@@ -14,6 +15,7 @@ from collections import Counter
 from typing import Any, Iterable
 
 from astrbot.api import logger
+from astrbot.core.agent.tool import FunctionTool, ToolSet
 
 from ...storage.topic_memory_store import TopicMemoryStore
 from ..models.identity_profile import (
@@ -42,9 +44,9 @@ from ..topic_settings import TOPIC_SETTINGS_REVISION
 from .topic_maintenance_manager import TopicMaintenanceManager
 
 
-_FRAGMENT_PROMPT_VERSION = "topic-fragment-v11-fact-actor-links"
-_SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v8-fact-actor-links"
-_COMPONENT_REVIEW_PROMPT_VERSION = "topic-component-review-v1-retrieval-boundary"
+_FRAGMENT_PROMPT_VERSION = "topic-fragment-v13-structured-output"
+_SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v10-structured-output"
+_COMPONENT_REVIEW_PROMPT_VERSION = "topic-component-review-v2-structured-output"
 _NARRATIVE_SCHEMA_VERSION = "first_person_assistant_roles_v3"
 _SUPPORTED_NARRATIVE_SCHEMA_VERSIONS = {
     _NARRATIVE_SCHEMA_VERSION,
@@ -54,6 +56,25 @@ _SUPPORTED_NARRATIVE_SCHEMA_VERSIONS = {
 _MATCHING_ALGORITHM_VERSION = 6
 _RELATION_ALGORITHM_VERSION = 6
 _CONFIDENCE_CALIBRATION_VERSION = 1
+_ACTOR_RELATION_ALIASES = {
+    "affected_person": "subject",
+    "addressed_person": "subject",
+    "beneficiary": "subject",
+    "companion_requested": "subject",
+    "object_of_feeling": "subject",
+    "opinion_holder": "subject",
+    "partner": "subject",
+    "recipient": "subject",
+    "target": "subject",
+    "comforter": "executor",
+    "evaluator": "executor",
+    "helper": "executor",
+    "initiator": "executor",
+    "supporter": "executor",
+    "participant": "mentioned",
+    "questioner": "requester",
+    "recipient_questioner": "requester",
+}
 
 
 class TopicBuildValidationError(ValueError):
@@ -99,6 +120,7 @@ class TopicBuildManager:
         self._rerank_semaphore = asyncio.Semaphore(self.rerank_concurrency)
         self._space_locks: dict[str, asyncio.Lock] = {}
         self._configuration_lock = asyncio.Lock()
+        self._structured_output_capabilities: dict[tuple[str, str], bool] = {}
         self._scheduled: dict[str, asyncio.Task] = {}
         self._scheduled_requests: dict[str, dict[str, Any]] = {}
         self._scheduled_wakeups: dict[str, asyncio.Event] = {}
@@ -338,21 +360,32 @@ class TopicBuildManager:
         run = await self.store.get_maintenance_run(run_uid)
         if run is None:
             raise ValueError(f"Topic maintenance run not found: {run_uid}")
-        status = str(run.get("status") or "")
-        if status == TopicMaintenanceStatus.COMPLETED.value:
-            raise ValueError("Completed Topic maintenance runs cannot be resumed")
-        stage = str(run.get("stage") or "candidate_scan")
-        groups = await self.store.list_candidate_groups(run_uid)
-        if stage in {"pending", "candidate_scan", "candidate_scan_completed"} or not groups:
-            scan = await self.candidate_manager.resume_scan(
+        memory_space_id = str(run.get("memory_space_id") or "").strip()
+        if not memory_space_id:
+            raise ValueError(f"Topic maintenance run has no memory space: {run_uid}")
+        lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
+        async with lock:
+            run = await self.store.get_maintenance_run(run_uid)
+            if run is None:
+                raise ValueError(f"Topic maintenance run not found: {run_uid}")
+            status = str(run.get("status") or "")
+            if status == TopicMaintenanceStatus.COMPLETED.value:
+                raise ValueError("Completed Topic maintenance runs cannot be resumed")
+            stage = str(run.get("stage") or "candidate_scan")
+            groups = await self.store.list_candidate_groups(run_uid)
+            if (
+                stage in {"pending", "candidate_scan", "candidate_scan_completed"}
+                or not groups
+            ):
+                scan = await self.candidate_manager.resume_scan(
+                    run_uid,
+                    progress_callback=progress_callback,
+                )
+                run_uid = str(scan["run_uid"])
+            return await self.build_from_scan(
                 run_uid,
                 progress_callback=progress_callback,
             )
-            run_uid = str(scan["run_uid"])
-        return await self.build_from_scan(
-            run_uid,
-            progress_callback=progress_callback,
-        )
 
     async def build_from_scan(self, run_uid: str, *, progress_callback=None) -> dict[str, Any]:
         """Run one build with the immutable settings captured at task creation."""
@@ -454,7 +487,10 @@ class TopicBuildManager:
                 for uid in incremental_scope.get("affected_topic_uids", [])
                 if str(uid)
             }
-            if run_mode is TopicMaintenanceMode.INCREMENTAL:
+            if (
+                run_mode is TopicMaintenanceMode.INCREMENTAL
+                and affected_topic_uids
+            ):
                 existing = [
                     topic
                     for topic in existing
@@ -559,12 +595,22 @@ class TopicBuildManager:
                     used_existing,
                     require_source_overlap=(
                         run_mode is TopicMaintenanceMode.INCREMENTAL
+                        and bool(affected_topic_uids)
                     ),
                 )
                 if (
                     matched is not None
                     and run_mode is TopicMaintenanceMode.INCREMENTAL
-                    and not incremental_scope
+                    and not (
+                        {
+                            uid
+                            for fragment in component_fragments
+                            for uid in fragment.timeline_uids
+                        }
+                        & set(
+                            matched.metadata.get("source_timeline_uids", [])
+                        )
+                    )
                 ):
                     existing_fragment = await self._existing_topic_fragment(
                         run_uid, matched
@@ -601,6 +647,8 @@ class TopicBuildManager:
                         "atoms": atoms,
                         "links": links,
                         "sources": sources,
+                        "actor_links": actor_links,
+                        "atom_actor_links": atom_actor_links,
                         "matched": matched,
                         "fragments": component_fragments,
                         "synthesis": synthesis,
@@ -638,6 +686,8 @@ class TopicBuildManager:
                 atoms = plan["atoms"]
                 links = plan["links"]
                 sources = plan["sources"]
+                actor_links = plan["actor_links"]
+                atom_actor_links = plan["atom_actor_links"]
                 matched = plan["matched"]
                 fragment_uids = [
                     item.fragment_uid for item in plan["fragments"]
@@ -814,11 +864,6 @@ class TopicBuildManager:
                     run_uid,
                     status=TopicMaintenanceStatus.PENDING,
                 )
-            )
-            raise
-        except Exception as exc:
-            await self.store.finish_group_job(
-                run_uid, group.group_uid, error=str(exc)
             )
             raise
         except Exception as exc:
@@ -1001,7 +1046,11 @@ class TopicBuildManager:
                     llm_payload, ensure_ascii=False, sort_keys=True
                 )
                 prompt = self._fragment_prompt(batch_json)
-                raw = await self._call_llm(prompt, self._fragment_system_prompt())
+                raw = await self._call_llm(
+                    prompt,
+                    self._fragment_system_prompt(),
+                    output_contract="fragments",
+                )
                 async with progress_lock:
                     completed_batches += 1
                     await self._emit(
@@ -1059,6 +1108,7 @@ class TopicBuildManager:
                             + "\n\nThe requested raw evidence has now been attached. "
                             "Return the final fragments and leave evidence_requests empty.",
                             self._fragment_system_prompt(),
+                            output_contract="fragments",
                         )
                         parsed = self._parse_json_object(raw)
                     parsed = self._decode_fragment_refs(
@@ -1082,6 +1132,7 @@ class TopicBuildManager:
                                 prompt, raw, first_exc
                             ),
                             self._fragment_system_prompt(),
+                            output_contract="fragments",
                         )
                         repaired = self._decode_fragment_refs(
                             self._parse_json_object(repaired_raw),
@@ -1131,6 +1182,13 @@ class TopicBuildManager:
                     group.group_uid,
                     error="cancelled before group extraction completed",
                 )
+            )
+            raise
+        except Exception as exc:
+            await self.store.finish_group_job(
+                run_uid,
+                group.group_uid,
+                error=str(exc),
             )
             raise
 
@@ -1674,7 +1732,11 @@ class TopicBuildManager:
             )
         input_json = json.dumps(input_payload, ensure_ascii=False)
         prompt = self._component_review_prompt(input_json)
-        raw = await self._call_llm(prompt, self._component_review_system_prompt())
+        raw = await self._call_llm(
+            prompt,
+            self._component_review_system_prompt(),
+            output_contract="component_review",
+        )
         try:
             parsed = self._parse_json_object(raw)
             return self._decode_component_review_refs(
@@ -1691,6 +1753,7 @@ class TopicBuildManager:
             corrected = await self._call_llm(
                 correction,
                 self._component_review_system_prompt(),
+                output_contract="component_review",
             )
             parsed = self._parse_json_object(corrected)
             return self._decode_component_review_refs(
@@ -2992,7 +3055,11 @@ class TopicBuildManager:
         prompt = self._synthesis_prompt(
             json.dumps(payload, ensure_ascii=False, sort_keys=True)
         )
-        raw = await self._call_llm(prompt, self._synthesis_system_prompt())
+        raw = await self._call_llm(
+            prompt,
+            self._synthesis_system_prompt(),
+            output_contract="synthesis",
+        )
         try:
             parsed = self._decode_synthesis_refs(
                 self._parse_json_object(raw), fact_refs, actor_refs, fragments
@@ -3005,6 +3072,7 @@ class TopicBuildManager:
                 repaired_raw = await self._call_llm(
                     self._validation_correction_prompt(prompt, raw, first_exc),
                     self._synthesis_system_prompt(),
+                    output_contract="synthesis",
                 )
                 parsed = self._decode_synthesis_refs(
                     self._parse_json_object(repaired_raw),
@@ -4791,23 +4859,387 @@ class TopicBuildManager:
             "validation_repairs": validation_repairs,
         }
 
-    async def _call_llm(self, prompt: str, system_prompt: str) -> str:
+    async def _call_llm(
+        self,
+        prompt: str,
+        system_prompt: str,
+        *,
+        output_contract: str | None = None,
+    ) -> str:
         if self.llm_provider is None:
             raise RuntimeError("Topic build requires an LLM Provider")
+        capability_key = self._provider_identity(self.llm_provider)
+        if (
+            output_contract
+            and self._structured_output_capabilities.get(capability_key) is not False
+            and self._provider_accepts_tool_output()
+        ):
+            tool_name, tool_description, parameters = self._structured_output_spec(
+                output_contract
+            )
+            tool = FunctionTool(
+                name=tool_name,
+                description=tool_description,
+                parameters=parameters,
+            )
+            try:
+                response = await self._request_llm(
+                    prompt,
+                    system_prompt,
+                    func_tool=ToolSet([tool]),
+                    tool_choice="required",
+                )
+                payload = self._tool_payload(response, tool_name)
+                if payload is not None:
+                    if (
+                        self._structured_output_capabilities.get(capability_key)
+                        is not True
+                    ):
+                        logger.info(
+                            "[TopicMemory] LLM 工具结构化输出已启用 (%s)",
+                            tool_name,
+                        )
+                    self._structured_output_capabilities[capability_key] = True
+                    return json.dumps(payload, ensure_ascii=False)
+                raw = str(getattr(response, "completion_text", "") or "").strip()
+                if raw:
+                    try:
+                        self._parse_json_object(raw)
+                    except TopicBuildValidationError:
+                        self._disable_structured_output(
+                            capability_key,
+                            "provider ignored the required output tool and returned "
+                            "non-JSON text"
+                        )
+                    else:
+                        self._disable_structured_output(
+                            capability_key,
+                            "provider ignored the required output tool and returned "
+                            "JSON text"
+                        )
+                        return raw
+                self._disable_structured_output(
+                    capability_key,
+                    "provider returned neither output-tool arguments nor JSON text"
+                )
+            except Exception as exc:
+                if not self._is_tool_output_unsupported(exc):
+                    raise
+                self._disable_structured_output(capability_key, str(exc))
+
+        response = await self._request_llm(prompt, system_prompt)
+        return str(response.completion_text)
+
+    async def _request_llm(self, prompt: str, system_prompt: str, **kwargs: Any) -> Any:
         retries = max(1, int(self.config.get("llm_max_retries", 3)))
         last_error: Exception | None = None
         for attempt in range(retries):
             try:
                 async with self._llm_semaphore:
                     response = await self.llm_provider.text_chat(
-                        prompt=prompt, system_prompt=system_prompt
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        **kwargs,
                     )
-                return str(response.completion_text)
+                return response
             except Exception as exc:
                 last_error = exc
                 if attempt + 1 < retries:
                     await asyncio.sleep((2**attempt) + random.uniform(0, 0.5))
         raise RuntimeError(f"Topic LLM request failed: {last_error}") from last_error
+
+    def _provider_accepts_tool_output(self) -> bool:
+        try:
+            parameters = inspect.signature(self.llm_provider.text_chat).parameters
+        except (TypeError, ValueError):
+            return True
+        if any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ):
+            return True
+        return "func_tool" in parameters and "tool_choice" in parameters
+
+    @staticmethod
+    def _tool_payload(response: Any, tool_name: str) -> dict[str, Any] | None:
+        names = list(getattr(response, "tools_call_name", None) or [])
+        arguments = list(getattr(response, "tools_call_args", None) or [])
+        matches = [
+            value
+            for name, value in zip(names, arguments, strict=False)
+            if str(name) == tool_name and isinstance(value, dict)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _is_tool_output_unsupported(exc: Exception) -> bool:
+        message = str(exc).casefold()
+        markers = (
+            "tool call is not supported",
+            "function calling is not supported",
+            "function_calling is not supported",
+            "tool use is not supported",
+            "does not support tool",
+            "unsupported parameter: tools",
+            "unknown field tools",
+            "unknown field: tools",
+            "invalid tools",
+            "invalid function parameters",
+            "tool schema",
+            "function schema",
+            "tools[0]",
+            "tool_choice",
+            "func_tool",
+        )
+        return isinstance(exc, TypeError) or any(marker in message for marker in markers)
+
+    def _disable_structured_output(
+        self,
+        capability_key: tuple[str, str],
+        reason: str,
+    ) -> None:
+        if self._structured_output_capabilities.get(capability_key) is not False:
+            logger.warning(
+                "[TopicMemory] 当前 LLM Provider 无法可靠使用工具结构化输出，"
+                "本次运行回退到 JSON 文本模式: %s",
+                str(reason)[:500],
+            )
+        self._structured_output_capabilities[capability_key] = False
+
+    @classmethod
+    def _structured_output_spec(
+        cls, contract: str
+    ) -> tuple[str, str, dict[str, Any]]:
+        specs = {
+            "fragments": (
+                "submit_topic_fragments",
+                "Submit the final source-grounded Topic fragment extraction result.",
+                cls._fragment_output_schema(),
+            ),
+            "component_review": (
+                "submit_topic_component_review",
+                "Submit the final partition of the supplied Topic fragment references.",
+                cls._component_review_output_schema(),
+            ),
+            "synthesis": (
+                "submit_topic_synthesis",
+                "Submit the final synthesized Topic memory and its grounded atoms.",
+                cls._synthesis_output_schema(),
+            ),
+        }
+        try:
+            return specs[contract]
+        except KeyError as exc:
+            raise ValueError(f"Unknown structured output contract: {contract}") from exc
+
+    @staticmethod
+    def _score_schema() -> dict[str, Any]:
+        return {"type": "number", "minimum": 0.0, "maximum": 1.0}
+
+    @classmethod
+    def _actor_relation_schema(
+        cls,
+        relations: list[str],
+        *,
+        include_source_facts: bool = False,
+    ) -> dict[str, Any]:
+        properties: dict[str, Any] = {
+            "actor_ref": {"type": "string", "minLength": 1},
+            "relation_type": {"type": "string", "enum": relations},
+            "confidence": cls._score_schema(),
+            "display_name_snapshot": {"type": "string"},
+        }
+        required = ["actor_ref", "relation_type", "confidence"]
+        if include_source_facts:
+            properties["source_fact_refs"] = {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+            }
+            required.append("source_fact_refs")
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        }
+
+    @classmethod
+    def _fragment_output_schema(cls) -> dict[str, Any]:
+        all_relations = [
+            "speaker", "narrator", "responder", "subject",
+            "mentioned", "executor", "requester",
+        ]
+        fact_schema = {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "minLength": 1},
+                "content": {"type": "string", "minLength": 1},
+                "importance": cls._score_schema(),
+                "confidence": cls._score_schema(),
+                "source_refs": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                },
+                "actor_refs": {
+                    "type": "array",
+                    "items": cls._actor_relation_schema(all_relations),
+                },
+            },
+            "required": [
+                "type", "content", "importance", "confidence",
+                "source_refs", "actor_refs",
+            ],
+            "additionalProperties": False,
+        }
+        fragment_schema = {
+            "type": "object",
+            "properties": {
+                "label": {"type": "string", "minLength": 1},
+                "summary": {"type": "string", "minLength": 1},
+                "importance": cls._score_schema(),
+                "confidence": cls._score_schema(),
+                "attribution_confidence": cls._score_schema(),
+                "ambiguity_flags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "evidence_requests": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "timeline_ref": {"type": "string", "minLength": 1},
+                            "reason": {"type": "string", "minLength": 1},
+                        },
+                        "required": ["timeline_ref", "reason"],
+                        "additionalProperties": False,
+                    },
+                },
+                "timeline_refs": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                },
+                "keywords": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "maxItems": 12,
+                },
+                "participant_refs": {
+                    "type": "array",
+                    "items": cls._actor_relation_schema(
+                        ["speaker", "narrator", "responder"]
+                    ),
+                },
+                "mentioned_actor_refs": {
+                    "type": "array",
+                    "items": cls._actor_relation_schema(
+                        ["subject", "mentioned", "executor", "requester"]
+                    ),
+                },
+                "facts": {"type": "array", "items": fact_schema, "minItems": 1},
+            },
+            "required": [
+                "label", "summary", "importance", "confidence",
+                "attribution_confidence", "ambiguity_flags", "evidence_requests",
+                "timeline_refs", "keywords", "participant_refs",
+                "mentioned_actor_refs", "facts",
+            ],
+            "additionalProperties": False,
+        }
+        return {
+            "type": "object",
+            "properties": {
+                "fragments": {
+                    "type": "array",
+                    "items": fragment_schema,
+                    "minItems": 1,
+                }
+            },
+            "required": ["fragments"],
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _component_review_output_schema() -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "groups": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "minLength": 1},
+                            "reason": {"type": "string", "minLength": 1},
+                            "fragment_refs": {
+                                "type": "array",
+                                "items": {"type": "string", "minLength": 1},
+                                "minItems": 1,
+                            },
+                        },
+                        "required": ["label", "reason", "fragment_refs"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["groups"],
+            "additionalProperties": False,
+        }
+
+    @classmethod
+    def _synthesis_output_schema(cls) -> dict[str, Any]:
+        relations = [
+            "speaker", "narrator", "responder", "subject",
+            "mentioned", "executor", "requester",
+        ]
+        return {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "minLength": 1},
+                "summary": {"type": "string", "minLength": 1},
+                "importance": cls._score_schema(),
+                "confidence": cls._score_schema(),
+                "actor_links": {
+                    "type": "array",
+                    "items": cls._actor_relation_schema(
+                        relations,
+                        include_source_facts=True,
+                    ),
+                },
+                "atoms": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "minLength": 1},
+                            "content": {"type": "string", "minLength": 1},
+                            "importance": cls._score_schema(),
+                            "confidence": cls._score_schema(),
+                            "source_fact_refs": {
+                                "type": "array",
+                                "items": {"type": "string", "minLength": 1},
+                                "minItems": 1,
+                            },
+                        },
+                        "required": [
+                            "type", "content", "importance", "confidence",
+                            "source_fact_refs",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": [
+                "title", "summary", "importance", "confidence",
+                "actor_links", "atoms",
+            ],
+            "additionalProperties": False,
+        }
 
     async def _get_embeddings(self, texts: list[str]) -> list[list[float]]:
         provider = self.embedding_provider
@@ -4847,7 +5279,8 @@ class TopicBuildManager:
             "Make semantic decisions only; the application owns identity and provenance. "
             "Authoritative identity profiles are immutable facts and override stylistic "
             "or demographic inference. "
-            "Return exactly one strict JSON object without Markdown. Never invent a "
+            "Submit exactly one result through the required output tool. If tool output "
+            "is unavailable, return one strict JSON object without Markdown. Never invent a "
             "source reference, fact, person, event, or relationship. Use the dominant "
             "language of the input."
         )
@@ -4918,6 +5351,9 @@ Reference rules:
   reuse it as if it were a stable account.
 - participant_refs records actual speaker/narrator/responder participation.
   mentioned_actor_refs records subject/mentioned/executor/requester relations.
+- relation_type is a closed enum. participant_refs accepts only speaker, narrator, or
+  responder. mentioned_actor_refs accepts only subject, mentioned, executor, or
+  requester. Fact actor_refs may use any of those seven exact values.
 - Each fact should include actor_refs for every supported semantic actor relation.
   Do not attach a relation when the source does not establish it.
 - Every fact needs one or more source_refs.
@@ -4926,7 +5362,8 @@ Reference rules:
   source_refs; otherwise split it into another grounded fragment.
 
 Output constraints:
-- Return exactly one JSON object and no Markdown or commentary.
+- Submit exactly one result through the required output tool. In fallback mode, return
+  exactly one JSON object without Markdown or commentary.
 - importance and confidence are numbers in [0, 1].
 - Keep labels concise and summaries focused and non-repetitive.
 - keywords should contain no more than 12 short items.
@@ -4935,17 +5372,12 @@ Output constraints:
   guess while requesting evidence. If evidence is already present, return an empty
   evidence_requests array and produce the final fragment.
 
-Required JSON schema:
-{{"fragments":[{{"label":"...","summary":"...","importance":0.0,
-"confidence":0.0,"attribution_confidence":0.0,"ambiguity_flags":[],
-"evidence_requests":[{{"timeline_ref":"T1","reason":"speaker ambiguity"}}],
-"timeline_refs":["T1"],"keywords":["..."],
-"participant_refs":[{{"actor_ref":"A1","relation_type":"speaker","confidence":1.0}}],
-"mentioned_actor_refs":[{{"actor_ref":"unresolved","display_name_snapshot":"朋友",
-"relation_type":"subject","confidence":0.6}}],
-"facts":[{{"type":"factual","content":"...","importance":0.0,
-"confidence":0.0,"source_refs":["T1.A1"],
-"actor_refs":[{{"actor_ref":"A1","relation_type":"subject","confidence":0.8}}]}}]}}]}}
+Required result shape:
+- Root field: fragments.
+- Every fragment includes label, summary, importance, confidence,
+  attribution_confidence, ambiguity_flags, evidence_requests, timeline_refs, keywords,
+  participant_refs, mentioned_actor_refs, and facts.
+- Every fact includes type, content, importance, confidence, source_refs, and actor_refs.
 
 Compact example of merging duplicate evidence when the human display name is 张三:
 source_facts = [{{"ref":"T1.A1","content":"张三喜欢黑咖啡"}},
@@ -4963,8 +5395,9 @@ INPUT:
             "The fragments use explicit actor mappings and may preserve the Bot's "
             "first-person memory voice. Never turn that narrator into the human user. "
             "Make semantic decisions only; the application derives fragment scope "
-            "and full provenance from cited fact refs. Return exactly one strict JSON "
-            "object without Markdown. Authoritative identity profiles are immutable "
+            "and full provenance from cited fact refs. Submit exactly one result through "
+            "the required output tool; use one strict JSON object without Markdown only "
+            "when tool output is unavailable. Authoritative identity profiles are immutable "
             "facts and override stylistic or demographic inference. Use the dominant "
             "language of the input."
         )
@@ -4973,7 +5406,8 @@ INPUT:
     def _component_review_system_prompt() -> str:
         return (
             "You audit the internal structure of one proposed long-term memory "
-            "component. Return exactly one strict JSON object without Markdown. "
+            "component. Submit exactly one result through the required output tool; use "
+            "one strict JSON object without Markdown only when tool output is unavailable. "
             "You may only partition the supplied opaque fragment refs; never add, "
             "drop, duplicate, or rewrite a ref. Use the dominant language of the input."
         )
@@ -5004,12 +5438,13 @@ Decision rules:
    groups. Never emit a ref not present in the input.
 
 Output constraints:
-- Return exactly one JSON object and no Markdown or commentary.
+- Submit exactly one result through the required output tool. In fallback mode, return
+  exactly one JSON object without Markdown or commentary.
 - `label` is a concise description of the retrieval intention, not new memory data.
 - `reason` briefly explains why the listed refs belong together.
 
-Required JSON schema:
-{{"groups":[{{"label":"...","reason":"...","fragment_refs":["P1"]}}]}}
+Required result shape: root field groups; every group contains label, reason, and a
+non-empty fragment_refs array.
 
 INPUT:
 {input_json}"""
@@ -5049,21 +5484,21 @@ Reference rules:
 - actor_refs contains the only actors you may cite. actor_links must copy one supplied
   actor_ref, one supported relation_type, and the source_fact_refs that establish it.
   Never infer that two actors are the same from a nickname.
+- relation_type is a closed enum. Use exactly speaker, narrator, responder, subject,
+  mentioned, executor, or requester; never emit a free-form semantic role.
 - Do not return fragment identifiers. The application derives fragment scope from
   source_fact_refs.
 
 Output constraints:
-- Return exactly one JSON object and no Markdown or commentary.
+- Submit exactly one result through the required output tool. In fallback mode, return
+  exactly one JSON object without Markdown or commentary.
 - title should be concise (at most 40 Chinese characters or similar length).
 - summary should be focused, non-repetitive, and normally under 800 Chinese characters.
 - importance and confidence are numbers in [0, 1].
 
-Required JSON schema:
-{{"title":"...","summary":"...","importance":0.0,"confidence":0.0,
-"actor_links":[{{"actor_ref":"A1","relation_type":"subject","confidence":0.8,
-"source_fact_refs":["F1"]}}],
-"atoms":[{{"type":"factual","content":"...","importance":0.0,
-"confidence":0.0,"source_fact_refs":["F1"]}}]}}
+Required result shape: title, summary, importance, confidence, actor_links, and atoms.
+Every actor link includes actor_ref, relation_type, confidence, and source_fact_refs.
+Every atom includes type, content, importance, confidence, and source_fact_refs.
 
 Compact merge example:
 facts = [{{"ref":"F1","content":"张三喜欢黑咖啡"}},
@@ -5381,22 +5816,33 @@ INPUT:
                 actor_refs,
                 scope=f"fragment {fragment_index} mentioned actors",
             )
-            if any(
-                value["relation_type"] not in {"speaker", "narrator", "responder"}
+            participant_roles = {"speaker", "narrator", "responder"}
+            misplaced_semantic = [
+                value
                 for value in participant_refs
-            ):
-                raise TopicBuildValidationError(
-                    f"fragment {fragment_index} participant_refs has a semantic-only role"
-                )
-            if any(
-                value["relation_type"] not in {
-                    "subject", "mentioned", "executor", "requester"
-                }
+                if value["relation_type"] not in participant_roles
+            ]
+            misplaced_participants = [
+                value
                 for value in mentioned_actor_refs
-            ):
-                raise TopicBuildValidationError(
-                    f"fragment {fragment_index} mentioned_actor_refs has a participant role"
-                )
+                if value["relation_type"] in participant_roles
+            ]
+            participant_refs = [
+                value
+                for value in participant_refs
+                if value["relation_type"] in participant_roles
+            ]
+            mentioned_actor_refs = [
+                value
+                for value in mentioned_actor_refs
+                if value["relation_type"] not in participant_roles
+            ]
+            participant_refs.extend(misplaced_participants)
+            mentioned_actor_refs.extend(misplaced_semantic)
+            participant_refs = self._dedupe_actor_relations(participant_refs)
+            mentioned_actor_refs = self._dedupe_actor_relations(
+                mentioned_actor_refs
+            )
             decoded.append(
                 {
                     **raw,
@@ -5430,7 +5876,9 @@ INPUT:
             if not isinstance(value, dict):
                 raise TopicBuildValidationError(f"{scope} item {index} must be an object")
             actor_ref = str(value.get("actor_ref") or "").strip()
-            relation_type = str(value.get("relation_type") or "").strip()
+            relation_type = cls._normalize_actor_relation(
+                value.get("relation_type")
+            )
             unresolved_label = str(
                 value.get("display_name_snapshot") or value.get("label") or ""
             ).strip()
@@ -5482,6 +5930,28 @@ INPUT:
                 }
             )
         return decoded
+
+    @staticmethod
+    def _normalize_actor_relation(value: Any) -> str:
+        relation = str(value or "").strip().casefold().replace("-", "_")
+        return _ACTOR_RELATION_ALIASES.get(relation, relation)
+
+    @staticmethod
+    def _dedupe_actor_relations(
+        values: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for value in values:
+            key = (
+                str(value.get("actor_id") or ""),
+                str(value.get("relation_type") or ""),
+            )
+            if not all(key) or key in seen:
+                continue
+            seen.add(key)
+            result.append(value)
+        return result
 
     def _synthesis_llm_context(
         self, fragments: list[TopicFragmentDraft]
@@ -6157,7 +6627,9 @@ INPUT:
                     f"actor_link {index} must be an object"
                 )
             actor_ref = str(raw_link.get("actor_ref") or "").strip()
-            relation_type = str(raw_link.get("relation_type") or "").strip()
+            relation_type = self._normalize_actor_relation(
+                raw_link.get("relation_type")
+            )
             if actor_ref not in actor_refs:
                 raise TopicBuildValidationError(
                     f"actor_link {index} references unknown actor {actor_ref}"
@@ -6207,15 +6679,28 @@ INPUT:
     def _validation_correction_prompt(
         original_prompt: str, previous_output: str, error: Exception
     ) -> str:
-        return f"""{original_prompt}
+        task = str(original_prompt).split("\n\nSemantic rules:", 1)[0].strip()
+        input_payload = (
+            str(original_prompt).rsplit("\nINPUT:\n", 1)[-1].strip()
+            if "\nINPUT:\n" in str(original_prompt)
+            else ""
+        )
+        return f"""{task}
 
 CORRECTION REQUIRED:
-The previous response failed validation: {str(error)[:800]}
-Previous response:
+The previous structured result failed validation:
+{str(error)[:800]}
+
+Previous result:
 {str(previous_output)[:12000]}
 
-Return a corrected JSON object only. Re-check every local reference against INPUT.
-Do not add Markdown or commentary."""
+Keep all valid source-grounded content, change only what is needed to satisfy the
+validation error, and re-check every local reference against INPUT. Submit exactly one
+corrected result through the required output tool. In JSON fallback mode, return one
+JSON object without Markdown or commentary.
+
+INPUT:
+{input_payload}"""
 
     @staticmethod
     def _candidate_prompt_payload(item: TimelineTopicCandidate) -> dict[str, Any]:

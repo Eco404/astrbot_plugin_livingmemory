@@ -574,6 +574,16 @@ class LivingMemoryPlugin(Star):
         if get_active_plugin() is self:
             set_active_plugin(None)
 
+        # Page API build jobs own independent asyncio tasks. Drain them before
+        # closing MemoryEngine stores so a reloaded plugin cannot race the old one.
+        if self.page_api is not None:
+            shutdown_page_api = getattr(self.page_api, "shutdown", None)
+            if callable(shutdown_page_api):
+                try:
+                    await shutdown_page_api()
+                except Exception:
+                    logger.error("停止 LivingMemory Page API 后台任务失败", exc_info=True)
+
         # 取消所有后台任务
         if self._background_tasks:
             logger.info(f"正在取消 {len(self._background_tasks)} 个后台任务...")

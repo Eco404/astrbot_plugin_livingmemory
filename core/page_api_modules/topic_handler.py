@@ -577,6 +577,17 @@ class TopicHandler:
     def has_active_jobs(self) -> bool:
         return bool(self._active_jobs())
 
+    async def shutdown(self) -> None:
+        """Cancel and drain WebUI build tasks before plugin-owned stores close."""
+        tasks = [task for task in self._tasks if not task.done()]
+        if not tasks:
+            self._tasks.clear()
+            return
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+
     @classmethod
     def _resumable_run_payload(cls, run: dict[str, Any]) -> dict[str, Any]:
         stage = str(run.get("stage") or "candidate_scan")

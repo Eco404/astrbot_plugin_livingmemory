@@ -516,3 +516,36 @@ async def test_active_topic_build_cannot_be_discarded(monkeypatch):
     assert response["status"] == "error"
     assert "正在运行" in response["message"]
     store.discard_maintenance_run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_and_drains_page_owned_build_tasks(monkeypatch):
+    started = asyncio.Event()
+
+    class BlockingBuildManager:
+        async def build_space(self, _memory_space_id, **_kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={"memory_space_id": "space-1", "mode": "full"}
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    handler = TopicHandler(PageApiUtils())
+    response = await handler.start_build(
+        SimpleNamespace(
+            topic_memory_enabled=True,
+            topic_build_manager=BlockingBuildManager(),
+        )
+    )
+    job_uid = response["data"]["job_uid"]
+    await started.wait()
+
+    await handler.shutdown()
+
+    assert handler._tasks == set()
+    assert handler._jobs[job_uid]["status"] == "cancelled"

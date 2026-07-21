@@ -377,15 +377,15 @@ def format_memories_for_injection(memories: list) -> str:
             time_part = f", Memory write time: {time_str}" if time_str else ""
             memory_layer = str(metadata.get("memory_layer") or "timeline")
             if memory_layer == "topic":
-                entry_label = "Topic 记忆 / Topic memory"
+                entry_label = f"Topic 记忆 #{idx} / Topic memory #{idx}"
             elif memory_layer == "topic_fragment":
-                entry_label = "Topic 片段 / Topic fragment"
+                entry_label = f"Topic 片段 #{idx} / Topic fragment #{idx}"
             elif memory_layer == "timeline_supplement":
-                entry_label = "Timeline 补充 / Timeline supplement"
+                entry_label = f"Timeline 补充 #{idx} / Timeline supplement #{idx}"
             else:
-                entry_label = "记忆 / Memory"
+                entry_label = f"记忆 #{idx} / Memory #{idx}"
             entry_parts = [
-                f"{entry_label} #{idx} (Importance: {importance:.2f}){time_part}"
+                f"{entry_label} (Importance: {importance:.2f}){time_part}"
             ]
 
             # 添加元数据信息

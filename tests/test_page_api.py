@@ -1904,3 +1904,12 @@ class TestRouteRegistration:
 
     def test_route_prefix_contains_plugin_name(self):
         assert PLUGIN_NAME in PAGE_API_PREFIX
+
+
+@pytest.mark.asyncio
+async def test_page_api_shutdown_drains_topic_handler(api):
+    api.topic_handler.shutdown = AsyncMock()
+
+    await api.shutdown()
+
+    api.topic_handler.shutdown.assert_awaited_once()

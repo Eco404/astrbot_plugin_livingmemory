@@ -113,6 +113,7 @@ async def test_status_command_returns_not_ready_message_without_handler(
 async def test_terminate_cleans_background_tasks_and_resources(monkeypatch, tmp_path):
     plugin = await _build_plugin(monkeypatch, tmp_path)
 
+    plugin.page_api = SimpleNamespace(shutdown=AsyncMock())
     plugin.event_handler = SimpleNamespace(shutdown=AsyncMock())
     plugin.command_handler = SimpleNamespace()
     plugin.initializer.conversation_manager = SimpleNamespace(
@@ -127,6 +128,7 @@ async def test_terminate_cleans_background_tasks_and_resources(monkeypatch, tmp_
 
     await plugin.terminate()
 
+    plugin.page_api.shutdown.assert_awaited_once()
     plugin.initializer.stop_background_tasks.assert_awaited_once()
     plugin.initializer.stop_scheduler.assert_awaited_once()
     plugin.event_handler.shutdown.assert_awaited_once()

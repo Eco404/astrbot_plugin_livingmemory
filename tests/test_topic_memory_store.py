@@ -13,6 +13,7 @@ from astrbot_plugin_livingmemory.core.models.memory_identity import (
 )
 from astrbot_plugin_livingmemory.core.models.topic_memory import (
     TimelineTopicCandidate,
+    TopicFragmentDraft,
     TopicAtomSource,
     TopicMaintenanceMode,
     TopicMaintenanceRun,
@@ -89,6 +90,32 @@ def test_candidate_checkpoint_preserves_actor_and_source_provenance():
     assert restored.source_window == candidate.source_window
     assert restored.edit_origin == "automatic"
     assert restored.traceability == "full"
+
+
+@pytest.mark.asyncio
+async def test_replace_group_fragments_reports_missing_parent(tmp_path: Path):
+    store = TopicMemoryStore(str(tmp_path / "missing-fragment-parent.db"))
+    await store.initialize()
+    fragment = TopicFragmentDraft(
+        fragment_uid="fragment-1",
+        run_uid="missing-run",
+        candidate_group_uid="missing-group",
+        memory_space_id="space-1",
+        label="Fragment",
+        summary="Summary",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[],
+        prompt_hash="prompt",
+        input_hash="input",
+    )
+
+    with pytest.raises(ValueError, match="parent run/group no longer exists"):
+        await store.replace_group_fragments(
+            "missing-run",
+            "missing-group",
+            [fragment],
+        )
 
 
 async def _register_timeline(
