@@ -26,6 +26,25 @@ class TopicRelationType(str, Enum):
     RELATED_SUBTOPIC = "related_subtopic"
 
 
+class TopicActorRelationType(str, Enum):
+    SPEAKER = "speaker"
+    NARRATOR = "narrator"
+    RESPONDER = "responder"
+    SUBJECT = "subject"
+    MENTIONED = "mentioned"
+    EXECUTOR = "executor"
+    REQUESTER = "requester"
+
+
+class TopicActorResolutionStatus(str, Enum):
+    RESOLVED = "resolved"
+    EVIDENCE_CONFIRMED = "evidence_confirmed"
+    TIMELINE_BOUND = "timeline_bound"
+    PROFILE_INFERRED = "profile_inferred"
+    INFERRED = "inferred"
+    UNRESOLVED = "unresolved"
+
+
 class TopicMaintenanceMode(str, Enum):
     FULL = "full"
     INCREMENTAL = "incremental"
@@ -58,6 +77,53 @@ class TopicMemory:
     decay_anchor_at: float | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+    participants: list[TopicActorRef] = field(default_factory=list)
+    mentioned_actors: list[TopicActorRef] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TopicActorRef:
+    """Read-only aggregate view of one actor within a Topic revision."""
+
+    actor_id: str
+    actor_type: str
+    relation_types: list[str] = field(default_factory=list)
+    display_names: list[str] = field(default_factory=list)
+    confidence: float = 1.0
+    resolution_status: str = TopicActorResolutionStatus.RESOLVED.value
+    fragment_uids: list[str] = field(default_factory=list)
+    timeline_uids: list[str] = field(default_factory=list)
+    atom_uids: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TopicActorLink:
+    """Authoritative Topic-to-actor relation row."""
+
+    topic_uid: str
+    actor_id: str
+    actor_type: str
+    relation_type: str
+    display_name_snapshot: str | None = None
+    confidence: float = 1.0
+    resolution_status: str = TopicActorResolutionStatus.RESOLVED.value
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TopicAtomActorLink:
+    """Fact-level actor relation with fragment and Timeline provenance."""
+
+    topic_atom_uid: str
+    actor_id: str
+    relation_type: str
+    fragment_uid: str
+    timeline_uid: str | None = None
+    confidence: float = 1.0
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -236,6 +302,11 @@ class TopicFragmentDraft:
 
 
 __all__ = [
+    "TopicActorLink",
+    "TopicActorRef",
+    "TopicActorRelationType",
+    "TopicActorResolutionStatus",
+    "TopicAtomActorLink",
     "TopicAtomSource",
     "TopicLinkStatus",
     "TopicMaintenanceMode",

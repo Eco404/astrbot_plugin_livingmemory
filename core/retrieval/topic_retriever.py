@@ -24,6 +24,9 @@ class TopicRecallResult:
     base_relevance_score: float | None = None
     atoms: list[dict[str, Any]] = field(default_factory=list)
     sources: list[dict[str, Any]] = field(default_factory=list)
+    actors: list[dict[str, Any]] = field(default_factory=list)
+    matched_actor_ids: list[str] = field(default_factory=list)
+    actor_match_boost: float = 0.0
     context_coverage: float = 0.0
     branch_scores: dict[str, float] = field(default_factory=dict)
 
@@ -58,6 +61,8 @@ class TopicRecallResult:
             "branch_scores": {
                 key: round(value, 6) for key, value in self.branch_scores.items()
             },
+            "matched_actor_ids": self.matched_actor_ids,
+            "actor_match_boost": round(self.actor_match_boost, 6),
         }
 
 
@@ -185,6 +190,7 @@ class TopicRetriever:
                     base_relevance_score=relevance,
                     atoms=payload["atoms"],
                     sources=payload["sources"],
+                    actors=payload.get("actors", []),
                 )
             )
 

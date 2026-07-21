@@ -135,15 +135,28 @@ async def test_identity_handler_saves_profiles_and_blocks_during_topic_build(
     handler = IdentityHandler(PageApiUtils())
     request = MagicMock()
     request.get_json = AsyncMock(return_value={"profiles": [_profile()]})
+    on_saved = AsyncMock(
+        return_value={
+            "affected_spaces": 1,
+            "affected_timelines": 2,
+            "queued": True,
+        }
+    )
 
     with patch(
         "astrbot_plugin_livingmemory.core.page_api_modules.identity_handler.request",
         request,
     ):
         blocked = await handler.save_profiles(store, topic_build_active=True)
-        saved = await handler.save_profiles(store, topic_build_active=False)
+        saved = await handler.save_profiles(
+            store,
+            topic_build_active=False,
+            on_saved=on_saved,
+        )
 
     assert blocked["status"] == "error"
     assert store.profiles[0].display_name == "空雨"
     assert saved["status"] == "ok"
     assert saved["data"]["profiles"] == [_profile()]
+    assert saved["data"]["topic_sync"]["queued"] is True
+    on_saved.assert_awaited_once_with([], [_profile()])

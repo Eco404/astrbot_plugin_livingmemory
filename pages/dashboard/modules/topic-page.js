@@ -161,7 +161,7 @@ export class TopicPage {
       body.innerHTML = items.length ? items.map(item => `
         <tr class="topic-row" data-topic-uid="${esc(item.topic_uid)}" tabindex="0" role="button" aria-label="${esc(`${window.t("topic.viewDetails")}: ${item.title}`)}">
           <td class="text-mono">${esc(item.topic_uid.slice(0, 12))}</td>
-          <td class="topic-title-cell" title="${esc(item.title)}"><strong>${esc(item.title)}</strong></td>
+          <td class="topic-title-cell" title="${esc(item.title)}"><span>${esc(item.title)}</span></td>
           <td>${esc(item.status)}</td>
           <td>${Number(item.importance || 0).toFixed(2)}</td>
           <td>${item.support?.time_cluster_count || 0} / ${item.support?.timeline_count || 0}</td>
@@ -206,6 +206,27 @@ export class TopicPage {
       (provenance.atom_sources || []).forEach(source => {
         (sourcesByAtom[source.topic_atom_uid] ||= []).push(source);
       });
+      const actorLinks = provenance.actor_links || [];
+      const atomActorsByActor = {};
+      (provenance.atom_actor_links || []).forEach(link => {
+        (atomActorsByActor[link.actor_id] ||= []).push(link);
+      });
+      const participantRoles = new Set(["speaker", "narrator", "responder"]);
+      const renderActors = links => links.length ? links.map(link => {
+        const actorFacts = atomActorsByActor[link.actor_id] || [];
+        const metadata = link.metadata || {};
+        const roleKey = `topic.role.${link.relation_type}`;
+        const displayName = link.display_name_snapshot || link.actor_id;
+        const resolution = link.resolution_status === "unresolved"
+          ? window.t("topic.actorUnresolved") : window.t("topic.actorResolved");
+        return `<div class="topic-actor-item">
+          <div class="topic-actor-heading"><strong>${esc(displayName)}</strong><span>${esc(window.t(roleKey))}</span></div>
+          <div class="text-tertiary text-mono">${esc(link.actor_id)} · ${esc(resolution)} · ${Number(link.confidence || 0).toFixed(2)}</div>
+          <div class="topic-actor-trace text-tertiary">${esc(window.t("topic.actorFacts"))}: ${actorFacts.length} · Fragment ${(metadata.fragment_uids || []).length} · Timeline ${(metadata.timeline_uids || []).length}</div>
+        </div>`;
+      }).join("") : `<div class='text-tertiary'>${esc(window.t("topic.none"))}</div>`;
+      const participants = actorLinks.filter(link => participantRoles.has(link.relation_type));
+      const mentionedActors = actorLinks.filter(link => !participantRoles.has(link.relation_type));
       title.innerHTML = `${esc(topic.title)} <span class="topic-detail-readonly text-tertiary">（${esc(window.t("topic.readOnly"))}）</span>`;
       body.innerHTML = `
         <p class="topic-detail-summary">${esc(topic.summary)}</p>
@@ -215,6 +236,10 @@ export class TopicPage {
             <button class="topic-related-item" type="button" data-related-topic-uid="${esc(item.related_topic_uid)}">
               <span>${esc(item.related_title)}</span><small>${Number(item.semantic_similarity || 0).toFixed(3)}</small>
             </button>`).join("") : `<span class="text-tertiary">${esc(window.t("topic.none"))}</span>`}</div>
+        </div>
+        <div class="topic-actor-grid">
+          <div><strong>${esc(window.t("topic.participants"))} (${participants.length})</strong>${renderActors(participants)}</div>
+          <div><strong>${esc(window.t("topic.mentionedActors"))} (${mentionedActors.length})</strong>${renderActors(mentionedActors)}</div>
         </div>
         <div class="topic-detail-grid">
           <div><strong>${esc(window.t("topic.topicAtoms"))} (${(provenance.atoms || []).length})</strong>${(provenance.atoms || []).map(atom => `<div class="topic-source-item"><div>${esc(atom.content)}</div>${(sourcesByAtom[atom.atom_uid] || []).map(source => `<div class="text-tertiary text-mono">↳ ${esc(source.timeline_uid)} · ${esc(source.source_kind)} · ${esc(source.source_atom_fingerprint || "")}</div>`).join("")}</div>`).join("") || `<div class='text-tertiary'>${esc(window.t("topic.none"))}</div>`}</div>
@@ -305,7 +330,7 @@ export class TopicPage {
             ? `<input class="topic-setting-input" data-setting-key="${esc(key)}" type="checkbox" ${value ? "checked" : ""}>`
             : `<input class="input topic-setting-input" data-setting-key="${esc(key)}" type="number" value="${esc(value)}" min="${esc(definition.min)}" max="${esc(definition.max)}" step="${esc(definition.step || 1)}">`;
           return `<div class="topic-setting-row" data-setting-row="${esc(key)}">
-            <div class="topic-setting-copy"><strong>${esc(definition.label || key)}</strong><small class="text-tertiary text-mono">${esc(key)}</small></div>
+            <div class="topic-setting-copy"><strong>${esc(definition.label || key)}</strong><small class="topic-setting-description text-secondary">${esc(definition.description || "")}</small><small class="text-tertiary text-mono">${esc(key)}</small></div>
             <div class="topic-setting-control">${input}<span class="topic-setting-source ${customized ? "is-custom" : ""}" data-setting-source>${esc(window.t(customized ? "topic.customValue" : "topic.defaultValue"))}</span><button class="btn btn-ghost btn-sm topic-setting-reset" type="button" data-reset-setting="${esc(key)}" ${customized ? "" : "disabled"}>${esc(window.t("topic.resetDefault"))}</button></div>
             <div class="topic-setting-default text-tertiary">${esc(window.t("topic.codeDefault"))}: ${esc(definition.default)}</div>
           </div>`;
@@ -365,7 +390,7 @@ export class TopicPage {
       this.settingsData = result;
       this.settingsResetKeys = new Set();
       this.settingsResetAll = false;
-      this.renderSettings();
+      this.closeSettings();
       this.showToast(window.t("topic.settingsSaved"));
     } catch (e) {
       this.showToast(e.message || window.t("topic.settingsSaveFailed"), true);
@@ -712,10 +737,12 @@ export class TopicPage {
     const overallPercent = Math.max(0, Math.min(100, Number(job.overall_percent || 0)));
     const stageKey = `topic.stage.${job.stage || "pending"}`;
     const stageLabel = window.t(stageKey);
+    const failedStageLabel = window.t(`topic.stage.${job.failed_stage || "failed"}`);
     const now = Date.now() / 1000;
     const elapsed = this.formatDuration(Math.max(0, now - Number(job.created_at || now)));
     const updatedAgo = this.formatDuration(Math.max(0, now - Number(job.last_progress_at || now)));
     const detail = this.progressDetail(job);
+    const failureDescription = this.failureDescription(job);
     el.classList.remove("hidden");
     el.innerHTML = `
       <div class="topic-progress-header"><strong>${esc(window.t("topic.overallProgress"))}</strong><strong>${overallPercent.toFixed(1)}%</strong></div>
@@ -723,7 +750,12 @@ export class TopicPage {
       <div class="topic-progress-header"><span>${esc(stageLabel)}</span><span>${current} / ${total}</span></div>
       <div class="topic-progress-track"><span style="width:${stagePercent}%"></span></div>
       ${detail ? `<div class="topic-progress-detail">${esc(detail)}</div>` : ""}
-      <div class="text-tertiary">${esc(window.t("topic.progress.elapsed"))} ${esc(elapsed)} · ${esc(window.t("topic.progress.updated"))} ${esc(updatedAgo)}${job.error ? ` · ${esc(job.error)}` : ""}</div>
+      ${job.status === "failed" ? `<div class="topic-progress-failure">
+        <strong>${esc(window.t("topic.progress.failedAt"))} ${esc(failedStageLabel)}</strong>
+        ${failureDescription ? `<div>${esc(failureDescription)}</div>` : ""}
+        ${job.error ? `<code>${esc(job.error)}</code>` : ""}
+      </div>` : ""}
+      <div class="text-tertiary">${esc(window.t("topic.progress.elapsed"))} ${esc(elapsed)} · ${esc(window.t("topic.progress.updated"))} ${esc(updatedAgo)}</div>
       <div class="text-tertiary">${esc(job.status)} · ${esc(job.memory_space_id || "")}</div>
       ${job.run_uid && ["failed", "cancelled", "pending"].includes(job.status)
         ? `<div class="topic-progress-actions">
@@ -742,9 +774,7 @@ export class TopicPage {
   }
 
   progressDetail(job) {
-    if (job.status === "failed" && job.failed_stage) {
-      return `${window.t("topic.progress.failedAt")} ${window.t(`topic.stage.${job.failed_stage}`)}`;
-    }
+    if (job.status === "failed") return "";
     if (!["pending", "running"].includes(job.status)) return "";
     const callTotal = Number(job.llm_call_total || 0);
     const completed = Number(job.llm_call_current || 0);
@@ -798,6 +828,13 @@ export class TopicPage {
         + ` · ${window.t("topic.progress.concurrency")} ${active} / ${concurrency}`;
     }
     return callText.replace(/^ · /, "");
+  }
+
+  failureDescription(job) {
+    if (job.status !== "failed") return "";
+    const key = `topic.stageFailure.${job.failed_stage || "unknown"}`;
+    const translated = window.t(key);
+    return translated === key ? window.t("topic.stageFailure.unknown") : translated;
   }
 
   formatDuration(seconds) {

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.event_handler import EventHandler
+from astrbot_plugin_livingmemory.core.models.conversation_models import Message
 
 from astrbot.api.platform import MessageType
 
@@ -105,6 +106,84 @@ def _make_event(group: bool = False):
     event.get_messages = Mock(return_value=[])
     event.get_platform_name = Mock(return_value="test")
     return event
+
+
+@pytest.mark.asyncio
+async def test_group_topic_actor_scope_uses_only_visible_human_speakers(
+    handler, conversation_manager
+):
+    conversation_manager.get_messages_range = AsyncMock(
+        return_value=[
+            Message(
+                id=1,
+                session_id="group-1",
+                role="user",
+                content="甲发言",
+                sender_id="user-a",
+                sender_name="甲",
+                group_id="group-1",
+                platform="aiocqhttp",
+                metadata={"actor_type": "human"},
+            ),
+            Message(
+                id=2,
+                session_id="group-1",
+                role="assistant",
+                content="Bot 回复",
+                sender_id="bot-1",
+                sender_name="Bot",
+                group_id="group-1",
+                platform="aiocqhttp",
+                metadata={"actor_type": "assistant", "is_bot_message": True},
+            ),
+            Message(
+                id=3,
+                session_id="group-1",
+                role="user",
+                content="乙发言",
+                sender_id="user-b",
+                sender_name="乙",
+                group_id="group-1",
+                platform="qq",
+                metadata={},
+            ),
+        ]
+    )
+
+    actor_ids = await handler._memory_recall._visible_group_actor_ids(
+        session_id="group-1",
+        visible_start=10,
+        visible_end=13,
+        current_actor_ids={"qq:human:current"},
+        fallback_platform="qq",
+    )
+
+    assert actor_ids == {
+        "qq:human:current",
+        "qq:human:user-a",
+        "qq:human:user-b",
+    }
+    conversation_manager.get_messages_range.assert_awaited_once_with(
+        "group-1",
+        start_index=10,
+        end_index=13,
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_topic_actor_scope_falls_back_to_current_sender_without_range(
+    handler, conversation_manager
+):
+    actor_ids = await handler._memory_recall._visible_group_actor_ids(
+        session_id="group-1",
+        visible_start=None,
+        visible_end=None,
+        current_actor_ids={"qq:human:current"},
+        fallback_platform="qq",
+    )
+
+    assert actor_ids == {"qq:human:current"}
+    conversation_manager.get_messages_range.assert_not_awaited()
 
 
 @pytest.mark.asyncio

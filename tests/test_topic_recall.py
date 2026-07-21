@@ -80,7 +80,7 @@ class _CountingReranker:
         ]
 
 
-def _payload(uid, title, embedding, *, sources=None, importance=0.6):
+def _payload(uid, title, embedding, *, sources=None, actors=None, importance=0.6):
     return {
         "topic": TopicMemory(
             topic_uid=uid,
@@ -93,6 +93,7 @@ def _payload(uid, title, embedding, *, sources=None, importance=0.6):
         ),
         "atoms": [{"content": f"{title}事实", "importance": 0.8}],
         "sources": sources or [],
+        "actors": actors or [],
     }
 
 
@@ -245,6 +246,56 @@ async def test_topic_pipeline_default_floor_accepts_moderate_match_but_rejects_w
 
     assert outcome.applied_threshold == pytest.approx(0.32)
     assert [item.topic_uid for item in outcome.results] == ["moderate"]
+
+
+@pytest.mark.asyncio
+async def test_topic_pipeline_actor_match_only_adds_configured_boost():
+    actor_id = "qq:human:u1"
+    store = _Store([_payload("placeholder", "占位", [1.0])])
+    matched_topic = _payload("matched", "项目进展", [1.0])["topic"]
+    other_topic = _payload("other", "项目进展", [1.0])["topic"]
+    retriever = _FixedScoreRetriever(
+        store,
+        [
+            TopicRecallResult(
+                matched_topic,
+                0.40,
+                0.40,
+                0.40,
+                0.0,
+                actors=[
+                    {
+                        "actor_id": actor_id,
+                        "relation_type": "subject",
+                        "resolution_status": "resolved",
+                    }
+                ],
+            ),
+            TopicRecallResult(other_topic, 0.42, 0.42, 0.42, 0.0),
+        ],
+    )
+    pipeline = TopicRecallPipeline(
+        retriever,
+        {
+            "recall_actor_match_boost": 0.04,
+            "recall_min_relevance": 0.0,
+            "recall_relative_floor": 0.0,
+        },
+    )
+
+    outcome = await pipeline.search(
+        branches=[RecallQueryBranch("current", "项目", 1.0, "user")],
+        memory_space_id="space-1",
+        final_k=2,
+        current_actor_ids={actor_id},
+        track_access=False,
+    )
+
+    assert [item.topic_uid for item in outcome.results] == ["matched", "other"]
+    assert outcome.results[0].base_relevance_score == pytest.approx(0.40)
+    assert outcome.results[0].relevance_score == pytest.approx(0.44)
+    assert outcome.results[0].actor_match_boost == pytest.approx(0.04)
+    assert outcome.results[0].matched_actor_ids == [actor_id]
 
 
 @pytest.mark.asyncio

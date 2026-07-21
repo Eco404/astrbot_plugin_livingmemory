@@ -237,6 +237,10 @@ export class RecallPage {
           if (item.rerank_score != null) {
             html += '<span>rerank ' + Number(item.rerank_score).toFixed(3) + '</span>';
           }
+          if (Number(item.actor_match_boost || 0) > 0) {
+            html += '<span>' + window.t("recall.actorBoost") + ' +' + Number(item.actor_match_boost).toFixed(3) + '</span>';
+            html += '<span class="cell-mono">' + esc((item.matched_actor_ids || []).join(", ")) + '</span>';
+          }
           html += '<span>coverage ' + Number(item.context_coverage || 0).toFixed(2) + '</span></div>';
         });
         html += '</div></details>';

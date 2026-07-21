@@ -231,6 +231,12 @@ class PluginPageApi:
             ["POST"],
             "LivingMemory Page save authoritative identity profiles",
         )
+        register(
+            f"{PAGE_API_PREFIX}/identities/topics/sync",
+            self.sync_identity_topics,
+            ["POST"],
+            "LivingMemory Page synchronize Topics affected by identity profiles",
+        )
 
     # ==================== 路由处理方法 ====================
     # 所有方法都委托给相应的处理器
@@ -441,7 +447,25 @@ class PluginPageApi:
             topic_build_active=topic_build_active,
             platform_manager=getattr(self.plugin.context, "platform_manager", None),
             conversation_manager=ready.get("conversation_manager"),
+            on_saved=ready["memory_engine"].handle_identity_profiles_changed,
         )
+
+    async def sync_identity_topics(self):
+        """Immediately queue pending identity-aware Topic rebuilds."""
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        memory_engine = ready["memory_engine"]
+        manager = memory_engine.topic_build_manager
+        if self.topic_handler.has_active_jobs() or manager.has_active_builds():
+            return self.utils.error(
+                "Topic 构建正在运行，请在当前任务完成后再同步人物资料"
+            )
+        try:
+            result = await memory_engine.sync_identity_topics_now()
+            return self.utils.ok(result)
+        except (RuntimeError, ValueError) as exc:
+            return self.utils.error(str(exc))
 
     # ==================== 辅助方法 ====================
 
