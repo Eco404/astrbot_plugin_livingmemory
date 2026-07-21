@@ -13,6 +13,7 @@ export class IdentityPage {
 
   initEventListeners() {
     document.getElementById("identity-refresh")?.addEventListener("click", () => this.fetch(true));
+    document.getElementById("identity-sync-topics")?.addEventListener("click", () => this.syncTopics());
     document.getElementById("identity-add")?.addEventListener("click", () => this.add());
     document.getElementById("identity-save")?.addEventListener("click", () => this.save());
     const container = document.getElementById("identity-list");
@@ -193,10 +194,48 @@ export class IdentityPage {
       this.dirty = false;
       this.loaded = true;
       this.render(data.load_error || "");
-      this.showToast(window.t("identity.saved"));
+      const sync = data.topic_sync || {};
+      if (sync.error) {
+        this.showToast(window.t("identity.savedSyncFailed", sync.error), true);
+      } else if (sync.queued) {
+        this.showToast(window.t(
+          "identity.savedQueued",
+          sync.affected_spaces || 0,
+          sync.affected_timelines || 0,
+        ));
+      } else if ((sync.affected_timelines || 0) > 0 && sync.auto_maintenance === false) {
+        this.showToast(window.t("identity.savedPending", sync.affected_timelines || 0));
+      } else {
+        this.showToast(window.t("identity.saved"));
+      }
     } catch (error) {
       this.showToast(error.message || window.t("identity.saveFailed"), true);
       this.updateSaveState();
+    }
+  }
+
+  async syncTopics() {
+    if (this.dirty) {
+      this.showToast(window.t("identity.unsavedFirst"), true);
+      return;
+    }
+    const button = document.getElementById("identity-sync-topics");
+    if (button) button.disabled = true;
+    try {
+      const result = await this.api.post("identities/topics/sync", {});
+      if (result.scheduled) {
+        this.showToast(window.t(
+          "identity.syncQueued",
+          result.affected_spaces || 0,
+          result.affected_timelines || 0,
+        ));
+      } else {
+        this.showToast(window.t("identity.syncNone"));
+      }
+    } catch (error) {
+      this.showToast(error.message || window.t("identity.syncFailed"), true);
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 

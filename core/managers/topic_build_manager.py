@@ -25,6 +25,8 @@ from ..models.conversation_models import build_role_bindings, stable_actor_id
 from ..models.platform_identity import canonical_platform
 from ..models.topic_memory import (
     TimelineTopicCandidate,
+    TopicActorLink,
+    TopicAtomActorLink,
     TopicAtomSource,
     TopicCandidateGroup,
     TopicFragmentDraft,
@@ -40,12 +42,13 @@ from ..topic_settings import TOPIC_SETTINGS_REVISION
 from .topic_maintenance_manager import TopicMaintenanceManager
 
 
-_FRAGMENT_PROMPT_VERSION = "topic-fragment-v10-canonical-actor-anchor"
-_SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v7-canonical-actor-anchor"
+_FRAGMENT_PROMPT_VERSION = "topic-fragment-v11-fact-actor-links"
+_SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v8-fact-actor-links"
 _COMPONENT_REVIEW_PROMPT_VERSION = "topic-component-review-v1-retrieval-boundary"
-_NARRATIVE_SCHEMA_VERSION = "first_person_assistant_roles_v2"
+_NARRATIVE_SCHEMA_VERSION = "first_person_assistant_roles_v3"
 _SUPPORTED_NARRATIVE_SCHEMA_VERSIONS = {
     _NARRATIVE_SCHEMA_VERSION,
+    "first_person_assistant_roles_v2",
     "third_person_roles_v1",
 }
 _MATCHING_ALGORITHM_VERSION = 6
@@ -98,6 +101,7 @@ class TopicBuildManager:
         self._configuration_lock = asyncio.Lock()
         self._scheduled: dict[str, asyncio.Task] = {}
         self._scheduled_requests: dict[str, dict[str, Any]] = {}
+        self._scheduled_wakeups: dict[str, asyncio.Event] = {}
 
     def apply_config(self, config: dict[str, Any]) -> None:
         """Apply settings between builds; callers must reject active mutations."""
@@ -117,17 +121,31 @@ class TopicBuildManager:
         *,
         full: bool = False,
         since: float | None = None,
+        timeline_uids: Iterable[str] | None = None,
+        immediate: bool = False,
     ) -> None:
         """Debounce automatic maintenance and preserve the broadest request."""
         if not memory_space_id:
             return
         request = self._scheduled_requests.setdefault(
-            memory_space_id, {"full": False, "since": since}
+            memory_space_id,
+            {"full": False, "since": since, "timeline_uids": set(), "immediate": False},
         )
         request["full"] = bool(request["full"] or full)
         if since is not None:
             previous = request.get("since")
             request["since"] = min(float(previous), float(since)) if previous else float(since)
+        request.setdefault("timeline_uids", set()).update(
+            str(uid).strip()
+            for uid in (timeline_uids or [])
+            if str(uid).strip()
+        )
+        request["immediate"] = bool(request.get("immediate") or immediate)
+        wakeup = self._scheduled_wakeups.setdefault(
+            memory_space_id, asyncio.Event()
+        )
+        if immediate:
+            wakeup.set()
         task = self._scheduled.get(memory_space_id)
         if task is None or task.done():
             self._scheduled[memory_space_id] = asyncio.create_task(
@@ -137,13 +155,22 @@ class TopicBuildManager:
 
     async def _run_scheduled(self, memory_space_id: str) -> None:
         try:
-            await asyncio.sleep(
-                max(0.0, float(self.config.get("auto_debounce_seconds", 60.0)))
+            wakeup = self._scheduled_wakeups.setdefault(
+                memory_space_id, asyncio.Event()
             )
+            delay = max(
+                0.0, float(self.config.get("auto_debounce_seconds", 60.0))
+            )
+            if not self._scheduled_requests.get(memory_space_id, {}).get("immediate"):
+                try:
+                    await asyncio.wait_for(wakeup.wait(), timeout=delay)
+                except TimeoutError:
+                    pass
             request = self._scheduled_requests.pop(memory_space_id, {})
             full = bool(request.get("full"))
             since = request.get("since")
-            if not full and since is None:
+            timeline_uids = sorted(request.get("timeline_uids") or [])
+            if not full and since is None and not timeline_uids:
                 since = time.time() - 300.0
             await self.build_space(
                 memory_space_id,
@@ -152,7 +179,12 @@ class TopicBuildManager:
                     if full
                     else TopicMaintenanceMode.INCREMENTAL
                 ),
-                since=None if full else float(since),
+                since=(
+                    None
+                    if full or since is None
+                    else float(since)
+                ),
+                timeline_uids=None if full else timeline_uids or None,
             )
         except asyncio.CancelledError:
             raise
@@ -163,6 +195,7 @@ class TopicBuildManager:
             )
         finally:
             self._scheduled.pop(memory_space_id, None)
+            self._scheduled_wakeups.pop(memory_space_id, None)
             if memory_space_id in self._scheduled_requests:
                 self.schedule_space(memory_space_id)
 
@@ -170,6 +203,7 @@ class TopicBuildManager:
         tasks = list(self._scheduled.values())
         self._scheduled.clear()
         self._scheduled_requests.clear()
+        self._scheduled_wakeups.clear()
         for task in tasks:
             if not task.done():
                 task.cancel()
@@ -546,7 +580,14 @@ class TopicBuildManager:
                                 stage_current=len(components),
                             ),
                         )
-                topic, atoms, links, sources = self._materialize_snapshot(
+                (
+                    topic,
+                    atoms,
+                    links,
+                    sources,
+                    actor_links,
+                    atom_actor_links,
+                ) = self._materialize_snapshot(
                     run_uid,
                     memory_space_id,
                     synthesis,
@@ -637,7 +678,7 @@ class TopicBuildManager:
                             if key != "checkpoint_reused"
                         },
                         "fragment_uids": fragment_uids,
-                        "materialization_schema": "formal_fragments_v1",
+                        "materialization_schema": "formal_fragments_actor_links_v2",
                         "formal_fragment_uids": [
                             item.fragment_uid for item in formal_fragments
                         ],
@@ -668,6 +709,8 @@ class TopicBuildManager:
                         atoms=atoms,
                         links=links,
                         atom_sources=sources,
+                        actor_links=actor_links,
+                        atom_actor_links=atom_actor_links,
                         fragments=formal_fragments,
                         expected_revision=(matched.revision if matched else None),
                     )
@@ -771,6 +814,11 @@ class TopicBuildManager:
                     run_uid,
                     status=TopicMaintenanceStatus.PENDING,
                 )
+            )
+            raise
+        except Exception as exc:
+            await self.store.finish_group_job(
+                run_uid, group.group_uid, error=str(exc)
             )
             raise
         except Exception as exc:
@@ -920,7 +968,13 @@ class TopicBuildManager:
             async def call_batch(
                 batch_index: int,
                 batch: list[TimelineTopicCandidate],
-            ) -> tuple[str, dict[str, str], dict[str, dict[str, str | None]], str]:
+            ) -> tuple[
+                str,
+                dict[str, str],
+                dict[str, dict[str, str | None]],
+                dict[str, dict[str, Any]],
+                str,
+            ]:
                 nonlocal completed_batches
                 await self._emit(
                     progress_callback,
@@ -940,7 +994,7 @@ class TopicBuildManager:
                     llm_call_total=total_batches,
                     llm_concurrency=self.llm_concurrency,
                 )
-                llm_payload, timeline_refs, source_refs = (
+                llm_payload, timeline_refs, source_refs, actor_refs = (
                     self._fragment_llm_context(batch)
                 )
                 batch_json = json.dumps(
@@ -968,18 +1022,47 @@ class TopicBuildManager:
                         llm_call_total=total_batches,
                         llm_concurrency=self.llm_concurrency,
                     )
-                return raw, timeline_refs, source_refs, prompt
+                return raw, timeline_refs, source_refs, actor_refs, prompt
 
             raw_outputs = await self._gather_cancel_on_error(
                 [call_batch(batch_index, batch) for batch_index, _, batch in batch_specs]
             )
             for (_, _, batch), output in zip(batch_specs, raw_outputs, strict=True):
-                raw, timeline_refs, source_refs, prompt = output
+                raw, timeline_refs, source_refs, actor_refs, prompt = output
                 fragment_index_offset = len(fragments)
                 try:
                     parsed = self._parse_json_object(raw)
+                    requested_refs = self._requested_evidence_refs(
+                        parsed, timeline_refs
+                    )
+                    if requested_refs:
+                        await self._attach_requested_evidence(
+                            batch,
+                            requested_refs,
+                            timeline_refs,
+                        )
+                        (
+                            evidence_payload,
+                            timeline_refs,
+                            source_refs,
+                            actor_refs,
+                        ) = self._fragment_llm_context(batch)
+                        prompt = self._fragment_prompt(
+                            json.dumps(
+                                evidence_payload,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            )
+                        )
+                        raw = await self._call_llm(
+                            prompt
+                            + "\n\nThe requested raw evidence has now been attached. "
+                            "Return the final fragments and leave evidence_requests empty.",
+                            self._fragment_system_prompt(),
+                        )
+                        parsed = self._parse_json_object(raw)
                     parsed = self._decode_fragment_refs(
-                        parsed, timeline_refs, source_refs
+                        parsed, timeline_refs, source_refs, actor_refs
                     )
                     batch_fragments = self._validate_fragments(
                         parsed,
@@ -1004,6 +1087,7 @@ class TopicBuildManager:
                             self._parse_json_object(repaired_raw),
                             timeline_refs,
                             source_refs,
+                            actor_refs,
                         )
                         batch_fragments = self._validate_fragments(
                             repaired,
@@ -1049,12 +1133,96 @@ class TopicBuildManager:
                 )
             )
             raise
-        except Exception as exc:
-            await self.store.finish_group_job(
-                run_uid, group.group_uid, error=str(exc)
-            )
-            raise
 
+    @staticmethod
+    def _requested_evidence_refs(
+        parsed: dict[str, Any],
+        timeline_refs: dict[str, str],
+    ) -> set[str]:
+        requested: set[str] = set()
+        raw_fragments = parsed.get("fragments")
+        if not isinstance(raw_fragments, list):
+            return requested
+        for fragment in raw_fragments:
+            if not isinstance(fragment, dict):
+                continue
+            requests = fragment.get("evidence_requests")
+            if not isinstance(requests, list):
+                continue
+            for request in requests:
+                if not isinstance(request, dict):
+                    continue
+                ref = str(request.get("timeline_ref") or "").strip()
+                if ref in timeline_refs:
+                    requested.add(ref)
+        return requested
+
+    async def _attach_requested_evidence(
+        self,
+        inputs: list[TimelineTopicCandidate],
+        requested_refs: set[str],
+        timeline_refs: dict[str, str],
+    ) -> None:
+        """Fulfil one model-requested evidence round without changing memory facts."""
+        requested_uids = {
+            timeline_refs[ref] for ref in requested_refs if ref in timeline_refs
+        }
+        by_uid = {item.memory_uid: item for item in inputs}
+        limit = max(1, min(200, int(self.config.get("evidence_max_messages", 80))))
+        for timeline_uid in requested_uids:
+            item = by_uid.get(timeline_uid)
+            if item is None:
+                continue
+            if item.features.get("raw_evidence"):
+                item.features["evidence_status"] = "llm_requested_attached"
+                continue
+            if self.conversation_store is None or not item.session_id:
+                item.features["evidence_status"] = "llm_requested_unavailable"
+                continue
+            first_id = item.source_window.get("first_message_id")
+            last_id = item.source_window.get("last_message_id")
+            if first_id is None or last_id is None:
+                item.features["evidence_status"] = "llm_requested_unavailable"
+                continue
+            try:
+                messages = await self.conversation_store.get_messages_by_id_span(
+                    item.session_id,
+                    int(first_id),
+                    int(last_id),
+                    limit=limit,
+                )
+            except Exception:
+                logger.warning(
+                    "[TopicMemory] LLM 请求补证时读取原始消息失败: %s",
+                    timeline_uid,
+                    exc_info=True,
+                )
+                messages = []
+            if not messages:
+                item.features["evidence_status"] = "llm_requested_unavailable"
+                continue
+            if not item.role_bindings.get("actors"):
+                item.role_bindings = build_role_bindings(messages, item.persona_id)
+            item.features["raw_evidence"] = [
+                {
+                    "message_id": message.id,
+                    "role": message.role,
+                    "actor_id": stable_actor_id(
+                        message.platform,
+                        message.sender_id,
+                        "assistant"
+                        if message.role == "assistant"
+                        or message.metadata.get("is_bot_message")
+                        else "human",
+                    ),
+                    "sender_id": message.sender_id,
+                    "sender_name": message.sender_name,
+                    "timestamp": message.timestamp,
+                    "content": str(message.content)[:2000],
+                }
+                for message in messages
+            ]
+            item.features["evidence_status"] = "llm_requested_attached"
     async def _embed_fragments(
         self, fragments: list[TopicFragmentDraft], progress_callback=None
     ) -> list[TopicFragmentDraft]:
@@ -2820,14 +2988,14 @@ class TopicBuildManager:
     ) -> dict[str, Any]:
         if len(fragments) == 1:
             return self._single_fragment_synthesis(fragments[0])
-        payload, fact_refs = self._synthesis_llm_context(fragments)
+        payload, fact_refs, actor_refs = self._synthesis_llm_context(fragments)
         prompt = self._synthesis_prompt(
             json.dumps(payload, ensure_ascii=False, sort_keys=True)
         )
         raw = await self._call_llm(prompt, self._synthesis_system_prompt())
         try:
             parsed = self._decode_synthesis_refs(
-                self._parse_json_object(raw), fact_refs, fragments
+                self._parse_json_object(raw), fact_refs, actor_refs, fragments
             )
             synthesis = self._validate_synthesis(parsed, fragments)
             self._validate_role_anchored_synthesis(synthesis, fragments)
@@ -2839,7 +3007,10 @@ class TopicBuildManager:
                     self._synthesis_system_prompt(),
                 )
                 parsed = self._decode_synthesis_refs(
-                    self._parse_json_object(repaired_raw), fact_refs, fragments
+                    self._parse_json_object(repaired_raw),
+                    fact_refs,
+                    actor_refs,
+                    fragments,
                 )
                 synthesis = self._validate_synthesis(parsed, fragments)
                 self._validate_role_anchored_synthesis(synthesis, fragments)
@@ -2865,8 +3036,58 @@ class TopicBuildManager:
                 }
         return self._validate_synthesis(parsed, fragments)
 
-    @staticmethod
-    def _single_fragment_synthesis(fragment: TopicFragmentDraft) -> dict[str, Any]:
+    def _single_fragment_synthesis(self, fragment: TopicFragmentDraft) -> dict[str, Any]:
+        actor_links: list[dict[str, Any]] = []
+        seen_actor_links: set[tuple[str, str]] = set()
+        for source in (
+            fragment.metadata.get("participant_refs", []),
+            fragment.metadata.get("mentioned_actor_refs", []),
+        ):
+            for actor in source:
+                if not isinstance(actor, dict):
+                    continue
+                actor_id = str(actor.get("actor_id") or "").strip()
+                relation = str(actor.get("relation_type") or "").strip()
+                if not actor_id or not relation or (actor_id, relation) in seen_actor_links:
+                    continue
+                seen_actor_links.add((actor_id, relation))
+                actor_links.append(
+                    {
+                        **actor,
+                        "actor_id": actor_id,
+                        "relation_type": relation,
+                        "source_fact_uids": [],
+                        "fragment_uids": [fragment.fragment_uid],
+                        "timeline_uids": list(fragment.timeline_uids),
+                    }
+                )
+        for fact in fragment.facts:
+            fact_uid = str(fact.get("fact_uid") or "").strip()
+            for actor in fact.get("actor_refs", []):
+                if not isinstance(actor, dict):
+                    continue
+                actor_id = str(actor.get("actor_id") or "").strip()
+                relation = str(actor.get("relation_type") or "").strip()
+                if not actor_id or not relation:
+                    continue
+                existing = next(
+                    (
+                        item for item in actor_links
+                        if item.get("actor_id") == actor_id
+                        and item.get("relation_type") == relation
+                    ),
+                    None,
+                )
+                if existing is None:
+                    existing = {
+                        **actor,
+                        "actor_id": actor_id,
+                        "relation_type": relation,
+                        "source_fact_uids": [],
+                    }
+                    actor_links.append(existing)
+                if fact_uid and fact_uid not in existing["source_fact_uids"]:
+                    existing["source_fact_uids"].append(fact_uid)
         return {
             "title": fragment.label,
             "summary": fragment.summary,
@@ -2884,6 +3105,7 @@ class TopicBuildManager:
                 }
                 for fact in fragment.facts
             ],
+            "actor_links": actor_links,
         }
 
     @staticmethod
@@ -2927,6 +3149,11 @@ class TopicBuildManager:
             )
             fragment_map[fragment_uid] = source_fragment_uids
             facts: list[dict[str, Any]] = []
+            partial_actor_links = [
+                dict(value)
+                for value in partial.get("actor_links", [])
+                if isinstance(value, dict)
+            ]
             for atom_index, atom in enumerate(partial.get("atoms", [])):
                 if not isinstance(atom, dict) or not str(atom.get("content") or "").strip():
                     continue
@@ -2944,8 +3171,26 @@ class TopicBuildManager:
                         "content": str(atom["content"]).strip(),
                         "importance": self._score(atom.get("importance"), 0.5),
                         "confidence": self._score(atom.get("confidence"), 0.7),
+                        "actor_refs": [
+                            {
+                                **actor,
+                                "source_fact_uids": [fact_uid],
+                            }
+                            for actor in partial_actor_links
+                            if not actor.get("source_fact_uids")
+                            or set(self._unique_strings(actor.get("source_fact_uids")))
+                            & set(self._unique_strings(atom.get("source_fact_uids")))
+                        ],
                     }
                 )
+            participant_refs = [
+                actor for actor in partial_actor_links
+                if actor.get("relation_type") in {"speaker", "narrator", "responder"}
+            ]
+            mentioned_actor_refs = [
+                actor for actor in partial_actor_links
+                if actor.get("relation_type") not in {"speaker", "narrator", "responder"}
+            ]
             pseudo_fragments.append(
                 TopicFragmentDraft(
                     fragment_uid=fragment_uid,
@@ -2959,7 +3204,11 @@ class TopicBuildManager:
                     facts=facts,
                     importance=self._score(partial.get("importance"), 0.5),
                     confidence=self._score(partial.get("confidence"), 0.7),
-                    metadata={"source_fragment_uids": source_fragment_uids},
+                    metadata={
+                        "source_fragment_uids": source_fragment_uids,
+                        "participant_refs": participant_refs,
+                        "mentioned_actor_refs": mentioned_actor_refs,
+                    },
                 )
             )
         return pseudo_fragments, fact_map, fragment_map
@@ -3014,6 +3263,26 @@ class TopicBuildManager:
                 }
             ),
             "atoms": expanded_atoms,
+            "actor_links": [
+                {
+                    **actor,
+                    "source_fact_uids": sorted(
+                        {
+                            uid
+                            for pseudo_uid in self._unique_strings(
+                                actor.get("source_fact_uids")
+                            )
+                            for uid in self._unique_strings(
+                                fact_map.get(pseudo_uid, {}).get(
+                                    "source_fact_uids"
+                                )
+                            )
+                        }
+                    ),
+                }
+                for actor in reduction.get("actor_links", [])
+                if isinstance(actor, dict)
+            ],
         }
         return expanded
 
@@ -3057,6 +3326,17 @@ class TopicBuildManager:
         links = provenance.get("links", [])
         atoms = provenance.get("atoms", [])
         sources = provenance.get("atom_sources", [])
+        existing_actor_links = [
+            dict(value)
+            for value in provenance.get("actor_links", [])
+            if isinstance(value, dict)
+        ]
+        actor_links_by_atom: dict[str, list[dict[str, Any]]] = {}
+        for value in provenance.get("atom_actor_links", []):
+            if isinstance(value, dict):
+                actor_links_by_atom.setdefault(
+                    str(value.get("topic_atom_uid") or ""), []
+                ).append(dict(value))
         timeline_uids = sorted(
             {str(row.get("timeline_uid") or "") for row in links if row.get("timeline_uid")}
         )
@@ -3118,6 +3398,7 @@ class TopicBuildManager:
                             if row.get("source_atom_fingerprint")
                         }
                     },
+                    "actor_refs": actor_links_by_atom.get(atom_uid, []),
                 }
             )
         if not facts:
@@ -3158,6 +3439,18 @@ class TopicBuildManager:
                 "conversation_roles": topic.metadata.get(
                     "conversation_roles", {}
                 ),
+                "participant_refs": [
+                    value
+                    for value in existing_actor_links
+                    if value.get("relation_type")
+                    in {"speaker", "narrator", "responder"}
+                ],
+                "mentioned_actor_refs": [
+                    value
+                    for value in existing_actor_links
+                    if value.get("relation_type")
+                    not in {"speaker", "narrator", "responder"}
+                ],
             },
         )
 
@@ -3169,7 +3462,14 @@ class TopicBuildManager:
         fragments: list[TopicFragmentDraft],
         candidate_map: dict[str, TimelineTopicCandidate],
         existing: TopicMemory | None,
-    ) -> tuple[TopicMemory, list[TopicMemoryAtom], list[TopicTimelineLink], list[TopicAtomSource]]:
+    ) -> tuple[
+        TopicMemory,
+        list[TopicMemoryAtom],
+        list[TopicTimelineLink],
+        list[TopicAtomSource],
+        list[TopicActorLink],
+        list[TopicAtomActorLink],
+    ]:
         timeline_uids = sorted({uid for item in fragments for uid in item.timeline_uids})
         cluster_sizes: Counter[str] = Counter()
         timeline_cluster: dict[str, str] = {}
@@ -3438,7 +3738,106 @@ class TopicBuildManager:
                 "Topic Timeline links without atom provenance: "
                 + ", ".join(missing_source_timelines)
             )
-        return topic, atoms, links, sources
+        actor_links: list[TopicActorLink] = []
+        atom_actor_links: list[TopicAtomActorLink] = []
+        atom_by_fact_uid: dict[str, list[TopicMemoryAtom]] = {}
+        for atom in atoms:
+            for fact_uid in self._unique_strings(
+                atom.metadata.get("source_fact_uids")
+            ):
+                atom_by_fact_uid.setdefault(fact_uid, []).append(atom)
+        seen_atom_actor: set[tuple[str, str, str, str, str]] = set()
+        for raw_link in synthesis.get("actor_links", []):
+            if not isinstance(raw_link, dict):
+                continue
+            actor_id = str(raw_link.get("actor_id") or "").strip()
+            relation_type = str(raw_link.get("relation_type") or "").strip()
+            if not actor_id or not relation_type:
+                continue
+            source_fact_uids = [
+                uid
+                for uid in self._unique_strings(raw_link.get("source_fact_uids"))
+                if uid in fact_map
+            ]
+            actor_fragment_uids = sorted(
+                set(self._unique_strings(raw_link.get("fragment_uids")))
+                | {fact_map[uid][0].fragment_uid for uid in source_fact_uids}
+            )
+            actor_timeline_uids = sorted(
+                set(self._unique_strings(raw_link.get("timeline_uids")))
+                | {
+                    timeline_uid
+                    for uid in source_fact_uids
+                    for timeline_uid in self._unique_strings(
+                        fact_map[uid][1].get(
+                            "source_timeline_uids",
+                            fact_map[uid][0].timeline_uids,
+                        )
+                    )
+                }
+            )
+            actor_links.append(
+                TopicActorLink(
+                    topic_uid=topic_uid,
+                    actor_id=actor_id,
+                    actor_type=str(raw_link.get("actor_type") or "unknown"),
+                    relation_type=relation_type,
+                    display_name_snapshot=(
+                        str(raw_link.get("display_name_snapshot") or "").strip()
+                        or None
+                    ),
+                    confidence=self._score(raw_link.get("confidence"), 0.7),
+                    resolution_status=str(
+                        raw_link.get("resolution_status") or "inferred"
+                    ),
+                    metadata={
+                        "source_fact_uids": source_fact_uids,
+                        "fragment_uids": actor_fragment_uids,
+                        "timeline_uids": actor_timeline_uids,
+                        "atom_uids": sorted(
+                            {
+                                atom.atom_uid
+                                for fact_uid in source_fact_uids
+                                for atom in atom_by_fact_uid.get(fact_uid, [])
+                            }
+                        ),
+                    },
+                )
+            )
+            for fact_uid in source_fact_uids:
+                fragment, fact = fact_map[fact_uid]
+                fact_timelines = self._unique_strings(
+                    fact.get("source_timeline_uids", fragment.timeline_uids)
+                ) or [""]
+                for atom in atom_by_fact_uid.get(fact_uid, []):
+                    for timeline_uid in fact_timelines:
+                        key = (
+                            atom.atom_uid,
+                            actor_id,
+                            relation_type,
+                            fragment.fragment_uid,
+                            timeline_uid,
+                        )
+                        if key in seen_atom_actor:
+                            continue
+                        seen_atom_actor.add(key)
+                        atom_actor_links.append(
+                            TopicAtomActorLink(
+                                topic_atom_uid=atom.atom_uid,
+                                actor_id=actor_id,
+                                relation_type=relation_type,
+                                fragment_uid=fragment.fragment_uid,
+                                timeline_uid=timeline_uid or None,
+                                confidence=self._score(
+                                    raw_link.get("confidence"), 0.7
+                                ),
+                                metadata={"source_fact_uid": fact_uid},
+                            )
+                        )
+        topic.metadata["participant_index"] = self._actor_index_from_links(
+            actor_links
+        )
+        return topic, atoms, links, sources, actor_links, atom_actor_links
 
     def _fallback_fragments(
         self,
@@ -3540,6 +3939,10 @@ class TopicBuildManager:
                         "conversation_roles": self._conversation_role_payload(
                             [candidate]
                         ),
+                        "participant_refs": self._deterministic_fragment_participants(
+                            [candidate]
+                        ),
+                        "mentioned_actor_refs": [],
                         "validation_repairs": [
                             {
                                 "type": "fragment_batch_fallback",
@@ -3771,6 +4174,11 @@ class TopicBuildManager:
                         "source_timeline_uids": fact_sources,
                         "source_atom_fingerprints": fingerprints,
                         "source_timeline_uids_by_fingerprint": timelines_by_fingerprint,
+                        "actor_refs": [
+                            dict(value)
+                            for value in fact.get("actor_refs", [])
+                            if isinstance(value, dict)
+                        ],
                     }
                 )
             uncovered_timelines = sorted(
@@ -3824,6 +4232,41 @@ class TopicBuildManager:
                     + ":".join(timeline_uids),
                 )
             )
+            participant_refs = [
+                dict(value)
+                for value in raw.get("participant_refs", [])
+                if isinstance(value, dict)
+            ]
+            mentioned_actor_refs = [
+                dict(value)
+                for value in raw.get("mentioned_actor_refs", [])
+                if isinstance(value, dict)
+            ]
+            deterministic_participants = self._deterministic_fragment_participants(
+                source_items
+            )
+            participant_keys = {
+                (
+                    str(value.get("actor_id") or ""),
+                    str(value.get("relation_type") or ""),
+                )
+                for value in participant_refs
+            }
+            participant_refs.extend(
+                value
+                for value in deterministic_participants
+                if (
+                    str(value.get("actor_id") or ""),
+                    str(value.get("relation_type") or ""),
+                )
+                not in participant_keys
+            )
+            self._scope_unresolved_actor_ids(
+                fragment_uid,
+                participant_refs,
+                mentioned_actor_refs,
+                normalized_facts,
+            )
             result.append(
                 TopicFragmentDraft(
                     fragment_uid=fragment_uid,
@@ -3853,6 +4296,8 @@ class TopicBuildManager:
                         "conversation_roles": self._conversation_role_payload(
                             source_items
                         ),
+                        "participant_refs": participant_refs,
+                        "mentioned_actor_refs": mentioned_actor_refs,
                         "attribution_confidence": self._score(
                             self._calibrated_attribution_confidence(
                                 source_items,
@@ -3907,6 +4352,94 @@ class TopicBuildManager:
                 )
         if covered != allowed.keys():
             raise TopicBuildValidationError("LLM fragments did not cover every Timeline input")
+        return result
+
+    @staticmethod
+    def _scope_unresolved_actor_ids(
+        fragment_uid: str,
+        participant_refs: list[dict[str, Any]],
+        mentioned_actor_refs: list[dict[str, Any]],
+        facts: list[dict[str, Any]],
+    ) -> None:
+        values = [*participant_refs, *mentioned_actor_refs]
+        values.extend(
+            actor
+            for fact in facts
+            for actor in fact.get("actor_refs", [])
+            if isinstance(actor, dict)
+        )
+        replacements: dict[str, str] = {}
+        for actor in values:
+            actor_id = str(actor.get("actor_id") or "")
+            if not actor_id.startswith("unresolved-pending:"):
+                continue
+            replacements.setdefault(
+                actor_id,
+                "unresolved:"
+                + fragment_uid
+                + ":"
+                + actor_id.removeprefix("unresolved-pending:"),
+            )
+            actor["actor_id"] = replacements[actor_id]
+            actor["resolution_status"] = "unresolved"
+
+    def _deterministic_fragment_participants(
+        self,
+        inputs: list[TimelineTopicCandidate],
+    ) -> list[dict[str, Any]]:
+        """Derive actual speakers/narrators without asking the model to identify them."""
+        roles = self._conversation_role_payload(inputs)
+        narrators = {
+            str(value)
+            for value in roles.get("timeline_narrators", {}).values()
+            if str(value)
+        }
+        result: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for bucket in ("human_participants", "assistant_personas"):
+            for actor in roles.get(bucket, []):
+                if not isinstance(actor, dict):
+                    continue
+                actor_id = str(actor.get("actor_id") or "").strip()
+                if not actor_id:
+                    continue
+                actor_type = str(actor.get("actor_type") or "unknown")
+                relations = [
+                    "narrator" if actor_id in narrators else (
+                        "responder" if actor_type == "assistant" else "speaker"
+                    )
+                ]
+                if (
+                    actor_type == "assistant"
+                    and not actor.get("synthetic_narrator")
+                    and "responder" not in relations
+                ):
+                    relations.append("responder")
+                for relation in relations:
+                    key = (actor_id, relation)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    result.append({
+                        "actor_id": actor_id,
+                        "actor_type": actor_type,
+                        "relation_type": relation,
+                        "display_name_snapshot": next(
+                            (
+                                str(name).strip()
+                                for name in actor.get("observed_names", [])
+                                if str(name).strip()
+                            ),
+                            None,
+                        ),
+                        "confidence": float(
+                            actor.get("identity_confidence", 0.68)
+                        ),
+                        "resolution_status": str(
+                            actor.get("resolution_status") or "inferred"
+                        ),
+                        "source": "deterministic_role_bindings",
+                    })
         return result
 
     def _validate_synthesis(
@@ -4192,6 +4725,61 @@ class TopicBuildManager:
                 len(validation_repairs),
                 coverage_repairs,
             )
+        actor_links_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+
+        def merge_actor_link(raw_link: dict[str, Any], fact_uids: Iterable[str]) -> None:
+            actor_id = str(raw_link.get("actor_id") or "").strip()
+            relation_type = str(raw_link.get("relation_type") or "").strip()
+            if not actor_id or not relation_type:
+                return
+            grounded_fact_uids = sorted(
+                {
+                    str(uid)
+                    for uid in fact_uids
+                    if str(uid) in fact_owners
+                }
+            )
+            key = (actor_id, relation_type)
+            existing_link = actor_links_by_key.setdefault(
+                key,
+                {
+                    **raw_link,
+                    "actor_id": actor_id,
+                    "relation_type": relation_type,
+                    "source_fact_uids": [],
+                },
+            )
+            existing_link["source_fact_uids"] = sorted(
+                set(existing_link["source_fact_uids"]) | set(grounded_fact_uids)
+            )
+            existing_link["confidence"] = max(
+                self._score(existing_link.get("confidence"), 0.7),
+                self._score(raw_link.get("confidence"), 0.7),
+            )
+
+        for raw_link in parsed.get("actor_links", []):
+            if isinstance(raw_link, dict):
+                merge_actor_link(
+                    raw_link,
+                    self._unique_strings(raw_link.get("source_fact_uids")),
+                )
+        for fragment in fragments:
+            for key in ("participant_refs", "mentioned_actor_refs"):
+                for raw_link in fragment.metadata.get(key, []):
+                    if isinstance(raw_link, dict):
+                        merge_actor_link(
+                            {
+                                **raw_link,
+                                "fragment_uids": [fragment.fragment_uid],
+                                "timeline_uids": list(fragment.timeline_uids),
+                            },
+                            [],
+                        )
+            for fact in fragment.facts:
+                fact_uid = str(fact.get("fact_uid") or "")
+                for raw_link in fact.get("actor_refs", []):
+                    if isinstance(raw_link, dict):
+                        merge_actor_link(raw_link, [fact_uid])
         return {
             "title": title,
             "summary": summary,
@@ -4199,6 +4787,7 @@ class TopicBuildManager:
             "confidence": self._score(parsed.get("confidence"), 0.7),
             "fragment_uids": sorted(allowed),
             "atoms": atoms,
+            "actor_links": list(actor_links_by_key.values()),
             "validation_repairs": validation_repairs,
         }
 
@@ -4320,6 +4909,17 @@ Semantic rules:
 Reference rules:
 - Treat refs such as T1 and T1.A1 as opaque local identifiers.
 - Copy refs only from the supplied input. Never create, alter, or translate a ref.
+- actor_refs contains the only stable actors you may cite. Use actor_ref values such
+  as A1 verbatim; never invent an account, merge actors by nickname, or create a new
+  stable identity.
+- When the source clearly mentions a person who has no supplied stable actor ref, use
+  actor_ref "unresolved" and copy only the local source label into
+  display_name_snapshot. The application will create a fragment-local identity; never
+  reuse it as if it were a stable account.
+- participant_refs records actual speaker/narrator/responder participation.
+  mentioned_actor_refs records subject/mentioned/executor/requester relations.
+- Each fact should include actor_refs for every supported semantic actor relation.
+  Do not attach a relation when the source does not establish it.
 - Every fact needs one or more source_refs.
 - Each source_ref must belong to a Timeline listed in that fragment.timeline_refs.
 - Every Timeline in fragment.timeline_refs must appear through at least one fact's
@@ -4330,13 +4930,22 @@ Output constraints:
 - importance and confidence are numbers in [0, 1].
 - Keep labels concise and summaries focused and non-repetitive.
 - keywords should contain no more than 12 short items.
+- If raw evidence is required to resolve an attribution, put at most one request per
+  Timeline in evidence_requests using a supplied T ref and a short reason. Do not
+  guess while requesting evidence. If evidence is already present, return an empty
+  evidence_requests array and produce the final fragment.
 
 Required JSON schema:
 {{"fragments":[{{"label":"...","summary":"...","importance":0.0,
 "confidence":0.0,"attribution_confidence":0.0,"ambiguity_flags":[],
-"evidence_requests":[],"timeline_refs":["T1"],"keywords":["..."],
+"evidence_requests":[{{"timeline_ref":"T1","reason":"speaker ambiguity"}}],
+"timeline_refs":["T1"],"keywords":["..."],
+"participant_refs":[{{"actor_ref":"A1","relation_type":"speaker","confidence":1.0}}],
+"mentioned_actor_refs":[{{"actor_ref":"unresolved","display_name_snapshot":"朋友",
+"relation_type":"subject","confidence":0.6}}],
 "facts":[{{"type":"factual","content":"...","importance":0.0,
-"confidence":0.0,"source_refs":["T1.A1"]}}]}}]}}
+"confidence":0.0,"source_refs":["T1.A1"],
+"actor_refs":[{{"actor_ref":"A1","relation_type":"subject","confidence":0.8}}]}}]}}]}}
 
 Compact example of merging duplicate evidence when the human display name is 张三:
 source_facts = [{{"ref":"T1.A1","content":"张三喜欢黑咖啡"}},
@@ -4437,6 +5046,9 @@ Semantic rules:
 Reference rules:
 - Treat F1, F2, ... as opaque local identifiers.
 - Copy source_fact_refs only from the input; never create or alter a ref.
+- actor_refs contains the only actors you may cite. actor_links must copy one supplied
+  actor_ref, one supported relation_type, and the source_fact_refs that establish it.
+  Never infer that two actors are the same from a nickname.
 - Do not return fragment identifiers. The application derives fragment scope from
   source_fact_refs.
 
@@ -4448,6 +5060,8 @@ Output constraints:
 
 Required JSON schema:
 {{"title":"...","summary":"...","importance":0.0,"confidence":0.0,
+"actor_links":[{{"actor_ref":"A1","relation_type":"subject","confidence":0.8,
+"source_fact_refs":["F1"]}}],
 "atoms":[{{"type":"factual","content":"...","importance":0.0,
 "confidence":0.0,"source_fact_refs":["F1"]}}]}}
 
@@ -4581,6 +5195,7 @@ INPUT:
         dict[str, Any],
         dict[str, str],
         dict[str, dict[str, str | None]],
+        dict[str, dict[str, Any]],
     ]:
         """Build a compact prompt payload with batch-local, reversible refs."""
         timelines: list[dict[str, Any]] = []
@@ -4652,17 +5267,38 @@ INPUT:
             )
             for ref, timeline_uid in timeline_refs.items()
         }
+        actor_refs: dict[str, dict[str, Any]] = {}
+        actor_payload: list[dict[str, Any]] = []
+        seen_actor_ids: set[str] = set()
+        for bucket in ("human_participants", "assistant_personas"):
+            for actor in prompt_roles.get(bucket, []):
+                if not isinstance(actor, dict):
+                    continue
+                actor_id = str(actor.get("actor_id") or "").strip()
+                if not actor_id or actor_id in seen_actor_ids:
+                    continue
+                seen_actor_ids.add(actor_id)
+                actor_ref = f"A{len(actor_payload) + 1}"
+                normalized = {
+                    **actor,
+                    "ref": actor_ref,
+                    "actor_id": actor_id,
+                }
+                actor_refs[actor_ref] = normalized
+                actor_payload.append(normalized)
         return {
             "authoritative_identities": self._candidate_identity_payload(inputs),
             "conversation_roles": prompt_roles,
+            "actor_refs": actor_payload,
             "timelines": timelines,
-        }, timeline_refs, source_refs
+        }, timeline_refs, source_refs, actor_refs
 
     def _decode_fragment_refs(
         self,
         parsed: dict[str, Any],
         timeline_refs: dict[str, str],
         source_refs: dict[str, dict[str, str | None]],
+        actor_refs: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         """Resolve model-facing refs into the existing internal provenance schema."""
         raw_fragments = parsed.get("fragments")
@@ -4728,23 +5364,156 @@ INPUT:
                         **fact,
                         "source_timeline_uids": fact_timeline_uids,
                         "source_atom_fingerprints": fingerprints,
+                        "actor_refs": self._decode_actor_relations(
+                            fact.get("actor_refs"),
+                            actor_refs,
+                            scope=f"fragment {fragment_index} fact {fact_index}",
+                        ),
                     }
+                )
+            participant_refs = self._decode_actor_relations(
+                raw.get("participant_refs"),
+                actor_refs,
+                scope=f"fragment {fragment_index} participants",
+            )
+            mentioned_actor_refs = self._decode_actor_relations(
+                raw.get("mentioned_actor_refs"),
+                actor_refs,
+                scope=f"fragment {fragment_index} mentioned actors",
+            )
+            if any(
+                value["relation_type"] not in {"speaker", "narrator", "responder"}
+                for value in participant_refs
+            ):
+                raise TopicBuildValidationError(
+                    f"fragment {fragment_index} participant_refs has a semantic-only role"
+                )
+            if any(
+                value["relation_type"] not in {
+                    "subject", "mentioned", "executor", "requester"
+                }
+                for value in mentioned_actor_refs
+            ):
+                raise TopicBuildValidationError(
+                    f"fragment {fragment_index} mentioned_actor_refs has a participant role"
                 )
             decoded.append(
                 {
                     **raw,
                     "timeline_uids": timeline_uids,
                     "facts": facts,
+                    "participant_refs": participant_refs,
+                    "mentioned_actor_refs": mentioned_actor_refs,
                 }
             )
         return {"fragments": decoded}
 
+    @classmethod
+    def _decode_actor_relations(
+        cls,
+        values: Any,
+        actor_refs: dict[str, dict[str, Any]],
+        *,
+        scope: str,
+    ) -> list[dict[str, Any]]:
+        if values is None:
+            return []
+        if not isinstance(values, list):
+            raise TopicBuildValidationError(f"{scope} must be an array")
+        allowed_roles = {
+            "speaker", "narrator", "responder", "subject",
+            "mentioned", "executor", "requester",
+        }
+        decoded: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, value in enumerate(values):
+            if not isinstance(value, dict):
+                raise TopicBuildValidationError(f"{scope} item {index} must be an object")
+            actor_ref = str(value.get("actor_ref") or "").strip()
+            relation_type = str(value.get("relation_type") or "").strip()
+            unresolved_label = str(
+                value.get("display_name_snapshot") or value.get("label") or ""
+            ).strip()
+            if actor_ref == "unresolved" and not unresolved_label:
+                raise TopicBuildValidationError(
+                    f"{scope} item {index} needs a local unresolved label"
+                )
+            if actor_ref != "unresolved" and actor_ref not in actor_refs:
+                raise TopicBuildValidationError(
+                    f"{scope} item {index} references unknown actor {actor_ref}"
+                )
+            if relation_type not in allowed_roles:
+                raise TopicBuildValidationError(
+                    f"{scope} item {index} has invalid relation_type {relation_type}"
+                )
+            actor = (
+                actor_refs[actor_ref]
+                if actor_ref != "unresolved"
+                else {
+                    "actor_id": "unresolved-pending:"
+                    + hashlib.sha256(unresolved_label.encode("utf-8")).hexdigest()[:16],
+                    "actor_type": "unknown",
+                    "observed_names": [unresolved_label],
+                    "resolution_status": "unresolved",
+                }
+            )
+            key = (str(actor["actor_id"]), relation_type)
+            if key in seen:
+                continue
+            seen.add(key)
+            decoded.append(
+                {
+                    "actor_id": str(actor["actor_id"]),
+                    "actor_type": str(actor.get("actor_type") or "unknown"),
+                    "relation_type": relation_type,
+                    "display_name_snapshot": next(
+                        (
+                            str(name).strip()
+                            for name in actor.get("observed_names", [])
+                            if str(name).strip()
+                        ),
+                        None,
+                    ),
+                    "confidence": cls._score(value.get("confidence"), 0.7),
+                    "resolution_status": str(
+                        actor.get("resolution_status") or "inferred"
+                    ),
+                    "actor_ref": actor_ref,
+                }
+            )
+        return decoded
+
     def _synthesis_llm_context(
         self, fragments: list[TopicFragmentDraft]
-    ) -> tuple[dict[str, Any], dict[str, str]]:
+    ) -> tuple[dict[str, Any], dict[str, str], dict[str, dict[str, Any]]]:
         """Strip nested provenance and expose only semantic fields plus local refs."""
         payload: list[dict[str, Any]] = []
         fact_refs: dict[str, str] = {}
+        actors_by_id: dict[str, dict[str, Any]] = {}
+        for fragment in fragments:
+            for key in ("participant_refs", "mentioned_actor_refs"):
+                for actor in fragment.metadata.get(key, []):
+                    if not isinstance(actor, dict):
+                        continue
+                    actor_id = str(actor.get("actor_id") or "").strip()
+                    if actor_id:
+                        actors_by_id.setdefault(actor_id, dict(actor))
+            for fact in fragment.facts:
+                for actor in fact.get("actor_refs", []):
+                    if not isinstance(actor, dict):
+                        continue
+                    actor_id = str(actor.get("actor_id") or "").strip()
+                    if actor_id:
+                        actors_by_id.setdefault(actor_id, dict(actor))
+        actor_refs: dict[str, dict[str, Any]] = {}
+        actor_id_to_ref: dict[str, str] = {}
+        actor_payload: list[dict[str, Any]] = []
+        for actor_id, actor in actors_by_id.items():
+            actor_ref = f"A{len(actor_payload) + 1}"
+            actor_id_to_ref[actor_id] = actor_ref
+            normalized = {**actor, "ref": actor_ref, "actor_id": actor_id}
+            actor_refs[actor_ref] = normalized
+            actor_payload.append(normalized)
         next_fact = 1
         for fragment_index, fragment in enumerate(fragments, 1):
             facts: list[dict[str, Any]] = []
@@ -4767,6 +5536,21 @@ INPUT:
                         "confidence": self._score(
                             fact.get("confidence"), fragment.confidence
                         ),
+                        "actor_refs": [
+                            {
+                                "actor_ref": actor_id_to_ref[actor_id],
+                                "relation_type": str(
+                                    actor.get("relation_type") or "mentioned"
+                                ),
+                                "confidence": self._score(
+                                    actor.get("confidence"), 0.7
+                                ),
+                            }
+                            for actor in fact.get("actor_refs", [])
+                            if isinstance(actor, dict)
+                            and (actor_id := str(actor.get("actor_id") or "").strip())
+                            in actor_id_to_ref
+                        ],
                     }
                 )
             payload.append(
@@ -4784,8 +5568,9 @@ INPUT:
         return {
             "authoritative_identities": self._fragment_identity_payload(fragments),
             "conversation_roles": prompt_roles,
+            "actor_refs": actor_payload,
             "fragments": payload,
-        }, fact_refs
+        }, fact_refs, actor_refs
 
     def _candidate_identity_payload(
         self, inputs: list[TimelineTopicCandidate]
@@ -5117,6 +5902,48 @@ INPUT:
             "mentioned_actors": [],
         }
 
+    @staticmethod
+    def _actor_index_from_links(
+        links: list[TopicActorLink],
+    ) -> dict[str, Any]:
+        indexed: dict[str, dict[str, Any]] = {}
+        for link in links:
+            entry = indexed.setdefault(
+                link.actor_id,
+                {
+                    "actor_id": link.actor_id,
+                    "actor_type": link.actor_type,
+                    "display_names": [],
+                    "roles": [],
+                    "fragment_uids": [],
+                    "timeline_uids": [],
+                    "resolution_status": link.resolution_status,
+                    "confidence": link.confidence,
+                },
+            )
+            if link.display_name_snapshot and link.display_name_snapshot not in entry["display_names"]:
+                entry["display_names"].append(link.display_name_snapshot)
+            if link.relation_type not in entry["roles"]:
+                entry["roles"].append(link.relation_type)
+            entry["confidence"] = max(float(entry["confidence"]), link.confidence)
+            for key in ("fragment_uids", "timeline_uids"):
+                for value in link.metadata.get(key, []):
+                    if value not in entry[key]:
+                        entry[key].append(value)
+        participants: list[dict[str, Any]] = []
+        mentioned: list[dict[str, Any]] = []
+        participant_roles = {"speaker", "narrator", "responder"}
+        for entry in indexed.values():
+            if participant_roles & set(entry["roles"]):
+                participants.append(entry)
+            if set(entry["roles"]) - participant_roles:
+                mentioned.append(entry)
+        return {
+            "schema_version": 2,
+            "participants": participants,
+            "mentioned_actors": mentioned,
+        }
+
     def _validate_role_anchored_fragment(
         self,
         label: str,
@@ -5265,6 +6092,7 @@ INPUT:
         self,
         parsed: dict[str, Any],
         fact_refs: dict[str, str],
+        actor_refs: dict[str, dict[str, Any]],
         fragments: list[TopicFragmentDraft],
     ) -> dict[str, Any]:
         fact_owners = {
@@ -5315,10 +6143,64 @@ INPUT:
                 "atoms do not cite facts from every fact-bearing fragment: "
                 + ", ".join(missing)
             )
+        decoded_actor_links: list[dict[str, Any]] = []
+        raw_actor_links = parsed.get("actor_links", [])
+        if raw_actor_links is not None and not isinstance(raw_actor_links, list):
+            raise TopicBuildValidationError("actor_links must be an array")
+        allowed_relations = {
+            "speaker", "narrator", "responder", "subject",
+            "mentioned", "executor", "requester",
+        }
+        for index, raw_link in enumerate(raw_actor_links or []):
+            if not isinstance(raw_link, dict):
+                raise TopicBuildValidationError(
+                    f"actor_link {index} must be an object"
+                )
+            actor_ref = str(raw_link.get("actor_ref") or "").strip()
+            relation_type = str(raw_link.get("relation_type") or "").strip()
+            if actor_ref not in actor_refs:
+                raise TopicBuildValidationError(
+                    f"actor_link {index} references unknown actor {actor_ref}"
+                )
+            if relation_type not in allowed_relations:
+                raise TopicBuildValidationError(
+                    f"actor_link {index} has invalid relation_type {relation_type}"
+                )
+            cited_refs = self._unique_strings(raw_link.get("source_fact_refs"))
+            unknown_fact_refs = [ref for ref in cited_refs if ref not in fact_refs]
+            if unknown_fact_refs:
+                raise TopicBuildValidationError(
+                    f"actor_link {index} references unknown facts {unknown_fact_refs}"
+                )
+            actor = actor_refs[actor_ref]
+            decoded_actor_links.append(
+                {
+                    "actor_id": str(actor["actor_id"]),
+                    "actor_type": str(actor.get("actor_type") or "unknown"),
+                    "relation_type": relation_type,
+                    "display_name_snapshot": actor.get("display_name_snapshot")
+                    or next(
+                        (
+                            str(value).strip()
+                            for value in actor.get("observed_names", [])
+                            if str(value).strip()
+                        ),
+                        None,
+                    ),
+                    "confidence": self._score(raw_link.get("confidence"), 0.7),
+                    "resolution_status": str(
+                        actor.get("resolution_status") or "inferred"
+                    ),
+                    "source_fact_uids": [
+                        fact_refs[ref] for ref in cited_refs
+                    ],
+                }
+            )
         return {
             **parsed,
             "fragment_uids": sorted(fragment.fragment_uid for fragment in fragments),
             "atoms": atoms,
+            "actor_links": decoded_actor_links,
         }
 
     @staticmethod

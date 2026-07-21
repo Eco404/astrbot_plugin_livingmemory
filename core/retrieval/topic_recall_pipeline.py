@@ -78,6 +78,7 @@ class TopicRecallPipeline:
         context_session_id: str | None = None,
         visible_message_start_index: int | None = None,
         visible_message_end_index: int | None = None,
+        current_actor_ids: set[str] | None = None,
         track_access: bool = True,
     ) -> TopicRecallOutcome:
         if not branches or not memory_space_id or final_k <= 0:
@@ -127,6 +128,28 @@ class TopicRecallPipeline:
                 if branch_score is not None:
                     miss_probability *= 1.0 - min(1.0, branch.weight * branch_score)
             candidate.relevance_score = 1.0 - miss_probability
+            candidate.base_relevance_score = candidate.relevance_score
+            available_actor_ids = {
+                str(actor.get("actor_id") or "")
+                for actor in candidate.actors
+                if str(actor.get("actor_id") or "")
+                and str(actor.get("resolution_status") or "") != "unresolved"
+            }
+            candidate.matched_actor_ids = sorted(
+                available_actor_ids & set(current_actor_ids or set())
+            )
+            if candidate.matched_actor_ids:
+                candidate.actor_match_boost = max(
+                    0.0,
+                    min(
+                        0.2,
+                        float(self.config.get("recall_actor_match_boost", 0.04)),
+                    ),
+                )
+                candidate.relevance_score = min(
+                    1.0,
+                    candidate.relevance_score + candidate.actor_match_boost,
+                )
             candidate.final_score = self.retriever._rank_score(
                 candidate.topic, candidate.relevance_score
             )
@@ -210,7 +233,11 @@ class TopicRecallPipeline:
             row
             for row in rows
             if row["fragment"].metadata.get("narrative_schema_version")
-            in {"first_person_assistant_roles_v2", "third_person_roles_v1"}
+            in {
+                "first_person_assistant_roles_v3",
+                "first_person_assistant_roles_v2",
+                "third_person_roles_v1",
+            }
         ]
         available_count = len(safe_rows)
         if not safe_rows or not branches:

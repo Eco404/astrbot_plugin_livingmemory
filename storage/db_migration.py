@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.7"
+    CURRENT_VERSION = "9.8"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -44,6 +44,7 @@ class DBMigration:
         "9.5": "Runtime Topic settings and local incremental reconciliation",
         "9.6": "Formal Topic fragments and revision-scoped fragment provenance",
         "9.7": "Stable conversation actors and evidence-aware Topic fragments",
+        "9.8": "Fact-level Topic actor relations and evidence repair",
     }
 
     def __init__(self, db_path: str):
@@ -324,6 +325,10 @@ class DBMigration:
                 # 从版本9.6升级到版本9.7
                 if current_key <= self.version_key("9.6"):
                     migration_steps.append(self._migrate_v9_6_to_v9_7)
+
+                # 从版本9.7升级到版本9.8
+                if current_key <= self.version_key("9.7"):
+                    migration_steps.append(self._migrate_v9_7_to_v9_8)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1209,6 +1214,21 @@ class DBMigration:
         if progress_callback:
             progress_callback("启用稳定人物身份与按需证据片段", 1, 1)
         logger.info("v9.6 -> v9.7 迁移完成，未自动改写现有 Timeline 或 Topic")
+
+    async def _migrate_v9_7_to_v9_8(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ):
+        """Create authoritative Topic and fact actor-relation indexes."""
+        logger.info("执行迁移步骤: v9.7 -> v9.8 (fact-level actor relations)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await TopicMemoryStore.create_tables(db)
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建 Topic 人物与事实人物关系索引", 1, 1)
+        logger.info("v9.7 -> v9.8 迁移完成；旧 Topic 在维护或重建后回填人物关系")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

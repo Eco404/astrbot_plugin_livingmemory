@@ -630,7 +630,7 @@ def test_validation_drops_unknown_atom_fingerprint_without_losing_fact_source():
             }
         ],
     }
-    _, _, _, sources = manager._materialize_snapshot(
+    _, _, _, sources, _, _ = manager._materialize_snapshot(
         "run-1",
         "space-1",
         synthesis,
@@ -1623,7 +1623,9 @@ def test_fragment_prompt_uses_local_refs_and_restores_exact_provenance():
         atom_fingerprints=[fingerprint],
     )
 
-    payload, timeline_refs, source_refs = manager._fragment_llm_context([candidate])
+    payload, timeline_refs, source_refs, actor_refs = manager._fragment_llm_context(
+        [candidate]
+    )
     serialized = json.dumps(payload, ensure_ascii=False)
 
     assert "timeline-private-uuid" not in serialized
@@ -1653,12 +1655,118 @@ def test_fragment_prompt_uses_local_refs_and_restores_exact_provenance():
         },
         timeline_refs,
         source_refs,
+        actor_refs,
     )
 
     fact = decoded["fragments"][0]["facts"][0]
     assert decoded["fragments"][0]["timeline_uids"] == [candidate.memory_uid]
     assert fact["source_timeline_uids"] == [candidate.memory_uid]
     assert fact["source_atom_fingerprints"] == [fingerprint]
+
+
+def test_fragment_actor_refs_are_constrained_and_unresolved_ids_are_fragment_local():
+    manager = TopicBuildManager(":memory:", None, None)
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-actor-1",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:u1",
+        content="示例甲提到了朋友小林",
+        summary="示例甲提到了朋友小林",
+        key_facts=["示例甲提到了朋友小林"],
+        role_bindings={
+            "narrator_actor_id": "qq:assistant:bot-1",
+            "actors": [
+                {
+                    "actor_id": "qq:human:u1",
+                    "actor_type": "human",
+                    "observed_names": ["示例甲"],
+                },
+                {
+                    "actor_id": "qq:assistant:bot-1",
+                    "actor_type": "assistant",
+                    "observed_names": ["测试助手"],
+                },
+            ],
+        },
+    )
+    payload, timeline_refs, source_refs, actor_refs = manager._fragment_llm_context(
+        [candidate]
+    )
+    human_ref = next(
+        value["ref"]
+        for value in payload["actor_refs"]
+        if value["actor_id"] == "qq:human:u1"
+    )
+    decoded = manager._decode_fragment_refs(
+        {
+            "fragments": [
+                {
+                    "label": "朋友近况",
+                    "summary": "示例甲提到了朋友小林",
+                    "timeline_refs": ["T1"],
+                    "participant_refs": [
+                        {
+                            "actor_ref": human_ref,
+                            "relation_type": "speaker",
+                            "confidence": 1.0,
+                        }
+                    ],
+                    "mentioned_actor_refs": [
+                        {
+                            "actor_ref": "unresolved",
+                            "display_name_snapshot": "小林",
+                            "relation_type": "subject",
+                            "confidence": 0.6,
+                        }
+                    ],
+                    "facts": [
+                        {
+                            "content": "示例甲提到了朋友小林",
+                            "source_refs": ["T1.K1"],
+                            "actor_refs": [
+                                {
+                                    "actor_ref": "unresolved",
+                                    "display_name_snapshot": "小林",
+                                    "relation_type": "subject",
+                                    "confidence": 0.6,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+        timeline_refs,
+        source_refs,
+        actor_refs,
+    )
+    group = TopicCandidateGroup(
+        run_uid="run-actor",
+        group_index=0,
+        memory_space_id="space-1",
+        label="朋友近况",
+        timeline_uids=[candidate.memory_uid],
+        time_cluster_keys=[],
+        cohesion=1.0,
+        group_uid="group-actor",
+    )
+    fragment = manager._validate_fragments(
+        decoded,
+        "run-actor",
+        group,
+        [candidate],
+        "prompt",
+        "input",
+        "provider",
+        "model",
+    )[0]
+    unresolved = fragment.metadata["mentioned_actor_refs"][0]
+    assert unresolved["actor_id"].startswith(
+        f"unresolved:{fragment.fragment_uid}:"
+    )
+    assert fragment.facts[0]["actor_refs"][0]["actor_id"] == unresolved["actor_id"]
 
 
 def test_fragment_prompt_defines_one_future_retrieval_intent_per_fragment():
@@ -1677,7 +1785,7 @@ def test_synthesis_prompt_strips_nested_provenance_and_derives_fragment_scope():
         "b" * 64: ["timeline-1"]
     }
 
-    payload, fact_refs = manager._synthesis_llm_context(fragments)
+    payload, fact_refs, actor_refs = manager._synthesis_llm_context(fragments)
     serialized = json.dumps(payload, ensure_ascii=False)
 
     assert "fact-1" not in serialized
@@ -1699,6 +1807,7 @@ def test_synthesis_prompt_strips_nested_provenance_and_derives_fragment_scope():
             ],
         },
         fact_refs,
+        actor_refs,
         fragments,
     )
 
@@ -1746,7 +1855,7 @@ def test_topic_prompts_include_only_matching_authoritative_identity_profiles():
         atom_fingerprints=["c" * 64],
     )
 
-    fragment_payload, _, _ = manager._fragment_llm_context([candidate])
+    fragment_payload, _, _, _ = manager._fragment_llm_context([candidate])
 
     assert fragment_payload["authoritative_identities"] == [
         {
@@ -1761,7 +1870,7 @@ def test_topic_prompts_include_only_matching_authoritative_identity_profiles():
     fragment = _topic_fragment(1)
     fragment.summary = "示例甲说他会完成测试"
     fragment.facts[0]["content"] = "示例甲是测试负责人"
-    synthesis_payload, _ = manager._synthesis_llm_context([fragment])
+    synthesis_payload, _, _ = manager._synthesis_llm_context([fragment])
 
     assert synthesis_payload["authoritative_identities"] == [
         fragment_payload["authoritative_identities"][0]
@@ -1813,7 +1922,7 @@ def test_fragment_role_map_preserves_bot_first_person_with_actor_anchor():
         },
     )
 
-    payload, _, _ = manager._fragment_llm_context([candidate])
+    payload, _, _, _ = manager._fragment_llm_context([candidate])
 
     assert payload["conversation_roles"]["timeline_narration"] == (
         "first_person_assistant"
@@ -1852,7 +1961,7 @@ def test_fragment_role_map_preserves_bot_first_person_with_actor_anchor():
     assert participant["confidence"] == 0.95
     assert participant["resolution_status"] == "timeline_bound"
     assert participant["resolution_sources"] == ["timeline_role_bindings"]
-    synthesis_payload, _ = manager._synthesis_llm_context([fragment])
+    synthesis_payload, _, _ = manager._synthesis_llm_context([fragment])
     assert "assistant-persona:测试助手" in json.dumps(
         synthesis_payload, ensure_ascii=False
     )
@@ -1988,7 +2097,7 @@ def test_fragment_validation_repairs_unambiguous_generic_human_role_in_place():
     assert fragment.summary == "我提醒示例甲检查结果"
     assert fragment.facts[0]["content"] == "示例甲已收到提醒"
     assert fragment.metadata["narrative_schema_version"] == (
-        "first_person_assistant_roles_v2"
+        "first_person_assistant_roles_v3"
     )
     assert fragment.metadata["validation_repairs"][-1]["type"] == (
         "unambiguous_generic_human_role_repair"
@@ -2113,6 +2222,56 @@ async def test_ambiguous_legacy_group_timeline_loads_raw_identity_evidence():
         10,
         11,
     ]
+
+
+@pytest.mark.asyncio
+async def test_llm_evidence_request_is_fulfilled_once_for_supplied_timeline_ref():
+    message = Message(
+        id=21,
+        session_id="qq:FriendMessage:u1",
+        role="user",
+        content="小林是我同事",
+        sender_id="u1",
+        sender_name="示例甲",
+        platform="qq",
+    )
+    evidence_store = SimpleNamespace(
+        get_messages_by_id_span=AsyncMock(return_value=[message])
+    )
+    manager = TopicBuildManager(
+        ":memory:", None, None, conversation_store=evidence_store
+    )
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-evidence-request",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:u1",
+        content="提到了小林",
+        summary="提到了小林",
+        source_window={"first_message_id": 21, "last_message_id": 21},
+    )
+    parsed = {
+        "fragments": [
+            {
+                "timeline_refs": ["T1"],
+                "evidence_requests": [
+                    {"timeline_ref": "T1", "reason": "resolve speaker"}
+                ],
+            }
+        ]
+    }
+    refs = manager._requested_evidence_refs(
+        parsed, {"T1": candidate.memory_uid}
+    )
+    await manager._attach_requested_evidence(
+        [candidate], refs, {"T1": candidate.memory_uid}
+    )
+
+    assert refs == {"T1"}
+    assert candidate.features["evidence_status"] == "llm_requested_attached"
+    assert candidate.features["raw_evidence"][0]["message_id"] == 21
+    evidence_store.get_messages_by_id_span.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -2249,7 +2408,7 @@ def test_materialization_adds_fact_fallback_for_unmapped_timeline():
         ],
     }
 
-    _, _, _, sources = manager._materialize_snapshot(
+    _, _, _, sources, _, _ = manager._materialize_snapshot(
         "run-1",
         "space-1",
         synthesis,
@@ -2268,6 +2427,63 @@ def test_materialization_adds_fact_fallback_for_unmapped_timeline():
     assert next(
         source for source in sources if source.timeline_uid == "timeline-2"
     ).source_kind == "fact_fingerprint"
+
+
+def test_materialization_builds_topic_and_fact_actor_links():
+    manager = TopicBuildManager(":memory:", None, None)
+    fragment = _topic_fragment(1)
+    fragment.metadata["participant_refs"] = [
+        {
+            "actor_id": "qq:human:u1",
+            "actor_type": "human",
+            "relation_type": "speaker",
+            "display_name_snapshot": "示例甲",
+            "confidence": 1.0,
+            "resolution_status": "resolved",
+        }
+    ]
+    fragment.facts[0]["actor_refs"] = [
+        {
+            "actor_id": "qq:human:u1",
+            "actor_type": "human",
+            "relation_type": "subject",
+            "display_name_snapshot": "示例甲",
+            "confidence": 0.9,
+            "resolution_status": "resolved",
+        }
+    ]
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-1",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:u1",
+        content="事实 1",
+        summary="事实 1",
+        time_cluster_key="cluster-1",
+    )
+    synthesis = manager._validate_synthesis(
+        manager._single_fragment_synthesis(fragment), [fragment]
+    )
+    _, atoms, _, _, actor_links, atom_actor_links = manager._materialize_snapshot(
+        "run-1",
+        "space-1",
+        synthesis,
+        [fragment],
+        {"timeline-1": candidate},
+        None,
+    )
+
+    assert {(item.actor_id, item.relation_type) for item in actor_links} == {
+        ("qq:human:u1", "speaker"),
+        ("qq:human:u1", "subject"),
+    }
+    assert {item.topic_atom_uid for item in atom_actor_links} == {
+        atoms[0].atom_uid
+    }
+    assert {item.fragment_uid for item in atom_actor_links} == {
+        fragment.fragment_uid
+    }
 
 
 def test_synthesis_drops_unknown_fact_and_restores_grounded_fact():
@@ -2456,3 +2672,25 @@ async def test_failed_run_resumes_without_repeating_completed_fragment_stage(
     resumed_run = await store.get_maintenance_run(failed_run["run_uid"])
     assert resumed_run["status"] == "completed"
     assert resumed_run["completed_at"] is not None
+@pytest.mark.asyncio
+async def test_immediate_scheduled_rebuild_keeps_target_timeline_uids():
+    manager = TopicBuildManager(
+        "unused.db",
+        None,
+        None,
+        config={"auto_debounce_seconds": 3600},
+    )
+    manager.build_space = AsyncMock(return_value={})
+
+    manager.schedule_space(
+        "space-1",
+        timeline_uids=["timeline-2", "timeline-1", "timeline-1"],
+        immediate=True,
+    )
+    await asyncio.wait_for(manager._scheduled["space-1"], timeout=1.0)
+
+    manager.build_space.assert_awaited_once()
+    call = manager.build_space.await_args
+    assert call.args[0] == "space-1"
+    assert call.kwargs["timeline_uids"] == ["timeline-1", "timeline-2"]
+    assert call.kwargs["since"] is None

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import sqlite3
 import time
 from pathlib import Path
 
@@ -29,6 +31,35 @@ from astrbot_plugin_livingmemory.storage.topic_memory_store import (
     TopicRevisionConflict,
     TopicSourceValidationError,
 )
+
+
+def test_topic_actor_schema_is_valid_without_aiosqlite_runtime():
+    connection = sqlite3.connect(":memory:")
+
+    class _ConnectionAdapter:
+        async def execute(self, sql, params=()):
+            return connection.execute(sql, params)
+
+    asyncio.run(TopicMemoryStore.create_tables(_ConnectionAdapter()))
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    assert "topic_actor_links" in tables
+    assert "topic_atom_actor_links" in tables
+    actor_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(topic_actor_links)")
+    }
+    assert {"topic_uid", "actor_id", "relation_type", "resolution_status"} <= actor_columns
+    atom_actor_columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(topic_atom_actor_links)")
+    }
+    assert {"topic_atom_uid", "fragment_uid", "timeline_uid"} <= atom_actor_columns
+    connection.close()
 
 
 def test_candidate_checkpoint_preserves_actor_and_source_provenance():

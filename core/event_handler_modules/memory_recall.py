@@ -13,6 +13,7 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import TextPart
 
 from ..models.memory_identity import resolve_memory_space
+from ..models.conversation_models import stable_actor_id
 from ..retrieval.recall_pipeline import RecallPipeline
 from ..utils import (
     OperationContext,
@@ -219,6 +220,34 @@ class MemoryRecall:
                     memory_space_id = resolve_memory_space(
                         session_id, persona_id
                     ).memory_space_id
+                    sender_id = (
+                        event.get_sender_id()
+                        if hasattr(event, "get_sender_id")
+                        else getattr(event, "sender_id", "")
+                    )
+                    platform = (
+                        event.get_platform_name()
+                        if hasattr(event, "get_platform_name")
+                        else "unknown"
+                    )
+                    current_actor_ids = {
+                        stable_actor_id(platform, str(sender_id), "human")
+                    } if sender_id else set()
+                    if (
+                        is_group
+                        and not bool(
+                            topic_config.get(
+                                "recall_group_current_sender_only", True
+                            )
+                        )
+                    ):
+                        current_actor_ids = await self._visible_group_actor_ids(
+                            session_id=session_id,
+                            visible_start=visible_start,
+                            visible_end=visible_end,
+                            current_actor_ids=current_actor_ids,
+                            fallback_platform=platform,
+                        )
                     topic_search = self._safe_topic_recall(
                         self.memory_engine.topic_recall_pipeline.search(
                             branches=branches,
@@ -230,6 +259,7 @@ class MemoryRecall:
                             context_session_id=session_id,
                             visible_message_start_index=visible_start,
                             visible_message_end_index=visible_end,
+                            current_actor_ids=current_actor_ids,
                             track_access=True,
                         ),
                         session_id,
@@ -491,6 +521,59 @@ class MemoryRecall:
             },
             "timestamp": item.fragment.started_at,
         }
+
+    async def _visible_group_actor_ids(
+        self,
+        *,
+        session_id: str,
+        visible_start: int | None,
+        visible_end: int | None,
+        current_actor_ids: set[str],
+        fallback_platform: str,
+    ) -> set[str]:
+        """Resolve human speakers from the persisted range visible to this request.
+
+        The current sender is supplied separately because group capture ordering is
+        adapter-dependent and the current event may not have reached the store yet.
+        Missing or unreadable range data deliberately falls back to that sender only.
+        """
+        actor_ids = set(current_actor_ids)
+        if (
+            visible_start is None
+            or visible_end is None
+            or int(visible_end) <= int(visible_start)
+        ):
+            return actor_ids
+        try:
+            messages = await self.conversation_manager.get_messages_range(
+                session_id,
+                start_index=max(0, int(visible_start)),
+                end_index=max(0, int(visible_end)),
+            )
+        except Exception as exc:
+            logger.debug(
+                f"[{session_id}] 无法读取群聊可见参与者，退化为当前发言者: {exc}"
+            )
+            return actor_ids
+        for message in messages:
+            metadata = getattr(message, "metadata", {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            role = str(getattr(message, "role", "") or "").casefold()
+            actor_type = str(metadata.get("actor_type") or "").casefold()
+            if (
+                role == "assistant"
+                or actor_type == "assistant"
+                or bool(metadata.get("is_bot_message"))
+            ):
+                continue
+            sender_id = str(getattr(message, "sender_id", "") or "").strip()
+            if not sender_id:
+                continue
+            platform = str(
+                getattr(message, "platform", "") or fallback_platform or "unknown"
+            )
+            actor_ids.add(stable_actor_id(platform, sender_id, "human"))
+        return actor_ids
 
     async def _visible_context_range(
         self,

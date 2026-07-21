@@ -226,7 +226,15 @@
             <div id="topic-progress" class="system-panel hidden mb-4"></div>
             <div class="table-container topic-table-container">
               <div class="table-scroll topic-table-scroll">
-                <table class="data-table">
+                <table class="data-table topic-data-table">
+                  <colgroup>
+                    <col class="topic-col-uid">
+                    <col class="topic-col-title">
+                    <col class="topic-col-status">
+                    <col class="topic-col-importance">
+                    <col class="topic-col-support">
+                    <col class="topic-col-revision">
+                  </colgroup>
                   <thead><tr><th data-i18n="topic.uid">Topic UID</th><th data-i18n="topic.title">标题</th><th data-i18n="topic.status">状态</th><th data-i18n="topic.importance">重要性</th><th data-i18n="topic.support">时间簇 / Timeline</th><th data-i18n="topic.revision">版本</th></tr></thead>
                   <tbody id="topics-body"><tr><td colspan="6" class="table-empty" data-i18n="topic.chooseSpace">请选择记忆空间</td></tr></tbody>
                 </table>
@@ -293,6 +301,7 @@
             <div class="page-actions">
               <span class="identity-dirty hidden" id="identity-dirty" data-i18n="identity.unsaved">有未保存的修改</span>
               <button class="btn btn-secondary btn-sm" id="identity-refresh" data-i18n="common.refresh">刷新</button>
+              <button class="btn btn-secondary btn-sm" id="identity-sync-topics" data-i18n="identity.syncNow">立即同步重建</button>
               <button class="btn btn-secondary btn-sm" id="identity-add" data-i18n="identity.add">添加人物</button>
               <button class="btn btn-primary btn-sm" id="identity-save" data-i18n="common.save" disabled>保存</button>
             </div>

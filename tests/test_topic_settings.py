@@ -23,6 +23,10 @@ def test_effective_topic_settings_are_sparse_overrides_over_code_defaults():
     assert effective["component_review_min_fragments"] == 6
     assert effective["recall_top_k"] == defaults["recall_top_k"]
     assert set(effective) == set(TOPIC_SETTING_DEFINITIONS)
+    assert all(
+        str(definition.get("description") or "").strip()
+        for definition in TOPIC_SETTING_DEFINITIONS.values()
+    )
 
 
 def test_topic_setting_validation_rejects_unknown_and_out_of_range_values():

@@ -11,6 +11,9 @@ from typing import Any
 import aiosqlite
 
 from ..core.models.topic_memory import (
+    TopicActorLink,
+    TopicActorRef,
+    TopicAtomActorLink,
     TopicAtomSource,
     TopicLinkStatus,
     TopicMaintenanceMode,
@@ -489,6 +492,71 @@ class TopicMemoryStore:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS topic_actor_links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic_uid TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                actor_type TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                display_name_snapshot TEXT,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                resolution_status TEXT NOT NULL DEFAULT 'resolved',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(topic_uid, actor_id, relation_type),
+                FOREIGN KEY(topic_uid) REFERENCES topic_memories(topic_uid)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_actor_topic
+            ON topic_actor_links(topic_uid)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_actor_actor
+            ON topic_actor_links(actor_id, relation_type)
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topic_atom_actor_links (
+                topic_atom_uid TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                relation_type TEXT NOT NULL,
+                fragment_uid TEXT NOT NULL,
+                timeline_uid TEXT NOT NULL DEFAULT '',
+                confidence REAL NOT NULL DEFAULT 1.0,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                PRIMARY KEY (
+                    topic_atom_uid, actor_id, relation_type,
+                    fragment_uid, timeline_uid
+                ),
+                FOREIGN KEY(topic_atom_uid) REFERENCES topic_memory_atoms(atom_uid)
+                    ON DELETE CASCADE,
+                FOREIGN KEY(fragment_uid) REFERENCES topic_fragments(fragment_uid)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_atom_actor_actor
+            ON topic_atom_actor_links(actor_id, relation_type)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_atom_actor_fragment
+            ON topic_atom_actor_links(fragment_uid, topic_atom_uid)
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS topic_build_decisions (
                 decision_uid TEXT PRIMARY KEY,
                 run_uid TEXT NOT NULL,
@@ -618,12 +686,17 @@ class TopicMemoryStore:
         atoms: list[TopicMemoryAtom],
         links: list[TopicTimelineLink],
         atom_sources: list[TopicAtomSource],
+        actor_links: list[TopicActorLink] | None = None,
+        atom_actor_links: list[TopicAtomActorLink] | None = None,
         fragments: list[TopicFragmentDraft] | None = None,
         expected_revision: int | None = None,
     ) -> TopicMemory:
         """Atomically replace one generated Topic snapshot and its provenance."""
         self._validate_topic(topic)
         self._validate_snapshot_members(topic.topic_uid, atoms, links, atom_sources)
+        actor_links = list(actor_links or [])
+        atom_actor_links = list(atom_actor_links or [])
+        self._validate_actor_links(topic.topic_uid, atoms, actor_links, atom_actor_links)
         timeline_uids = {link.timeline_uid for link in links}
         timeline_uids.update(source.timeline_uid for source in atom_sources)
 
@@ -709,6 +782,10 @@ class TopicMemoryStore:
                     "DELETE FROM topic_timeline_links WHERE topic_uid = ?",
                     (topic.topic_uid,),
                 )
+                await db.execute(
+                    "DELETE FROM topic_actor_links WHERE topic_uid = ?",
+                    (topic.topic_uid,),
+                )
                 previous_fragment_uids: set[str] = set()
                 if fragments is not None:
                     previous_fragment_rows = await (
@@ -761,6 +838,10 @@ class TopicMemoryStore:
                             """,
                             [now, *sorted(stale_uids)],
                         )
+                for actor_link in actor_links:
+                    await self._insert_actor_link(db, actor_link, now)
+                for atom_actor_link in atom_actor_links:
+                    await self._insert_atom_actor_link(db, atom_actor_link)
                 await db.commit()
             except Exception:
                 await db.rollback()
@@ -779,7 +860,21 @@ class TopicMemoryStore:
                 "SELECT * FROM topic_memories WHERE topic_uid = ?", (topic_uid,)
             )
             row = await cursor.fetchone()
-        return self._row_to_topic(row) if row else None
+            actor_rows = []
+            if row:
+                actor_rows = await (
+                    await db.execute(
+                        "SELECT * FROM topic_actor_links WHERE topic_uid = ?",
+                        (topic_uid,),
+                    )
+                ).fetchall()
+        if not row:
+            return None
+        topic = self._row_to_topic(row)
+        topic.participants, topic.mentioned_actors = self._aggregate_actor_refs(
+            actor_rows
+        )
+        return topic
 
     async def list_topics(
         self,
@@ -862,21 +957,42 @@ class TopicMemoryStore:
                     topic_uids,
                 )
             ).fetchall()
+            actor_rows = await (
+                await db.execute(
+                    f"""
+                    SELECT topic_uid, actor_id, actor_type, relation_type,
+                           display_name_snapshot, confidence,
+                           resolution_status, metadata
+                    FROM topic_actor_links
+                    WHERE topic_uid IN ({placeholders})
+                    ORDER BY topic_uid, relation_type, actor_id
+                    """,
+                    topic_uids,
+                )
+            ).fetchall()
         atoms_by_topic: dict[str, list[dict[str, Any]]] = {
             uid: [] for uid in topic_uids
         }
         sources_by_topic: dict[str, list[dict[str, Any]]] = {
             uid: [] for uid in topic_uids
         }
+        actors_by_topic: dict[str, list[dict[str, Any]]] = {
+            uid: [] for uid in topic_uids
+        }
         for row in atom_rows:
             atoms_by_topic[str(row["topic_uid"])].append(dict(row))
         for row in source_rows:
             sources_by_topic[str(row["topic_uid"])].append(dict(row))
+        for row in actor_rows:
+            item = dict(row)
+            item["metadata"] = self._from_json(item.get("metadata"))
+            actors_by_topic[str(row["topic_uid"])].append(item)
         return [
             {
                 "topic": self._row_to_topic(row),
                 "atoms": atoms_by_topic[str(row["topic_uid"])],
                 "sources": sources_by_topic[str(row["topic_uid"])],
+                "actors": actors_by_topic[str(row["topic_uid"])],
             }
             for row in topic_rows
         ]
@@ -1100,6 +1216,28 @@ class TopicMemoryStore:
                     (topic_uid,),
                 )
             ).fetchall()
+            actor_rows = await (
+                await db.execute(
+                    """
+                    SELECT * FROM topic_actor_links
+                    WHERE topic_uid = ?
+                    ORDER BY relation_type, actor_id
+                    """,
+                    (topic_uid,),
+                )
+            ).fetchall()
+            atom_actor_rows = await (
+                await db.execute(
+                    """
+                    SELECT l.* FROM topic_atom_actor_links l
+                    JOIN topic_memory_atoms a
+                      ON a.atom_uid = l.topic_atom_uid
+                    WHERE a.topic_uid = ?
+                    ORDER BY l.topic_atom_uid, l.relation_type, l.actor_id
+                    """,
+                    (topic_uid,),
+                )
+            ).fetchall()
             topic_metadata = self._from_json(topic_row["metadata"]) if topic_row else {}
             fragment_link_rows = await (
                 await db.execute(
@@ -1135,13 +1273,23 @@ class TopicMemoryStore:
         link_items = [dict(row) for row in links]
         atom_items = [dict(row) for row in atoms]
         source_items = [dict(row) for row in sources]
-        for item in [*link_items, *atom_items, *source_items]:
+        actor_items = [dict(row) for row in actor_rows]
+        atom_actor_items = [dict(row) for row in atom_actor_rows]
+        for item in [
+            *link_items,
+            *atom_items,
+            *source_items,
+            *actor_items,
+            *atom_actor_items,
+        ]:
             if "metadata" in item:
                 item["metadata"] = self._from_json(item["metadata"])
         return {
             "links": link_items,
             "atoms": atom_items,
             "atom_sources": source_items,
+            "actor_links": actor_items,
+            "atom_actor_links": atom_actor_items,
             "fragments": [
                 self._fragment_to_dict(self._row_to_fragment(row))
                 for row in fragment_rows
@@ -1455,6 +1603,134 @@ class TopicMemoryStore:
             except Exception:
                 await db.rollback()
                 raise
+
+    async def mark_identity_topics_pending(
+        self,
+        *,
+        actor_ids: set[str],
+        actor_suffixes: set[str],
+        display_names: set[str],
+    ) -> dict[str, list[str]]:
+        """Mark actor-affected Topics for queued rebuild without hiding old snapshots."""
+        actor_ids = {str(value).strip() for value in actor_ids if str(value).strip()}
+        actor_suffixes = {
+            str(value).strip() for value in actor_suffixes if str(value).strip()
+        }
+        normalized_names = {
+            str(value).strip().casefold()
+            for value in display_names
+            if str(value).strip()
+        }
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT t.topic_uid, t.memory_space_id, t.metadata,
+                           a.actor_id, a.display_name_snapshot,
+                           a.resolution_status
+                    FROM topic_memories t
+                    LEFT JOIN topic_actor_links a ON a.topic_uid = t.topic_uid
+                    WHERE t.status = 'active'
+                    ORDER BY t.topic_uid
+                    """
+                )
+            ).fetchall()
+            matched: dict[str, tuple[str, dict[str, Any]]] = {}
+            topics_with_actors: set[str] = set()
+            all_topics: dict[str, tuple[str, dict[str, Any]]] = {}
+            for row in rows:
+                topic_uid = str(row["topic_uid"])
+                memory_space_id = str(row["memory_space_id"])
+                metadata = self._from_json(row["metadata"])
+                all_topics[topic_uid] = (memory_space_id, metadata)
+                actor_id = str(row["actor_id"] or "").strip()
+                if actor_id:
+                    topics_with_actors.add(topic_uid)
+                display_name = str(row["display_name_snapshot"] or "").strip()
+                suffix_match = any(
+                    actor_id.endswith(f":human:{suffix}")
+                    for suffix in actor_suffixes
+                )
+                unresolved_name_match = (
+                    str(row["resolution_status"] or "") == "unresolved"
+                    and display_name.casefold() in normalized_names
+                )
+                if actor_id in actor_ids or suffix_match or unresolved_name_match:
+                    matched[topic_uid] = (memory_space_id, metadata)
+            # Legacy Topics have no authoritative actor rows. Rebuild them once so
+            # identity changes cannot leave permanently unindexed snapshots.
+            for topic_uid, value in all_topics.items():
+                if topic_uid not in topics_with_actors:
+                    matched.setdefault(topic_uid, value)
+            now = time.time()
+            for topic_uid, (_, metadata) in matched.items():
+                metadata["identity_sync_pending"] = True
+                metadata["identity_sync_requested_at"] = now
+                await db.execute(
+                    """
+                    UPDATE topic_memories SET metadata = ?, updated_at = ?
+                    WHERE topic_uid = ?
+                    """,
+                    (self._to_json(metadata), now, topic_uid),
+                )
+            result: dict[str, list[str]] = {}
+            for topic_uid, (memory_space_id, _) in matched.items():
+                timeline_rows = await (
+                    await db.execute(
+                        """
+                        SELECT timeline_uid FROM topic_timeline_links
+                        WHERE topic_uid = ? AND status = 'active'
+                        ORDER BY timeline_uid
+                        """,
+                        (topic_uid,),
+                    )
+                ).fetchall()
+                result.setdefault(memory_space_id, []).extend(
+                    str(row["timeline_uid"]) for row in timeline_rows
+                )
+            await db.commit()
+        return {
+            space_id: sorted(set(timeline_uids))
+            for space_id, timeline_uids in result.items()
+            if timeline_uids
+        }
+
+    async def list_identity_sync_pending(self) -> dict[str, list[str]]:
+        """Return Timeline sources for Topics awaiting identity-aware rebuild."""
+        async with self._connect() as db:
+            topic_rows = await (
+                await db.execute(
+                    """
+                    SELECT topic_uid, memory_space_id, metadata
+                    FROM topic_memories WHERE status = 'active'
+                    ORDER BY topic_uid
+                    """
+                )
+            ).fetchall()
+            pending = [
+                (str(row["topic_uid"]), str(row["memory_space_id"]))
+                for row in topic_rows
+                if self._from_json(row["metadata"]).get("identity_sync_pending")
+            ]
+            result: dict[str, list[str]] = {}
+            for topic_uid, memory_space_id in pending:
+                rows = await (
+                    await db.execute(
+                        """
+                        SELECT timeline_uid FROM topic_timeline_links
+                        WHERE topic_uid = ? AND status = 'active'
+                        """,
+                        (topic_uid,),
+                    )
+                ).fetchall()
+                result.setdefault(memory_space_id, []).extend(
+                    str(row["timeline_uid"]) for row in rows
+                )
+        return {
+            space_id: sorted(set(timeline_uids))
+            for space_id, timeline_uids in result.items()
+            if timeline_uids
+        }
 
     async def delete_topic(self, topic_uid: str) -> bool:
         async with self._connect() as db:
@@ -2300,6 +2576,55 @@ class TopicMemoryStore:
             )
 
     @staticmethod
+    def _validate_actor_links(
+        topic_uid: str,
+        atoms: list[TopicMemoryAtom],
+        actor_links: list[TopicActorLink],
+        atom_actor_links: list[TopicAtomActorLink],
+    ) -> None:
+        atom_uids = {atom.atom_uid for atom in atoms}
+        actor_keys: set[tuple[str, str]] = set()
+        allowed_relations = {
+            "speaker", "narrator", "responder", "subject",
+            "mentioned", "executor", "requester",
+        }
+        for link in actor_links:
+            if link.topic_uid != topic_uid:
+                raise ValueError("Topic actor link belongs to another Topic")
+            if not link.actor_id.strip() or not link.relation_type.strip():
+                raise ValueError("Topic actor link needs actor_id and relation_type")
+            if link.relation_type not in allowed_relations:
+                raise ValueError("Unknown Topic actor relation_type")
+            key = (link.actor_id, link.relation_type)
+            if key in actor_keys:
+                raise ValueError("Duplicate Topic actor relation")
+            actor_keys.add(key)
+            TopicMemoryStore._validate_score("actor confidence", link.confidence)
+        atom_actor_keys: set[tuple[str, str, str, str, str]] = set()
+        for link in atom_actor_links:
+            if link.topic_atom_uid not in atom_uids:
+                raise ValueError("Topic atom actor link references an unknown atom")
+            if not link.actor_id.strip() or not link.relation_type.strip():
+                raise ValueError("Topic atom actor link needs actor_id and relation_type")
+            if (link.actor_id, link.relation_type) not in actor_keys:
+                raise ValueError("Atom actor relation requires a matching Topic actor link")
+            if not link.fragment_uid.strip():
+                raise ValueError("Topic atom actor link needs fragment provenance")
+            key = (
+                link.topic_atom_uid,
+                link.actor_id,
+                link.relation_type,
+                link.fragment_uid,
+                str(link.timeline_uid or ""),
+            )
+            if key in atom_actor_keys:
+                raise ValueError("Duplicate Topic atom actor relation")
+            atom_actor_keys.add(key)
+            TopicMemoryStore._validate_score(
+                "atom actor confidence", link.confidence
+            )
+
+    @staticmethod
     def _validate_score(name: str, value: float) -> None:
         if not 0.0 <= float(value) <= 1.0:
             raise ValueError(f"{name} must be between 0 and 1")
@@ -2538,6 +2863,57 @@ class TopicMemoryStore:
         )
 
     @staticmethod
+    async def _insert_actor_link(
+        db: aiosqlite.Connection,
+        link: TopicActorLink,
+        now: float,
+    ) -> None:
+        await db.execute(
+            """
+            INSERT INTO topic_actor_links (
+                topic_uid, actor_id, actor_type, relation_type,
+                display_name_snapshot, confidence, resolution_status,
+                metadata, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                link.topic_uid,
+                link.actor_id,
+                link.actor_type,
+                link.relation_type,
+                link.display_name_snapshot,
+                float(link.confidence),
+                link.resolution_status,
+                TopicMemoryStore._to_json(link.metadata),
+                float(link.created_at),
+                now,
+            ),
+        )
+
+    @staticmethod
+    async def _insert_atom_actor_link(
+        db: aiosqlite.Connection,
+        link: TopicAtomActorLink,
+    ) -> None:
+        await db.execute(
+            """
+            INSERT INTO topic_atom_actor_links (
+                topic_atom_uid, actor_id, relation_type, fragment_uid,
+                timeline_uid, confidence, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                link.topic_atom_uid,
+                link.actor_id,
+                link.relation_type,
+                link.fragment_uid,
+                str(link.timeline_uid or ""),
+                float(link.confidence),
+                TopicMemoryStore._to_json(link.metadata),
+            ),
+        )
+
+    @staticmethod
     def _row_to_topic(row: aiosqlite.Row) -> TopicMemory:
         return TopicMemory(
             topic_uid=str(row["topic_uid"]),
@@ -2558,6 +2934,53 @@ class TopicMemoryStore:
             updated_at=float(row["updated_at"]),
             metadata=TopicMemoryStore._from_json(row["metadata"]),
         )
+
+    @staticmethod
+    def _aggregate_actor_refs(
+        rows: list[aiosqlite.Row] | list[dict[str, Any]],
+    ) -> tuple[list[TopicActorRef], list[TopicActorRef]]:
+        grouped: dict[str, TopicActorRef] = {}
+        participant_roles = {"speaker", "narrator", "responder"}
+        for row in rows:
+            item = dict(row)
+            actor_id = str(item.get("actor_id") or "").strip()
+            if not actor_id:
+                continue
+            metadata = TopicMemoryStore._from_json(item.get("metadata"))
+            actor = grouped.setdefault(
+                actor_id,
+                TopicActorRef(
+                    actor_id=actor_id,
+                    actor_type=str(item.get("actor_type") or "unknown"),
+                    confidence=float(item.get("confidence") or 0.0),
+                    resolution_status=str(
+                        item.get("resolution_status") or "inferred"
+                    ),
+                ),
+            )
+            relation_type = str(item.get("relation_type") or "")
+            if relation_type and relation_type not in actor.relation_types:
+                actor.relation_types.append(relation_type)
+            display_name = str(item.get("display_name_snapshot") or "").strip()
+            if display_name and display_name not in actor.display_names:
+                actor.display_names.append(display_name)
+            actor.confidence = max(actor.confidence, float(item.get("confidence") or 0.0))
+            for key, target in (
+                ("fragment_uids", actor.fragment_uids),
+                ("timeline_uids", actor.timeline_uids),
+                ("atom_uids", actor.atom_uids),
+            ):
+                for value in metadata.get(key, []):
+                    if value not in target:
+                        target.append(value)
+        participants: list[TopicActorRef] = []
+        mentioned: list[TopicActorRef] = []
+        for actor in grouped.values():
+            if participant_roles & set(actor.relation_types):
+                participants.append(actor)
+            if set(actor.relation_types) - participant_roles:
+                mentioned.append(actor)
+        return participants, mentioned
 
     @staticmethod
     def _candidate_to_dict(candidate: TimelineTopicCandidate) -> dict[str, Any]:

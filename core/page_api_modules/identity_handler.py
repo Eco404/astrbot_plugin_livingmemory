@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any
 
 from quart import request
@@ -43,6 +44,7 @@ class IdentityHandler:
         topic_build_active: bool = False,
         platform_manager: Any = None,
         conversation_manager: Any = None,
+        on_saved: Any = None,
     ) -> dict[str, Any]:
         if topic_build_active:
             return self.utils.error(
@@ -53,8 +55,24 @@ class IdentityHandler:
         if not isinstance(profiles, list):
             return self.utils.error("profiles 必须是数组")
         try:
+            previous_profiles = list(store.payload().get("profiles", []))
             store.replace_profiles(profiles)
             result = store.payload()
+            if callable(on_saved):
+                try:
+                    sync_result = on_saved(
+                        previous_profiles,
+                        list(result.get("profiles", [])),
+                    )
+                    if inspect.isawaitable(sync_result):
+                        sync_result = await sync_result
+                    result["topic_sync"] = sync_result or {}
+                except Exception as exc:
+                    logger.error(
+                        "[PageAPI] 人物资料已保存，但 Topic 同步排队失败",
+                        exc_info=True,
+                    )
+                    result["topic_sync"] = {"queued": False, "error": str(exc)}
             result["platform_options"] = await self._platform_catalog(
                 store,
                 platform_manager=platform_manager,
