@@ -248,7 +248,7 @@ async def test_topic_pipeline_default_floor_accepts_moderate_match_but_rejects_w
 
 
 @pytest.mark.asyncio
-async def test_topic_fragment_supplements_only_serve_formal_third_person_rows():
+async def test_topic_fragment_supplements_only_serve_role_anchored_rows():
     topic = _payload("weather", "上海雷雨", [1.0, 0.0])["topic"]
     safe = TopicFragmentDraft(
         fragment_uid="safe-fragment",
@@ -256,12 +256,12 @@ async def test_topic_fragment_supplements_only_serve_formal_third_person_rows():
         candidate_group_uid="group-1",
         memory_space_id="space-1",
         label="上海雷雨出行",
-        summary="唯提醒空雨携带雨具",
+        summary="我提醒空雨携带雨具",
         timeline_uids=["timeline-1"],
         source_revisions={"timeline-1": 1},
         facts=[{"content": "空雨决定携带雨具"}],
         embedding=[1.0, 0.0],
-        metadata={"narrative_schema_version": "third_person_roles_v1"},
+        metadata={"narrative_schema_version": "first_person_assistant_roles_v2"},
     )
     legacy = TopicFragmentDraft(
         fragment_uid="legacy-fragment",
@@ -306,4 +306,4 @@ async def test_topic_fragment_supplements_only_serve_formal_third_person_rows():
 
     assert outcome.available_count == 1
     assert [item.fragment_uid for item in outcome.results] == ["safe-fragment"]
-    assert "唯提醒空雨" in outcome.results[0].content
+    assert "我提醒空雨" in outcome.results[0].content

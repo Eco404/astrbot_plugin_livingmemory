@@ -237,7 +237,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "memory_layer": "topic_fragment",
                     "parent_topic_uid": item.topic_uid,
                     "source_timeline_count": len(item.fragment.timeline_uids),
-                    "narrative_perspective": "third_person",
+                    "narrative_perspective": "first_person_assistant",
                 }
                 for item in fragment_results
             )

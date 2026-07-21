@@ -892,6 +892,49 @@ class ConversationStore:
 
         return messages
 
+    async def get_messages_by_id_span(
+        self,
+        session_id: str,
+        first_message_id: int,
+        last_message_id: int,
+        *,
+        limit: int = 100,
+    ) -> list[Message]:
+        """Read a stable source span without relying on deletion-sensitive offsets."""
+        if self.connection is None:
+            return []
+        lower = min(int(first_message_id), int(last_message_id))
+        upper = max(int(first_message_id), int(last_message_id))
+        async with self.connection.execute(
+            """
+            SELECT id, session_id, role, content, sender_id, sender_name,
+                   group_id, platform, timestamp, metadata
+            FROM messages
+            WHERE session_id = ? AND id BETWEEN ? AND ?
+            ORDER BY timestamp ASC, id ASC
+            LIMIT ?
+            """,
+            (session_id, lower, upper, max(1, int(limit))),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            Message.from_dict(
+                {
+                    "id": row["id"],
+                    "session_id": row["session_id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "sender_id": row["sender_id"],
+                    "sender_name": row["sender_name"],
+                    "group_id": row["group_id"],
+                    "platform": row["platform"],
+                    "timestamp": row["timestamp"],
+                    "metadata": row["metadata"],
+                }
+            )
+            for row in rows
+        ]
+
     async def sync_message_counts(self) -> dict[str, int]:
         """
         同步所有会话的 message_count 与实际消息数量

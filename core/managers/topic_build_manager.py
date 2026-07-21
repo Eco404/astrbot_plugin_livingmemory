@@ -21,6 +21,7 @@ from ..models.identity_profile import (
     AuthoritativeIdentityStore,
     identity_prompt_payload,
 )
+from ..models.conversation_models import build_role_bindings, stable_actor_id
 from ..models.topic_memory import (
     TimelineTopicCandidate,
     TopicAtomSource,
@@ -38,10 +39,14 @@ from ..topic_settings import TOPIC_SETTINGS_REVISION
 from .topic_maintenance_manager import TopicMaintenanceManager
 
 
-_FRAGMENT_PROMPT_VERSION = "topic-fragment-v8-third-person-role-map"
-_SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v5-third-person-role-map"
+_FRAGMENT_PROMPT_VERSION = "topic-fragment-v9-first-person-actor-anchor"
+_SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v6-first-person-actor-anchor"
 _COMPONENT_REVIEW_PROMPT_VERSION = "topic-component-review-v1-retrieval-boundary"
-_NARRATIVE_SCHEMA_VERSION = "third_person_roles_v1"
+_NARRATIVE_SCHEMA_VERSION = "first_person_assistant_roles_v2"
+_SUPPORTED_NARRATIVE_SCHEMA_VERSIONS = {
+    _NARRATIVE_SCHEMA_VERSION,
+    "third_person_roles_v1",
+}
 _MATCHING_ALGORITHM_VERSION = 6
 _RELATION_ALGORITHM_VERSION = 3
 _CONFIDENCE_CALIBRATION_VERSION = 1
@@ -65,6 +70,7 @@ class TopicBuildManager:
         rerank_provider: Any = None,
         config: dict[str, Any] | None = None,
         identity_profile_store: AuthoritativeIdentityStore | None = None,
+        conversation_store: Any = None,
     ):
         self.db_path = db_path
         self.store = store
@@ -76,6 +82,7 @@ class TopicBuildManager:
         self.identity_profile_store = (
             identity_profile_store or AuthoritativeIdentityStore()
         )
+        self.conversation_store = conversation_store
         self.llm_concurrency = max(
             1,
             int(self.config.get("llm_concurrency", 1)),
@@ -844,6 +851,7 @@ class TopicBuildManager:
         group_total: int = 1,
     ) -> None:
         inputs = [candidate_map[uid] for uid in group.timeline_uids if uid in candidate_map]
+        await self._prepare_candidate_evidence(inputs)
         payload = [self._candidate_prompt_payload(item) for item in inputs]
         input_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         input_hash = hashlib.sha256(input_json.encode()).hexdigest()
@@ -1182,7 +1190,7 @@ class TopicBuildManager:
             if isinstance(payload, dict):
                 try:
                     synthesis = self._validate_synthesis(payload, fragments)
-                    self._validate_third_person_synthesis(synthesis, fragments)
+                    self._validate_role_anchored_synthesis(synthesis, fragments)
                 except TopicBuildValidationError:
                     synthesis = None
                 if synthesis is not None:
@@ -2501,7 +2509,7 @@ class TopicBuildManager:
                 self._parse_json_object(raw), fact_refs, fragments
             )
             synthesis = self._validate_synthesis(parsed, fragments)
-            self._validate_third_person_synthesis(synthesis, fragments)
+            self._validate_role_anchored_synthesis(synthesis, fragments)
             return synthesis
         except TopicBuildValidationError as first_exc:
             try:
@@ -2513,7 +2521,7 @@ class TopicBuildManager:
                     self._parse_json_object(repaired_raw), fact_refs, fragments
                 )
                 synthesis = self._validate_synthesis(parsed, fragments)
-                self._validate_third_person_synthesis(synthesis, fragments)
+                self._validate_role_anchored_synthesis(synthesis, fragments)
                 logger.info(
                     "[TopicMemory] Topic 合成输出经一次校正后通过来源校验"
                 )
@@ -2924,6 +2932,7 @@ class TopicBuildManager:
                     else "mixed_or_legacy"
                 ),
                 "conversation_roles": self._fragment_role_payload(fragments),
+                "participant_index": self._topic_participant_index(fragments),
             },
         )
         links = [
@@ -3221,6 +3230,109 @@ class TopicBuildManager:
             )
         return result
 
+    async def _prepare_candidate_evidence(
+        self, inputs: list[TimelineTopicCandidate]
+    ) -> None:
+        """Backfill actor bindings and attach raw messages only for risky sources."""
+        if self.conversation_store is None:
+            for item in inputs:
+                flags = self._candidate_ambiguity_flags(item)
+                item.features["ambiguity_flags"] = flags
+                item.features["evidence_status"] = "store_unavailable"
+            return
+        limit = max(1, min(200, int(self.config.get("evidence_max_messages", 80))))
+        for item in inputs:
+            flags = self._candidate_ambiguity_flags(item)
+            needs_identity_backfill = not bool(item.role_bindings.get("actors"))
+            needs_content_evidence = bool(flags)
+            if not needs_identity_backfill and not needs_content_evidence:
+                item.features["ambiguity_flags"] = []
+                item.features["evidence_status"] = "not_needed"
+                continue
+            source = item.source_window
+            first_id = source.get("first_message_id")
+            last_id = source.get("last_message_id")
+            if first_id is None or last_id is None or not item.session_id:
+                item.features["ambiguity_flags"] = flags or [
+                    "legacy_source_span_without_message_ids"
+                ]
+                item.features["evidence_status"] = "unavailable"
+                continue
+            try:
+                messages = await self.conversation_store.get_messages_by_id_span(
+                    item.session_id,
+                    int(first_id),
+                    int(last_id),
+                    limit=limit,
+                )
+            except Exception:
+                logger.warning(
+                    "[TopicMemory] 无法读取 Timeline 原始证据: %s",
+                    item.memory_uid,
+                    exc_info=True,
+                )
+                messages = []
+            if not messages:
+                item.features["ambiguity_flags"] = flags
+                item.features["evidence_status"] = "unavailable"
+                continue
+            if needs_identity_backfill:
+                item.role_bindings = build_role_bindings(messages, item.persona_id)
+                flags = self._candidate_ambiguity_flags(item)
+            item.features["ambiguity_flags"] = self._unique_strings(
+                [*flags, *item.role_bindings.get("ambiguity_flags", [])]
+            )
+            item.features["evidence_status"] = (
+                "attached" if needs_content_evidence else "identity_backfilled"
+            )
+            if needs_content_evidence:
+                item.features["raw_evidence"] = [
+                    {
+                        "message_id": message.id,
+                        "role": message.role,
+                        "actor_id": message.metadata.get("actor_id")
+                        or stable_actor_id(
+                            message.platform,
+                            message.sender_id,
+                            "assistant"
+                            if message.role == "assistant"
+                            or message.metadata.get("is_bot_message")
+                            else "human",
+                        ),
+                        "sender_id": message.sender_id,
+                        "sender_name": message.sender_name,
+                        "timestamp": message.timestamp,
+                        "content": str(message.content)[:2000],
+                    }
+                    for message in messages
+                ]
+
+    @staticmethod
+    def _candidate_ambiguity_flags(
+        item: TimelineTopicCandidate,
+    ) -> list[str]:
+        flags: list[str] = []
+        bindings = item.role_bindings if isinstance(item.role_bindings, dict) else {}
+        actors = [actor for actor in bindings.get("actors", []) if isinstance(actor, dict)]
+        humans = [actor for actor in actors if actor.get("actor_type") != "assistant"]
+        narr = str(bindings.get("narrator_actor_id") or "").strip()
+        if not actors:
+            flags.append("missing_role_bindings")
+        if not narr:
+            flags.append("missing_narrator_actor")
+        if bindings.get("ambiguity_flags"):
+            flags.extend(str(value) for value in bindings["ambiguity_flags"])
+        text = " ".join([item.summary, *item.key_facts, *item.atom_contents])
+        is_group = bool(item.session_id and "GroupMessage" in item.session_id)
+        if is_group and len(humans) > 1 and re.search(
+            r"(?:^|[，。；、\s])(他|她|对方|那个人)(?:的|说|提|认|表|回|$)", text
+        ):
+            flags.append("ambiguous_human_pronoun")
+        actor_ids = [str(actor.get("actor_id") or "") for actor in actors]
+        if len(actor_ids) != len(set(actor_ids)):
+            flags.append("duplicate_actor_id")
+        return list(dict.fromkeys(flags))
+
     def _validate_fragments(
         self,
         parsed: dict[str, Any],
@@ -3354,7 +3466,7 @@ class TopicBuildManager:
             if not label or not summary:
                 raise TopicBuildValidationError("fragment label and summary are required")
             source_items = [allowed[uid] for uid in timeline_uids]
-            self._validate_third_person_fragment(
+            self._validate_role_anchored_fragment(
                 label,
                 summary,
                 normalized_facts,
@@ -3397,6 +3509,40 @@ class TopicBuildManager:
                         "narrative_schema_version": _NARRATIVE_SCHEMA_VERSION,
                         "conversation_roles": self._conversation_role_payload(
                             source_items
+                        ),
+                        "attribution_confidence": self._score(
+                            raw.get("attribution_confidence"),
+                            min(item.confidence for item in source_items),
+                        ),
+                        "ambiguity_flags": self._unique_strings(
+                            [
+                                *(
+                                    raw.get("ambiguity_flags", [])
+                                    if isinstance(raw.get("ambiguity_flags"), list)
+                                    else []
+                                ),
+                                *[
+                                    value
+                                    for item in source_items
+                                    for value in item.features.get(
+                                        "ambiguity_flags", []
+                                    )
+                                ],
+                            ]
+                        ),
+                        "evidence_status": sorted(
+                            {
+                                str(item.features.get("evidence_status", "not_needed"))
+                                for item in source_items
+                            }
+                        ),
+                        "source_message_refs": sorted(
+                            {
+                                int(message["message_id"])
+                                for item in source_items
+                                for message in item.features.get("raw_evidence", [])
+                                if message.get("message_id") is not None
+                            }
                         ),
                         "validation_repairs": validation_repairs,
                     },
@@ -3757,8 +3903,9 @@ class TopicBuildManager:
         return (
             "You split Timeline memories into source-grounded topic fragments. "
             "Timeline text is written from the Bot's first-person viewpoint. "
-            "Use conversation_roles to map that narrator to the assistant persona and "
-            "write every generated field in third person. "
+            "Use conversation_roles to anchor that narrator to the assistant actor. "
+            "Preserve the Bot's first-person memory voice without transferring it to "
+            "a human participant. "
             "Make semantic decisions only; the application owns identity and provenance. "
             "Authoritative identity profiles are immutable facts and override stylistic "
             "or demographic inference. "
@@ -3807,19 +3954,19 @@ Semantic rules:
    to another participant.
    Example: if a profile says 张三 uses 他, never rewrite 张三 as 她; if the source does
    not discuss gender, do not create a fact saying 张三 is male.
-14. The supplied Timeline summary and source_facts are narrated by the Bot in first
-   person. For each Timeline, `first_person_narrator` and
-   `conversation_roles.timeline_narrators` give the exact assistant-persona name.
-   Convert non-quoted 我/我的/我们/I/my/we into that assistant-persona name. They never
-   refer to the human user. Do not transfer the Bot's action, opinion, feeling or
-   relationship to the human participant.
-15. Write fragment label, summary and every fact in third person. Outside a preserved
-   direct quotation, do not use first-person narrator words. When an authoritative
-   human display_name is available, use that exact name instead of generic 用户、对方、
-   叙述者 or an inferred pronoun. When the assistant name is unavailable, use 助手.
-16. Before returning, verify actor-by-actor: who performed each action in the source,
-   who the first-person narrator maps to, and whether every generated statement keeps
-   the same actor after third-person conversion.
+14. The supplied Timeline summary and source_facts are the Bot's own first-person
+   memory. `narrator_actor_id` and `conversation_roles.timeline_narrators` bind 我/我的/
+   我们/I/my/we to the exact assistant actor; they never refer to a human participant.
+15. Preserve that first-person memory voice when it is useful. Use exact human names
+   from conversation_roles instead of generic 用户、对方 or 叙述者. Do not replace a
+   human speaker's quoted first person with the Bot narrator.
+16. Before returning, verify actor-by-actor that every action, opinion, feeling and
+   relationship remains attached to the same source actor. If attribution is unclear,
+   preserve the source wording and lower confidence instead of guessing.
+17. raw_evidence, when present, is auxiliary evidence only for speaker identity,
+   pronoun resolution, chronology and local context. The current Timeline revision
+   decides what should be remembered. Never add a fact absent from source_facts and
+   never restore content that a user may have removed from the Timeline.
 
 Reference rules:
 - Treat refs such as T1 and T1.A1 as opaque local identifiers.
@@ -3837,7 +3984,8 @@ Output constraints:
 
 Required JSON schema:
 {{"fragments":[{{"label":"...","summary":"...","importance":0.0,
-"confidence":0.0,"timeline_refs":["T1"],"keywords":["..."],
+"confidence":0.0,"attribution_confidence":0.0,"ambiguity_flags":[],
+"evidence_requests":[],"timeline_refs":["T1"],"keywords":["..."],
 "facts":[{{"type":"factual","content":"...","importance":0.0,
 "confidence":0.0,"source_refs":["T1.A1"]}}]}}]}}
 
@@ -3854,8 +4002,8 @@ INPUT:
     def _synthesis_system_prompt() -> str:
         return (
             "You merge only the supplied fragments into one clean Topic memory. "
-            "The fragments use third-person role mappings; preserve those mappings "
-            "and never turn the assistant narrator into the human user. "
+            "The fragments use explicit actor mappings and may preserve the Bot's "
+            "first-person memory voice. Never turn that narrator into the human user. "
             "Make semantic decisions only; the application derives fragment scope "
             "and full provenance from cited fact refs. Return exactly one strict JSON "
             "object without Markdown. Authoritative identity profiles are immutable "
@@ -3932,11 +4080,10 @@ Semantic rules:
    remains attached to the correct person.
    Example: if a profile says 张三 uses 他, never rewrite 张三 as 她; if the fragments
    do not discuss gender, do not create an atom saying 张三 is male.
-10. conversation_roles is an actor map. Input fragments are already third-person.
-   Preserve the mapped human and assistant-persona names in title, summary and atoms.
-   Never reintroduce first-person narration or replace a known name with 用户、对方、
-   叙述者. Before returning, verify that every action remains attached to its source
-   actor.
+10. conversation_roles is an actor map. Preserve the Bot's anchored first-person
+   memory voice and all mapped human identities. Never reinterpret 我 as the human
+   user or replace a known human name with 用户、对方、叙述者. Before returning,
+   verify that every action remains attached to its source actor.
 
 Reference rules:
 - Treat F1, F2, ... as opaque local identifiers.
@@ -4132,23 +4279,27 @@ INPUT:
             timelines.append(
                 {
                     "ref": timeline_ref,
-                    "first_person_narrator": item.persona_id or "助手",
+                    "narrator_actor_id": (
+                        item.role_bindings.get("narrator_actor_id")
+                        or f"assistant-persona:{item.persona_id or 'default'}"
+                    ),
                     "summary": item.summary,
                     "topics": item.topics,
                     "source_facts": source_facts,
                     "started_at": item.started_at,
                     "ended_at": item.ended_at,
+                    "ambiguity_flags": item.features.get("ambiguity_flags", []),
+                    "evidence_status": item.features.get(
+                        "evidence_status", "not_needed"
+                    ),
+                    "raw_evidence": item.features.get("raw_evidence", []),
                 }
             )
         prompt_roles = self._conversation_role_payload(inputs)
+        narrators_by_uid = prompt_roles.get("timeline_narrators", {})
         prompt_roles["timeline_narrators"] = {
-            ref: next(
-                (
-                    item.persona_id or "助手"
-                    for item in inputs
-                    if item.memory_uid == timeline_uid
-                ),
-                "助手",
+            ref: narrators_by_uid.get(
+                timeline_uid, f"assistant-persona:default"
             )
             for ref, timeline_uid in timeline_refs.items()
         }
@@ -4322,25 +4473,80 @@ INPUT:
     def _conversation_role_payload(
         self, inputs: list[TimelineTopicCandidate]
     ) -> dict[str, Any]:
-        """Describe who Timeline first person refers to and the desired output view."""
-        identities = self._candidate_identity_payload(inputs)
-        humans = [{"role": "human_user", **identity} for identity in identities]
-        if not humans:
-            humans = [{"role": "human_user", "display_name": "用户"}]
-        persona_names = self._unique_strings(
-            item.persona_id or "助手" for item in inputs
-        )
+        """Carry stable Timeline actors into fragment construction."""
+        humans: list[dict[str, Any]] = []
+        assistants: list[dict[str, Any]] = []
+        timeline_narrators: dict[str, str] = {}
+
+        def append_unique(target: list[dict[str, Any]], value: dict[str, Any]) -> None:
+            actor_id = str(value.get("actor_id") or "")
+            if actor_id and any(item.get("actor_id") == actor_id for item in target):
+                existing = next(item for item in target if item.get("actor_id") == actor_id)
+                for name in value.get("observed_names", []):
+                    if name not in existing.setdefault("observed_names", []):
+                        existing["observed_names"].append(name)
+                return
+            target.append(value)
+
+        for item in inputs:
+            bindings = item.role_bindings if isinstance(item.role_bindings, dict) else {}
+            narrator = str(bindings.get("narrator_actor_id") or "").strip()
+            for actor in bindings.get("actors", []):
+                if not isinstance(actor, dict):
+                    continue
+                normalized = {
+                    key: actor[key]
+                    for key in (
+                        "actor_id",
+                        "actor_type",
+                        "platform",
+                        "sender_id",
+                        "observed_names",
+                        "persona_id",
+                        "synthetic_narrator",
+                    )
+                    if key in actor
+                }
+                if actor.get("actor_type") == "assistant":
+                    append_unique(assistants, normalized)
+                else:
+                    append_unique(humans, normalized)
+            if not narrator:
+                narrator = f"assistant-persona:{item.persona_id or 'default'}"
+                append_unique(
+                    assistants,
+                    {
+                        "actor_id": narrator,
+                        "actor_type": "assistant",
+                        "observed_names": [item.persona_id or "助手"],
+                        "persona_id": item.persona_id or "default",
+                        "synthetic_narrator": True,
+                    },
+                )
+            timeline_narrators[item.memory_uid] = narrator
+
+        for identity in self._candidate_identity_payload(inputs):
+            actor_id = (
+                f"{identity.get('platform') or 'unknown'}:human:"
+                f"{identity.get('user_id') or identity.get('display_name') or 'unknown'}"
+            )
+            append_unique(
+                humans,
+                {
+                    "actor_id": actor_id,
+                    "actor_type": "human",
+                    "platform": identity.get("platform"),
+                    "sender_id": identity.get("user_id"),
+                    "observed_names": [identity.get("display_name")],
+                    "authoritative_identity": identity,
+                },
+            )
         return {
             "timeline_narration": "first_person_assistant",
-            "output_perspective": "third_person",
+            "output_perspective": "preserve_first_person_assistant",
             "human_participants": humans,
-            "assistant_personas": [
-                {"role": "assistant_persona", "display_name": name}
-                for name in persona_names
-            ],
-            "timeline_narrators": {
-                item.memory_uid: (item.persona_id or "助手") for item in inputs
-            },
+            "assistant_personas": assistants,
+            "timeline_narrators": timeline_narrators,
         }
 
     @classmethod
@@ -4370,53 +4576,98 @@ INPUT:
                     }
                 )
         return {
-            "input_perspective": "third_person_fragments",
-            "output_perspective": "third_person",
+            "input_perspective": "first_person_assistant_fragments",
+            "output_perspective": "preserve_first_person_assistant",
             "human_participants": humans,
             "assistant_personas": assistants,
             "timeline_narrators": timeline_narrators,
         }
 
-    def _validate_third_person_fragment(
+    @classmethod
+    def _topic_participant_index(
+        cls, fragments: list[TopicFragmentDraft]
+    ) -> dict[str, Any]:
+        """Build a revision-scoped actor index with fragment/Timeline provenance."""
+        indexed: dict[tuple[str, str], dict[str, Any]] = {}
+        for fragment in fragments:
+            roles = fragment.metadata.get("conversation_roles")
+            if not isinstance(roles, dict):
+                continue
+            narrator_ids = {
+                str(value)
+                for value in roles.get("timeline_narrators", {}).values()
+                if str(value)
+            }
+            for bucket, actor_type in (
+                ("human_participants", "human"),
+                ("assistant_personas", "assistant"),
+            ):
+                for actor in roles.get(bucket, []):
+                    if not isinstance(actor, dict):
+                        continue
+                    actor_id = str(actor.get("actor_id") or "").strip()
+                    if not actor_id:
+                        continue
+                    key = (actor_id, actor_type)
+                    entry = indexed.setdefault(
+                        key,
+                        {
+                            "actor_id": actor_id,
+                            "actor_type": actor_type,
+                            "display_names": [],
+                            "roles": [],
+                            "fragment_uids": [],
+                            "timeline_uids": [],
+                            "resolution_status": "resolved",
+                            "confidence": 1.0,
+                        },
+                    )
+                    for name in actor.get("observed_names", []):
+                        name = str(name).strip()
+                        if name and name not in entry["display_names"]:
+                            entry["display_names"].append(name)
+                    role = (
+                        "narrator"
+                        if actor_type == "assistant" and actor_id in narrator_ids
+                        else "speaker"
+                    )
+                    if role not in entry["roles"]:
+                        entry["roles"].append(role)
+                    if fragment.fragment_uid not in entry["fragment_uids"]:
+                        entry["fragment_uids"].append(fragment.fragment_uid)
+                    for timeline_uid in fragment.timeline_uids:
+                        if timeline_uid not in entry["timeline_uids"]:
+                            entry["timeline_uids"].append(timeline_uid)
+        return {
+            "schema_version": 1,
+            "participants": list(indexed.values()),
+            "mentioned_actors": [],
+        }
+
+    def _validate_role_anchored_fragment(
         self,
         label: str,
         summary: str,
         facts: list[dict[str, Any]],
         inputs: list[TimelineTopicCandidate],
     ) -> None:
-        """Reject obvious unresolved narrator aliases so correction gets one retry."""
+        """Require an explicit narrator map without banning first-person memory."""
         roles = self._conversation_role_payload(inputs)
+        narrators = roles.get("timeline_narrators", {})
+        if any(item.memory_uid not in narrators for item in inputs):
+            raise TopicBuildValidationError(
+                "fragment is missing a Timeline narrator actor binding"
+            )
         texts = [
             label,
             summary,
             *(str(fact.get("content") or "") for fact in facts),
         ]
-        for text in texts:
-            unquoted = re.sub(
-                r'["“”「」『』][^"“”「」『』]*["“”「」『』]', "", text
-            )
-            if re.search(
-                r"(?<![自忘无唯敌你他她它])我(?!国|方|司|校|军|党|省|市)|"
-                r"咱们|本人",
-                unquoted,
-            ):
-                raise TopicBuildValidationError(
-                    "fragment must convert the Bot's first-person narration to the "
-                    "mapped assistant persona in third person"
-                )
-            if re.search(
-                r"\b(?:I|my|mine|we|our|ours)\b",
-                unquoted,
-                flags=re.IGNORECASE,
-            ):
-                raise TopicBuildValidationError(
-                    "fragment must convert English first-person narration to the "
-                    "mapped assistant persona in third person"
-                )
         exact_human_names = {
-            str(item.get("display_name") or "").strip()
+            str(name).strip()
             for item in roles["human_participants"]
-            if str(item.get("display_name") or "").strip() not in {"", "用户"}
+            for name in item.get("observed_names", [])
+            if str(name).strip() not in {"", "用户"}
         }
         if exact_human_names and any(
             re.search(
@@ -4431,7 +4682,7 @@ INPUT:
                 "generic role"
             )
 
-    def _validate_third_person_synthesis(
+    def _validate_role_anchored_synthesis(
         self,
         synthesis: dict[str, Any],
         fragments: list[TopicFragmentDraft],
@@ -4468,18 +4719,17 @@ INPUT:
                 if isinstance(atom, dict)
             ),
         ]
-        # Reuse first-person detection. Human-name enforcement is performed below
-        # from the role payload because proxy inputs intentionally contain no session.
-        self._validate_third_person_fragment(
+        self._validate_role_anchored_fragment(
             texts[0],
             texts[1],
             [{"content": value} for value in texts[2:]],
             proxy_inputs,
         )
         exact_human_names = {
-            str(item.get("display_name") or "").strip()
+            str(name).strip()
             for item in roles.get("human_participants", [])
-            if str(item.get("display_name") or "").strip() not in {"", "用户"}
+            for name in item.get("observed_names", [])
+            if str(name).strip() not in {"", "用户"}
         }
         if exact_human_names and any(
             re.search(
@@ -4594,6 +4844,11 @@ Do not add Markdown or commentary."""
             ],
             "started_at": item.started_at,
             "ended_at": item.ended_at,
+            "role_bindings": item.role_bindings,
+            "source_window": item.source_window,
+            "ambiguity_flags": item.features.get("ambiguity_flags", []),
+            "evidence_status": item.features.get("evidence_status"),
+            "raw_evidence": item.features.get("raw_evidence", []),
         }
 
     @staticmethod

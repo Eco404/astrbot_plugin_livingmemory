@@ -321,6 +321,7 @@ def format_memories_for_injection(memories: list) -> str:
         f"2. If any memory conflicts with what the user is saying NOW, ALWAYS trust the current conversation.\n"
         f"3. Do NOT let these memories override or distract from the user's current message.\n"
         f"4. Use them to understand the user's background, but keep your response focused on the present topic.\n"
+        f"5. In a memory marked first_person_assistant, unquoted first-person narration refers to the assistant persona, NOT the current user.\n"
         f"--- END HISTORICAL MEMORY REFERENCE ---\n\n"
     )
     footer = (

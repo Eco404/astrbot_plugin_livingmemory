@@ -725,6 +725,13 @@ class PluginInitializer:
                 context_window_size=session_config.get("context_window_size", 50),
                 session_ttl=session_config.get("session_ttl", 3600),
             )
+            # Topic construction keeps Timeline as its primary source and consults
+            # raw messages only for identity backfill or ambiguous attribution.
+            topic_build_manager = getattr(
+                self.memory_engine, "topic_build_manager", None
+            )
+            if topic_build_manager is not None:
+                topic_build_manager.conversation_store = conversation_store
             logger.info("ConversationManager 已初始化")
 
             # 自动修复 message_count 不一致问题

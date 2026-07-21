@@ -12,7 +12,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ..models.conversation_models import Message
+from ..models.conversation_models import Message, build_role_bindings
 from ..models.identity_profile import (
     AuthoritativeIdentityProfile,
     AuthoritativeIdentityStore,
@@ -392,6 +392,13 @@ class MemoryProcessor:
             content, metadata = self._build_storage_format(
                 fallback_excerpt, structured_data, is_group_chat
             )
+            role_bindings = build_role_bindings(messages, persona_id)
+            metadata["role_bindings"] = role_bindings
+            metadata["narrative_perspective"] = "first_person_assistant"
+            if is_group_chat:
+                metadata["participants"] = self._legacy_participants_from_roles(
+                    role_bindings
+                )
             # 将质量标记写入 metadata
             metadata["summary_quality"] = structured_data.get("_quality", "normal")
 
@@ -412,6 +419,27 @@ class MemoryProcessor:
             logger.error(f"[MemoryProcessor] 处理对话历史失败: {e}", exc_info=True)
             # 不再降级处理，直接向上抛出异常，由调用方处理重试逻辑
             raise
+
+    @staticmethod
+    def _legacy_participants_from_roles(
+        role_bindings: dict[str, Any],
+    ) -> list[str]:
+        """Keep the old display field deterministic while v2 uses actor bindings."""
+        result: list[str] = []
+        for actor in role_bindings.get("actors", []):
+            if not isinstance(actor, dict) or actor.get("synthetic_narrator"):
+                continue
+            names = actor.get("observed_names")
+            display_name = (
+                str(names[-1]).strip()
+                if isinstance(names, list) and names and str(names[-1]).strip()
+                else str(actor.get("sender_id") or "").strip()
+            )
+            if actor.get("actor_type") == "assistant":
+                display_name = f"我(Bot: {display_name})"
+            if display_name and display_name not in result:
+                result.append(display_name)
+        return result
 
     def _format_conversation(self, messages: list[Message]) -> str:
         """

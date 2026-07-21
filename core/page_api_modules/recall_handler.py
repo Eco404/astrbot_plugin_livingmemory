@@ -203,7 +203,7 @@ class RecallHandler:
                         "title": result.fragment.label,
                         "parent_topic_uid": result.topic_uid,
                         "importance": result.fragment.importance,
-                        "narrative_perspective": "third_person",
+                        "narrative_perspective": "first_person_assistant",
                     },
                     "score_breakdown": {
                         "fragment_relevance_score": round(
