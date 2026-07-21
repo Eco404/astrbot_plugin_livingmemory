@@ -17,7 +17,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PLUGINS_DIR = Path(__file__).resolve().parents[2]
-ASTRBOT_ROOT = Path(__file__).resolve().parents[4]
+ASTRBOT_ROOT = PROJECT_ROOT.parent / "AstrBot"
 
 for candidate in (PROJECT_ROOT, PLUGINS_DIR, ASTRBOT_ROOT):
     candidate_str = str(candidate)
@@ -142,18 +142,28 @@ def _install_astrbot_stubs() -> None:
         pass
 
     class Star:
-        pass
+        def __init__(self, context=None):
+            self.context = context
 
     class StarTools:
-        pass
+        @staticmethod
+        def get_data_dir(_plugin_name):
+            return Path(tempfile.gettempdir())
 
     class FunctionTool:
+        def __init__(self, name="", description="", parameters=None, **kwargs):
+            self.name = name
+            self.description = description
+            self.parameters = parameters or {}
+            self.active = kwargs.get("active", True)
+
         @classmethod
         def __class_getitem__(cls, item):
             return cls
 
     class ToolSet:
-        pass
+        def __init__(self, tools=None):
+            self.tools = list(tools or [])
 
     ToolExecResult = str
 
@@ -191,7 +201,9 @@ def _install_astrbot_stubs() -> None:
             return True
 
     class EmbeddingProvider:
-        pass
+        def __init__(self, provider_config=None, provider_settings=None):
+            self.provider_config = provider_config or {}
+            self.provider_settings = provider_settings or {}
 
     class Provider:
         pass

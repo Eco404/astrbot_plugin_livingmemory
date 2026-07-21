@@ -2317,6 +2317,23 @@ class TopicMemoryStore:
     ) -> None:
         async with self._connect() as db:
             try:
+                await db.execute("BEGIN IMMEDIATE")
+                parent = await (
+                    await db.execute(
+                        """
+                        SELECT 1
+                        FROM topic_candidate_groups g
+                        JOIN topic_maintenance_runs r ON r.run_uid = g.run_uid
+                        WHERE g.group_uid = ? AND g.run_uid = ?
+                        """,
+                        (group_uid, run_uid),
+                    )
+                ).fetchone()
+                if parent is None:
+                    raise ValueError(
+                        "Topic fragment parent run/group no longer exists; "
+                        "the build may have been cleared while extraction was running"
+                    )
                 await db.execute(
                     """
                     DELETE FROM topic_fragment_drafts

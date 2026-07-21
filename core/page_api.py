@@ -497,6 +497,10 @@ class PluginPageApi:
         except (RuntimeError, ValueError) as exc:
             return self.utils.error(str(exc))
 
+    async def shutdown(self) -> None:
+        """Stop page-owned background work before runtime components are closed."""
+        await self.topic_handler.shutdown()
+
     # ==================== 辅助方法 ====================
 
     async def _ensure_plugin_ready(self) -> tuple[dict[str, Any] | None, dict | None]:

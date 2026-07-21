@@ -544,15 +544,13 @@ async def test_process_group_chat_extracts_participants_from_message_identity():
     assert "李四" in metadata["participants"]
     assert "王五" not in metadata["participants"]
     assert "我(Bot: Bot)" in metadata["participants"]
-    assert metadata["role_bindings"]["narrator_actor_id"] == (
-        "aiocqhttp:assistant:bot"
-    )
+    assert metadata["role_bindings"]["narrator_actor_id"] == "qq:assistant:bot"
     assert {
         actor["actor_id"] for actor in metadata["role_bindings"]["actors"]
     } == {
-        "aiocqhttp:human:10001",
-        "aiocqhttp:human:10002",
-        "aiocqhttp:assistant:bot",
+        "qq:human:10001",
+        "qq:human:10002",
+        "qq:assistant:bot",
     }
 
 

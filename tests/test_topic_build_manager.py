@@ -41,6 +41,49 @@ class _Response:
         self.completion_text = json.dumps(payload, ensure_ascii=False)
 
 
+class _StructuredOutputLLM:
+    def __init__(self):
+        self.calls = []
+
+    async def text_chat(
+        self,
+        *,
+        prompt,
+        system_prompt,
+        func_tool=None,
+        tool_choice="auto",
+    ):
+        del prompt, system_prompt
+        self.calls.append((func_tool, tool_choice))
+        tool = func_tool.tools[0]
+        return SimpleNamespace(
+            completion_text="",
+            tools_call_name=[tool.name],
+            tools_call_args=[{"groups": []}],
+        )
+
+
+class _ToolUnsupportedLLM:
+    def __init__(self):
+        self.tool_attempts = 0
+        self.text_attempts = 0
+
+    async def text_chat(
+        self,
+        *,
+        prompt,
+        system_prompt,
+        func_tool=None,
+        tool_choice="auto",
+    ):
+        del prompt, system_prompt, tool_choice
+        if func_tool is not None:
+            self.tool_attempts += 1
+            raise RuntimeError("function calling is not supported")
+        self.text_attempts += 1
+        return _Response({"groups": []})
+
+
 @pytest.mark.asyncio
 async def test_selected_unindexed_build_does_not_expand_to_full_without_topics():
     store = SimpleNamespace(list_topics=AsyncMock(return_value=[]))
@@ -121,6 +164,53 @@ async def test_incremental_build_uses_expanded_scope_and_shared_scan_pipeline():
     assert kwargs["run_config"]["topic_settings"] == manager.config
     assert kwargs["run_metadata"]["incremental_scope"] == scope
     assert kwargs["run_metadata"]["pipeline"] == "shared_full_pipeline"
+
+
+@pytest.mark.asyncio
+async def test_resume_and_reset_build_share_the_memory_space_lock():
+    reset_started = asyncio.Event()
+    release_reset = asyncio.Event()
+
+    async def clear_space(_memory_space_id):
+        reset_started.set()
+        await release_reset.wait()
+        return {"deleted_topics": 0, "deleted_runs": 0}
+
+    store = SimpleNamespace(
+        clear_space=AsyncMock(side_effect=clear_space),
+        get_maintenance_run=AsyncMock(
+            return_value={
+                "run_uid": "run-resume",
+                "memory_space_id": "space-1",
+                "status": "failed",
+                "stage": "fragment_extraction",
+            }
+        ),
+        list_candidate_groups=AsyncMock(return_value=[SimpleNamespace()]),
+    )
+    candidate_manager = SimpleNamespace(
+        start_scan=AsyncMock(return_value={"run_uid": "run-reset"})
+    )
+    manager = TopicBuildManager(":memory:", store, candidate_manager)
+    manager.build_from_scan = AsyncMock(
+        return_value={"status": "completed", "run_uid": "run-reset"}
+    )
+
+    reset_task = asyncio.create_task(
+        manager.build_space("space-1", reset_topics=True)
+    )
+    await reset_started.wait()
+    resume_task = asyncio.create_task(manager.resume_run("run-resume"))
+    await asyncio.sleep(0)
+
+    assert not resume_task.done()
+    assert store.get_maintenance_run.await_count == 1
+
+    release_reset.set()
+    await reset_task
+    await resume_task
+
+    assert store.get_maintenance_run.await_count == 2
 
 
 class _GroundedLLM:
@@ -734,6 +824,73 @@ async def test_fragment_matching_reports_its_own_progress_stage():
     assert events
     assert all(event["stage"] == "fragment_matching" for event in events)
     assert events[-1]["current"] == events[-1]["total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_llm_structured_output_uses_one_required_internal_tool():
+    llm = _StructuredOutputLLM()
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        llm_provider=llm,
+        config={"llm_max_retries": 1},
+    )
+
+    raw = await manager._call_llm(
+        "review",
+        "system",
+        output_contract="component_review",
+    )
+
+    assert json.loads(raw) == {"groups": []}
+    tool_set, choice = llm.calls[0]
+    assert choice == "required"
+    assert len(tool_set.tools) == 1
+    assert tool_set.tools[0].name == "submit_topic_component_review"
+
+
+@pytest.mark.asyncio
+async def test_llm_structured_output_falls_back_and_caches_unsupported_provider():
+    llm = _ToolUnsupportedLLM()
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        llm_provider=llm,
+        config={"llm_max_retries": 1},
+    )
+
+    first = await manager._call_llm(
+        "review",
+        "system",
+        output_contract="component_review",
+    )
+    second = await manager._call_llm(
+        "review",
+        "system",
+        output_contract="component_review",
+    )
+
+    assert json.loads(first) == json.loads(second) == {"groups": []}
+    assert llm.tool_attempts == 1
+    assert llm.text_attempts == 2
+    capability_key = manager._provider_identity(llm)
+    assert manager._structured_output_capabilities[capability_key] is False
+
+
+def test_fragment_tool_schema_enforces_actor_role_containers():
+    schema = TopicBuildManager._fragment_output_schema()
+    fragment = schema["properties"]["fragments"]["items"]
+    participant = fragment["properties"]["participant_refs"]["items"]
+    mentioned = fragment["properties"]["mentioned_actor_refs"]["items"]
+
+    assert participant["properties"]["relation_type"]["enum"] == [
+        "speaker", "narrator", "responder"
+    ]
+    assert mentioned["properties"]["relation_type"]["enum"] == [
+        "subject", "mentioned", "executor", "requester"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1769,12 +1926,106 @@ def test_fragment_actor_refs_are_constrained_and_unresolved_ids_are_fragment_loc
     assert fragment.facts[0]["actor_refs"][0]["actor_id"] == unresolved["actor_id"]
 
 
+@pytest.mark.parametrize(
+    ("raw_role", "expected"),
+    [
+        ("affected_person", "subject"),
+        ("recipient", "subject"),
+        ("beneficiary", "subject"),
+        ("object_of_feeling", "subject"),
+        ("helper", "executor"),
+        ("initiator", "executor"),
+        ("questioner", "requester"),
+        ("recipient_questioner", "requester"),
+        ("participant", "mentioned"),
+    ],
+)
+def test_actor_relation_aliases_are_normalized(raw_role: str, expected: str):
+    manager = TopicBuildManager(":memory:", None, None)
+    decoded = manager._decode_actor_relations(
+        [{"actor_ref": "A1", "relation_type": raw_role}],
+        {
+            "A1": {
+                "actor_id": "qq:human:u1",
+                "actor_type": "human",
+                "observed_names": ["空雨"],
+            }
+        },
+        scope="test",
+    )
+
+    assert decoded[0]["relation_type"] == expected
+
+
+def test_fragment_actor_relations_are_moved_to_the_correct_container():
+    manager = TopicBuildManager(":memory:", None, None)
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-actor-container",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:u1",
+        content="空雨请求帮助",
+        summary="空雨请求帮助",
+        key_facts=["空雨请求帮助"],
+        role_bindings={
+            "actors": [
+                {
+                    "actor_id": "qq:human:u1",
+                    "actor_type": "human",
+                    "observed_names": ["空雨"],
+                }
+            ]
+        },
+    )
+    payload, timeline_refs, source_refs, actor_refs = manager._fragment_llm_context(
+        [candidate]
+    )
+    actor_ref = payload["actor_refs"][0]["ref"]
+
+    decoded = manager._decode_fragment_refs(
+        {
+            "fragments": [
+                {
+                    "label": "求助",
+                    "summary": "空雨请求帮助",
+                    "timeline_refs": ["T1"],
+                    "participant_refs": [
+                        {"actor_ref": actor_ref, "relation_type": "recipient"}
+                    ],
+                    "mentioned_actor_refs": [
+                        {"actor_ref": actor_ref, "relation_type": "speaker"}
+                    ],
+                    "facts": [
+                        {
+                            "content": "空雨请求帮助",
+                            "source_refs": ["T1.K1"],
+                        }
+                    ],
+                }
+            ]
+        },
+        timeline_refs,
+        source_refs,
+        actor_refs,
+    )["fragments"][0]
+
+    assert [item["relation_type"] for item in decoded["participant_refs"]] == [
+        "speaker"
+    ]
+    assert [item["relation_type"] for item in decoded["mentioned_actor_refs"]] == [
+        "subject"
+    ]
+
+
 def test_fragment_prompt_defines_one_future_retrieval_intent_per_fragment():
     prompt = TopicBuildManager._fragment_prompt("{}")
 
     assert "one plausible future retrieval query" in prompt
     assert "Repeating its ref is preferable" in prompt
     assert "mixed fragment" in prompt
+    assert "relation_type is a closed enum" in prompt
+    assert "participant_refs accepts only" in prompt
 
 
 def test_synthesis_prompt_strips_nested_provenance_and_derives_fragment_scope():
