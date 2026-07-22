@@ -774,156 +774,348 @@ class TopicMemoryStore:
         actor_links = list(actor_links or [])
         atom_actor_links = list(atom_actor_links or [])
         self._validate_actor_links(topic.topic_uid, atoms, actor_links, atom_actor_links)
-        timeline_uids = {link.timeline_uid for link in links}
-        timeline_uids.update(source.timeline_uid for source in atom_sources)
-
         async with self._connect() as db:
             try:
-                cursor = await db.execute(
-                    "SELECT revision, created_at FROM topic_memories WHERE topic_uid = ?",
-                    (topic.topic_uid,),
+                await db.execute("BEGIN IMMEDIATE")
+                saved = await self._save_topic_snapshot_tx(
+                    db,
+                    topic,
+                    atoms=atoms,
+                    links=links,
+                    atom_sources=atom_sources,
+                    actor_links=actor_links,
+                    atom_actor_links=atom_actor_links,
+                    fragments=fragments,
+                    expected_revision=expected_revision,
                 )
-                existing = await cursor.fetchone()
-                if existing:
-                    effective_expected = (
-                        topic.revision if expected_revision is None else expected_revision
-                    )
-                    if int(effective_expected) != int(existing["revision"]):
-                        raise TopicRevisionConflict(
-                            f"Topic {topic.topic_uid} revision changed: "
-                            f"expected {effective_expected}, current {existing['revision']}"
-                        )
-                    revision = int(existing["revision"]) + 1
-                    created_at = float(existing["created_at"])
-                else:
-                    if expected_revision not in (None, 0) or topic.revision not in (0, 1):
-                        raise TopicRevisionConflict(
-                            f"Topic {topic.topic_uid} does not exist"
-                        )
-                    revision = 1
-                    created_at = float(topic.created_at)
-
-                registry = await self._load_timeline_registry(db, timeline_uids)
-                self._validate_timeline_scope(topic.memory_space_id, timeline_uids, registry)
-                now = time.time()
-                await db.execute(
-                    """
-                    INSERT INTO topic_memories (
-                        topic_uid, memory_space_id, title, summary, revision, status,
-                        base_importance, importance, confidence, started_at, ended_at,
-                        last_accessed_at, access_count, decay_anchor_at,
-                        created_at, updated_at, metadata
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(topic_uid) DO UPDATE SET
-                        memory_space_id = excluded.memory_space_id,
-                        title = excluded.title,
-                        summary = excluded.summary,
-                        revision = excluded.revision,
-                        status = excluded.status,
-                        base_importance = excluded.base_importance,
-                        importance = excluded.importance,
-                        confidence = excluded.confidence,
-                        started_at = excluded.started_at,
-                        ended_at = excluded.ended_at,
-                        last_accessed_at = excluded.last_accessed_at,
-                        access_count = excluded.access_count,
-                        decay_anchor_at = excluded.decay_anchor_at,
-                        updated_at = excluded.updated_at,
-                        metadata = excluded.metadata
-                    """,
-                    (
-                        topic.topic_uid,
-                        topic.memory_space_id,
-                        topic.title.strip(),
-                        topic.summary.strip(),
-                        revision,
-                        self._enum_value(topic.status),
-                        float(topic.base_importance),
-                        float(topic.importance),
-                        float(topic.confidence),
-                        topic.started_at,
-                        topic.ended_at,
-                        topic.last_accessed_at,
-                        max(0, int(topic.access_count)),
-                        topic.decay_anchor_at,
-                        created_at,
-                        now,
-                        self._to_json(topic.metadata),
-                    ),
-                )
-                await db.execute(
-                    "DELETE FROM topic_memory_atoms WHERE topic_uid = ?",
-                    (topic.topic_uid,),
-                )
-                await db.execute(
-                    "DELETE FROM topic_timeline_links WHERE topic_uid = ?",
-                    (topic.topic_uid,),
-                )
-                await db.execute(
-                    "DELETE FROM topic_actor_links WHERE topic_uid = ?",
-                    (topic.topic_uid,),
-                )
-                previous_fragment_uids: set[str] = set()
-                if fragments is not None:
-                    previous_fragment_rows = await (
-                        await db.execute(
-                            """
-                            SELECT fragment_uid FROM topic_fragment_links
-                            WHERE topic_uid = ? AND status = 'active'
-                            """,
-                            (topic.topic_uid,),
-                        )
-                    ).fetchall()
-                    previous_fragment_uids = {
-                        str(row["fragment_uid"])
-                        for row in previous_fragment_rows
-                    }
-                    await db.execute(
-                        "DELETE FROM topic_fragment_links WHERE topic_uid = ?",
-                        (topic.topic_uid,),
-                    )
-                for atom in atoms:
-                    await self._insert_atom(db, atom, now)
-                for link in links:
-                    source_revision = int(registry[link.timeline_uid]["revision"])
-                    await self._insert_link(db, link, revision, source_revision, now)
-                for source in atom_sources:
-                    source_revision = int(registry[source.timeline_uid]["revision"])
-                    await self._insert_atom_source(db, source, source_revision)
-                if fragments is not None:
-                    fragment_uids = [fragment.fragment_uid for fragment in fragments]
-                    await self._insert_fragment_links(
-                        db,
-                        topic,
-                        revision,
-                        fragments,
-                        now,
-                    )
-                    stale_uids = previous_fragment_uids - set(fragment_uids)
-                    if stale_uids:
-                        placeholders = ",".join("?" * len(stale_uids))
-                        await db.execute(
-                            f"""
-                            UPDATE topic_fragments SET status = 'archived',
-                                updated_at = ?
-                            WHERE fragment_uid IN ({placeholders})
-                              AND NOT EXISTS (
-                                  SELECT 1 FROM topic_fragment_links l
-                                  WHERE l.fragment_uid = topic_fragments.fragment_uid
-                                    AND l.status = 'active'
-                              )
-                            """,
-                            [now, *sorted(stale_uids)],
-                        )
-                for actor_link in actor_links:
-                    await self._insert_actor_link(db, actor_link, now)
-                for atom_actor_link in atom_actor_links:
-                    await self._insert_atom_actor_link(db, atom_actor_link)
                 await db.commit()
             except Exception:
                 await db.rollback()
                 raise
+        return saved
 
+    async def publish_topic_build(
+        self,
+        *,
+        run_uid: str,
+        memory_space_id: str,
+        mode: TopicMaintenanceMode | str,
+        snapshots: list[dict[str, Any]],
+        relations: list[TopicRelation],
+        affected_topic_uids: set[str] | None = None,
+        reset_topics: bool = False,
+    ) -> dict[str, Any]:
+        """Publish one completed build as a single visible database change."""
+        run_uid = str(run_uid or "").strip()
+        memory_space_id = str(memory_space_id or "").strip()
+        mode = TopicMaintenanceMode(mode)
+        if not run_uid or not memory_space_id:
+            raise ValueError("run_uid and memory_space_id are required")
+        normalized_snapshots: list[dict[str, Any]] = []
+        for snapshot in snapshots:
+            topic = snapshot["topic"]
+            atoms = list(snapshot.get("atoms") or [])
+            links = list(snapshot.get("links") or [])
+            atom_sources = list(snapshot.get("atom_sources") or [])
+            actor_links = list(snapshot.get("actor_links") or [])
+            atom_actor_links = list(snapshot.get("atom_actor_links") or [])
+            self._validate_topic(topic)
+            if topic.memory_space_id != memory_space_id:
+                raise TopicSourceValidationError(
+                    "Topic snapshot belongs to another memory space"
+                )
+            self._validate_snapshot_members(
+                topic.topic_uid, atoms, links, atom_sources
+            )
+            self._validate_actor_links(
+                topic.topic_uid, atoms, actor_links, atom_actor_links
+            )
+            normalized_snapshots.append(
+                {
+                    **snapshot,
+                    "atoms": atoms,
+                    "links": links,
+                    "atom_sources": atom_sources,
+                    "actor_links": actor_links,
+                    "atom_actor_links": atom_actor_links,
+                    "fragments": list(snapshot.get("fragments") or []),
+                }
+            )
+        normalized_relations = self._normalize_topic_relations(
+            memory_space_id, relations
+        )
+        affected = set(affected_topic_uids or set())
+        active_uids = {
+            str(snapshot["topic"].topic_uid) for snapshot in normalized_snapshots
+        }
+        saved_topics: list[TopicMemory] = []
+        reset_result = None
+        archived_topics = 0
+        now = time.time()
+
+        async with self._connect() as db:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                run_row = await (
+                    await db.execute(
+                        "SELECT memory_space_id FROM topic_maintenance_runs "
+                        "WHERE run_uid = ?",
+                        (run_uid,),
+                    )
+                ).fetchone()
+                if run_row is None or str(run_row["memory_space_id"]) != memory_space_id:
+                    raise ValueError("Topic build run is missing or belongs to another space")
+
+                if reset_topics:
+                    topic_count = await (
+                        await db.execute(
+                            "SELECT COUNT(*) FROM topic_memories WHERE memory_space_id = ?",
+                            (memory_space_id,),
+                        )
+                    ).fetchone()
+                    run_count = await (
+                        await db.execute(
+                            "SELECT COUNT(*) FROM topic_maintenance_runs "
+                            "WHERE memory_space_id = ? AND run_uid != ?",
+                            (memory_space_id, run_uid),
+                        )
+                    ).fetchone()
+                    await db.execute(
+                        "DELETE FROM topic_memories WHERE memory_space_id = ?",
+                        (memory_space_id,),
+                    )
+                    await db.execute(
+                        "DELETE FROM topic_maintenance_runs "
+                        "WHERE memory_space_id = ? AND run_uid != ?",
+                        (memory_space_id, run_uid),
+                    )
+                    await db.execute(
+                        "DELETE FROM topic_fragments WHERE memory_space_id = ?",
+                        (memory_space_id,),
+                    )
+                    reset_result = {
+                        "deleted_topics": int(topic_count[0] if topic_count else 0),
+                        "deleted_runs": int(run_count[0] if run_count else 0),
+                    }
+
+                for snapshot in normalized_snapshots:
+                    saved = await self._save_topic_snapshot_tx(
+                        db,
+                        snapshot["topic"],
+                        atoms=snapshot["atoms"],
+                        links=snapshot["links"],
+                        atom_sources=snapshot["atom_sources"],
+                        actor_links=snapshot["actor_links"],
+                        atom_actor_links=snapshot["atom_actor_links"],
+                        fragments=snapshot["fragments"],
+                        expected_revision=snapshot.get("expected_revision"),
+                    )
+                    saved_topics.append(saved)
+                    decision = dict(snapshot.get("decision") or {})
+                    if decision:
+                        await self._record_build_decision_tx(
+                            db,
+                            decision_uid=str(decision["decision_uid"]),
+                            run_uid=run_uid,
+                            topic_uid=saved.topic_uid,
+                            action=str(decision["action"]),
+                            fragment_uids=list(decision.get("fragment_uids") or []),
+                            candidate_scores=dict(
+                                decision.get("candidate_scores") or {}
+                            ),
+                            llm_output=dict(decision.get("llm_output") or {}),
+                            metadata={
+                                **dict(decision.get("metadata") or {}),
+                                "topic_revision": saved.revision,
+                            },
+                        )
+
+                if mode is TopicMaintenanceMode.FULL and not reset_topics:
+                    archived_topics = await self._archive_topics_not_in_tx(
+                        db, memory_space_id, active_uids, now
+                    )
+                elif affected:
+                    archived_topics = await self._archive_topic_uids_not_in_tx(
+                        db, memory_space_id, affected, active_uids, now
+                    )
+                await self._replace_topic_relations_tx(
+                    db, memory_space_id, normalized_relations
+                )
+                created_topics = sum(1 for topic in saved_topics if topic.revision == 1)
+                updated_topics = len(saved_topics) - created_topics
+                await db.execute(
+                    """
+                    UPDATE topic_maintenance_runs
+                    SET status = 'completed', stage = 'completed',
+                        current_group_index = ?, total_groups = ?,
+                        created_topics = ?, updated_topics = ?,
+                        completed_at = ?, updated_at = ?, error = ''
+                    WHERE run_uid = ?
+                    """,
+                    (
+                        len(saved_topics),
+                        len(saved_topics),
+                        created_topics,
+                        updated_topics,
+                        now,
+                        now,
+                        run_uid,
+                    ),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "topics": saved_topics,
+            "relation_count": len(normalized_relations),
+            "archived_topics": archived_topics,
+            "reset": reset_result,
+        }
+
+    async def _save_topic_snapshot_tx(
+        self,
+        db: aiosqlite.Connection,
+        topic: TopicMemory,
+        *,
+        atoms: list[TopicMemoryAtom],
+        links: list[TopicTimelineLink],
+        atom_sources: list[TopicAtomSource],
+        actor_links: list[TopicActorLink],
+        atom_actor_links: list[TopicAtomActorLink],
+        fragments: list[TopicFragmentDraft] | None,
+        expected_revision: int | None,
+    ) -> TopicMemory:
+        timeline_uids = {link.timeline_uid for link in links}
+        timeline_uids.update(source.timeline_uid for source in atom_sources)
+        existing = await (
+            await db.execute(
+                "SELECT revision, created_at FROM topic_memories WHERE topic_uid = ?",
+                (topic.topic_uid,),
+            )
+        ).fetchone()
+        if existing:
+            effective_expected = (
+                topic.revision if expected_revision is None else expected_revision
+            )
+            if int(effective_expected) != int(existing["revision"]):
+                raise TopicRevisionConflict(
+                    f"Topic {topic.topic_uid} revision changed: "
+                    f"expected {effective_expected}, current {existing['revision']}"
+                )
+            revision = int(existing["revision"]) + 1
+            created_at = float(existing["created_at"])
+        else:
+            if expected_revision not in (None, 0) or topic.revision not in (0, 1):
+                raise TopicRevisionConflict(f"Topic {topic.topic_uid} does not exist")
+            revision = 1
+            created_at = float(topic.created_at)
+
+        registry = await self._load_timeline_registry(db, timeline_uids)
+        self._validate_timeline_scope(topic.memory_space_id, timeline_uids, registry)
+        now = time.time()
+        await db.execute(
+            """
+            INSERT INTO topic_memories (
+                topic_uid, memory_space_id, title, summary, revision, status,
+                base_importance, importance, confidence, started_at, ended_at,
+                last_accessed_at, access_count, decay_anchor_at,
+                created_at, updated_at, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(topic_uid) DO UPDATE SET
+                memory_space_id = excluded.memory_space_id,
+                title = excluded.title,
+                summary = excluded.summary,
+                revision = excluded.revision,
+                status = excluded.status,
+                base_importance = excluded.base_importance,
+                importance = excluded.importance,
+                confidence = excluded.confidence,
+                started_at = excluded.started_at,
+                ended_at = excluded.ended_at,
+                last_accessed_at = excluded.last_accessed_at,
+                access_count = excluded.access_count,
+                decay_anchor_at = excluded.decay_anchor_at,
+                updated_at = excluded.updated_at,
+                metadata = excluded.metadata
+            """,
+            (
+                topic.topic_uid,
+                topic.memory_space_id,
+                topic.title.strip(),
+                topic.summary.strip(),
+                revision,
+                self._enum_value(topic.status),
+                float(topic.base_importance),
+                float(topic.importance),
+                float(topic.confidence),
+                topic.started_at,
+                topic.ended_at,
+                topic.last_accessed_at,
+                max(0, int(topic.access_count)),
+                topic.decay_anchor_at,
+                created_at,
+                now,
+                self._to_json(topic.metadata),
+            ),
+        )
+        await db.execute(
+            "DELETE FROM topic_memory_atoms WHERE topic_uid = ?", (topic.topic_uid,)
+        )
+        await db.execute(
+            "DELETE FROM topic_timeline_links WHERE topic_uid = ?", (topic.topic_uid,)
+        )
+        await db.execute(
+            "DELETE FROM topic_actor_links WHERE topic_uid = ?", (topic.topic_uid,)
+        )
+        previous_fragment_uids: set[str] = set()
+        if fragments is not None:
+            previous_fragment_rows = await (
+                await db.execute(
+                    "SELECT fragment_uid FROM topic_fragment_links "
+                    "WHERE topic_uid = ? AND status = 'active'",
+                    (topic.topic_uid,),
+                )
+            ).fetchall()
+            previous_fragment_uids = {
+                str(row["fragment_uid"]) for row in previous_fragment_rows
+            }
+            await db.execute(
+                "DELETE FROM topic_fragment_links WHERE topic_uid = ?",
+                (topic.topic_uid,),
+            )
+        for atom in atoms:
+            await self._insert_atom(db, atom, now)
+        for link in links:
+            await self._insert_link(
+                db, link, revision, int(registry[link.timeline_uid]["revision"]), now
+            )
+        for source in atom_sources:
+            await self._insert_atom_source(
+                db, source, int(registry[source.timeline_uid]["revision"])
+            )
+        if fragments is not None:
+            fragment_uids = [fragment.fragment_uid for fragment in fragments]
+            await self._insert_fragment_links(db, topic, revision, fragments, now)
+            stale_uids = previous_fragment_uids - set(fragment_uids)
+            if stale_uids:
+                placeholders = ",".join("?" * len(stale_uids))
+                await db.execute(
+                    f"""
+                    UPDATE topic_fragments SET status = 'archived', updated_at = ?
+                    WHERE fragment_uid IN ({placeholders})
+                      AND NOT EXISTS (
+                          SELECT 1 FROM topic_fragment_links l
+                          WHERE l.fragment_uid = topic_fragments.fragment_uid
+                            AND l.status = 'active'
+                      )
+                    """,
+                    [now, *sorted(stale_uids)],
+                )
+        for actor_link in actor_links:
+            await self._insert_actor_link(db, actor_link, now)
+        for atom_actor_link in atom_actor_links:
+            await self._insert_atom_actor_link(db, atom_actor_link)
         return replace(
             topic,
             revision=revision,
@@ -1414,6 +1606,24 @@ class TopicMemoryStore:
         memory_space_id = str(memory_space_id or "").strip()
         if not memory_space_id:
             raise ValueError("memory_space_id is required")
+        normalized = self._normalize_topic_relations(memory_space_id, relations)
+        async with self._connect() as db:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await self._replace_topic_relations_tx(
+                    db, memory_space_id, normalized
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return len(normalized)
+
+    def _normalize_topic_relations(
+        self,
+        memory_space_id: str,
+        relations: list[TopicRelation],
+    ) -> list[TopicRelation]:
         normalized: list[TopicRelation] = []
         for relation in relations:
             left, right = sorted(
@@ -1436,64 +1646,66 @@ class TopicMemoryStore:
                     right_topic_uid=right,
                 )
             )
+        return normalized
 
-        async with self._connect() as db:
-            try:
-                topic_uids = {
-                    uid
-                    for relation in normalized
-                    for uid in (relation.left_topic_uid, relation.right_topic_uid)
-                }
-                if topic_uids:
-                    placeholders = ",".join("?" * len(topic_uids))
-                    rows = await (
-                        await db.execute(
-                            f"SELECT topic_uid, memory_space_id FROM topic_memories "
-                            f"WHERE topic_uid IN ({placeholders})",
-                            sorted(topic_uids),
-                        )
-                    ).fetchall()
-                    scopes = {str(row["topic_uid"]): str(row["memory_space_id"]) for row in rows}
-                    if set(scopes) != topic_uids or any(
-                        scope != memory_space_id for scope in scopes.values()
-                    ):
-                        raise TopicSourceValidationError(
-                            "Topic relation crosses a memory-space boundary"
-                        )
+    async def _replace_topic_relations_tx(
+        self,
+        db: aiosqlite.Connection,
+        memory_space_id: str,
+        relations: list[TopicRelation],
+    ) -> None:
+        topic_uids = {
+            uid
+            for relation in relations
+            for uid in (relation.left_topic_uid, relation.right_topic_uid)
+        }
+        if topic_uids:
+            placeholders = ",".join("?" * len(topic_uids))
+            rows = await (
                 await db.execute(
-                    "DELETE FROM topic_relations WHERE memory_space_id = ?",
-                    (memory_space_id,),
+                    f"SELECT topic_uid, memory_space_id FROM topic_memories "
+                    f"WHERE topic_uid IN ({placeholders})",
+                    sorted(topic_uids),
                 )
-                for relation in normalized:
-                    await db.execute(
-                        """
-                        INSERT INTO topic_relations (
-                            relation_uid, memory_space_id, left_topic_uid,
-                            right_topic_uid, relation_type, confidence,
-                            semantic_similarity, status, build_run_uid,
-                            created_at, updated_at, metadata
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            relation.relation_uid,
-                            memory_space_id,
-                            relation.left_topic_uid,
-                            relation.right_topic_uid,
-                            self._enum_value(relation.relation_type),
-                            float(relation.confidence),
-                            float(relation.semantic_similarity),
-                            relation.status,
-                            relation.build_run_uid,
-                            float(relation.created_at),
-                            float(relation.updated_at),
-                            self._to_json(relation.metadata),
-                        ),
-                    )
-                await db.commit()
-            except Exception:
-                await db.rollback()
-                raise
-        return len(normalized)
+            ).fetchall()
+            scopes = {
+                str(row["topic_uid"]): str(row["memory_space_id"]) for row in rows
+            }
+            if set(scopes) != topic_uids or any(
+                scope != memory_space_id for scope in scopes.values()
+            ):
+                raise TopicSourceValidationError(
+                    "Topic relation crosses a memory-space boundary"
+                )
+        await db.execute(
+            "DELETE FROM topic_relations WHERE memory_space_id = ?",
+            (memory_space_id,),
+        )
+        for relation in relations:
+            await db.execute(
+                """
+                INSERT INTO topic_relations (
+                    relation_uid, memory_space_id, left_topic_uid,
+                    right_topic_uid, relation_type, confidence,
+                    semantic_similarity, status, build_run_uid,
+                    created_at, updated_at, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    relation.relation_uid,
+                    memory_space_id,
+                    relation.left_topic_uid,
+                    relation.right_topic_uid,
+                    self._enum_value(relation.relation_type),
+                    float(relation.confidence),
+                    float(relation.semantic_similarity),
+                    relation.status,
+                    relation.build_run_uid,
+                    float(relation.created_at),
+                    float(relation.updated_at),
+                    self._to_json(relation.metadata),
+                ),
+            )
 
     async def list_topic_relations(self, topic_uid: str) -> list[dict[str, Any]]:
         """Return active neighboring Topics without flattening their contents."""
@@ -1824,6 +2036,7 @@ class TopicMemoryStore:
             raise ValueError("memory_space_id is required")
         async with self._connect() as db:
             try:
+                await db.execute("BEGIN IMMEDIATE")
                 topic_cursor = await db.execute(
                     "DELETE FROM topic_memories WHERE memory_space_id = ?",
                     (memory_space_id,),
@@ -1832,7 +2045,7 @@ class TopicMemoryStore:
                     "DELETE FROM topic_maintenance_runs WHERE memory_space_id = ?",
                     (memory_space_id,),
                 )
-                await db.execute(
+                fragment_cursor = await db.execute(
                     "DELETE FROM topic_fragments WHERE memory_space_id = ?",
                     (memory_space_id,),
                 )
@@ -1843,6 +2056,7 @@ class TopicMemoryStore:
         return {
             "deleted_topics": int(topic_cursor.rowcount or 0),
             "deleted_runs": int(run_cursor.rowcount or 0),
+            "deleted_fragments": int(fragment_cursor.rowcount or 0),
         }
 
     async def create_maintenance_run(
@@ -1963,10 +2177,9 @@ class TopicMemoryStore:
     ) -> dict[str, Any]:
         """Discard a resumable run and every run-owned intermediate artifact.
 
-        Topic snapshots are formal derived data rather than checkpoints. They are
-        intentionally preserved because an interrupted materialization may have
-        updated a pre-existing Topic in place and the current schema does not keep
-        the previous snapshot needed for a safe rollback.
+        Current builds publish only after the whole batch succeeds. Published
+        snapshots are still preserved for compatibility with legacy runs that
+        may have materialized topics before reaching the completed state.
         """
         run_uid = str(run_uid or "").strip()
         expected_space = str(memory_space_id or "").strip() or None
@@ -2442,26 +2655,51 @@ class TopicMemoryStore:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         async with self._connect() as db:
-            await db.execute(
-                """
-                INSERT OR REPLACE INTO topic_build_decisions (
-                    decision_uid, run_uid, topic_uid, action, fragment_uids,
-                    candidate_scores, llm_output, created_at, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    decision_uid,
-                    run_uid,
-                    topic_uid,
-                    action,
-                    self._to_json(fragment_uids),
-                    self._to_json(candidate_scores),
-                    self._to_json(llm_output),
-                    time.time(),
-                    self._to_json(metadata or {}),
-                ),
+            await self._record_build_decision_tx(
+                db,
+                decision_uid=decision_uid,
+                run_uid=run_uid,
+                topic_uid=topic_uid,
+                action=action,
+                fragment_uids=fragment_uids,
+                candidate_scores=candidate_scores,
+                llm_output=llm_output,
+                metadata=metadata,
             )
             await db.commit()
+
+    async def _record_build_decision_tx(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        decision_uid: str,
+        run_uid: str,
+        topic_uid: str | None,
+        action: str,
+        fragment_uids: list[str],
+        candidate_scores: dict[str, Any],
+        llm_output: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO topic_build_decisions (
+                decision_uid, run_uid, topic_uid, action, fragment_uids,
+                candidate_scores, llm_output, created_at, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_uid,
+                run_uid,
+                topic_uid,
+                action,
+                self._to_json(fragment_uids),
+                self._to_json(candidate_scores),
+                self._to_json(llm_output),
+                time.time(),
+                self._to_json(metadata or {}),
+            ),
+        )
 
     async def save_build_checkpoint(
         self,
@@ -2527,26 +2765,38 @@ class TopicMemoryStore:
         self, memory_space_id: str, active_topic_uids: set[str]
     ) -> int:
         async with self._connect() as db:
-            if active_topic_uids:
-                placeholders = ",".join("?" * len(active_topic_uids))
-                cursor = await db.execute(
-                    f"""
-                    UPDATE topic_memories SET status = 'archived', updated_at = ?
-                    WHERE memory_space_id = ? AND status != 'archived'
-                      AND topic_uid NOT IN ({placeholders})
-                    """,
-                    [time.time(), memory_space_id, *sorted(active_topic_uids)],
-                )
-            else:
-                cursor = await db.execute(
-                    """
-                    UPDATE topic_memories SET status = 'archived', updated_at = ?
-                    WHERE memory_space_id = ? AND status != 'archived'
-                    """,
-                    (time.time(), memory_space_id),
-                )
+            cursor_count = await self._archive_topics_not_in_tx(
+                db, memory_space_id, active_topic_uids, time.time()
+            )
             await db.commit()
-            return int(cursor.rowcount or 0)
+            return cursor_count
+
+    @staticmethod
+    async def _archive_topics_not_in_tx(
+        db: aiosqlite.Connection,
+        memory_space_id: str,
+        active_topic_uids: set[str],
+        now: float,
+    ) -> int:
+        if active_topic_uids:
+            placeholders = ",".join("?" * len(active_topic_uids))
+            cursor = await db.execute(
+                f"""
+                UPDATE topic_memories SET status = 'archived', updated_at = ?
+                WHERE memory_space_id = ? AND status != 'archived'
+                  AND topic_uid NOT IN ({placeholders})
+                """,
+                [now, memory_space_id, *sorted(active_topic_uids)],
+            )
+        else:
+            cursor = await db.execute(
+                """
+                UPDATE topic_memories SET status = 'archived', updated_at = ?
+                WHERE memory_space_id = ? AND status != 'archived'
+                """,
+                (now, memory_space_id),
+            )
+        return int(cursor.rowcount or 0)
 
     async def archive_topic_uids_not_in(
         self,
@@ -2558,18 +2808,38 @@ class TopicMemoryStore:
         targets = sorted(set(affected_topic_uids) - set(active_topic_uids))
         if not targets:
             return 0
-        placeholders = ",".join("?" * len(targets))
         async with self._connect() as db:
-            cursor = await db.execute(
-                f"""
-                UPDATE topic_memories SET status = 'archived', updated_at = ?
-                WHERE memory_space_id = ? AND status != 'archived'
-                  AND topic_uid IN ({placeholders})
-                """,
-                [time.time(), memory_space_id, *targets],
+            cursor_count = await self._archive_topic_uids_not_in_tx(
+                db,
+                memory_space_id,
+                affected_topic_uids,
+                active_topic_uids,
+                time.time(),
             )
             await db.commit()
-            return int(cursor.rowcount or 0)
+            return cursor_count
+
+    @staticmethod
+    async def _archive_topic_uids_not_in_tx(
+        db: aiosqlite.Connection,
+        memory_space_id: str,
+        affected_topic_uids: set[str],
+        active_topic_uids: set[str],
+        now: float,
+    ) -> int:
+        targets = sorted(set(affected_topic_uids) - set(active_topic_uids))
+        if not targets:
+            return 0
+        placeholders = ",".join("?" * len(targets))
+        cursor = await db.execute(
+            f"""
+            UPDATE topic_memories SET status = 'archived', updated_at = ?
+            WHERE memory_space_id = ? AND status != 'archived'
+              AND topic_uid IN ({placeholders})
+            """,
+            [now, memory_space_id, *targets],
+        )
+        return int(cursor.rowcount or 0)
 
     async def _load_timeline_registry(
         self, db: aiosqlite.Connection, timeline_uids: set[str]

@@ -62,7 +62,8 @@ class TopicHandler:
         "fragment_matching": (60.0, 72.0),
         "component_review": (72.0, 82.0),
         "topic_synthesis": (82.0, 92.0),
-        "materialization": (92.0, 100.0),
+        "materialization": (92.0, 98.0),
+        "publication": (98.0, 100.0),
         "completed": (100.0, 100.0),
     }
 
@@ -293,6 +294,30 @@ class TopicHandler:
             return self.utils.error(str(exc))
         except Exception as exc:
             logger.error("[PageAPI] 重算 Topic 关系失败", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def clear_topics(self, memory_engine) -> dict[str, Any]:
+        """Permanently clear one space after the WebUI confirmation step."""
+        payload = await request.get_json(silent=True) or {}
+        memory_space_id = self.utils.optional_text(payload.get("memory_space_id"))
+        confirmed = payload.get("confirmed", False)
+        if not memory_space_id:
+            return self.utils.error("memory_space_id 不能为空")
+        if confirmed is not True:
+            return self.utils.error("必须明确确认后才能清空 Topic")
+        if self.has_active_jobs() or memory_engine.topic_build_manager.has_active_builds():
+            return self.utils.error("Topic 构建正在运行，暂时不能清空 Topic")
+        try:
+            result = await memory_engine.topic_build_manager.clear_topic_space(
+                memory_space_id
+            )
+            return self.utils.ok(
+                {"memory_space_id": memory_space_id, **result}
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+        except Exception as exc:
+            logger.error("[PageAPI] 清空 Topic 记忆失败", exc_info=True)
             return self.utils.error(str(exc))
 
     async def start_build(self, memory_engine) -> dict[str, Any]:

@@ -64,7 +64,8 @@ async def test_failed_build_overrides_completed_scan_stage(monkeypatch):
         ("fragment_matching", 1, 2, 66.0),
         ("component_review", 1, 2, 77.0),
         ("topic_synthesis", 1, 2, 87.0),
-        ("materialization", 1, 2, 96.0),
+        ("materialization", 1, 2, 95.0),
+        ("publication", 1, 2, 99.0),
         ("completed", 0, 0, 100.0),
     ],
 )
@@ -131,6 +132,73 @@ async def test_recomputes_only_topic_relations(monkeypatch):
     assert response["status"] == "ok"
     assert response["data"]["relation_count"] == 42
     manager.recompute_topic_relations.assert_awaited_once_with("space-1")
+
+
+@pytest.mark.asyncio
+async def test_clear_topics_requires_confirmation_and_clears_selected_space(
+    monkeypatch,
+):
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={"memory_space_id": "space-1", "confirmed": True}
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    clear_topic_space = AsyncMock(
+        return_value={
+            "deleted_topics": 5,
+            "deleted_runs": 2,
+            "deleted_fragments": 8,
+        }
+    )
+    engine = SimpleNamespace(
+        topic_build_manager=SimpleNamespace(
+            has_active_builds=lambda: False,
+            clear_topic_space=clear_topic_space,
+        ),
+    )
+
+    response = await TopicHandler(PageApiUtils()).clear_topics(engine)
+
+    assert response["status"] == "ok"
+    assert response["data"]["deleted_topics"] == 5
+    clear_topic_space.assert_awaited_once_with("space-1")
+
+
+@pytest.mark.asyncio
+async def test_clear_topics_rejects_unconfirmed_or_active_build(monkeypatch):
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={"memory_space_id": "space-1", "confirmed": False}
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    clear_topic_space = AsyncMock()
+    engine = SimpleNamespace(
+        topic_build_manager=SimpleNamespace(
+            has_active_builds=lambda: False,
+            clear_topic_space=clear_topic_space,
+        ),
+    )
+    handler = TopicHandler(PageApiUtils())
+
+    response = await handler.clear_topics(engine)
+    assert response["status"] == "error"
+    clear_topic_space.assert_not_awaited()
+
+    request.get_json.return_value = {
+        "memory_space_id": "space-1",
+        "confirmed": True,
+    }
+    engine.topic_build_manager.has_active_builds = lambda: True
+    response = await handler.clear_topics(engine)
+    assert response["status"] == "error"
+    assert "正在运行" in response["message"]
+    clear_topic_space.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -276,7 +276,11 @@ async def test_clear_space_removes_only_topic_derivatives_and_build_history(
 
     result = await store.clear_space(space_a)
 
-    assert result == {"deleted_topics": 1, "deleted_runs": 1}
+    assert result == {
+        "deleted_topics": 1,
+        "deleted_runs": 1,
+        "deleted_fragments": 0,
+    }
     assert await store.get_topic("topic-a") is None
     assert await store.get_topic("topic-b") is not None
     assert await store.list_maintenance_runs(space_a) == []
@@ -299,6 +303,121 @@ async def test_clear_space_removes_only_topic_derivatives_and_build_history(
         )[0]
     assert timeline_count == 1
     assert source_count == 0
+
+
+@pytest.mark.asyncio
+async def test_publish_topic_build_rolls_back_every_snapshot_on_mid_publish_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    db_path = str(tmp_path / "atomic-topic-publication.db")
+    space_id = await _register_timeline(
+        db_path,
+        memory_uid="timeline-1",
+        document_id=1,
+    )
+    await _register_timeline(
+        db_path,
+        memory_uid="timeline-2",
+        document_id=2,
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+
+    old_topic = TopicMemory(
+        topic_uid="topic-old",
+        memory_space_id=space_id,
+        title="Old Topic",
+        summary="Published before the failed build.",
+    )
+    old_atom = TopicMemoryAtom(
+        atom_uid="atom-old",
+        topic_uid=old_topic.topic_uid,
+        atom_type="factual",
+        content="old fact",
+    )
+    old_link = TopicTimelineLink(
+        topic_uid=old_topic.topic_uid,
+        timeline_uid="timeline-1",
+        time_cluster_key="cluster-old",
+    )
+    old_source = TopicAtomSource(
+        source_uid="source-old",
+        topic_atom_uid=old_atom.atom_uid,
+        timeline_uid="timeline-1",
+        source_atom_fingerprint="old-fingerprint",
+    )
+    await store.save_topic_snapshot(
+        old_topic,
+        atoms=[old_atom],
+        links=[old_link],
+        atom_sources=[old_source],
+    )
+    run = await store.create_maintenance_run(
+        TopicMaintenanceRun(memory_space_id=space_id, mode=TopicMaintenanceMode.FULL)
+    )
+
+    def snapshot(suffix: str, timeline_uid: str) -> dict:
+        topic = TopicMemory(
+            topic_uid=f"topic-{suffix}",
+            memory_space_id=space_id,
+            title=f"Topic {suffix}",
+            summary=f"Summary {suffix}",
+        )
+        atom = TopicMemoryAtom(
+            atom_uid=f"atom-{suffix}",
+            topic_uid=topic.topic_uid,
+            atom_type="factual",
+            content=f"fact {suffix}",
+        )
+        link = TopicTimelineLink(
+            topic_uid=topic.topic_uid,
+            timeline_uid=timeline_uid,
+            time_cluster_key=f"cluster-{suffix}",
+        )
+        source = TopicAtomSource(
+            source_uid=f"source-{suffix}",
+            topic_atom_uid=atom.atom_uid,
+            timeline_uid=timeline_uid,
+            source_atom_fingerprint=f"fingerprint-{suffix}",
+        )
+        return {
+            "topic": topic,
+            "atoms": [atom],
+            "links": [link],
+            "atom_sources": [source],
+        }
+
+    original = store._save_topic_snapshot_tx
+    calls = 0
+
+    async def fail_second_snapshot(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("injected publication failure")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_save_topic_snapshot_tx", fail_second_snapshot)
+    with pytest.raises(RuntimeError, match="injected publication failure"):
+        await store.publish_topic_build(
+            run_uid=run.run_uid,
+            memory_space_id=space_id,
+            mode=TopicMaintenanceMode.FULL,
+            snapshots=[
+                snapshot("new-1", "timeline-1"),
+                snapshot("new-2", "timeline-2"),
+            ],
+            relations=[],
+            reset_topics=True,
+        )
+
+    topics = await store.list_topics(space_id, limit=20)
+    assert [(topic.topic_uid, topic.status.value) for topic in topics] == [
+        ("topic-old", "active")
+    ]
+    persisted_run = await store.get_maintenance_run(run.run_uid)
+    assert persisted_run["status"] == "pending"
 
 
 async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:

@@ -168,16 +168,16 @@ async def test_incremental_build_uses_expanded_scope_and_shared_scan_pipeline():
 
 @pytest.mark.asyncio
 async def test_resume_and_reset_build_share_the_memory_space_lock():
-    reset_started = asyncio.Event()
-    release_reset = asyncio.Event()
+    build_started = asyncio.Event()
+    release_build = asyncio.Event()
 
-    async def clear_space(_memory_space_id):
-        reset_started.set()
-        await release_reset.wait()
-        return {"deleted_topics": 0, "deleted_runs": 0}
+    async def build_from_scan(run_uid, **_kwargs):
+        if run_uid == "run-reset":
+            build_started.set()
+            await release_build.wait()
+        return {"status": "completed", "run_uid": run_uid}
 
     store = SimpleNamespace(
-        clear_space=AsyncMock(side_effect=clear_space),
         get_maintenance_run=AsyncMock(
             return_value={
                 "run_uid": "run-resume",
@@ -192,25 +192,47 @@ async def test_resume_and_reset_build_share_the_memory_space_lock():
         start_scan=AsyncMock(return_value={"run_uid": "run-reset"})
     )
     manager = TopicBuildManager(":memory:", store, candidate_manager)
-    manager.build_from_scan = AsyncMock(
-        return_value={"status": "completed", "run_uid": "run-reset"}
-    )
+    manager.build_from_scan = AsyncMock(side_effect=build_from_scan)
 
     reset_task = asyncio.create_task(
         manager.build_space("space-1", reset_topics=True)
     )
-    await reset_started.wait()
+    await build_started.wait()
     resume_task = asyncio.create_task(manager.resume_run("run-resume"))
     await asyncio.sleep(0)
 
     assert not resume_task.done()
     assert store.get_maintenance_run.await_count == 1
 
-    release_reset.set()
+    release_build.set()
     await reset_task
     await resume_task
 
     assert store.get_maintenance_run.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_clear_topic_space_uses_the_build_lock():
+    store = SimpleNamespace(
+        clear_space=AsyncMock(
+            return_value={
+                "deleted_topics": 2,
+                "deleted_runs": 1,
+                "deleted_fragments": 3,
+            }
+        )
+    )
+    manager = TopicBuildManager(":memory:", store, None)
+    lock = manager._space_locks.setdefault("space-1", asyncio.Lock())
+
+    async with lock:
+        with pytest.raises(RuntimeError, match="already running"):
+            await manager.clear_topic_space("space-1")
+
+    result = await manager.clear_topic_space("space-1")
+
+    assert result["deleted_topics"] == 2
+    store.clear_space.assert_awaited_once_with("space-1")
 
 
 class _GroundedLLM:
@@ -538,7 +560,7 @@ async def test_full_build_splits_merges_and_materializes_exact_sources(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_reset_full_build_clears_old_snapshots_and_runs_before_rebuilding(
+async def test_reset_full_build_atomically_replaces_old_snapshots_after_rebuilding(
     tmp_path: Path,
 ):
     db_path, space_id = await _create_timeline_db(tmp_path)

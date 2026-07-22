@@ -204,6 +204,12 @@ class PluginPageApi:
             "LivingMemory Page recompute Topic relations",
         )
         register(
+            f"{PAGE_API_PREFIX}/topics/maintenance/clear",
+            self.clear_topic_memories,
+            ["POST"],
+            "LivingMemory Page clear Topic memories",
+        )
+        register(
             f"{PAGE_API_PREFIX}/topics/build/start",
             self.start_topic_build,
             ["POST"],
@@ -433,6 +439,12 @@ class PluginPageApi:
         if error:
             return error
         return await self.topic_handler.discard_build(ready["memory_engine"])
+
+    async def clear_topic_memories(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.clear_topics(ready["memory_engine"])
 
     async def list_models(self):
         """列出插件运行时实际使用的模型，包括默认回退来源。"""
