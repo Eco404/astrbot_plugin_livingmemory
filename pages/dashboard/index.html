@@ -410,6 +410,13 @@
             </div>
             <button class="btn btn-secondary btn-sm" id="topic-recompute-relations" type="button" data-i18n="topic.recomputeRelations">立即重算</button>
           </div>
+          <div class="topic-maintenance-action topic-maintenance-danger-action">
+            <div>
+              <strong data-i18n="topic.clearTopicsTitle">清空 Topic 记忆</strong>
+              <p class="text-secondary" data-i18n="topic.clearTopicsIntro">永久删除当前空间的全部 Topic、正式片段、人物索引、关系和构建断点，不影响 Timeline 记忆。</p>
+            </div>
+            <button class="btn btn-danger btn-sm" id="topic-clear-topics" type="button" data-i18n="topic.clearTopics">清空</button>
+          </div>
           <div class="topic-maintenance-toolbar">
             <div id="topic-maintenance-status" class="text-secondary" aria-live="polite"></div>
             <button class="btn btn-secondary btn-sm" id="topic-maintenance-detect" type="button" data-i18n="topic.detectUnindexed">重新检查</button>
@@ -426,6 +433,25 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" id="topic-maintenance-cancel" type="button" data-i18n="common.close">关闭</button>
           <button class="btn btn-primary" id="topic-maintenance-submit" type="button" data-i18n="topic.maintenanceSubmit" disabled>开始增量补建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Clear Topic Memories Confirmation -->
+    <div class="modal-overlay" id="topic-clear-confirm-overlay" aria-hidden="true">
+      <div class="modal topic-discard-build-modal" role="alertdialog" aria-modal="true" aria-labelledby="topic-clear-confirm-title" aria-describedby="topic-clear-confirm-message">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-clear-confirm-title" data-i18n="topic.clearConfirmTitle">确认清空 Topic 记忆</div>
+          <button class="modal-close" id="topic-clear-confirm-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="topic-discard-build-warning" data-i18n="topic.clearConfirmWarning">这是不可撤销的危险操作。只会删除 Topic 派生数据，Timeline 记忆不会被删除。</div>
+          <p class="topic-discard-build-message" id="topic-clear-confirm-message"></p>
+          <p class="text-tertiary" data-i18n="topic.clearConfirmRecovery">清空后只能通过全量构建重新生成 Topic 记忆。</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="topic-clear-confirm-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-danger" id="topic-clear-confirm-submit" type="button" data-i18n="topic.clearConfirmSubmit">确认永久清空</button>
         </div>
       </div>
     </div>
@@ -487,10 +513,10 @@
             </label>
             <label class="topic-full-build-choice topic-full-build-choice-danger">
               <input type="radio" name="topic-full-build-mode" value="clear">
-              <span><strong data-i18n="topic.fullBuildClearTitle">清空后全量构建</strong><small data-i18n="topic.fullBuildClearDetail">先永久删除该空间的全部 Topic、原子、来源、索引及旧构建断点，再像首次使用一样重新构建。</small></span>
+              <span><strong data-i18n="topic.fullBuildClearTitle">清空后全量构建</strong><small data-i18n="topic.fullBuildClearDetail">按首次使用方式生成全新 Topic；旧数据会保留到新构建完整成功后再原子替换。</small></span>
             </label>
           </div>
-          <div class="topic-full-build-reset-risk hidden" id="topic-full-build-reset-risk" data-i18n="topic.fullBuildClearRisk">清空不可撤销；如果随后构建失败，旧 Topic 不会自动恢复。</div>
+          <div class="topic-full-build-reset-risk hidden" id="topic-full-build-reset-risk" data-i18n="topic.fullBuildClearRisk">构建失败或取消不会删除现有 Topic；只有完整构建成功后才会一次性替换旧数据。</div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" id="topic-full-build-confirm-cancel" type="button" data-i18n="common.cancel">取消</button>
@@ -509,7 +535,7 @@
         <div class="modal-body">
           <div class="topic-discard-build-warning" data-i18n="topic.discardBuildWarning">此操作会永久清除该任务已保存的候选扫描、片段、向量、匹配、合成结果和构建检查点，之后无法从该断点继续。</div>
           <p class="topic-discard-build-message" id="topic-discard-build-message"></p>
-          <p class="text-tertiary" data-i18n="topic.discardBuildMaterialized">已经正式写入的 Topic 会保留，避免误删或破坏任务开始前的 Topic；取消后可以重新执行全量或增量构建。</p>
+          <p class="text-tertiary" data-i18n="topic.discardBuildMaterialized">构建结果只会在全部完成后正式发布；取消断点不会修改任务开始前的 Topic。</p>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" id="topic-discard-build-cancel" type="button" data-i18n="common.cancel">取消</button>

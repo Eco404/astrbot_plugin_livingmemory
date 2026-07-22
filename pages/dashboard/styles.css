@@ -2166,6 +2166,15 @@ body {
   margin: var(--space-1) 0 0;
 }
 
+.topic-maintenance-danger-action {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border-normal));
+  background: color-mix(in srgb, var(--danger-light) 65%, var(--bg-secondary));
+}
+
+.topic-maintenance-danger-action strong {
+  color: var(--danger);
+}
+
 .identity-state {
   padding: var(--space-8);
   border: 1px dashed var(--border);

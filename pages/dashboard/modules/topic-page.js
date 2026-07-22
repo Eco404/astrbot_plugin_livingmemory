@@ -17,6 +17,7 @@ export class TopicPage {
     this.maintenanceItems = [];
     this.discardBuildTrigger = null;
     this.discardRun = null;
+    this.clearTopicsTrigger = null;
     this.settingsTrigger = null;
     this.settingsData = null;
     this.settingsResetKeys = new Set();
@@ -40,6 +41,13 @@ export class TopicPage {
     document.getElementById("topic-maintenance-cancel")?.addEventListener("click", () => this.closeMaintenance());
     document.getElementById("topic-maintenance-detect")?.addEventListener("click", () => this.detectUnindexedTimelines());
     document.getElementById("topic-recompute-relations")?.addEventListener("click", () => this.recomputeRelations());
+    document.getElementById("topic-clear-topics")?.addEventListener("click", event => this.requestClearTopics(event.currentTarget));
+    document.getElementById("topic-clear-confirm-close")?.addEventListener("click", () => this.closeClearTopicsConfirm());
+    document.getElementById("topic-clear-confirm-cancel")?.addEventListener("click", () => this.closeClearTopicsConfirm());
+    document.getElementById("topic-clear-confirm-submit")?.addEventListener("click", () => this.clearTopics());
+    document.getElementById("topic-clear-confirm-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeClearTopicsConfirm();
+    });
     document.getElementById("topic-maintenance-select-all")?.addEventListener("change", event => {
       document.querySelectorAll("#topic-maintenance-list .topic-maintenance-checkbox").forEach(input => {
         input.checked = event.currentTarget.checked;
@@ -75,7 +83,8 @@ export class TopicPage {
     });
     document.addEventListener("keydown", event => {
       if (event.key !== "Escape") return;
-      if (this.discardBuildConfirmIsOpen()) this.closeDiscardBuildConfirm();
+      if (this.clearTopicsConfirmIsOpen()) this.closeClearTopicsConfirm();
+      else if (this.discardBuildConfirmIsOpen()) this.closeDiscardBuildConfirm();
       else if (this.fullBuildConfirmIsOpen()) this.closeFullBuildConfirm();
       else if (this.settingsIsOpen()) this.closeSettings();
       else if (this.maintenanceIsOpen()) this.closeMaintenance();
@@ -502,6 +511,63 @@ export class TopicPage {
     }
   }
 
+  requestClearTopics(trigger) {
+    if (!this.currentSpace() || this.activeJobUid) return;
+    this.clearTopicsTrigger = trigger || null;
+    const overlay = document.getElementById("topic-clear-confirm-overlay");
+    const message = document.getElementById("topic-clear-confirm-message");
+    if (message) {
+      message.textContent = window.t(
+        "topic.clearConfirmMessage",
+        this.topicCount,
+        this.currentSpace(),
+      );
+    }
+    overlay?.classList.add("visible");
+    overlay?.setAttribute("aria-hidden", "false");
+    document.getElementById("topic-clear-confirm-cancel")?.focus();
+  }
+
+  clearTopicsConfirmIsOpen() {
+    return document.getElementById("topic-clear-confirm-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeClearTopicsConfirm({ restoreFocus = true } = {}) {
+    if (!this.clearTopicsConfirmIsOpen() && !this.clearTopicsTrigger) return;
+    const overlay = document.getElementById("topic-clear-confirm-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    const trigger = this.clearTopicsTrigger;
+    this.clearTopicsTrigger = null;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  async clearTopics() {
+    if (!this.currentSpace() || this.activeJobUid) return;
+    const submit = document.getElementById("topic-clear-confirm-submit");
+    const cancel = document.getElementById("topic-clear-confirm-cancel");
+    if (submit) submit.disabled = true;
+    if (cancel) cancel.disabled = true;
+    try {
+      const result = await this.api.post("topics/maintenance/clear", {
+        memory_space_id: this.currentSpace(),
+        confirmed: true,
+      });
+      this.closeClearTopicsConfirm({ restoreFocus: false });
+      this.closeMaintenance({ restoreFocus: false });
+      this.showToast(window.t(
+        "topic.clearSuccess",
+        Number(result.deleted_topics || 0),
+      ));
+      await this.fetch();
+    } catch (error) {
+      this.showToast(error.message || window.t("topic.clearFailed"), true);
+    } finally {
+      if (submit) submit.disabled = false;
+      if (cancel) cancel.disabled = false;
+    }
+  }
+
   updateMaintenanceSelection() {
     const checkboxes = Array.from(document.querySelectorAll("#topic-maintenance-list .topic-maintenance-checkbox"));
     const selected = checkboxes.filter(input => input.checked).length;
@@ -592,7 +658,6 @@ export class TopicPage {
         ...(Array.isArray(timelineUids) ? { timeline_uids: timelineUids } : {}),
       });
       this.renderProgress(job);
-      if (job.reset_topics && !job.already_running) this.renderResetBuildState();
       if (job.already_running) {
         this.showToast(window.t("topic.buildAlreadyRunning"));
       }
@@ -600,18 +665,6 @@ export class TopicPage {
     } catch (e) {
       this.setBuildButtonsDisabled(!this.currentSpace() || !this.buildEnabled);
       this.showToast(e.message || "无法启动 Topic 构建", true);
-    }
-  }
-
-  renderResetBuildState() {
-    this.topicCount = 0;
-    ["topic-total", "topic-active", "topic-atoms", "topic-links", "topic-relations"].forEach(id => {
-      const element = document.getElementById(id);
-      if (element) element.textContent = "0";
-    });
-    const body = document.getElementById("topics-body");
-    if (body) {
-      body.innerHTML = `<tr><td colspan="6" class="table-empty">${esc(window.t("topic.resetBuildStarted"))}</td></tr>`;
     }
   }
 
@@ -701,7 +754,7 @@ export class TopicPage {
   }
 
   setBuildButtonsDisabled(disabled) {
-    ["topic-build-full", "topic-maintenance", "topic-recompute-relations"].forEach(id => {
+    ["topic-build-full", "topic-maintenance", "topic-recompute-relations", "topic-clear-topics"].forEach(id => {
       const button = document.getElementById(id);
       if (button) button.disabled = Boolean(disabled);
     });

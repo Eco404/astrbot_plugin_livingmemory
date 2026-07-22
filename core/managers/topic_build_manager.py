@@ -262,6 +262,17 @@ class TopicBuildManager:
                 "algorithm_version": _RELATION_ALGORITHM_VERSION,
             }
 
+    async def clear_topic_space(self, memory_space_id: str) -> dict[str, int]:
+        """Clear one space while excluding builds and other Topic maintenance."""
+        memory_space_id = str(memory_space_id or "").strip()
+        if not memory_space_id:
+            raise ValueError("memory_space_id is required")
+        lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeError("Topic build is already running for this memory space")
+        async with lock:
+            return await self.store.clear_space(memory_space_id)
+
     async def build_space(
         self,
         memory_space_id: str,
@@ -278,11 +289,8 @@ class TopicBuildManager:
             raise ValueError("Topic reset is only available for full builds")
         lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
         async with lock:
-            reset_result = None
             incremental_scope: dict[str, Any] | None = None
             scan_only_unindexed = False
-            if reset_topics:
-                reset_result = await self.store.clear_space(memory_space_id)
             if mode is TopicMaintenanceMode.INCREMENTAL:
                 existing = await self.store.list_topics(
                     memory_space_id,
@@ -346,14 +354,12 @@ class TopicBuildManager:
                 run_metadata={
                     "incremental_scope": incremental_scope or {},
                     "pipeline": "shared_full_pipeline",
+                    "reset_topics": bool(reset_topics),
                 },
             )
-            result = await self.build_from_scan(
+            return await self.build_from_scan(
                 scan["run_uid"], progress_callback=progress_callback
             )
-            if reset_result is not None:
-                result["reset"] = reset_result
-            return result
 
     async def resume_run(self, run_uid: str, *, progress_callback=None) -> dict[str, Any]:
         """Resume a persisted run from its latest durable stage boundary."""
@@ -417,6 +423,7 @@ class TopicBuildManager:
         candidate_map = {item.memory_uid: item for item in candidates}
         memory_space_id = str(run["memory_space_id"])
         run_mode = TopicMaintenanceMode(str(run["mode"]))
+        reset_topics = bool((run.get("metadata") or {}).get("reset_topics", False))
         await self.store.update_maintenance_run(
             run_uid,
             status=TopicMaintenanceStatus.RUNNING,
@@ -469,14 +476,14 @@ class TopicBuildManager:
                 total_groups=len(components),
             )
 
-            active_uids: set[str] = set()
             built: list[dict[str, Any]] = []
             plans: list[dict[str, Any]] = []
-            existing = await self.store.list_topics(
+            all_existing = await self.store.list_topics(
                 memory_space_id,
                 status=TopicMemoryStatus.ACTIVE,
                 limit=1000,
             )
+            existing = [] if reset_topics else list(all_existing)
             incremental_scope = (
                 (run.get("metadata") or {}).get("incremental_scope", {})
                 if run_mode is TopicMaintenanceMode.INCREMENTAL
@@ -681,6 +688,7 @@ class TopicBuildManager:
                 current_group_index=0,
                 total_groups=len(plans),
             )
+            snapshots: list[dict[str, Any]] = []
             for position, plan in enumerate(plans, 1):
                 topic = plan["topic"]
                 atoms = plan["atoms"]
@@ -715,136 +723,117 @@ class TopicBuildManager:
                 topic.metadata["fragment_uids"] = [
                     item.fragment_uid for item in formal_fragments
                 ]
-                material_key = hashlib.sha256(
-                    "\n".join(sorted(fragment_uids)).encode()
-                ).hexdigest()
-                checkpoint_key = f"materialization:{material_key}"
-                material_input_hash = self._checkpoint_hash(
-                    {
-                        "topic_uid": topic.topic_uid,
-                        "synthesis": {
-                            key: value
-                            for key, value in plan["synthesis"].items()
-                            if key != "checkpoint_reused"
-                        },
-                        "fragment_uids": fragment_uids,
-                        "materialization_schema": "formal_fragments_actor_links_v2",
-                        "formal_fragment_uids": [
-                            item.fragment_uid for item in formal_fragments
-                        ],
-                    }
-                )
-                material_checkpoint = await self.store.get_build_checkpoint(
-                    run_uid,
-                    checkpoint_key,
-                )
-                saved = None
-                if (
-                    material_checkpoint
-                    and material_checkpoint.get("input_hash") == material_input_hash
-                ):
-                    checkpoint_payload = material_checkpoint.get("payload") or {}
-                    checkpoint_topic = await self.store.get_topic(
-                        str(checkpoint_payload.get("topic_uid") or "")
-                    )
-                    if (
-                        checkpoint_topic is not None
-                        and checkpoint_topic.revision
-                        == int(checkpoint_payload.get("revision") or 0)
-                    ):
-                        saved = checkpoint_topic
-                if saved is None:
-                    saved = await self.store.save_topic_snapshot(
-                        topic,
-                        atoms=atoms,
-                        links=links,
-                        atom_sources=sources,
-                        actor_links=actor_links,
-                        atom_actor_links=atom_actor_links,
-                        fragments=formal_fragments,
-                        expected_revision=(matched.revision if matched else None),
-                    )
-                active_uids.add(saved.topic_uid)
                 decision_uid = str(
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
-                        f"livingmemory:topic-build:{run_uid}:{saved.topic_uid}",
+                        f"livingmemory:topic-build:{run_uid}:{topic.topic_uid}",
                     )
                 )
-                await self.store.record_build_decision(
-                    decision_uid=decision_uid,
-                    run_uid=run_uid,
-                    topic_uid=saved.topic_uid,
-                    action="update" if matched else "create",
-                    fragment_uids=fragment_uids,
-                    candidate_scores={
-                        key: value
-                        for key, value in scores.items()
-                        if any(uid in key for uid in fragment_uids)
-                    },
-                    llm_output=plan["synthesis"],
-                    metadata={"topic_revision": saved.revision},
-                )
-                await self.store.save_build_checkpoint(
-                    run_uid=run_uid,
-                    checkpoint_key=checkpoint_key,
-                    stage="materialization",
-                    input_hash=material_input_hash,
-                    payload={
-                        "topic_uid": saved.topic_uid,
-                        "revision": saved.revision,
-                    },
-                )
-                built.append(
+                snapshots.append(
                     {
-                        "topic_uid": saved.topic_uid,
-                        "revision": saved.revision,
-                        "title": saved.title,
-                        "timeline_count": len(links),
-                        "atom_count": len(atoms),
-                    }
+                        "topic": topic,
+                        "atoms": atoms,
+                        "links": links,
+                        "atom_sources": sources,
+                        "actor_links": actor_links,
+                        "atom_actor_links": atom_actor_links,
+                        "fragments": formal_fragments,
+                        "expected_revision": (
+                            None
+                            if reset_topics
+                            else matched.revision
+                            if matched
+                            else None
+                        ),
+                        "decision": {
+                            "decision_uid": decision_uid,
+                            "action": "update" if matched else "create",
+                            "fragment_uids": fragment_uids,
+                            "candidate_scores": {
+                                key: value
+                                for key, value in scores.items()
+                                if any(uid in key for uid in fragment_uids)
+                            },
+                            "llm_output": plan["synthesis"],
+                        },
+                    },
                 )
                 await self.store.update_maintenance_run(
                     run_uid,
                     stage="materialization",
                     current_group_index=position,
-                    total_groups=len(components),
-                    created_topics=sum(1 for item in built if item["revision"] == 1),
-                    updated_topics=sum(1 for item in built if item["revision"] > 1),
+                    total_groups=len(plans),
                 )
                 await self._emit(
                     progress_callback,
                     run_uid,
                     "materialization",
                     position,
-                    len(components),
+                    len(plans),
                 )
 
-            if run_mode is TopicMaintenanceMode.FULL:
-                await self.store.archive_topics_not_in(memory_space_id, active_uids)
-            elif affected_topic_uids:
-                await self.store.archive_topic_uids_not_in(
-                    memory_space_id,
-                    affected_topic_uids,
-                    active_uids,
-                )
-            active_topics = await self.store.list_topics(
-                memory_space_id,
-                status=TopicMemoryStatus.ACTIVE,
-                limit=1000,
+            final_topic_map = (
+                {}
+                if run_mode is TopicMaintenanceMode.FULL
+                else {topic.topic_uid: topic for topic in all_existing}
             )
-            relations = self._derive_topic_relations(run_uid, active_topics)
-            relation_count = await self.store.replace_topic_relations(
-                memory_space_id,
-                relations,
+            if run_mode is TopicMaintenanceMode.INCREMENTAL:
+                for topic_uid in affected_topic_uids:
+                    final_topic_map.pop(topic_uid, None)
+            final_topic_map.update(
+                (snapshot["topic"].topic_uid, snapshot["topic"])
+                for snapshot in snapshots
+            )
+            relations = self._derive_topic_relations(
+                run_uid, list(final_topic_map.values())
             )
             await self.store.update_maintenance_run(
                 run_uid,
-                status=TopicMaintenanceStatus.COMPLETED,
-                stage="completed",
-                current_group_index=len(components),
-                total_groups=len(components),
+                stage="publication",
+                current_group_index=0,
+                total_groups=1,
             )
+            await self._emit(
+                progress_callback,
+                run_uid,
+                "publication",
+                0,
+                1,
+                activity="atomic_publish",
+                item_kind="topic_generation",
+                topic_count=len(snapshots),
+            )
+            publication = await self.store.publish_topic_build(
+                run_uid=run_uid,
+                memory_space_id=memory_space_id,
+                mode=run_mode,
+                snapshots=snapshots,
+                relations=relations,
+                affected_topic_uids=affected_topic_uids,
+                reset_topics=reset_topics,
+            )
+            await self._emit(
+                progress_callback,
+                run_uid,
+                "publication",
+                1,
+                1,
+                activity="atomic_publish",
+                item_kind="topic_generation",
+                topic_count=len(snapshots),
+            )
+            for saved, snapshot in zip(
+                publication["topics"], snapshots, strict=True
+            ):
+                built.append(
+                    {
+                        "topic_uid": saved.topic_uid,
+                        "revision": saved.revision,
+                        "title": saved.title,
+                        "timeline_count": len(snapshot["links"]),
+                        "atom_count": len(snapshot["atoms"]),
+                    }
+                )
             return {
                 "run_uid": run_uid,
                 "status": "completed",
@@ -855,8 +844,13 @@ class TopicBuildManager:
                 "reviewed_component_count": reviewed_component_count,
                 "topic_count": len(built),
                 "topics": built,
-                "related_topic_count": relation_count,
+                "related_topic_count": publication["relation_count"],
                 "rerank_used": self.rerank_provider is not None,
+                **(
+                    {"reset": publication["reset"]}
+                    if publication.get("reset") is not None
+                    else {}
+                ),
             }
         except asyncio.CancelledError:
             await asyncio.shield(
