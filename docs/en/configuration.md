@@ -63,10 +63,13 @@ With recent-context expansion enabled, recent user messages are searched as a se
 | `topic_memory.recall_top_k` | `3` | Maximum Topics injected per recall |
 | `topic_memory.recall_candidate_multiplier` | `4` | Topic candidate multiplier before filtering |
 | `topic_memory.recall_scan_limit` | `2000` | Topic vector scan limit per memory space |
-| `topic_memory.recall_min_relevance` | `0.42` | Minimum Topic relevance |
+| `topic_memory.recall_min_relevance` | `0.32` | Minimum current-query relevance for a Topic |
 | `topic_memory.recall_relative_floor` | `0.70` | Minimum relevance relative to the best Topic |
+| `topic_memory.recall_selection_relative_floor` | `0.90` | Dynamic final-selection floor relative to the best current-query relevance; results may stop below the configured limit |
 | `topic_memory.recall_mmr_lambda` | `0.78` | Balance between Topic relevance and diversity |
-| `topic_memory.recall_use_rerank` | `true` | Rerank Topic candidates when a provider is available |
+| `topic_memory.recall_use_rerank` | `true` | Rerank qualified Topic candidates once with the current query |
+| `topic_memory.recall_rerank_weight` | `0.35` | Maximum influence of relative Rerank order, reduced by per-call confidence; raw absolute scores are not blended |
+| `topic_memory.recall_context_support_cap` | `0.08` | Maximum ranking bonus from recent context; context cannot qualify a Topic alone |
 | `topic_memory.recall_context_overlap_threshold` | `0.80` | Suppress a Topic when this fraction of its sources is already visible |
 | `topic_memory.timeline_supplement_k` | `2` | Maximum Timeline supplements after a Topic match |
 

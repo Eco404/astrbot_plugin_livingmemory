@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -146,6 +147,51 @@ async def test_memory_search_tool_serializes_results(memory_engine, astr_context
         "create_time": 100.0,
         "last_access_time": 200.0,
     }
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_records_topic_access_after_serializing_result(
+    memory_engine, astr_context
+):
+    tool = MemorySearchTool(
+        context=astr_context,
+        config_manager=ConfigManager(),
+        memory_engine=memory_engine,
+    )
+    topic = SimpleNamespace(
+        title="工资核对",
+        summary="核对工资天数",
+        importance=0.8,
+    )
+    topic_result = SimpleNamespace(
+        topic_uid="topic-wage",
+        topic=topic,
+        final_score=0.8,
+        sources=[],
+    )
+    topic_outcome = SimpleNamespace(results=[topic_result])
+    fragment_outcome = SimpleNamespace(results=[], available_count=0)
+    topic_pipeline = SimpleNamespace(
+        config={"recall_top_k": 1, "timeline_supplement_k": 0},
+        search=AsyncMock(return_value=topic_outcome),
+        search_fragment_supplements=AsyncMock(return_value=fragment_outcome),
+        select_timeline_supplements=Mock(return_value=[]),
+        record_topic_access=AsyncMock(return_value=1),
+    )
+    memory_engine.topic_memory_enabled = True
+    memory_engine.topic_recall_pipeline = topic_pipeline
+    memory_engine.search_memories = AsyncMock(return_value=[])
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.tools.memory_search_tool.get_persona_id",
+        new_callable=AsyncMock,
+    ) as get_persona:
+        get_persona.return_value = "persona_a"
+        raw_result = await tool.call(_make_run_context(), query="工资")
+
+    result = json.loads(raw_result)
+    assert result["results"][0]["memory_layer"] == "topic"
+    topic_pipeline.record_topic_access.assert_awaited_once_with([topic_result])
 
 
 @pytest.mark.asyncio

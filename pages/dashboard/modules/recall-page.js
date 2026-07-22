@@ -239,6 +239,9 @@ export class RecallPage {
       html += '<strong>' + window.t("recall.topicDiagnostics") + '</strong>';
       html += '<span>' + window.t("recall.candidateSummary", topic.candidate_count || 0, topic.selected_count || 0) + '</span>';
       html += '<span>' + window.t("recall.threshold") + ': ' + Number(topic.applied_threshold || 0).toFixed(3) + '</span>';
+      if (Number(topic.selection_threshold || 0) > Number(topic.applied_threshold || 0)) {
+        html += '<span>' + window.t("topic.selectionThreshold") + ': ' + Number(topic.selection_threshold).toFixed(3) + '</span>';
+      }
       html += '<span>' + window.t("recall.topicContextSuppressed") + ': ' + Number(topic.context_suppressed || 0) + '</span>';
       if (diagnostics.topic_space_id) {
         html += '<span class="cell-mono">' + esc(diagnostics.topic_space_id) + '</span>';
@@ -251,19 +254,62 @@ export class RecallPage {
         topicCandidates.forEach(item => {
           html += '<div><span class="cell-mono">' + esc(item.title || item.topic_uid) + '</span>';
           html += '<span>' + (item.selected ? window.t("recall.selected") : window.t("recall.filtered")) + '</span>';
-          html += '<span>rel ' + Number(item.relevance_score || 0).toFixed(3) + '</span>';
-          html += '<span>score ' + Number(item.final_score || 0).toFixed(3) + '</span>';
-          html += '<span>base ' + Number(item.base_relevance_score || 0).toFixed(3) + '</span>';
+          html += '<span>current ' + Number(item.current_relevance || 0).toFixed(3) + '</span>';
+          html += '<span>context +' + Number(item.context_support || 0).toFixed(3) + '</span>';
+          html += '<span>rank ' + Number(item.ranking_score || item.final_score || 0).toFixed(3) + '</span>';
           html += '<span>emb ' + Number(item.embedding_score || 0).toFixed(3) + '</span>';
           html += '<span>key ' + Number(item.keyword_score || 0).toFixed(3) + '</span>';
           if (item.rerank_score != null) {
-            html += '<span>rerank ' + Number(item.rerank_score).toFixed(3) + '</span>';
+            html += '<span>rerank raw ' + Number(item.rerank_score).toFixed(3) + '</span>';
+            html += '<span>rerank #' + esc(String(item.rerank_rank || "--")) + ' · strength ' + Number(item.rerank_confidence || 0).toFixed(3) + ' · +' + Number(item.rerank_rank_boost || 0).toFixed(3) + '</span>';
           }
           if (Number(item.actor_match_boost || 0) > 0) {
             html += '<span>' + window.t("recall.actorBoost") + ' +' + Number(item.actor_match_boost).toFixed(3) + '</span>';
             html += '<span class="cell-mono">' + esc((item.matched_actor_ids || []).join(", ")) + '</span>';
           }
-          html += '<span>coverage ' + Number(item.context_coverage || 0).toFixed(2) + '</span></div>';
+          html += '<span>coverage ' + Number(item.context_coverage || 0).toFixed(2) + '</span>';
+          if (item.filter_reason) html += '<span>' + esc(item.filter_reason) + '</span>';
+          html += '</div>';
+        });
+        html += '</div></details>';
+      }
+    }
+    const topicFragments = diagnostics.topic_fragments;
+    if (topicFragments) {
+      html += '<div class="recall-topic-diagnostics">';
+      html += '<strong>' + window.t("recall.fragmentDiagnostics") + '</strong>';
+      html += '<span>' + window.t("recall.candidateSummary", topicFragments.candidate_count || 0, topicFragments.selected_count || 0) + '</span>';
+      html += '<span>' + window.t("recall.availableFragments") + ': ' + Number(topicFragments.available_count || 0) + '</span>';
+      html += '<span>' + window.t("recall.threshold") + ': ' + Number(topicFragments.applied_threshold || 0).toFixed(3) + '</span>';
+      if (Number(topicFragments.selection_threshold || 0) > Number(topicFragments.applied_threshold || 0)) {
+        html += '<span>' + window.t("topic.selectionThreshold") + ': ' + Number(topicFragments.selection_threshold).toFixed(3) + '</span>';
+      }
+      if (Number(topicFragments.duplicate_parent_count || 0) > 0) {
+        html += '<span>' + window.t("topic.duplicateFragments") + ': ' + Number(topicFragments.duplicate_parent_count) + '</span>';
+      }
+      html += '</div>';
+      const fragmentCandidates = topicFragments.candidates || [];
+      if (fragmentCandidates.length) {
+        html += '<details class="recall-filtered"><summary>' + window.t("recall.fragmentCandidates", fragmentCandidates.length) + '</summary>';
+        html += '<div class="recall-filtered-list">';
+        fragmentCandidates.forEach(item => {
+          html += '<div><span class="cell-mono">' + esc(item.label || item.fragment_uid) + '</span>';
+          html += '<span>' + (item.selected ? window.t("recall.selected") : window.t("recall.filtered")) + '</span>';
+          html += '<span>current ' + Number(item.current_relevance || 0).toFixed(3) + '</span>';
+          html += '<span>context +' + Number(item.context_support || 0).toFixed(3) + '</span>';
+          html += '<span>rank ' + Number(item.ranking_score || item.final_score || 0).toFixed(3) + '</span>';
+          html += '<span>parent ' + Number(item.parent_topic_relevance || 0).toFixed(3) + '</span>';
+          html += '<span>emb ' + Number(item.embedding_score || 0).toFixed(3) + '</span>';
+          html += '<span>key ' + Number(item.keyword_score || 0).toFixed(3) + '</span>';
+          if (item.body_suppressed) {
+            html += '<span>' + window.t("topic.fragmentBodySuppressed") + ' · ' + window.t("topic.fragmentFacts", Number(item.fact_count || 0)) + '</span>';
+          }
+          if (item.rerank_score != null) {
+            html += '<span>rerank raw ' + Number(item.rerank_score).toFixed(3) + '</span>';
+            html += '<span>rerank #' + esc(String(item.rerank_rank || "--")) + ' · strength ' + Number(item.rerank_confidence || 0).toFixed(3) + ' · +' + Number(item.rerank_rank_boost || 0).toFixed(3) + '</span>';
+          }
+          if (item.filter_reason) html += '<span>' + esc(item.filter_reason) + '</span>';
+          html += '</div>';
         });
         html += '</div></details>';
       }

@@ -958,6 +958,66 @@ async def test_handle_memory_recall_fake_tool_call_fallback_on_gemini(
 
 
 @pytest.mark.asyncio
+async def test_topic_access_is_recorded_only_after_successful_injection(
+    handler, memory_engine
+):
+    event = _make_event(group=False)
+    req = _make_req("工资怎么核对")
+    topic = Mock(
+        title="工资核对",
+        summary="核对工资天数和补发记录",
+        importance=0.8,
+        confidence=0.9,
+        status=Mock(value="active"),
+        metadata={"keywords": ["工资"]},
+        started_at=None,
+        ended_at=None,
+    )
+    topic_result = Mock(
+        topic_uid="topic-wage",
+        topic=topic,
+        final_score=0.8,
+        atoms=[],
+        sources=[],
+        context_coverage=0.0,
+    )
+    topic_outcome = Mock(
+        results=[topic_result],
+        candidates=[topic_result],
+        applied_threshold=0.32,
+        context_suppressed=0,
+    )
+    fragment_outcome = Mock(results=[], available_count=0)
+
+    async def record_after_injection(results):
+        assert results == [topic_result]
+        assert len(req.extra_user_content_parts) == 1
+        return 1
+
+    topic_pipeline = Mock()
+    topic_pipeline.config = {"recall_top_k": 1, "timeline_supplement_k": 0}
+    topic_pipeline.search = AsyncMock(return_value=topic_outcome)
+    topic_pipeline.search_fragment_supplements = AsyncMock(
+        return_value=fragment_outcome
+    )
+    topic_pipeline.record_topic_access = AsyncMock(
+        side_effect=record_after_injection
+    )
+    memory_engine.topic_memory_enabled = True
+    memory_engine.topic_recall_pipeline = topic_pipeline
+    memory_engine.search_memories = AsyncMock(return_value=[])
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.event_handler.get_persona_id",
+        new_callable=AsyncMock,
+    ) as get_persona:
+        get_persona.return_value = "persona_1"
+        await handler.handle_memory_recall(event, req)
+
+    topic_pipeline.record_topic_access.assert_awaited_once_with([topic_result])
+
+
+@pytest.mark.asyncio
 async def test_handle_memory_recall_fake_tool_call_fetches_provider_for_fallback(
     memory_engine,
 ):

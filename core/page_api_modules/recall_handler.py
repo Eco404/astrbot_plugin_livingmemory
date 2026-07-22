@@ -139,7 +139,6 @@ class RecallHandler:
                                 if mode == "topic"
                                 else min(k, int(topic_config.get("recall_top_k", 3)))
                             ),
-                            track_access=False,
                         )
                         if topic_outcome.results and mode == "current":
                             supplement_k = min(
@@ -150,9 +149,15 @@ class RecallHandler:
                                 branches=outcome.branches,
                                 topic_results=topic_outcome.results,
                                 limit=supplement_k,
+                                query_vectors=getattr(topic_outcome, "query_vectors", None),
                             )
                             fragment_results = fragment_outcome.results
-                            if fragment_outcome.available_count:
+                            suppress_timeline_for_parent_duplicates = bool(
+                                fragment_outcome.available_count > 0
+                                and int(getattr(fragment_outcome, "duplicate_parent_count", 0))
+                                == fragment_outcome.available_count
+                            )
+                            if fragment_results or suppress_timeline_for_parent_duplicates:
                                 results = []
                             else:
                                 results = topic_pipeline.select_timeline_supplements(
@@ -203,11 +208,63 @@ class RecallHandler:
                                 else result.relevance_score,
                                 6,
                             ),
+                            "topic_current_relevance": round(
+                                result.current_relevance
+                                if getattr(result, "current_relevance", None) is not None
+                                else result.relevance_score,
+                                6,
+                            ),
+                            "topic_context_support": round(
+                                float(getattr(result, "context_support", 0.0)), 6
+                            ),
+                            "topic_ranking_score": round(
+                                result.ranking_score
+                                if getattr(result, "ranking_score", None) is not None
+                                else result.final_score,
+                                6,
+                            ),
+                            "topic_actor_match_boost": round(
+                                float(getattr(result, "actor_match_boost", 0.0)), 6
+                            ),
                             **(
                                 {
                                     "topic_rerank_score": round(
                                         result.rerank_score, 6
-                                    )
+                                    ),
+                                    "topic_rerank_rank": getattr(
+                                        result, "rerank_rank", None
+                                    ),
+                                    "topic_rerank_percentile": round(
+                                        float(
+                                            getattr(
+                                                result,
+                                                "rerank_percentile",
+                                                0.0,
+                                            )
+                                            or 0.0
+                                        ),
+                                        6,
+                                    ),
+                                    "topic_rerank_rank_boost": round(
+                                        float(
+                                            getattr(
+                                                result,
+                                                "rerank_rank_boost",
+                                                0.0,
+                                            )
+                                        ),
+                                        6,
+                                    ),
+                                    "topic_rerank_confidence": round(
+                                        float(
+                                            getattr(
+                                                result,
+                                                "rerank_confidence",
+                                                0.0,
+                                            )
+                                        ),
+                                        6,
+                                    ),
                                 }
                                 if result.rerank_score is not None
                                 else {}
@@ -227,6 +284,8 @@ class RecallHandler:
                         "title": result.fragment.label,
                         "parent_topic_uid": result.topic_uid,
                         "importance": result.fragment.importance,
+                        "fragment_body_suppressed": result.body_suppressed,
+                        "fragment_fact_count": len(result.fact_contents),
                         "narrative_perspective": "first_person_assistant",
                     },
                     "score_breakdown": {
@@ -242,8 +301,61 @@ class RecallHandler:
                         "parent_topic_relevance": round(
                             result.parent_topic_relevance, 6
                         ),
+                        "fragment_current_relevance": round(
+                            result.current_relevance
+                            if getattr(result, "current_relevance", None) is not None
+                            else result.relevance_score,
+                            6,
+                        ),
+                        "fragment_context_support": round(
+                            float(getattr(result, "context_support", 0.0)), 6
+                        ),
+                        "fragment_ranking_score": round(
+                            result.ranking_score
+                            if getattr(result, "ranking_score", None) is not None
+                            else result.final_score,
+                            6,
+                        ),
                         **(
-                            {"fragment_rerank_score": round(result.rerank_score, 6)}
+                            {
+                                "fragment_rerank_score": round(
+                                    result.rerank_score, 6
+                                ),
+                                "fragment_rerank_rank": getattr(
+                                    result, "rerank_rank", None
+                                ),
+                                "fragment_rerank_percentile": round(
+                                    float(
+                                        getattr(
+                                            result,
+                                            "rerank_percentile",
+                                            0.0,
+                                        )
+                                        or 0.0
+                                    ),
+                                    6,
+                                ),
+                                "fragment_rerank_rank_boost": round(
+                                    float(
+                                        getattr(
+                                            result,
+                                            "rerank_rank_boost",
+                                            0.0,
+                                        )
+                                    ),
+                                    6,
+                                ),
+                                "fragment_rerank_confidence": round(
+                                    float(
+                                        getattr(
+                                            result,
+                                            "rerank_confidence",
+                                            0.0,
+                                        )
+                                    ),
+                                    6,
+                                ),
+                            }
                             if result.rerank_score is not None
                             else {}
                         ),
