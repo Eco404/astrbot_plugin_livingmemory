@@ -2836,12 +2836,75 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .topic-related-item:hover { border-color: var(--accent); background: var(--accent-light); }
 .topic-related-item small { color: var(--text-tertiary); font-family: "SF Mono", "JetBrains Mono", monospace; }
 .topic-actor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); margin-bottom: var(--space-5); }
-.topic-actor-item { margin-top: var(--space-2); padding: var(--space-3); border: 1px solid var(--border-normal); border-radius: var(--radius-md); background: var(--bg-card); overflow-wrap: anywhere; }
-.topic-actor-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: 4px; }
-.topic-actor-heading span { color: var(--accent); font-size: 12px; }
-.topic-actor-trace { margin-top: 4px; font-size: 12px; }
+.topic-actor-chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: var(--space-2); }
+.topic-actor-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-normal);
+  border-radius: var(--radius-full);
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.topic-actor-chip span { margin-left: 4px; color: var(--text-tertiary); }
+.topic-compact-details { margin-top: var(--space-2); color: var(--text-secondary); font-size: 12px; }
+.topic-compact-details > summary { width: fit-content; cursor: pointer; color: var(--text-tertiary); user-select: none; }
+.topic-compact-details[open] > summary { color: var(--accent); }
+.topic-actor-detail-list { display: grid; gap: 8px; margin-top: var(--space-2); }
+.topic-actor-detail-row { padding-left: 10px; border-left: 2px solid var(--border-normal); overflow-wrap: anywhere; }
+.topic-actor-detail-row > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.topic-actor-detail-row > div span { color: var(--accent); }
+.topic-actor-detail-row small { display: block; margin-top: 3px; line-height: 1.45; }
+.topic-actor-detail-row code,
+.topic-identifier-list code { display: block; margin-top: 4px; color: var(--text-tertiary); font-family: "SF Mono", "JetBrains Mono", monospace; overflow-wrap: anywhere; }
 .topic-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); }
 .topic-source-item { margin-top: var(--space-2); padding: var(--space-2); border-radius: var(--radius-sm); background: var(--bg-hover); overflow-wrap: anywhere; }
+.topic-atom-item > div:first-child { line-height: 1.55; }
+.topic-identifier-list { margin-top: 6px; }
+.topic-timeline-source { display: grid; gap: 4px; }
+.topic-timeline-preview {
+  display: grid;
+  width: 100%;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+.topic-timeline-preview span {
+  display: -webkit-box;
+  overflow: hidden;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+.topic-timeline-preview small { color: var(--accent); }
+.topic-timeline-preview:hover span { color: var(--accent); }
+.topic-timeline-preview:disabled { color: var(--text-tertiary); cursor: default; }
+.topic-timeline-detail-overlay { z-index: 90; padding: var(--space-6); }
+.modal.topic-timeline-detail-modal {
+  width: min(920px, calc(100vw - 64px));
+  max-height: calc(100vh - 80px);
+  max-height: calc(100dvh - 80px);
+}
+.topic-timeline-detail-body { display: grid; gap: var(--space-4); min-height: 0; }
+.topic-timeline-content-section { display: grid; gap: var(--space-2); min-height: 0; }
+.topic-timeline-full-content {
+  padding: var(--space-4);
+  border: 1px solid var(--border-normal);
+  border-radius: var(--radius-md);
+  background: var(--bg-hover);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.topic-timeline-identifiers { margin-top: 0; }
 .modal.topic-full-build-confirm-modal { width: min(620px, calc(100vw - 48px)); }
 .topic-full-build-warning {
   margin-bottom: var(--space-4);
@@ -3008,9 +3071,14 @@ select.timeline-setting-input { width: min(220px, 100%); }
   .topic-table-scroll { min-height: 200px; max-height: min(50vh, 480px); }
 
   .topic-detail-overlay { padding: var(--space-3); }
+  .topic-timeline-detail-overlay { padding: var(--space-3); }
   .modal.topic-detail-modal {
     width: calc(100vw - 24px);
     height: calc(100dvh - 24px);
+  }
+  .modal.topic-timeline-detail-modal {
+    width: calc(100vw - 24px);
+    max-height: calc(100dvh - 24px);
   }
 
   .peek-panel {

@@ -1465,6 +1465,39 @@ class TopicMemoryStore:
                     (topic_uid,),
                 )
             ).fetchall()
+            timeline_details: dict[str, dict[str, Any]] = {}
+            if links:
+                documents_table = await (
+                    await db.execute(
+                        """
+                        SELECT 1 FROM sqlite_master
+                        WHERE type = 'table' AND name = 'documents'
+                        """
+                    )
+                ).fetchone()
+                if documents_table:
+                    timeline_uids = sorted(
+                        {str(row["timeline_uid"]) for row in links}
+                    )
+                    placeholders = ",".join("?" * len(timeline_uids))
+                    timeline_rows = await (
+                        await db.execute(
+                            f"""
+                            SELECT r.memory_uid, r.document_id, d.text
+                            FROM memory_registry r
+                            LEFT JOIN documents d ON d.id = r.document_id
+                            WHERE r.memory_uid IN ({placeholders})
+                            """,
+                            timeline_uids,
+                        )
+                    ).fetchall()
+                    timeline_details = {
+                        str(row["memory_uid"]): {
+                            "timeline_document_id": row["document_id"],
+                            "timeline_content": str(row["text"] or ""),
+                        }
+                        for row in timeline_rows
+                    }
             atoms = await (
                 await db.execute(
                     """
@@ -1540,6 +1573,14 @@ class TopicMemoryStore:
                     )
                 ).fetchall()
         link_items = [dict(row) for row in links]
+        for item in link_items:
+            detail = timeline_details.get(str(item.get("timeline_uid") or ""), {})
+            content = str(detail.get("timeline_content") or "")
+            item.update(detail)
+            item["timeline_available"] = bool(content)
+            item["timeline_preview"] = (
+                content[:180] + ("..." if len(content) > 180 else "")
+            )
         atom_items = [dict(row) for row in atoms]
         source_items = [dict(row) for row in sources]
         actor_items = [dict(row) for row in actor_rows]

@@ -72,8 +72,8 @@
 
 **实验性 Topic 记忆**:
 - 开启 `topic_memory.enabled` 后，在 Topic 记忆页面执行一次全量构建；`topic_memory.auto_maintenance` 控制后续自动维护。
-- `topic_memory.recall_enabled` 默认开启：正式召回优先返回活跃 Topic，并在总预算内附带少量 Timeline；具体数量在 Topic 页面的“参数”中调整。没有可用 Topic 或检索失败时自动回退纯 Timeline。
-- Topic 召回复用已保存的 Embedding，可选使用当前 Rerank Provider 精排，不调用 LLM。当前上下文来源覆盖、相关度门槛和多样性策略统一在 Topic 参数面板中调整。
+- `topic_memory.recall_enabled` 默认开启：正式召回优先返回活跃 Topic，当前消息独立决定候选资格，跨轮上下文只提供有上限的排序奖励；Rerank 的相对名次奖励会按本轮分数区分度自动降权。没有可用 Topic 或检索失败时自动回退纯 Timeline。
+- Topic 召回复用已保存的 Embedding，可选使用当前 Rerank Provider 精排，不调用 LLM。候选会按本轮最佳相关度动态停止；片段正文与父 Topic 高度近似时只注入片段附带的关键事实，正文不重复注入；没有事实的纯重复片段才会跳过。当前上下文来源覆盖、相关度门槛和多样性策略统一在 Topic 参数面板中调整。
 - Topic 是自动派生的只读数据。应编辑来源 Timeline，关联 Topic 会被标记为待重建并自动更新。
 - Topic 页面的“维护”会检查活跃 Timeline 当前版本是否已有活跃 Topic 索引，列出缺失项并默认全选；确认后仅对选中 Timeline 增量补建，不再使用固定 24 小时时间窗口。
 - 宽候选组默认按 12 条 Timeline 分批提取，大型 Topic 组件默认按 12 个片段分层合成；可在 Topic 页面右上角“参数”调整，并查看当前组件、批次、调用序号和耗时。

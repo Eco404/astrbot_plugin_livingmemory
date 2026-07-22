@@ -63,10 +63,13 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 | `topic_memory.recall_top_k` | `3` | 每轮最多注入的 Topic 数量 |
 | `topic_memory.recall_candidate_multiplier` | `4` | Topic 精筛前的候选倍率 |
 | `topic_memory.recall_scan_limit` | `2000` | 单个记忆空间每次参与向量扫描的 Topic 上限 |
-| `topic_memory.recall_min_relevance` | `0.42` | Topic 最低相关度 |
+| `topic_memory.recall_min_relevance` | `0.32` | 当前消息与 Topic 的最低相关度 |
 | `topic_memory.recall_relative_floor` | `0.70` | 相对最佳 Topic 的最低比例 |
+| `topic_memory.recall_selection_relative_floor` | `0.90` | 最终选择相对最佳当前相关度的动态停止比例，结果可少于配置上限 |
 | `topic_memory.recall_mmr_lambda` | `0.78` | Topic 相关性与结果多样性的平衡 |
-| `topic_memory.recall_use_rerank` | `true` | 有可用 Rerank 时精排 Topic 候选 |
+| `topic_memory.recall_use_rerank` | `true` | 有可用 Rerank 时使用当前消息对合格 Topic 精排 |
+| `topic_memory.recall_rerank_weight` | `0.35` | Rerank 相对名次的最大影响强度；按本轮可信度衰减，不混合原始绝对分 |
+| `topic_memory.recall_context_support_cap` | `0.08` | 跨轮上下文可提供的最大排序奖励，不能单独使 Topic 入选 |
 | `topic_memory.recall_context_overlap_threshold` | `0.80` | 当前上下文覆盖该比例的 Topic 来源时抑制注入 |
 | `topic_memory.timeline_supplement_k` | `2` | Topic 命中后附带的 Timeline 上限 |
 

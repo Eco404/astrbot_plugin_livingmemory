@@ -11,6 +11,8 @@ export class TopicPage {
     this.topicCount = 0;
     this.detailRequestId = 0;
     this.detailTrigger = null;
+    this.timelineSources = [];
+    this.timelineDetailTrigger = null;
     this.fullBuildTrigger = null;
     this.maintenanceTrigger = null;
     this.maintenanceRequestId = 0;
@@ -62,6 +64,10 @@ export class TopicPage {
     document.getElementById("topic-detail-overlay")?.addEventListener("click", event => {
       if (event.target === event.currentTarget) this.closeDetail();
     });
+    document.getElementById("topic-timeline-detail-close")?.addEventListener("click", () => this.closeTimelineDetail());
+    document.getElementById("topic-timeline-detail-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeTimelineDetail();
+    });
     document.getElementById("topic-full-build-confirm-close")?.addEventListener("click", () => this.closeFullBuildConfirm());
     document.getElementById("topic-full-build-confirm-cancel")?.addEventListener("click", () => this.closeFullBuildConfirm());
     document.querySelectorAll('input[name="topic-full-build-mode"]').forEach(input => {
@@ -83,7 +89,8 @@ export class TopicPage {
     });
     document.addEventListener("keydown", event => {
       if (event.key !== "Escape") return;
-      if (this.clearTopicsConfirmIsOpen()) this.closeClearTopicsConfirm();
+      if (this.timelineDetailIsOpen()) this.closeTimelineDetail();
+      else if (this.clearTopicsConfirmIsOpen()) this.closeClearTopicsConfirm();
       else if (this.discardBuildConfirmIsOpen()) this.closeDiscardBuildConfirm();
       else if (this.fullBuildConfirmIsOpen()) this.closeFullBuildConfirm();
       else if (this.settingsIsOpen()) this.closeSettings();
@@ -216,26 +223,70 @@ export class TopicPage {
         (sourcesByAtom[source.topic_atom_uid] ||= []).push(source);
       });
       const actorLinks = provenance.actor_links || [];
+      this.timelineSources = provenance.links || [];
       const atomActorsByActor = {};
       (provenance.atom_actor_links || []).forEach(link => {
         (atomActorsByActor[link.actor_id] ||= []).push(link);
       });
       const participantRoles = new Set(["speaker", "narrator", "responder"]);
-      const renderActors = links => links.length ? links.map(link => {
-        const actorFacts = atomActorsByActor[link.actor_id] || [];
-        const metadata = link.metadata || {};
-        const roleKey = `topic.role.${link.relation_type}`;
-        const displayName = link.display_name_snapshot || link.actor_id;
-        const resolution = link.resolution_status === "unresolved"
-          ? window.t("topic.actorUnresolved") : window.t("topic.actorResolved");
-        return `<div class="topic-actor-item">
-          <div class="topic-actor-heading"><strong>${esc(displayName)}</strong><span>${esc(window.t(roleKey))}</span></div>
-          <div class="text-tertiary text-mono">${esc(link.actor_id)} · ${esc(resolution)} · ${Number(link.confidence || 0).toFixed(2)}</div>
-          <div class="topic-actor-trace text-tertiary">${esc(window.t("topic.actorFacts"))}: ${actorFacts.length} · Fragment ${(metadata.fragment_uids || []).length} · Timeline ${(metadata.timeline_uids || []).length}</div>
-        </div>`;
-      }).join("") : `<div class='text-tertiary'>${esc(window.t("topic.none"))}</div>`;
+      const groupActors = links => {
+        const grouped = new Map();
+        links.forEach(link => {
+          const key = link.actor_id || link.display_name_snapshot || "unknown";
+          const item = grouped.get(key) || {
+            actorId: link.actor_id || "",
+            displayName: link.display_name_snapshot || link.actor_id || "--",
+            links: [],
+          };
+          item.links.push(link);
+          grouped.set(key, item);
+        });
+        return Array.from(grouped.values());
+      };
+      const renderActors = links => {
+        const groups = groupActors(links);
+        if (!groups.length) return `<div class="text-tertiary">${esc(window.t("topic.none"))}</div>`;
+        const chips = groups.map(item => `<span class="topic-actor-chip">${esc(item.displayName)} <span>(${item.links.length})</span></span>`).join("");
+        const details = links.map(link => {
+          const actorFacts = atomActorsByActor[link.actor_id] || [];
+          const metadata = link.metadata || {};
+          const roleKey = `topic.role.${link.relation_type}`;
+          const displayName = link.display_name_snapshot || link.actor_id;
+          const resolution = link.resolution_status === "unresolved"
+            ? window.t("topic.actorUnresolved") : window.t("topic.actorResolved");
+          return `<div class="topic-actor-detail-row">
+            <div><strong>${esc(displayName)}</strong><span>${esc(window.t(roleKey))}</span></div>
+            <small class="text-tertiary">${esc(resolution)} · ${Number(link.confidence || 0).toFixed(2)} · ${esc(window.t("topic.actorFacts"))} ${actorFacts.length} · Fragment ${(metadata.fragment_uids || []).length} · Timeline ${(metadata.timeline_uids || []).length}</small>
+            <code>${esc(link.actor_id)}</code>
+          </div>`;
+        }).join("");
+        return `<div class="topic-actor-chips">${chips}</div><details class="topic-compact-details"><summary>${esc(window.t("topic.actorDetails"))} (${links.length})</summary><div class="topic-actor-detail-list">${details}</div></details>`;
+      };
       const participants = actorLinks.filter(link => participantRoles.has(link.relation_type));
       const mentionedActors = actorLinks.filter(link => !participantRoles.has(link.relation_type));
+      const participantGroups = groupActors(participants);
+      const mentionedGroups = groupActors(mentionedActors);
+      const renderAtoms = () => (provenance.atoms || []).map(atom => {
+        const sources = sourcesByAtom[atom.atom_uid] || [];
+        return `<div class="topic-source-item topic-atom-item">
+          <div>${esc(atom.content)}</div>
+          <details class="topic-compact-details"><summary>${esc(window.t("topic.identifierDetails"))} (${sources.length})</summary>
+            <div class="topic-identifier-list"><code>${esc(atom.atom_uid)}</code>${sources.map(source => `<code>↳ ${esc(source.timeline_uid)} · ${esc(source.source_kind)} · ${esc(source.source_atom_fingerprint || "--")}</code>`).join("")}</div>
+          </details>
+        </div>`;
+      }).join("") || `<div class="text-tertiary">${esc(window.t("topic.none"))}</div>`;
+      const renderTimelines = () => this.timelineSources.map((link, index) => {
+        const preview = link.timeline_preview || window.t("topic.timelineUnavailable");
+        const available = Boolean(link.timeline_available && link.timeline_content);
+        return `<div class="topic-source-item topic-timeline-source">
+          <button class="topic-timeline-preview" type="button" data-timeline-source-index="${index}" ${available ? "" : "disabled"}>
+            <span>${esc(preview)}</span>${available ? `<small>${esc(window.t("topic.timelineOpen"))}</small>` : ""}
+          </button>
+          <details class="topic-compact-details"><summary>${esc(window.t("topic.identifierDetails"))}</summary>
+            <div class="topic-identifier-list"><code>${esc(link.timeline_uid)}</code><code>${esc(link.time_cluster_key)}</code></div>
+          </details>
+        </div>`;
+      }).join("") || `<div class="text-tertiary">${esc(window.t("topic.none"))}</div>`;
       title.innerHTML = `${esc(topic.title)} <span class="topic-detail-readonly text-tertiary">（${esc(window.t("topic.readOnly"))}）</span>`;
       body.innerHTML = `
         <p class="topic-detail-summary">${esc(topic.summary)}</p>
@@ -247,15 +298,18 @@ export class TopicPage {
             </button>`).join("") : `<span class="text-tertiary">${esc(window.t("topic.none"))}</span>`}</div>
         </div>
         <div class="topic-actor-grid">
-          <div><strong>${esc(window.t("topic.participants"))} (${participants.length})</strong>${renderActors(participants)}</div>
-          <div><strong>${esc(window.t("topic.mentionedActors"))} (${mentionedActors.length})</strong>${renderActors(mentionedActors)}</div>
+          <section><strong>${esc(window.t("topic.participants"))} (${participantGroups.length})</strong>${renderActors(participants)}</section>
+          <section><strong>${esc(window.t("topic.mentionedActors"))} (${mentionedGroups.length})</strong>${renderActors(mentionedActors)}</section>
         </div>
         <div class="topic-detail-grid">
-          <div><strong>${esc(window.t("topic.topicAtoms"))} (${(provenance.atoms || []).length})</strong>${(provenance.atoms || []).map(atom => `<div class="topic-source-item"><div>${esc(atom.content)}</div>${(sourcesByAtom[atom.atom_uid] || []).map(source => `<div class="text-tertiary text-mono">↳ ${esc(source.timeline_uid)} · ${esc(source.source_kind)} · ${esc(source.source_atom_fingerprint || "")}</div>`).join("")}</div>`).join("") || `<div class='text-tertiary'>${esc(window.t("topic.none"))}</div>`}</div>
-          <div><strong>${esc(window.t("topic.sources"))} (${(provenance.links || []).length})</strong>${(provenance.links || []).map(link => `<div class="topic-source-item text-mono">${esc(link.timeline_uid)} · ${esc(link.time_cluster_key)}</div>`).join("") || `<div class='text-tertiary'>${esc(window.t("topic.none"))}</div>`}</div>
+          <section><strong>${esc(window.t("topic.topicAtoms"))} (${(provenance.atoms || []).length})</strong>${renderAtoms()}</section>
+          <section><strong>${esc(window.t("topic.sources"))} (${this.timelineSources.length})</strong>${renderTimelines()}</section>
         </div>`;
       body.querySelectorAll("[data-related-topic-uid]").forEach(button => {
         button.addEventListener("click", () => this.showDetail(button.dataset.relatedTopicUid));
+      });
+      body.querySelectorAll("[data-timeline-source-index]").forEach(button => {
+        button.addEventListener("click", () => this.showTimelineDetail(Number(button.dataset.timelineSourceIndex), button));
       });
     } catch (e) {
       if (requestId !== this.detailRequestId) return;
@@ -264,12 +318,45 @@ export class TopicPage {
     }
   }
 
+  showTimelineDetail(index, trigger) {
+    const source = this.timelineSources[index];
+    if (!source?.timeline_content) return;
+    this.timelineDetailTrigger = trigger || null;
+    const overlay = document.getElementById("topic-timeline-detail-overlay");
+    const body = document.getElementById("topic-timeline-detail-body");
+    body.innerHTML = `
+      <section class="topic-timeline-content-section">
+        <strong>${esc(window.t("topic.timelineContent"))}</strong>
+        <div class="topic-timeline-full-content">${esc(source.timeline_content)}</div>
+      </section>
+      <details class="topic-compact-details topic-timeline-identifiers"><summary>${esc(window.t("topic.identifierDetails"))}</summary>
+        <div class="topic-identifier-list"><code>${esc(source.timeline_uid)}</code><code>${esc(source.time_cluster_key)}</code></div>
+      </details>`;
+    overlay?.classList.add("visible");
+    overlay?.setAttribute("aria-hidden", "false");
+    document.getElementById("topic-timeline-detail-close")?.focus();
+  }
+
+  timelineDetailIsOpen() {
+    return document.getElementById("topic-timeline-detail-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeTimelineDetail({ restoreFocus = true } = {}) {
+    if (!this.timelineDetailIsOpen() && !this.timelineDetailTrigger) return;
+    document.getElementById("topic-timeline-detail-overlay")?.classList.remove("visible");
+    document.getElementById("topic-timeline-detail-overlay")?.setAttribute("aria-hidden", "true");
+    const trigger = this.timelineDetailTrigger;
+    this.timelineDetailTrigger = null;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
   detailIsOpen() {
     return document.getElementById("topic-detail-overlay")?.classList.contains("visible") || false;
   }
 
   closeDetail({ restoreFocus = true } = {}) {
     if (!this.detailIsOpen() && !this.detailTrigger) return;
+    this.closeTimelineDetail({ restoreFocus: false });
     this.detailRequestId += 1;
     const overlay = document.getElementById("topic-detail-overlay");
     overlay?.classList.remove("visible");
@@ -279,6 +366,7 @@ export class TopicPage {
     });
     const trigger = this.detailTrigger;
     this.detailTrigger = null;
+    this.timelineSources = [];
     if (restoreFocus && trigger?.isConnected) trigger.focus();
   }
 

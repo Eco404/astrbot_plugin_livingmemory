@@ -66,8 +66,8 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 
 **Experimental Topic memory**:
 - Enable `topic_memory.enabled`, then run one full build from the Topic Memory page. Automatic maintenance can be controlled by `topic_memory.auto_maintenance`.
-- `topic_memory.recall_enabled` defaults to on. Active Topics are recalled first with a small Timeline supplement budget configured from **Topic Memory → Settings**. Missing or failed Topic retrieval falls back to Timeline-only recall.
-- Topic recall reuses stored embeddings, optionally reranks candidates, and never invokes an LLM. Visible-source overlap, relevance thresholds, and diversity controls are managed from the Topic settings panel.
+- `topic_memory.recall_enabled` defaults to on. The current query independently qualifies Topic candidates; recent context provides only a bounded ranking bonus, while relative Rerank boosts are confidence-gated by each call's score separation. Missing or failed Topic retrieval falls back to Timeline-only recall.
+- Topic recall reuses stored embeddings, optionally reranks candidates, and never invokes an LLM. A dynamic relative floor stops weak tail results. When a fragment body duplicates its parent Topic, only the fragment's attached key facts are injected; a pure duplicate with no facts is skipped. Visible-source overlap, relevance thresholds, and diversity controls are managed from the Topic settings panel.
 - Topic memories are derived and read-only. Edit their source Timeline memories instead; dependent Topics are marked stale and rebuilt.
 - **Maintenance** checks whether each active Timeline revision has an active Topic index, lists missing entries with all selected by default, and incrementally processes only the confirmed selection instead of using a fixed 24-hour window.
 - Wide candidate groups are extracted in batches of 12 by default and large Topic components are synthesized hierarchically in batches of 12. Both values are available from **Topic Memory → Settings**, while the page reports the active component, batch, LLM call, and elapsed time.

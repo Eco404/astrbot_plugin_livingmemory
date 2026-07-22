@@ -153,7 +153,6 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                         limited_k,
                         int(topic_config.get("recall_top_k", 3)),
                     ),
-                    track_access=True,
                 )
                 timeline_result, topic_result = await asyncio.gather(
                     timeline_search,
@@ -196,6 +195,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                         branches=topic_branches,
                         topic_results=topic_results,
                         limit=supplement_k,
+                        query_vectors=getattr(topic_outcome, "query_vectors", None),
                     )
                 except asyncio.CancelledError:
                     raise
@@ -206,17 +206,18 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     )
                 if fragment_outcome is not None:
                     fragment_results = fragment_outcome.results
-                if fragment_outcome is not None and fragment_outcome.available_count:
+                suppress_timeline_for_parent_duplicates = bool(
+                    fragment_outcome is not None
+                    and fragment_outcome.available_count > 0
+                    and int(getattr(fragment_outcome, "duplicate_parent_count", 0))
+                    == fragment_outcome.available_count
+                )
+                if fragment_results or suppress_timeline_for_parent_duplicates:
                     memories = []
                 else:
                     memories = self.memory_engine.topic_recall_pipeline.select_timeline_supplements(
                         memories, topic_results, supplement_k
                     )
-            if topic_enabled and memories:
-                self.memory_engine.record_memory_access(
-                    [memory.doc_id for memory in memories]
-                )
-
             serialized_results = [
                 {
                     "id": item.topic_uid,
@@ -236,6 +237,8 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "importance": item.fragment.importance,
                     "memory_layer": "topic_fragment",
                     "parent_topic_uid": item.topic_uid,
+                    "fragment_body_suppressed": item.body_suppressed,
+                    "fragment_fact_count": len(item.fact_contents),
                     "source_timeline_count": len(item.fragment.timeline_uids),
                     "narrative_perspective": "first_person_assistant",
                 }
@@ -266,6 +269,22 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                         ),
                     }
                 )
+
+            if serialized_results:
+                try:
+                    if topic_outcome is not None:
+                        await self.memory_engine.topic_recall_pipeline.record_topic_access(
+                            topic_results
+                        )
+                    if topic_enabled and memories:
+                        self.memory_engine.record_memory_access(
+                            [memory.doc_id for memory in memories]
+                        )
+                except Exception:
+                    logger.warning(
+                        "记忆工具已生成结果，但访问统计更新失败",
+                        exc_info=True,
+                    )
 
             return _json_result(
                 {

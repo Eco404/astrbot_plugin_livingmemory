@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TOPIC_SETTINGS_REVISION = 4
+TOPIC_SETTINGS_REVISION = 6
 
 
 TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -14,9 +14,11 @@ TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "recall_scan_limit": {"default": 2000, "type": "int", "min": 100, "max": 5000, "category": "recall", "label": "单次扫描上限", "effect": "recall"},
     "recall_min_relevance": {"default": 0.32, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "最低相关度", "effect": "recall"},
     "recall_relative_floor": {"default": 0.70, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "相对相关度下限", "effect": "recall"},
+    "recall_selection_relative_floor": {"default": 0.90, "type": "float", "min": 0.5, "max": 1.0, "step": 0.01, "category": "recall", "label": "动态结果保留比例", "effect": "recall"},
     "recall_mmr_lambda": {"default": 0.78, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "相关性与多样性平衡", "effect": "recall"},
     "recall_use_rerank": {"default": True, "type": "bool", "category": "recall", "label": "召回使用 Rerank", "effect": "recall"},
     "recall_rerank_weight": {"default": 0.35, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "recall", "label": "召回 Rerank 权重", "effect": "recall"},
+    "recall_context_support_cap": {"default": 0.08, "type": "float", "min": 0.0, "max": 0.25, "step": 0.01, "category": "recall", "label": "跨轮上下文奖励上限", "effect": "recall"},
     "recall_context_overlap_threshold": {"default": 0.8, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "上下文来源覆盖阈值", "effect": "recall"},
     "timeline_supplement_k": {"default": 2, "type": "int", "min": 0, "max": 10, "category": "recall", "label": "Topic 片段补充数量", "effect": "recall"},
     "fragment_min_relevance": {"default": 0.28, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "Topic 片段最低相关度", "effect": "recall"},
@@ -60,9 +62,11 @@ TOPIC_SETTING_DESCRIPTIONS: dict[str, str] = {
     "recall_scan_limit": "一次召回最多读取的活跃 Topic 数量，用于限制大库扫描开销。",
     "recall_min_relevance": "候选进入结果所需的最低综合相关度；调低会增加弱相关召回。",
     "recall_relative_floor": "相对本轮最佳候选的保留比例，用于过滤明显落后的结果。",
+    "recall_selection_relative_floor": "候选通过基本门槛后，最终结果仍需达到本轮最佳当前相关度的该比例；用于让模糊查询自然少返回，而不是勉强填满数量。",
     "recall_mmr_lambda": "越接近 1 越重视相关性，越低越重视结果之间的多样性。",
     "recall_use_rerank": "可用时使用 Rerank 对 Topic 候选重新排序；关闭后只使用基础相关度。",
-    "recall_rerank_weight": "Rerank 分数在最终相关度中的占比；设为 0 时不调用 Rerank。",
+    "recall_rerank_weight": "Rerank 相对名次对最终排序的影响强度；实际加分还会按本轮分数可信度衰减，不混合原始绝对分，设为 0 时不调用 Rerank。",
+    "recall_context_support_cap": "最近用户消息和 Bot 回复对已通过当前消息门槛的候选所能增加的最大排序奖励；上下文不能单独使候选入选。",
     "recall_context_overlap_threshold": "Topic 来源被当前上下文覆盖到该比例时，抑制重复注入。",
     "timeline_supplement_k": "每个召回 Topic 最多补充的正式片段数量；0 表示只注入 Topic 主体。",
     "fragment_min_relevance": "正式片段作为 Topic 补充时必须达到的最低相关度。",

@@ -260,7 +260,6 @@ class MemoryRecall:
                             visible_message_start_index=visible_start,
                             visible_message_end_index=visible_end,
                             current_actor_ids=current_actor_ids,
-                            track_access=True,
                         ),
                         session_id,
                     )
@@ -291,12 +290,19 @@ class MemoryRecall:
                             context_session_id=session_id,
                             visible_message_start_index=visible_start,
                             visible_message_end_index=visible_end,
+                            query_vectors=getattr(topic_outcome, "query_vectors", None),
                         ),
                         session_id,
                     )
                     if fragment_outcome is not None:
                         fragment_results = fragment_outcome.results
-                    if fragment_outcome is not None and fragment_outcome.available_count:
+                    suppress_timeline_for_parent_duplicates = bool(
+                        fragment_outcome is not None
+                        and fragment_outcome.available_count > 0
+                        and int(getattr(fragment_outcome, "duplicate_parent_count", 0))
+                        == fragment_outcome.available_count
+                    )
+                    if fragment_results or suppress_timeline_for_parent_duplicates:
                         recalled_memories = []
                     else:
                         recalled_memories = self._select_timeline_supplements(
@@ -306,10 +312,6 @@ class MemoryRecall:
                         )
                 else:
                     recalled_memories = recall_outcome.results
-                if recalled_memories:
-                    self.memory_engine.record_memory_access(
-                        [item.doc_id for item in recalled_memories]
-                    )
                 branch_summary = ", ".join(
                     f"{item.name}:{item.weight:.2f}"
                     for item in recall_outcome.branches
@@ -386,14 +388,17 @@ class MemoryRecall:
                         )
 
                     memory_str = format_memories_for_injection(memory_list)
+                    injection_succeeded = False
 
                     if injection_method == "user_message_before":
                         req.prompt = memory_str + "\n\n" + (req.prompt or "")
+                        injection_succeeded = True
                         logger.info(
                             f"[{session_id}] 成功向用户消息前注入 {len(memory_list)} 条记忆"
                         )
                     elif injection_method == "user_message_after":
                         req.prompt = (req.prompt or "") + "\n\n" + memory_str
+                        injection_succeeded = True
                         logger.info(
                             f"[{session_id}] 成功向用户消息后注入 {len(memory_list)} 条记忆"
                         )
@@ -407,6 +412,7 @@ class MemoryRecall:
                         )
                         if fake_messages:
                             req.contexts.extend(fake_messages)
+                            injection_succeeded = True
                             logger.info(
                                 f"[{session_id}] 成功以伪造工具调用方式注入 "
                                 f"{len(memory_list)} 条记忆"
@@ -417,10 +423,26 @@ class MemoryRecall:
                         req.extra_user_content_parts.append(
                             TextPart(text=memory_str).mark_as_temp()
                         )
+                        injection_succeeded = True
                         logger.info(
                             f"[{session_id}] 成功向用户消息末尾注入 "
                             f"{len(memory_list)} 条记忆"
                         )
+                    if injection_succeeded:
+                        try:
+                            if topic_results:
+                                await self.memory_engine.topic_recall_pipeline.record_topic_access(
+                                    topic_results
+                                )
+                            if recalled_memories:
+                                self.memory_engine.record_memory_access(
+                                    [item.doc_id for item in recalled_memories]
+                                )
+                        except Exception:
+                            logger.warning(
+                                f"[{session_id}] 记忆注入已成功，但访问统计更新失败",
+                                exc_info=True,
+                            )
                 else:
                     logger.info(f"[{session_id}] 未找到相关记忆")
 
@@ -510,6 +532,8 @@ class MemoryRecall:
                 "title": item.fragment.label,
                 "importance": item.fragment.importance,
                 "confidence": item.fragment.confidence,
+                "fragment_body_suppressed": item.body_suppressed,
+                "fragment_fact_count": len(item.fact_contents),
                 "source_timeline_count": len(item.fragment.timeline_uids),
                 "context_coverage": item.context_coverage,
                 "narrative_perspective": "first_person_assistant",

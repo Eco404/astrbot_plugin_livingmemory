@@ -150,6 +150,18 @@ async def test_topic_snapshot_has_independent_atoms_and_cluster_metrics(
         db_path, memory_uid="timeline-1", document_id=1
     )
     await _register_timeline(db_path, memory_uid="timeline-2", document_id=2)
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "CREATE TABLE documents (id INTEGER PRIMARY KEY, text TEXT NOT NULL)"
+        )
+        await db.executemany(
+            "INSERT INTO documents (id, text) VALUES (?, ?)",
+            [
+                (1, "第一条 Timeline 的完整内容，用于 Topic 来源预览。"),
+                (2, "第二条 Timeline 的完整内容。"),
+            ],
+        )
+        await db.commit()
     store = TopicMemoryStore(db_path)
     await store.initialize()
 
@@ -201,6 +213,10 @@ async def test_topic_snapshot_has_independent_atoms_and_cluster_metrics(
     assert len(provenance["atom_sources"]) == 1
     assert provenance["atom_sources"][0]["source_atom_id"] == 41
     assert len(provenance["links"]) == 2
+    assert provenance["links"][0]["timeline_available"] is True
+    assert provenance["links"][0]["timeline_document_id"] in {1, 2}
+    assert "Timeline 的完整内容" in provenance["links"][0]["timeline_preview"]
+    assert "Timeline 的完整内容" in provenance["links"][0]["timeline_content"]
 
     metrics = await store.get_topic_support_metrics(topic.topic_uid)
     assert metrics["timeline_count"] == 2

@@ -1480,6 +1480,82 @@ class TestTestRecall:
         assert engine.topic_recall_pipeline.search.await_args.kwargs["final_k"] == 5
 
     @pytest.mark.asyncio
+    async def test_current_mode_uses_timeline_fallback_when_fragments_exist_but_none_match(
+        self, api
+    ):
+        engine = api.plugin.initializer.memory_engine
+        engine.topic_memory_enabled = True
+        timeline = SimpleNamespace(
+            doc_id=7,
+            content="工资核对的 Timeline",
+            final_score=0.8,
+            rrf_score=0.8,
+            bm25_score=0.2,
+            vector_score=0.8,
+            metadata={"memory_uid": "timeline-7", "importance": 0.7},
+            score_breakdown={"document_vector_score": 0.8},
+        )
+        engine.search_memories = AsyncMock(return_value=[timeline])
+        engine.topic_memory_store = SimpleNamespace(
+            find_memory_spaces_for_session=AsyncMock(return_value=["space-1"])
+        )
+        topic = SimpleNamespace(
+            title="工资核对",
+            summary="工资核对详情",
+            importance=0.8,
+            status=SimpleNamespace(value="active"),
+        )
+        topic_result = SimpleNamespace(
+            topic_uid="topic-1",
+            topic=topic,
+            final_score=0.9,
+            relevance_score=0.8,
+            embedding_score=0.7,
+            keyword_score=0.2,
+            base_relevance_score=0.8,
+            rerank_score=None,
+        )
+        topic_outcome = SimpleNamespace(
+            results=[topic_result],
+            diagnostics=lambda: {"selected_count": 1},
+        )
+        fragment_outcome = SimpleNamespace(
+            results=[],
+            available_count=3,
+            diagnostics=lambda: {
+                "available_count": 3,
+                "selected_count": 0,
+            },
+        )
+        select_supplements = MagicMock(return_value=[timeline])
+        engine.topic_recall_pipeline = SimpleNamespace(
+            config={"recall_top_k": 1, "timeline_supplement_k": 2},
+            search=AsyncMock(return_value=topic_outcome),
+            search_fragment_supplements=AsyncMock(
+                return_value=fragment_outcome
+            ),
+            select_timeline_supplements=select_supplements,
+        )
+        req = _mock_page_request(
+            get_json={
+                "query": "工资",
+                "mode": "current",
+                "session_id": "bot:FriendMessage:user",
+                "k": 5,
+            }
+        )
+
+        with _patch_page_request(req):
+            result = await api.test_recall()
+
+        assert result["status"] == "ok"
+        assert any(
+            item["metadata"]["memory_layer"] == "timeline_supplement"
+            for item in result["data"]["results"]
+        )
+        select_supplements.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_valid_recall(self, api):
         req = _mock_page_request(get_json={"query": "test", "k": 5})
         with _patch_page_request(req):

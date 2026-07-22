@@ -29,6 +29,15 @@ class TopicRecallResult:
     actor_match_boost: float = 0.0
     context_coverage: float = 0.0
     branch_scores: dict[str, float] = field(default_factory=dict)
+    current_relevance: float | None = None
+    context_support: float = 0.0
+    ranking_score: float | None = None
+    rerank_rank: int | None = None
+    rerank_percentile: float | None = None
+    rerank_confidence: float = 0.0
+    rerank_rank_boost: float = 0.0
+    selected: bool = False
+    filter_reason: str | None = None
 
     @property
     def topic_uid(self) -> str:
@@ -52,17 +61,40 @@ class TopicRecallResult:
                 else self.relevance_score,
                 6,
             ),
+            "current_relevance": round(
+                self.current_relevance
+                if self.current_relevance is not None
+                else self.relevance_score,
+                6,
+            ),
+            "context_support": round(self.context_support, 6),
+            "ranking_score": round(
+                self.ranking_score
+                if self.ranking_score is not None
+                else self.final_score,
+                6,
+            ),
             "rerank_score": (
                 round(self.rerank_score, 6)
                 if self.rerank_score is not None
                 else None
             ),
+            "rerank_rank": self.rerank_rank,
+            "rerank_percentile": (
+                round(self.rerank_percentile, 6)
+                if self.rerank_percentile is not None
+                else None
+            ),
+            "rerank_confidence": round(self.rerank_confidence, 6),
+            "rerank_rank_boost": round(self.rerank_rank_boost, 6),
             "context_coverage": round(self.context_coverage, 6),
             "branch_scores": {
                 key: round(value, 6) for key, value in self.branch_scores.items()
             },
             "matched_actor_ids": self.matched_actor_ids,
             "actor_match_boost": round(self.actor_match_boost, 6),
+            "selected": self.selected,
+            "filter_reason": self.filter_reason,
         }
 
 
@@ -78,23 +110,52 @@ class TopicFragmentRecallResult:
     rerank_score: float | None = None
     sources: list[dict[str, Any]] = field(default_factory=list)
     context_coverage: float = 0.0
+    branch_scores: dict[str, float] = field(default_factory=dict)
+    current_relevance: float | None = None
+    context_support: float = 0.0
+    ranking_score: float | None = None
+    rerank_rank: int | None = None
+    rerank_percentile: float | None = None
+    rerank_confidence: float = 0.0
+    rerank_rank_boost: float = 0.0
+    body_suppressed: bool = False
+    selected: bool = False
+    filter_reason: str | None = None
 
     @property
     def fragment_uid(self) -> str:
         return self.fragment.fragment_uid
 
     @property
+    def fact_contents(self) -> list[str]:
+        facts: list[str] = []
+        seen: set[str] = set()
+        for fact in self.fragment.facts:
+            content = str(fact.get("content") or "").strip()
+            if not content or content in seen:
+                continue
+            seen.add(content)
+            facts.append(content)
+        return facts
+
+    @property
+    def body_content(self) -> str:
+        return "\n".join(
+            value
+            for value in (
+                f"Topic 片段: {self.fragment.label}",
+                self.fragment.summary,
+            )
+            if value
+        ).strip()
+
+    @property
     def content(self) -> str:
-        facts = [
-            str(fact.get("content") or "").strip()
-            for fact in self.fragment.facts
-            if str(fact.get("content") or "").strip()
-            and str(fact.get("content") or "").strip()
-            not in self.fragment.summary
-        ][:3]
-        lines = [f"Topic 片段: {self.fragment.label}", self.fragment.summary]
+        facts = self.fact_contents
+        lines = [] if self.body_suppressed else [self.body_content]
         if facts:
-            lines.append("关键事实: " + "；".join(facts))
+            label = "Topic 片段补充事实" if self.body_suppressed else "关键事实"
+            lines.append(f"{label}: " + "；".join(facts))
         return "\n".join(value for value in lines if value).strip()
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,6 +165,19 @@ class TopicFragmentRecallResult:
             "label": self.fragment.label,
             "relevance_score": round(self.relevance_score, 6),
             "final_score": round(self.final_score, 6),
+            "current_relevance": round(
+                self.current_relevance
+                if self.current_relevance is not None
+                else self.relevance_score,
+                6,
+            ),
+            "context_support": round(self.context_support, 6),
+            "ranking_score": round(
+                self.ranking_score
+                if self.ranking_score is not None
+                else self.final_score,
+                6,
+            ),
             "embedding_score": round(self.embedding_score, 6),
             "keyword_score": round(self.keyword_score, 6),
             "parent_topic_relevance": round(self.parent_topic_relevance, 6),
@@ -112,7 +186,22 @@ class TopicFragmentRecallResult:
                 if self.rerank_score is not None
                 else None
             ),
+            "rerank_rank": self.rerank_rank,
+            "rerank_percentile": (
+                round(self.rerank_percentile, 6)
+                if self.rerank_percentile is not None
+                else None
+            ),
+            "rerank_confidence": round(self.rerank_confidence, 6),
+            "rerank_rank_boost": round(self.rerank_rank_boost, 6),
+            "body_suppressed": self.body_suppressed,
+            "fact_count": len(self.fact_contents),
             "context_coverage": round(self.context_coverage, 6),
+            "branch_scores": {
+                key: round(value, 6) for key, value in self.branch_scores.items()
+            },
+            "selected": self.selected,
+            "filter_reason": self.filter_reason,
         }
 
 
@@ -188,6 +277,8 @@ class TopicRetriever:
                     embedding_score=embedding_score,
                     keyword_score=keyword_score,
                     base_relevance_score=relevance,
+                    current_relevance=relevance,
+                    ranking_score=self._rank_score(topic, relevance),
                     atoms=payload["atoms"],
                     sources=payload["sources"],
                     actors=payload.get("actors", []),
@@ -201,10 +292,7 @@ class TopicRetriever:
             if use_rerank is None
             else bool(use_rerank)
         )
-        rerank_weight = max(
-            0.0,
-            min(1.0, float(self.config.get("recall_rerank_weight", 0.35))),
-        )
+        rerank_weight = self._rerank_weight()
         if (
             rerank_enabled
             and rerank_weight > 0.0
@@ -212,34 +300,19 @@ class TopicRetriever:
             and candidates
         ):
             try:
-                documents = [item.content for item in candidates]
-                rows = await self.rerank_provider.rerank(
-                    query, documents, top_n=len(documents)
-                )
-                rerank_map = {
-                    int(getattr(row, "index", -1)): float(
-                        getattr(row, "relevance_score", 0.0)
-                    )
-                    for row in rows
-                }
-                for index, candidate in enumerate(candidates):
-                    rerank_score = rerank_map.get(index)
-                    if rerank_score is None or not math.isfinite(rerank_score):
+                rerank_confidence = await self.assign_rerank_ranks(query, candidates)
+                for candidate in candidates:
+                    if candidate.rerank_percentile is None:
                         continue
-                    rerank_score = max(0.0, min(1.0, rerank_score))
-                    candidate.rerank_score = rerank_score
-                    base_relevance = (
-                        candidate.base_relevance_score
-                        if candidate.base_relevance_score is not None
-                        else candidate.relevance_score
+                    candidate.rerank_rank_boost = self._rerank_rank_boost(
+                        candidate.rerank_percentile,
+                        rerank_confidence,
                     )
-                    candidate.relevance_score = (
-                        base_relevance * (1.0 - rerank_weight)
-                        + rerank_score * rerank_weight
+                    candidate.final_score = min(
+                        1.0,
+                        candidate.final_score + candidate.rerank_rank_boost,
                     )
-                    candidate.final_score = self._rank_score(
-                        candidate.topic, candidate.relevance_score
-                    )
+                    candidate.ranking_score = candidate.final_score
             except Exception:
                 logger.warning(
                     "[TopicRecall] Rerank 失败，本轮保留 Embedding/关键词结果",
@@ -247,6 +320,92 @@ class TopicRetriever:
                 )
         candidates.sort(key=lambda item: item.final_score, reverse=True)
         return candidates[:k]
+
+    async def assign_rerank_ranks(self, query: str, candidates: list[Any]) -> float:
+        """Attach provider scores and relative ranks without changing relevance."""
+        if not candidates or self.rerank_provider is None:
+            return 0.0
+        documents = [item.content for item in candidates]
+        rows = await self.rerank_provider.rerank(
+            query,
+            documents,
+            top_n=len(documents),
+        )
+        ranked_rows: list[tuple[int, float]] = []
+        seen: set[int] = set()
+        for row in rows:
+            try:
+                index = int(getattr(row, "index", -1))
+                score = float(getattr(row, "relevance_score", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if index in seen or not 0 <= index < len(candidates):
+                continue
+            if not math.isfinite(score):
+                continue
+            seen.add(index)
+            ranked_rows.append((index, score))
+        ranked_rows.sort(key=lambda item: item[1], reverse=True)
+        total = len(ranked_rows)
+        if not total:
+            return 0.0
+        confidence = self._rerank_result_confidence(
+            [score for _, score in ranked_rows]
+        )
+        previous_score: float | None = None
+        previous_rank = 1
+        for position, (index, score) in enumerate(ranked_rows, 1):
+            rank = (
+                previous_rank
+                if previous_score is not None
+                and math.isclose(score, previous_score, rel_tol=1e-9, abs_tol=1e-12)
+                else position
+            )
+            candidate = candidates[index]
+            candidate.rerank_score = score
+            candidate.rerank_rank = rank
+            candidate.rerank_percentile = (
+                0.0 if total == 1 else 1.0 - (rank - 1) / (total - 1)
+            )
+            candidate.rerank_confidence = confidence
+            previous_score = score
+            previous_rank = rank
+        return confidence
+
+    def _rerank_weight(self) -> float:
+        return max(
+            0.0,
+            min(1.0, float(self.config.get("recall_rerank_weight", 0.35))),
+        )
+
+    def _rerank_rank_boost(
+        self,
+        percentile: float,
+        confidence: float = 1.0,
+    ) -> float:
+        return (
+            min(0.15, self._rerank_weight() * 0.15)
+            * max(0.0, min(1.0, float(percentile)))
+            * max(0.0, min(1.0, float(confidence)))
+        )
+
+    def _rerank_result_confidence(self, scores: list[float]) -> float:
+        """Estimate whether one rerank response has enough signal to affect order."""
+        if len(scores) <= 1:
+            return 0.0
+        ordered = sorted((float(score) for score in scores), reverse=True)
+        midpoint = len(ordered) // 2
+        median = (
+            ordered[midpoint]
+            if len(ordered) % 2
+            else (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+        )
+        top = ordered[0]
+        if 0.0 <= ordered[-1] and top <= 1.0:
+            contrast = max(0.0, min(1.0, (top - median) / 0.15))
+            return math.sqrt(max(0.0, top) * contrast)
+        scale = max(1.0, abs(top), abs(ordered[-1]))
+        return max(0.0, min(1.0, (top - median) / scale))
 
     async def _get_embeddings(self, texts: list[str]) -> list[list[float]]:
         provider = self.embedding_provider

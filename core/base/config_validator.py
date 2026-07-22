@@ -176,9 +176,11 @@ class TopicMemoryConfig(BaseModel):
     recall_scan_limit: int = Field(default=2000, ge=100, le=5000)
     recall_min_relevance: float = Field(default=0.32, ge=0.0, le=1.0)
     recall_relative_floor: float = Field(default=0.70, ge=0.0, le=1.0)
+    recall_selection_relative_floor: float = Field(default=0.90, ge=0.5, le=1.0)
     recall_mmr_lambda: float = Field(default=0.78, ge=0.0, le=1.0)
     recall_use_rerank: bool = True
     recall_rerank_weight: float = Field(default=0.35, ge=0.0, le=1.0)
+    recall_context_support_cap: float = Field(default=0.08, ge=0.0, le=0.25)
     recall_context_overlap_threshold: float = Field(
         default=0.8, ge=0.0, le=1.0
     )
