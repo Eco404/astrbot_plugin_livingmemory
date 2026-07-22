@@ -43,6 +43,7 @@ export class TopicPage {
     document.getElementById("topic-maintenance-cancel")?.addEventListener("click", () => this.closeMaintenance());
     document.getElementById("topic-maintenance-detect")?.addEventListener("click", () => this.detectUnindexedTimelines());
     document.getElementById("topic-recompute-relations")?.addEventListener("click", () => this.recomputeRelations());
+    document.getElementById("topic-revectorize")?.addEventListener("click", () => this.startRevectorization());
     document.getElementById("topic-clear-topics")?.addEventListener("click", event => this.requestClearTopics(event.currentTarget));
     document.getElementById("topic-clear-confirm-close")?.addEventListener("click", () => this.closeClearTopicsConfirm());
     document.getElementById("topic-clear-confirm-cancel")?.addEventListener("click", () => this.closeClearTopicsConfirm());
@@ -143,6 +144,21 @@ export class TopicPage {
         ? `${window.t("topic.rerankOn")} (${data.rerank_backend || "configured"})`
         : window.t("topic.rerankOff"),
     ].join(" · ");
+    const vectorWarning = document.getElementById("topic-vector-warning");
+    const embeddingHealth = data.embedding_health || {};
+    if (vectorWarning) {
+      const showWarning = Boolean(
+        embeddingHealth.needs_revectorization
+          && Number(embeddingHealth.topic_count || 0) > 0
+      );
+      vectorWarning.classList.toggle("hidden", !showWarning);
+      vectorWarning.textContent = showWarning
+        ? window.t(
+            "topic.needsRevectorization",
+            Number(embeddingHealth.incompatible_count || 0),
+          )
+        : "";
+    }
 
     const activeJob = activeJobs[0] || null;
     const settingsButton = document.getElementById("topic-settings");
@@ -599,6 +615,25 @@ export class TopicPage {
     }
   }
 
+  async startRevectorization() {
+    if (!this.currentSpace() || this.activeJobUid) return;
+    const button = document.getElementById("topic-revectorize");
+    if (button) button.disabled = true;
+    try {
+      const job = await this.api.post("topics/maintenance/revectorize", {
+        memory_space_id: this.currentSpace(),
+      });
+      this.closeMaintenance({ restoreFocus: false });
+      this.renderProgress(job);
+      this.resumePolling(job.job_uid);
+      this.setBuildButtonsDisabled(true);
+      this.showToast(window.t("topic.revectorizeStarted"));
+    } catch (error) {
+      this.showToast(error.message || window.t("topic.revectorizeFailed"), true);
+      if (button) button.disabled = false;
+    }
+  }
+
   requestClearTopics(trigger) {
     if (!this.currentSpace() || this.activeJobUid) return;
     this.clearTopicsTrigger = trigger || null;
@@ -842,7 +877,7 @@ export class TopicPage {
   }
 
   setBuildButtonsDisabled(disabled) {
-    ["topic-build-full", "topic-maintenance", "topic-recompute-relations", "topic-clear-topics"].forEach(id => {
+    ["topic-build-full", "topic-maintenance", "topic-revectorize", "topic-recompute-relations", "topic-clear-topics"].forEach(id => {
       const button = document.getElementById(id);
       if (button) button.disabled = Boolean(disabled);
     });

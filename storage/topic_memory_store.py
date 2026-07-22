@@ -109,6 +109,7 @@ class TopicMemoryStore:
                 decay_anchor_at REAL,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
+                embedding_signature TEXT NOT NULL DEFAULT '{}',
                 metadata TEXT NOT NULL DEFAULT '{}'
             )
             """
@@ -401,6 +402,7 @@ class TopicMemoryStore:
                 input_hash TEXT NOT NULL,
                 provider_id TEXT,
                 model_id TEXT,
+                embedding_signature TEXT NOT NULL DEFAULT '{}',
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 metadata TEXT NOT NULL DEFAULT '{}',
@@ -447,6 +449,7 @@ class TopicMemoryStore:
                 input_hash TEXT NOT NULL,
                 provider_id TEXT,
                 model_id TEXT,
+                embedding_signature TEXT NOT NULL DEFAULT '{}',
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 metadata TEXT NOT NULL DEFAULT '{}'
@@ -1020,8 +1023,8 @@ class TopicMemoryStore:
                 topic_uid, memory_space_id, title, summary, revision, status,
                 base_importance, importance, confidence, started_at, ended_at,
                 last_accessed_at, access_count, decay_anchor_at,
-                created_at, updated_at, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, embedding_signature, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(topic_uid) DO UPDATE SET
                 memory_space_id = excluded.memory_space_id,
                 title = excluded.title,
@@ -1037,6 +1040,7 @@ class TopicMemoryStore:
                 access_count = excluded.access_count,
                 decay_anchor_at = excluded.decay_anchor_at,
                 updated_at = excluded.updated_at,
+                embedding_signature = excluded.embedding_signature,
                 metadata = excluded.metadata
             """,
             (
@@ -1056,6 +1060,7 @@ class TopicMemoryStore:
                 topic.decay_anchor_at,
                 created_at,
                 now,
+                self._to_json(topic.embedding_signature),
                 self._to_json(topic.metadata),
             ),
         )
@@ -1347,6 +1352,115 @@ class TopicMemoryStore:
                 }
             )
         return result
+
+    async def list_formal_fragments(
+        self,
+        memory_space_id: str,
+        *,
+        status: str = "active",
+    ) -> list[TopicFragmentDraft]:
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT * FROM topic_fragments
+                    WHERE memory_space_id = ? AND status = ?
+                    ORDER BY started_at, created_at, fragment_uid
+                    """,
+                    (memory_space_id, status),
+                )
+            ).fetchall()
+        return [self._row_to_fragment(row) for row in rows]
+
+    async def replace_embeddings_and_relations(
+        self,
+        *,
+        memory_space_id: str,
+        topic_updates: list[dict[str, Any]],
+        fragment_updates: list[dict[str, Any]],
+        relations: list[TopicRelation],
+    ) -> dict[str, int]:
+        """Atomically publish vector-only maintenance and derived relations."""
+        normalized_relations = self._normalize_topic_relations(
+            memory_space_id, relations
+        )
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                for item in topic_updates:
+                    topic_uid = str(item.get("topic_uid") or "")
+                    expected_revision = int(item.get("expected_revision") or 0)
+                    row = await (
+                        await db.execute(
+                            """
+                            SELECT memory_space_id, revision, metadata
+                            FROM topic_memories
+                            WHERE topic_uid = ? AND status = 'active'
+                            """,
+                            (topic_uid,),
+                        )
+                    ).fetchone()
+                    if (
+                        row is None
+                        or str(row["memory_space_id"]) != memory_space_id
+                        or int(row["revision"]) != expected_revision
+                    ):
+                        raise TopicRevisionConflict(
+                            f"Topic {topic_uid} changed during revectorization"
+                        )
+                    metadata = self._from_json(row["metadata"])
+                    metadata["embedding"] = [
+                        float(value) for value in item.get("embedding", [])
+                    ]
+                    metadata["revectorized_at"] = now
+                    await db.execute(
+                        """
+                        UPDATE topic_memories
+                        SET embedding_signature = ?, metadata = ?, updated_at = ?
+                        WHERE topic_uid = ? AND revision = ?
+                        """,
+                        (
+                            self._to_json(item.get("embedding_signature") or {}),
+                            self._to_json(metadata),
+                            now,
+                            topic_uid,
+                            expected_revision,
+                        ),
+                    )
+                for item in fragment_updates:
+                    fragment_uid = str(item.get("fragment_uid") or "")
+                    cursor = await db.execute(
+                        """
+                        UPDATE topic_fragments
+                        SET embedding = ?, embedding_signature = ?, updated_at = ?
+                        WHERE fragment_uid = ? AND memory_space_id = ?
+                          AND status = 'active'
+                        """,
+                        (
+                            self._to_json(item.get("embedding") or []),
+                            self._to_json(item.get("embedding_signature") or {}),
+                            now,
+                            fragment_uid,
+                            memory_space_id,
+                        ),
+                    )
+                    if int(cursor.rowcount or 0) != 1:
+                        raise TopicSourceValidationError(
+                            f"Topic fragment {fragment_uid} changed during revectorization"
+                        )
+                await self._replace_topic_relations_tx(
+                    db, memory_space_id, normalized_relations
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "topics": len(topic_updates),
+            "fragments": len(fragment_updates),
+            "relations": len(normalized_relations),
+        }
 
     async def record_topic_access(self, topic_uids: list[str]) -> int:
         """Update reinforcement fields only for Topics actually injected."""
@@ -2619,9 +2733,10 @@ class TopicMemoryStore:
                             source_revisions, facts, keywords, time_cluster_keys,
                             importance, confidence, embedding, started_at, ended_at,
                             status, prompt_hash, input_hash, provider_id, model_id,
+                            embedding_signature,
                             created_at, updated_at, metadata
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                  ?, ?, ?, ?, ?, ?, ?, ?)
+                                  ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             fragment.fragment_uid,
@@ -2645,6 +2760,7 @@ class TopicMemoryStore:
                             fragment.input_hash,
                             fragment.provider_id,
                             fragment.model_id,
+                            self._to_json(fragment.embedding_signature),
                             float(fragment.created_at),
                             float(fragment.updated_at),
                             self._to_json(fragment.metadata),
@@ -2684,15 +2800,24 @@ class TopicMemoryStore:
         return [self._row_to_fragment(row) for row in rows]
 
     async def update_fragment_embedding(
-        self, fragment_uid: str, embedding: list[float]
+        self,
+        fragment_uid: str,
+        embedding: list[float],
+        embedding_signature: dict[str, Any] | None = None,
     ) -> None:
         async with self._connect() as db:
             await db.execute(
                 """
                 UPDATE topic_fragment_drafts
-                SET embedding = ?, updated_at = ? WHERE fragment_uid = ?
+                SET embedding = ?, embedding_signature = ?, updated_at = ?
+                WHERE fragment_uid = ?
                 """,
-                (self._to_json(embedding), time.time(), fragment_uid),
+                (
+                    self._to_json(embedding),
+                    self._to_json(embedding_signature or {}),
+                    time.time(),
+                    fragment_uid,
+                ),
             )
             await db.commit()
 
@@ -3133,10 +3258,11 @@ class TopicMemoryStore:
                     label, summary, timeline_uids, source_revisions, facts,
                     keywords, time_cluster_keys, importance, confidence,
                     embedding, started_at, ended_at, status, prompt_hash,
-                    input_hash, provider_id, model_id, created_at, updated_at,
+                    input_hash, provider_id, model_id, embedding_signature,
+                    created_at, updated_at,
                     metadata
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          'active', ?, ?, ?, ?, ?, ?, ?)
+                          'active', ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fragment_uid) DO UPDATE SET
                     run_uid = excluded.run_uid,
                     candidate_group_uid = excluded.candidate_group_uid,
@@ -3158,6 +3284,7 @@ class TopicMemoryStore:
                     input_hash = excluded.input_hash,
                     provider_id = excluded.provider_id,
                     model_id = excluded.model_id,
+                    embedding_signature = excluded.embedding_signature,
                     updated_at = excluded.updated_at,
                     metadata = excluded.metadata
                 """,
@@ -3182,6 +3309,7 @@ class TopicMemoryStore:
                     fragment.input_hash,
                     fragment.provider_id,
                     fragment.model_id,
+                    TopicMemoryStore._to_json(fragment.embedding_signature),
                     float(fragment.created_at),
                     now,
                     TopicMemoryStore._to_json(fragment.metadata),
@@ -3350,6 +3478,9 @@ class TopicMemoryStore:
             decay_anchor_at=row["decay_anchor_at"],
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
+            embedding_signature=TopicMemoryStore._from_json(
+                row["embedding_signature"]
+            ),
             metadata=TopicMemoryStore._from_json(row["metadata"]),
         )
 
@@ -3547,6 +3678,9 @@ class TopicMemoryStore:
             input_hash=str(row["input_hash"]),
             provider_id=str(row["provider_id"] or ""),
             model_id=str(row["model_id"] or ""),
+            embedding_signature=TopicMemoryStore._from_json(
+                row["embedding_signature"]
+            ),
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
             metadata=TopicMemoryStore._from_json(row["metadata"]),

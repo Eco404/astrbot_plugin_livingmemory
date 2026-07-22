@@ -84,6 +84,27 @@ class _ToolUnsupportedLLM:
         return _Response({"groups": []})
 
 
+class _ToolIgnoredWithJsonLLM:
+    def __init__(self):
+        self.tool_attempts = 0
+        self.text_attempts = 0
+
+    async def text_chat(
+        self,
+        *,
+        prompt,
+        system_prompt,
+        func_tool=None,
+        tool_choice="auto",
+    ):
+        del prompt, system_prompt, tool_choice
+        if func_tool is not None:
+            self.tool_attempts += 1
+            return _Response({"groups": []})
+        self.text_attempts += 1
+        return _Response({"groups": []})
+
+
 class _RetryAwareLLM:
     def __init__(self):
         self.calls = 0
@@ -353,7 +374,9 @@ class _ConcurrentGroundedLLM(_GroundedLLM):
                 self.active_fragment_calls,
             )
         try:
-            await asyncio.sleep(0.02)
+            # Leave enough overlap for both groups after their independent
+            # SQLite preparation work, even on slower Windows-mounted paths.
+            await asyncio.sleep(0.1)
             return await super().text_chat(prompt=prompt, system_prompt=system_prompt)
         finally:
             self.active_calls -= 1
@@ -461,6 +484,17 @@ class _CheckpointStore:
 class _Embedding:
     async def get_embeddings(self, texts: list[str]):
         return [[1.0, 0.0] if "京都" in text else [0.0, 1.0] for text in texts]
+
+
+class _OtherEmbedding(_Embedding):
+    provider_config = {"id": "other-embedding", "model": "other-model"}
+
+    def __init__(self):
+        self.calls = 0
+
+    async def get_embeddings(self, texts: list[str]):
+        self.calls += 1
+        return await super().get_embeddings(texts)
 
 
 class _RerankResult:
@@ -654,6 +688,43 @@ async def test_full_build_extracts_candidate_groups_concurrently_with_monotonic_
         for event in fragment_events
     )
     assert fragment_events[-1]["current"] == fragment_events[-1]["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_revectorize_space_recovers_model_compatibility_without_llm(
+    tmp_path: Path,
+):
+    db_path, space_id = await _create_timeline_db(tmp_path)
+    store = TopicMemoryStore(db_path)
+    manager = TopicBuildManager(
+        db_path,
+        store,
+        TopicMaintenanceManager(db_path, store),
+        llm_provider=_GroundedLLM(),
+        embedding_provider=_Embedding(),
+    )
+    await manager.build_space(space_id)
+    assert (await manager.get_embedding_health(space_id))[
+        "needs_revectorization"
+    ] is False
+
+    replacement = _OtherEmbedding()
+    manager.embedding_provider = replacement
+    incompatible = await manager.get_embedding_health(space_id)
+    assert incompatible["needs_revectorization"] is True
+    assert incompatible["reasons"]["provider_changed"] > 0
+
+    manager._call_llm = AsyncMock(
+        side_effect=AssertionError("revectorization must not invoke the LLM")
+    )
+    result = await manager.revectorize_space(space_id)
+
+    assert result["topic_count"] > 0
+    assert result["fragment_count"] > 0
+    assert replacement.calls > 0
+    assert (await manager.get_embedding_health(space_id))[
+        "needs_revectorization"
+    ] is False
 
 
 @pytest.mark.asyncio
@@ -930,8 +1001,142 @@ async def test_llm_structured_output_falls_back_and_caches_unsupported_provider(
     assert json.loads(first) == json.loads(second) == {"groups": []}
     assert llm.tool_attempts == 1
     assert llm.text_attempts == 2
-    capability_key = manager._provider_identity(llm)
+    capability_key = manager._provider_capability_key(llm)
     assert manager._structured_output_capabilities[capability_key] is False
+
+
+@pytest.mark.asyncio
+async def test_llm_ignored_tool_json_does_not_disable_future_tool_attempts():
+    llm = _ToolIgnoredWithJsonLLM()
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        llm_provider=llm,
+        config={"llm_max_retries": 1},
+    )
+
+    for _ in range(2):
+        raw = await manager._call_llm(
+            "review",
+            "system",
+            output_contract="component_review",
+        )
+        assert json.loads(raw) == {"groups": []}
+
+    assert llm.tool_attempts == 2
+    assert llm.text_attempts == 0
+    capability_key = manager._provider_capability_key(llm)
+    assert manager._structured_output_capabilities.get(capability_key) is not False
+
+
+@pytest.mark.asyncio
+async def test_reloaded_provider_reprobes_structured_output_capability():
+    unsupported = _ToolUnsupportedLLM()
+    unsupported.provider_config = {"id": "shared-provider", "model": "same-model"}
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        llm_provider=unsupported,
+        config={"llm_max_retries": 1},
+    )
+    await manager._call_llm(
+        "review",
+        "system",
+        output_contract="component_review",
+    )
+    assert unsupported.tool_attempts == 1
+
+    reloaded = _StructuredOutputLLM()
+    reloaded.provider_config = {"id": "shared-provider", "model": "same-model"}
+    manager.llm_provider = reloaded
+    raw = await manager._call_llm(
+        "review",
+        "system",
+        output_contract="component_review",
+    )
+
+    assert json.loads(raw) == {"groups": []}
+    assert len(reloaded.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_build_run_context_isolated_between_concurrent_spaces():
+    runs = {
+        "run-a": {
+            "run_uid": "run-a",
+            "memory_space_id": "space-a",
+            "config": {"topic_settings": {"llm_concurrency": 2}},
+        },
+        "run-b": {
+            "run_uid": "run-b",
+            "memory_space_id": "space-b",
+            "config": {"topic_settings": {"llm_concurrency": 7}},
+        },
+    }
+    store = SimpleNamespace(
+        get_maintenance_run=AsyncMock(side_effect=lambda run_uid: runs[run_uid])
+    )
+    manager = TopicBuildManager(":memory:", store, None)
+    entered = asyncio.Event()
+    contexts: dict[str, tuple[str, int]] = {}
+
+    async def build_impl(run_uid, **_kwargs):
+        context = manager._runtime_context.get()
+        contexts[run_uid] = (context.memory_space_id, manager.llm_concurrency)
+        if len(contexts) == 2:
+            entered.set()
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        return {"run_uid": run_uid}
+
+    manager._build_from_scan_impl = build_impl
+    await asyncio.gather(
+        manager.build_from_scan("run-a"),
+        manager.build_from_scan("run-b"),
+    )
+
+    assert contexts == {
+        "run-a": ("space-a", 2),
+        "run-b": ("space-b", 7),
+    }
+    assert manager._runtime_context.get() is None
+
+
+def test_build_run_context_captures_provider_model_signatures():
+    llm = _GroundedLLM()
+    embedding = _OtherEmbedding()
+    reranker = _AllPassReranker()
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        llm_provider=llm,
+        embedding_provider=embedding,
+        rerank_provider=reranker,
+    )
+
+    context = manager._make_run_context(
+        memory_space_id="space-1",
+        run_uid="run-1",
+        config={"llm_concurrency": 3},
+    )
+
+    assert context.llm_provider is llm
+    assert context.embedding_provider is embedding
+    assert context.rerank_provider is reranker
+    assert (context.llm_signature.provider_id, context.llm_signature.model_id) == (
+        "fake-llm",
+        "test",
+    )
+    assert (
+        context.embedding_signature.provider_id,
+        context.embedding_signature.model_id,
+    ) == ("other-embedding", "other-model")
+    assert (
+        context.rerank_signature.provider_id,
+        context.rerank_signature.model_id,
+    ) == ("fake-rerank", "test")
 
 
 @pytest.mark.asyncio

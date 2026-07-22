@@ -175,6 +175,35 @@ async def test_set_db_version_forces_text_in_legacy_integer_column(tmp_path):
     assert await migration.get_db_version() == "9.10"
 
 
+@pytest.mark.asyncio
+async def test_v9_10_migration_adds_embedding_signatures_idempotently(tmp_path):
+    db_path = str(tmp_path / "v9.9-topic.db")
+    async with aiosqlite.connect(db_path) as db:
+        for table in (
+            "topic_memories",
+            "topic_fragment_drafts",
+            "topic_fragments",
+        ):
+            await db.execute(
+                f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, metadata TEXT)"
+            )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_9_to_v9_10(None)
+    await migration._migrate_v9_9_to_v9_10(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        for table in (
+            "topic_memories",
+            "topic_fragment_drafts",
+            "topic_fragments",
+        ):
+            cursor = await db.execute(f"PRAGMA table_info({table})")
+            columns = {str(row[1]) for row in await cursor.fetchall()}
+            assert "embedding_signature" in columns
+
+
 # ===========================================================================
 # 一、迁移正确性测试
 # ===========================================================================

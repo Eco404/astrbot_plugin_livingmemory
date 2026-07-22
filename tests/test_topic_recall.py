@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import pytest
 
+from astrbot_plugin_livingmemory.core.embedding_signature import (
+    TOPIC_CENTROID_EMBEDDING_FORMAT,
+    TOPIC_FRAGMENT_EMBEDDING_FORMAT,
+    make_embedding_signature,
+)
 from astrbot_plugin_livingmemory.core.models.topic_memory import (
     TopicFragmentDraft,
     TopicMemory,
@@ -10,9 +15,10 @@ from astrbot_plugin_livingmemory.core.retrieval.recall_pipeline import RecallQue
 from astrbot_plugin_livingmemory.core.retrieval.topic_recall_pipeline import (
     TopicRecallPipeline,
 )
-from astrbot_plugin_livingmemory.core.retrieval.topic_retriever import TopicRetriever
 from astrbot_plugin_livingmemory.core.retrieval.topic_retriever import (
+    TopicEmbeddingCompatibilityError,
     TopicRecallResult,
+    TopicRetriever,
 )
 
 
@@ -54,6 +60,8 @@ class _FixedScoreRetriever(TopicRetriever):
         self.store = store
         self.candidates = candidates
         self.rerank_provider = rerank_provider
+        self.embedding_provider = _Embedding()
+        self.provider_resolver = None
         self.config = {"recall_rerank_weight": 0.35}
 
     async def _get_embeddings(self, texts):
@@ -104,12 +112,86 @@ def _payload(uid, title, embedding, *, sources=None, actors=None, importance=0.6
             summary=f"{title}的详细总结",
             importance=importance,
             confidence=0.8,
+            embedding_signature=make_embedding_signature(
+                _Embedding(),
+                dimension=len(embedding),
+                input_format_version=TOPIC_CENTROID_EMBEDDING_FORMAT,
+                generated_at=1.0,
+            ),
             metadata={"embedding": embedding, "keywords": [title]},
         ),
         "atoms": [{"content": f"{title}事实", "importance": 0.8}],
         "sources": sources or [],
         "actors": actors or [],
     }
+
+
+def _fragment_signature(embedding: list[float]) -> dict:
+    return make_embedding_signature(
+        _Embedding(),
+        dimension=len(embedding),
+        input_format_version=TOPIC_FRAGMENT_EMBEDDING_FORMAT,
+        generated_at=1.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_topic_retriever_rejects_unsigned_legacy_vectors():
+    payload = _payload("weather", "上海雷雨", [1.0, 0.0])
+    payload["topic"].embedding_signature = {}
+    retriever = TopicRetriever(
+        _Store([payload]),
+        embedding_provider=_Embedding(),
+        config={"recall_use_rerank": False},
+    )
+
+    with pytest.raises(TopicEmbeddingCompatibilityError, match="重新向量化"):
+        await retriever.search("上海天气", memory_space_id="space-1", k=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("signature_update", "expected_reason"),
+    [
+        ({"model_id": "retired-model"}, "模型已变更"),
+        ({"dimension": 3}, "向量维度已变更"),
+    ],
+)
+async def test_topic_retriever_rejects_model_or_dimension_changes(
+    signature_update,
+    expected_reason,
+):
+    payload = _payload("weather", "上海雷雨", [1.0, 0.0])
+    payload["topic"].embedding_signature.update(signature_update)
+    retriever = TopicRetriever(
+        _Store([payload]),
+        embedding_provider=_Embedding(),
+        config={"recall_use_rerank": False},
+    )
+
+    with pytest.raises(TopicEmbeddingCompatibilityError, match=expected_reason):
+        await retriever.search("上海天气", memory_space_id="space-1", k=1)
+
+
+@pytest.mark.asyncio
+async def test_topic_retriever_refreshes_reloaded_embedding_provider():
+    payload = _payload("weather", "上海雷雨", [1.0, 0.0])
+    initial = _Embedding()
+
+    class ReloadedEmbedding(_Embedding):
+        provider_config = {"id": "reloaded", "model": "next-model"}
+
+    reloaded = ReloadedEmbedding()
+    retriever = TopicRetriever(
+        _Store([payload]),
+        embedding_provider=initial,
+        provider_resolver=lambda: {"embedding_provider": reloaded},
+        config={"recall_use_rerank": False},
+    )
+
+    with pytest.raises(TopicEmbeddingCompatibilityError, match="Provider 已变更"):
+        await retriever.search("上海天气", memory_space_id="space-1", k=1)
+    assert retriever.embedding_provider is reloaded
 
 
 @pytest.mark.asyncio
@@ -534,6 +616,7 @@ async def test_topic_fragment_supplements_only_serve_role_anchored_rows():
         source_revisions={"timeline-1": 1},
         facts=[{"content": "空雨决定携带雨具"}],
         embedding=[1.0, 0.0],
+        embedding_signature=_fragment_signature([1.0, 0.0]),
         metadata={"narrative_schema_version": "first_person_assistant_roles_v2"},
     )
     legacy = TopicFragmentDraft(
@@ -547,6 +630,7 @@ async def test_topic_fragment_supplements_only_serve_role_anchored_rows():
         source_revisions={"timeline-2": 1},
         facts=[],
         embedding=[1.0, 0.0],
+        embedding_signature=_fragment_signature([1.0, 0.0]),
         metadata={},
     )
     store = _Store(
@@ -598,6 +682,7 @@ async def test_fragment_candidates_rerank_once_without_changing_current_relevanc
             source_revisions={f"timeline-{index}": 1},
             facts=[{"content": "携带雨具"}],
             embedding=embedding,
+            embedding_signature=_fragment_signature(embedding),
             metadata={"narrative_schema_version": "first_person_assistant_roles_v3"},
         )
         fragments.append(
@@ -667,6 +752,7 @@ async def test_fragment_reuses_query_vectors_and_keeps_facts_when_body_duplicate
             {"content": "计划在八月补发"},
         ],
         embedding=[1.0, 0.0],
+        embedding_signature=_fragment_signature([1.0, 0.0]),
         metadata={"narrative_schema_version": "first_person_assistant_roles_v3"},
     )
     store = _Store(
@@ -739,6 +825,7 @@ async def test_fragment_skips_parent_duplicate_body_only_when_it_has_no_facts():
         source_revisions={"timeline-1": 1},
         facts=[],
         embedding=[1.0, 0.0],
+        embedding_signature=_fragment_signature([1.0, 0.0]),
         metadata={"narrative_schema_version": "first_person_assistant_roles_v3"},
     )
     store = _Store(

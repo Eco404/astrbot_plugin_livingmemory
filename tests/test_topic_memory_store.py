@@ -799,3 +799,61 @@ async def test_related_topics_are_replaced_and_return_neighbor_details(tmp_path:
 
     await store.replace_topic_relations(space_id, [])
     assert await store.list_topic_relations("topic-1") == []
+
+
+@pytest.mark.asyncio
+async def test_revector_publish_rolls_back_topic_update_when_fragment_changed(
+    tmp_path: Path,
+):
+    db_path = str(tmp_path / "revector-rollback.db")
+    space_id = await _register_timeline(
+        db_path, memory_uid="timeline-1", document_id=1
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    topic = TopicMemory(
+        topic_uid="topic-1",
+        memory_space_id=space_id,
+        title="Topic",
+        summary="Summary",
+        embedding_signature={"provider_id": "old"},
+        metadata={"embedding": [1.0, 0.0]},
+    )
+    await store.save_topic_snapshot(
+        topic,
+        atoms=[],
+        links=[
+            TopicTimelineLink(
+                topic_uid=topic.topic_uid,
+                timeline_uid="timeline-1",
+                time_cluster_key="cluster-1",
+            )
+        ],
+        atom_sources=[],
+    )
+    saved = await store.get_topic(topic.topic_uid)
+
+    with pytest.raises(TopicSourceValidationError, match="changed"):
+        await store.replace_embeddings_and_relations(
+            memory_space_id=space_id,
+            topic_updates=[
+                {
+                    "topic_uid": topic.topic_uid,
+                    "expected_revision": saved.revision,
+                    "embedding": [0.0, 1.0],
+                    "embedding_signature": {"provider_id": "new"},
+                }
+            ],
+            fragment_updates=[
+                {
+                    "fragment_uid": "missing-fragment",
+                    "embedding": [0.0, 1.0],
+                    "embedding_signature": {"provider_id": "new"},
+                }
+            ],
+            relations=[],
+        )
+
+    unchanged = await store.get_topic(topic.topic_uid)
+    assert unchanged.metadata["embedding"] == [1.0, 0.0]
+    assert unchanged.embedding_signature == {"provider_id": "old"}

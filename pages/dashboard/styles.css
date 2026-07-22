@@ -2653,6 +2653,12 @@ body {
   padding: 0 var(--space-1);
 }
 .topic-flags { min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.topic-vector-warning {
+  margin-top: 6px;
+  color: var(--danger, #c92a2a);
+  font-size: 13px;
+  line-height: 1.45;
+}
 .topic-stats { display: flex; flex: 0 0 auto; align-items: center; gap: var(--space-2); }
 .topic-stat {
   display: inline-flex;

@@ -257,7 +257,8 @@ async def test_complete_initialization_wires_graph_db_and_engine_config(
     class FakeMemoryEngine:
         def __init__(
             self, db_path, faiss_db, graph_vector_db, llm_provider=None,
-            rerank_provider=None, config=None, identity_profile_store=None
+            rerank_provider=None, config=None, identity_profile_store=None,
+            topic_provider_resolver=None,
         ):
             self.db_path = db_path
             self.faiss_db = faiss_db
@@ -265,6 +266,7 @@ async def test_complete_initialization_wires_graph_db_and_engine_config(
             self.llm_provider = llm_provider
             self.rerank_provider = rerank_provider
             self.identity_profile_store = identity_profile_store
+            self.topic_provider_resolver = topic_provider_resolver
             self.config = config or {}
             self.text_processor = Mock(async_init=AsyncMock())
 
@@ -429,13 +431,15 @@ async def test_complete_initialization_skips_graph_db_when_disabled(
     class FakeMemoryEngine:
         def __init__(
             self, db_path, faiss_db, graph_vector_db, llm_provider=None,
-            rerank_provider=None, config=None, identity_profile_store=None
+            rerank_provider=None, config=None, identity_profile_store=None,
+            topic_provider_resolver=None,
         ):
             self.db_path = db_path
             self.faiss_db = faiss_db
             self.graph_vector_db = graph_vector_db
             self.llm_provider = llm_provider
             self.rerank_provider = rerank_provider
+            self.topic_provider_resolver = topic_provider_resolver
             self.config = config or {}
             self.text_processor = Mock(async_init=AsyncMock())
 

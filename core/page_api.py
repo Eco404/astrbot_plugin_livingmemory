@@ -204,6 +204,12 @@ class PluginPageApi:
             "LivingMemory Page recompute Topic relations",
         )
         register(
+            f"{PAGE_API_PREFIX}/topics/maintenance/revectorize",
+            self.revectorize_topic_memories,
+            ["POST"],
+            "LivingMemory Page revectorize Topic memories",
+        )
+        register(
             f"{PAGE_API_PREFIX}/topics/maintenance/clear",
             self.clear_topic_memories,
             ["POST"],
@@ -472,6 +478,14 @@ class PluginPageApi:
         if error:
             return error
         return await self.topic_handler.recompute_relations(ready["memory_engine"])
+
+    async def revectorize_topic_memories(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.start_revectorization(
+            ready["memory_engine"]
+        )
 
     async def save_identity_profiles(self):
         ready, error = await self._ensure_plugin_ready()

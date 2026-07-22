@@ -6,11 +6,39 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from astrbot.api import logger
 
+from ..embedding_signature import (
+    SUPPORTED_TOPIC_EMBEDDING_FORMATS,
+    TOPIC_FRAGMENT_EMBEDDING_FORMAT,
+    signature_mismatch_reason,
+)
 from ..models.topic_memory import TopicFragmentDraft, TopicMemory
+
+
+class TopicEmbeddingCompatibilityError(RuntimeError):
+    """Stored Topic vectors do not match the active Embedding Provider."""
+
+    def __init__(self, artifact: str, reason: str, count: int = 1):
+        self.artifact = artifact
+        self.reason = reason
+        self.count = max(1, int(count))
+        labels = {
+            "missing_signature": "旧向量没有模型签名",
+            "provider_changed": "Embedding Provider 已变更",
+            "model_changed": "Embedding 模型已变更",
+            "dimension_changed": "向量维度已变更",
+            "invalid_dimension": "向量维度无效",
+            "input_format_changed": "向量输入格式已升级",
+            "missing_embedding": "向量数据缺失",
+        }
+        detail = labels.get(reason, reason)
+        super().__init__(
+            f"Topic {artifact}向量不可用：{detail}（{self.count} 项）。"
+            "请在 Topic 记忆的维护面板执行“重新向量化并重算关系”。"
+        )
 
 
 @dataclass(slots=True)
@@ -215,11 +243,22 @@ class TopicRetriever:
         embedding_provider: Any,
         rerank_provider: Any = None,
         config: dict[str, Any] | None = None,
+        provider_resolver: Callable[[], dict[str, Any]] | None = None,
     ):
         self.store = store
         self.embedding_provider = embedding_provider
         self.rerank_provider = rerank_provider
         self.config = config or {}
+        self.provider_resolver = provider_resolver
+
+    def refresh_providers(self) -> None:
+        if self.provider_resolver is None:
+            return
+        resolved = self.provider_resolver()
+        if "embedding_provider" in resolved:
+            self.embedding_provider = resolved["embedding_provider"]
+        if "rerank_provider" in resolved:
+            self.rerank_provider = resolved["rerank_provider"]
 
     async def search(
         self,
@@ -234,6 +273,7 @@ class TopicRetriever:
         query = str(query or "").strip()
         if not query or not memory_space_id or k <= 0:
             return []
+        self.refresh_providers()
         scan_limit = max(
             100, min(5000, int(self.config.get("recall_scan_limit", 2000)))
         )
@@ -247,6 +287,7 @@ class TopicRetriever:
 
         if query_vector is None:
             query_vector = (await self._get_embeddings([query]))[0]
+        self.validate_topic_payload_embeddings(payloads, query_vector)
         query_features = self._text_features(query)
         candidates: list[TopicRecallResult] = []
         for payload in payloads:
@@ -320,6 +361,58 @@ class TopicRetriever:
                 )
         candidates.sort(key=lambda item: item.final_score, reverse=True)
         return candidates[:k]
+
+    def validate_topic_payload_embeddings(
+        self,
+        payloads: list[dict[str, Any]],
+        query_vector: list[float],
+    ) -> None:
+        reasons: dict[str, int] = {}
+        for payload in payloads:
+            topic = payload["topic"]
+            embedding = (
+                topic.metadata.get("embedding", [])
+                if isinstance(topic.metadata, dict)
+                else []
+            )
+            reason = (
+                "missing_embedding"
+                if not embedding
+                else signature_mismatch_reason(
+                    topic.embedding_signature,
+                    self.embedding_provider,
+                    expected_formats=SUPPORTED_TOPIC_EMBEDDING_FORMATS,
+                    dimension=len(query_vector),
+                )
+            )
+            if reason:
+                reasons[reason] = reasons.get(reason, 0) + 1
+        if reasons:
+            reason, count = max(reasons.items(), key=lambda item: item[1])
+            raise TopicEmbeddingCompatibilityError("记忆", reason, count)
+
+    def validate_fragment_embeddings(
+        self,
+        fragments: list[TopicFragmentDraft],
+        query_vector: list[float],
+    ) -> None:
+        reasons: dict[str, int] = {}
+        for fragment in fragments:
+            reason = (
+                "missing_embedding"
+                if not fragment.embedding
+                else signature_mismatch_reason(
+                    fragment.embedding_signature,
+                    self.embedding_provider,
+                    expected_formats={TOPIC_FRAGMENT_EMBEDDING_FORMAT},
+                    dimension=len(query_vector),
+                )
+            )
+            if reason:
+                reasons[reason] = reasons.get(reason, 0) + 1
+        if reasons:
+            reason, count = max(reasons.items(), key=lambda item: item[1])
+            raise TopicEmbeddingCompatibilityError("片段", reason, count)
 
     async def assign_rerank_ranks(self, query: str, candidates: list[Any]) -> float:
         """Attach provider scores and relative ranks without changing relevance."""
@@ -408,6 +501,7 @@ class TopicRetriever:
         return max(0.0, min(1.0, (top - median) / scale))
 
     async def _get_embeddings(self, texts: list[str]) -> list[list[float]]:
+        self.refresh_providers()
         provider = self.embedding_provider
         get_embeddings = getattr(provider, "get_embeddings", None)
         if callable(get_embeddings):
@@ -467,4 +561,9 @@ class TopicRetriever:
         return features or {"<empty>"}
 
 
-__all__ = ["TopicFragmentRecallResult", "TopicRecallResult", "TopicRetriever"]
+__all__ = [
+    "TopicEmbeddingCompatibilityError",
+    "TopicFragmentRecallResult",
+    "TopicRecallResult",
+    "TopicRetriever",
+]
