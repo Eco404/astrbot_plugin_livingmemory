@@ -416,6 +416,7 @@ class TopicMaintenanceManager:
                 "seed_timeline_uids": [],
                 "timeline_uids": [],
                 "affected_topic_uids": [],
+                "seed_topic_uids": [],
                 "time_cluster_keys": {},
                 "scope_limited": False,
             }
@@ -462,6 +463,7 @@ class TopicMaintenanceManager:
             sorted(seed_uids),
         )
         affected_topic_uids = list(affected["topic_uids"])
+        seed_topic_uids = list(affected.get("seed_topic_uids", []))
         expanded_uids = set(selected_uids)
         expanded_uids.update(affected["timeline_uids"])
         if len(expanded_uids) > max_timelines:
@@ -470,12 +472,14 @@ class TopicMaintenanceManager:
             # broad existing Topics.
             scope_limited = True
             affected_topic_uids = []
+            seed_topic_uids = []
             expanded_uids = set(selected_uids)
 
         return {
             "seed_timeline_uids": sorted(seed_uids),
             "timeline_uids": sorted(expanded_uids),
             "affected_topic_uids": sorted(affected_topic_uids),
+            "seed_topic_uids": sorted(seed_topic_uids),
             "time_cluster_keys": {
                 uid: by_uid[uid].time_cluster_key
                 for uid in expanded_uids

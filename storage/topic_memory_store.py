@@ -1395,7 +1395,11 @@ class TopicMemoryStore:
         context = sorted({str(uid) for uid in context_timeline_uids if str(uid)})
         seeds = sorted({str(uid) for uid in seed_timeline_uids if str(uid)})
         if not context:
-            return {"topic_uids": [], "timeline_uids": []}
+            return {
+                "topic_uids": [],
+                "seed_topic_uids": [],
+                "timeline_uids": [],
+            }
         context_json = self._to_json(context)
         seed_json = self._to_json(seeds)
         async with self._connect() as db:
@@ -1417,7 +1421,7 @@ class TopicMemoryStore:
                           AND t.status = 'active' AND l.status = 'active'
                         GROUP BY t.topic_uid
                     )
-                    SELECT topic_uid FROM support
+                    SELECT topic_uid, seed_count FROM support
                     WHERE seed_count > 0
                        OR (context_count > 0 AND (
                            source_count <= 4 OR context_count >= 2
@@ -1429,6 +1433,11 @@ class TopicMemoryStore:
                 )
             ).fetchall()
             topic_uids = [str(row["topic_uid"]) for row in rows]
+            seed_topic_uids = [
+                str(row["topic_uid"])
+                for row in rows
+                if int(row["seed_count"] or 0) > 0
+            ]
             timeline_uids: list[str] = []
             if topic_uids:
                 placeholders = ",".join("?" * len(topic_uids))
@@ -1445,7 +1454,11 @@ class TopicMemoryStore:
                     )
                 ).fetchall()
                 timeline_uids = [str(row["timeline_uid"]) for row in source_rows]
-        return {"topic_uids": topic_uids, "timeline_uids": timeline_uids}
+        return {
+            "topic_uids": topic_uids,
+            "seed_topic_uids": seed_topic_uids,
+            "timeline_uids": timeline_uids,
+        }
 
     async def get_topic_provenance(self, topic_uid: str) -> dict[str, Any]:
         async with self._connect() as db:

@@ -44,7 +44,7 @@ from ..topic_settings import TOPIC_SETTINGS_REVISION
 from .topic_maintenance_manager import TopicMaintenanceManager
 
 
-_FRAGMENT_PROMPT_VERSION = "topic-fragment-v13-structured-output"
+_FRAGMENT_PROMPT_VERSION = "topic-fragment-v14-source-accounting"
 _SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v10-structured-output"
 _COMPONENT_REVIEW_PROMPT_VERSION = "topic-component-review-v2-structured-output"
 _NARRATIVE_SCHEMA_VERSION = "first_person_assistant_roles_v3"
@@ -494,6 +494,35 @@ class TopicBuildManager:
                 for uid in incremental_scope.get("affected_topic_uids", [])
                 if str(uid)
             }
+            seed_timeline_uids = {
+                str(uid)
+                for uid in incremental_scope.get("seed_timeline_uids", [])
+                if str(uid)
+            }
+            seed_topic_uids = {
+                str(uid)
+                for uid in incremental_scope.get("seed_topic_uids", [])
+                if str(uid)
+            }
+            if (
+                run_mode is TopicMaintenanceMode.INCREMENTAL
+                and seed_timeline_uids
+                and "seed_topic_uids" not in incremental_scope
+            ):
+                for timeline_uid in seed_timeline_uids:
+                    for row in await self.store.get_topics_for_timeline(
+                        timeline_uid
+                    ):
+                        if (
+                            str(row.get("status") or "")
+                            == TopicMemoryStatus.ACTIVE.value
+                            and str(row.get("link_status") or "") == "active"
+                        ):
+                            seed_topic_uids.add(str(row["topic_uid"]))
+            scoped_incremental_publish = bool(
+                run_mode is TopicMaintenanceMode.INCREMENTAL
+                and seed_timeline_uids
+            )
             if (
                 run_mode is TopicMaintenanceMode.INCREMENTAL
                 and affected_topic_uids
@@ -605,6 +634,20 @@ class TopicBuildManager:
                         and bool(affected_topic_uids)
                     ),
                 )
+                component_timeline_uids = {
+                    uid
+                    for fragment in component_fragments
+                    for uid in fragment.timeline_uids
+                }
+                if (
+                    scoped_incremental_publish
+                    and not component_timeline_uids & seed_timeline_uids
+                    and not (
+                        matched is not None
+                        and matched.topic_uid in seed_topic_uids
+                    )
+                ):
+                    continue
                 if (
                     matched is not None
                     and run_mode is TopicMaintenanceMode.INCREMENTAL
@@ -777,8 +820,14 @@ class TopicBuildManager:
                 if run_mode is TopicMaintenanceMode.FULL
                 else {topic.topic_uid: topic for topic in all_existing}
             )
+            publication_affected_topic_uids = set(affected_topic_uids)
+            if scoped_incremental_publish:
+                publication_affected_topic_uids = {
+                    *seed_topic_uids,
+                    *used_existing,
+                }
             if run_mode is TopicMaintenanceMode.INCREMENTAL:
-                for topic_uid in affected_topic_uids:
+                for topic_uid in publication_affected_topic_uids:
                     final_topic_map.pop(topic_uid, None)
             final_topic_map.update(
                 (snapshot["topic"].topic_uid, snapshot["topic"])
@@ -809,7 +858,7 @@ class TopicBuildManager:
                 mode=run_mode,
                 snapshots=snapshots,
                 relations=relations,
-                affected_topic_uids=affected_topic_uids,
+                affected_topic_uids=publication_affected_topic_uids,
                 reset_topics=reset_topics,
             )
             await self._emit(
@@ -1106,7 +1155,11 @@ class TopicBuildManager:
                         )
                         parsed = self._parse_json_object(raw)
                     parsed = self._decode_fragment_refs(
-                        parsed, timeline_refs, source_refs, actor_refs
+                        parsed,
+                        timeline_refs,
+                        source_refs,
+                        actor_refs,
+                        require_source_accounting=True,
                     )
                     batch_fragments = self._validate_fragments(
                         parsed,
@@ -1133,6 +1186,7 @@ class TopicBuildManager:
                             timeline_refs,
                             source_refs,
                             actor_refs,
+                            require_source_accounting=True,
                         )
                         batch_fragments = self._validate_fragments(
                             repaired,
@@ -4005,6 +4059,11 @@ class TopicBuildManager:
                             [candidate]
                         ),
                         "mentioned_actor_refs": [],
+                        "source_accounting": {
+                            "complete": True,
+                            "omitted_source_refs": [],
+                            "mode": "deterministic_fallback",
+                        },
                         "validation_repairs": [
                             {
                                 "type": "fragment_batch_fallback",
@@ -4134,6 +4193,17 @@ class TopicBuildManager:
         if not isinstance(raw_fragments, list) or not raw_fragments:
             raise TopicBuildValidationError("fragments must be a non-empty array")
         allowed = {item.memory_uid: item for item in inputs}
+        omissions_by_timeline: dict[str, list[dict[str, Any]]] = {}
+        for omission in parsed.get("omitted_source_refs", []):
+            if not isinstance(omission, dict):
+                continue
+            timeline_uid = str(
+                omission.get("source_timeline_uid") or ""
+            ).strip()
+            if timeline_uid in allowed:
+                omissions_by_timeline.setdefault(timeline_uid, []).append(
+                    dict(omission)
+                )
         allowed_fingerprints = {
             fingerprint for item in inputs for fingerprint in item.atom_fingerprints
         }
@@ -4400,6 +4470,18 @@ class TopicBuildManager:
                                 if message.get("message_id") is not None
                             }
                         ),
+                        "source_accounting": {
+                            "complete": bool(
+                                parsed.get("source_accounting_complete", False)
+                            ),
+                            "omitted_source_refs": [
+                                omission
+                                for item in source_items
+                                for omission in omissions_by_timeline.get(
+                                    item.memory_uid, []
+                                )
+                            ],
+                        },
                         "validation_repairs": validation_repairs,
                     },
                 )
@@ -4925,9 +5007,25 @@ class TopicBuildManager:
         return str(response.completion_text)
 
     async def _request_llm(self, prompt: str, system_prompt: str, **kwargs: Any) -> Any:
-        retries = max(1, int(self.config.get("llm_max_retries", 3)))
+        max_attempts = max(1, int(self.config.get("llm_max_retries", 3)))
+        if self._provider_accepts_request_retry_budget():
+            provider_kwargs = dict(kwargs)
+            provider_kwargs.setdefault("request_max_retries", max_attempts)
+            try:
+                async with self._llm_semaphore:
+                    return await self.llm_provider.text_chat(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        **provider_kwargs,
+                    )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Topic LLM request failed after Provider retry budget "
+                    f"({max_attempts} attempts): {exc}"
+                ) from exc
+
         last_error: Exception | None = None
-        for attempt in range(retries):
+        for attempt in range(max_attempts):
             try:
                 async with self._llm_semaphore:
                     response = await self.llm_provider.text_chat(
@@ -4938,9 +5036,17 @@ class TopicBuildManager:
                 return response
             except Exception as exc:
                 last_error = exc
-                if attempt + 1 < retries:
+                if attempt + 1 < max_attempts:
                     await asyncio.sleep((2**attempt) + random.uniform(0, 0.5))
         raise RuntimeError(f"Topic LLM request failed: {last_error}") from last_error
+
+    def _provider_accepts_request_retry_budget(self) -> bool:
+        """Use the Provider's retry loop when it exposes the AstrBot retry contract."""
+        try:
+            parameters = inspect.signature(self.llm_provider.text_chat).parameters
+        except (TypeError, ValueError):
+            return False
+        return "request_max_retries" in parameters
 
     def _provider_accepts_tool_output(self) -> bool:
         try:
@@ -5143,6 +5249,25 @@ class TopicBuildManager:
             ],
             "additionalProperties": False,
         }
+        omitted_source_schema = {
+            "type": "object",
+            "properties": {
+                "source_ref": {"type": "string", "minLength": 1},
+                "reason": {
+                    "type": "string",
+                    "enum": [
+                        "duplicate",
+                        "superseded",
+                        "non_durable",
+                        "invalid_source",
+                    ],
+                },
+                "detail": {"type": "string", "minLength": 1},
+                "replacement_ref": {"type": "string", "minLength": 1},
+            },
+            "required": ["source_ref", "reason", "detail"],
+            "additionalProperties": False,
+        }
         return {
             "type": "object",
             "properties": {
@@ -5150,9 +5275,13 @@ class TopicBuildManager:
                     "type": "array",
                     "items": fragment_schema,
                     "minItems": 1,
-                }
+                },
+                "omitted_source_refs": {
+                    "type": "array",
+                    "items": omitted_source_schema,
+                },
             },
-            "required": ["fragments"],
+            "required": ["fragments", "omitted_source_refs"],
             "additionalProperties": False,
         }
 
@@ -5332,6 +5461,16 @@ Semantic rules:
    pronoun resolution, chronology and local context. The current Timeline revision
    decides what should be remembered. Never add a fact absent from source_facts and
    never restore content that a user may have removed from the Timeline.
+18. Account for every supplied source_fact ref. Cite it in at least one output fact,
+   or list it exactly once in root omitted_source_refs with a specific reason. Never
+   silently drop a relationship, intention, preference, constraint, decision, change,
+   disagreement, or outcome merely because another fact has the same broad subject.
+19. Omission is exceptional. Use duplicate only for semantically equivalent evidence
+   and superseded only when a later source explicitly replaces the earlier claim; both
+   require replacement_ref naming a supplied source ref that is actually cited by an
+   output fact. Use non_durable only for incidental details with no plausible future
+   retrieval value. Use invalid_source only when the source text itself is unusable or
+   contradictory without a supportable reading. Explain the decision in detail.
 
 Reference rules:
 - Treat refs such as T1 and T1.A1 as opaque local identifiers.
@@ -5354,6 +5493,8 @@ Reference rules:
 - Each source_ref must belong to a Timeline listed in that fragment.timeline_refs.
 - Every Timeline in fragment.timeline_refs must appear through at least one fact's
   source_refs; otherwise split it into another grounded fragment.
+- A source ref cannot be both cited and omitted. An omitted source ref must be supplied
+  in this input. A replacement_ref cannot itself be omitted.
 
 Output constraints:
 - Submit exactly one result through the required output tool. In fallback mode, return
@@ -5367,7 +5508,8 @@ Output constraints:
   evidence_requests array and produce the final fragment.
 
 Required result shape:
-- Root field: fragments.
+- Root fields: fragments and omitted_source_refs. Return an empty omitted_source_refs
+  array when every supplied source fact is retained.
 - Every fragment includes label, summary, importance, confidence,
   attribution_confidence, ambiguity_flags, evidence_requests, timeline_refs, keywords,
   participant_refs, mentioned_actor_refs, and facts.
@@ -5378,6 +5520,7 @@ source_facts = [{{"ref":"T1.A1","content":"张三喜欢黑咖啡"}},
 {{"ref":"T2.K1","content":"张三通常喝不加糖的咖啡"}}]
 merged fact = {{"type":"preference","content":"张三偏好不加糖的黑咖啡",
 "importance":0.7,"confidence":0.8,"source_refs":["T1.A1","T2.K1"]}}
+omitted_source_refs = []
 
 INPUT:
 {input_json}"""
@@ -5728,12 +5871,15 @@ INPUT:
         timeline_refs: dict[str, str],
         source_refs: dict[str, dict[str, str | None]],
         actor_refs: dict[str, dict[str, Any]],
+        *,
+        require_source_accounting: bool = False,
     ) -> dict[str, Any]:
         """Resolve model-facing refs into the existing internal provenance schema."""
         raw_fragments = parsed.get("fragments")
         if not isinstance(raw_fragments, list) or not raw_fragments:
             raise TopicBuildValidationError("fragments must be a non-empty array")
         decoded: list[dict[str, Any]] = []
+        cited_source_refs: set[str] = set()
         for fragment_index, raw in enumerate(raw_fragments):
             if not isinstance(raw, dict):
                 raise TopicBuildValidationError(
@@ -5767,6 +5913,7 @@ INPUT:
                         f"fragment {fragment_index} fact {fact_index} has invalid "
                         f"source refs: {unknown_sources or cited_refs}"
                     )
+                cited_source_refs.update(cited_refs)
                 fact_timeline_uids = list(
                     dict.fromkeys(
                         str(source_refs[ref]["timeline_uid"])
@@ -5846,7 +5993,93 @@ INPUT:
                     "mentioned_actor_refs": mentioned_actor_refs,
                 }
             )
-        return {"fragments": decoded}
+
+        raw_omissions = parsed.get("omitted_source_refs")
+        if raw_omissions is None:
+            if require_source_accounting:
+                raise TopicBuildValidationError(
+                    "omitted_source_refs is required for source accounting"
+                )
+            raw_omissions = []
+        if not isinstance(raw_omissions, list):
+            raise TopicBuildValidationError("omitted_source_refs must be an array")
+        decoded_omissions: list[dict[str, Any]] = []
+        omitted_refs: set[str] = set()
+        replacement_reasons = {"duplicate", "superseded"}
+        allowed_reasons = {
+            "duplicate", "superseded", "non_durable", "invalid_source"
+        }
+        for index, omission in enumerate(raw_omissions):
+            if not isinstance(omission, dict):
+                raise TopicBuildValidationError(
+                    f"omitted_source_refs item {index} must be an object"
+                )
+            source_ref = str(omission.get("source_ref") or "").strip()
+            reason = str(omission.get("reason") or "").strip()
+            detail = str(omission.get("detail") or "").strip()
+            replacement_ref = str(
+                omission.get("replacement_ref") or ""
+            ).strip()
+            if source_ref not in source_refs or source_ref in omitted_refs:
+                raise TopicBuildValidationError(
+                    f"omitted_source_refs item {index} has invalid source_ref "
+                    f"{source_ref or '<empty>'}"
+                )
+            if reason not in allowed_reasons or not detail:
+                raise TopicBuildValidationError(
+                    f"omitted_source_refs item {index} needs a valid reason and detail"
+                )
+            if reason in replacement_reasons and not replacement_ref:
+                raise TopicBuildValidationError(
+                    f"omitted_source_refs item {index} reason {reason} requires "
+                    "replacement_ref"
+                )
+            if replacement_ref and replacement_ref not in source_refs:
+                raise TopicBuildValidationError(
+                    f"omitted_source_refs item {index} has unknown replacement_ref "
+                    f"{replacement_ref}"
+                )
+            omitted_refs.add(source_ref)
+            source = source_refs[source_ref]
+            decoded_omissions.append(
+                {
+                    "source_ref": source_ref,
+                    "source_timeline_uid": str(source["timeline_uid"]),
+                    "source_atom_fingerprint": source.get("fingerprint"),
+                    "reason": reason,
+                    "detail": detail,
+                    "replacement_ref": replacement_ref or None,
+                }
+            )
+        overlap = sorted(cited_source_refs & omitted_refs)
+        if overlap:
+            raise TopicBuildValidationError(
+                "source refs cannot be both cited and omitted: " + ", ".join(overlap)
+            )
+        invalid_replacements = sorted(
+            {
+                str(item["replacement_ref"])
+                for item in decoded_omissions
+                if item.get("replacement_ref")
+                and item["replacement_ref"] not in cited_source_refs
+            }
+        )
+        if invalid_replacements:
+            raise TopicBuildValidationError(
+                "omission replacement refs must be cited by retained facts: "
+                + ", ".join(invalid_replacements)
+            )
+        unaccounted = sorted(set(source_refs) - cited_source_refs - omitted_refs)
+        if require_source_accounting and unaccounted:
+            raise TopicBuildValidationError(
+                "source facts were neither retained nor explicitly omitted: "
+                + ", ".join(unaccounted)
+            )
+        return {
+            "fragments": decoded,
+            "omitted_source_refs": decoded_omissions,
+            "source_accounting_complete": not unaccounted,
+        }
 
     @classmethod
     def _decode_actor_relations(
