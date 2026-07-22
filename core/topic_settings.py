@@ -96,7 +96,7 @@ TOPIC_SETTING_DESCRIPTIONS: dict[str, str] = {
     "embedding_batch_size": "一次 Embedding 请求包含的片段文本数量；限流时可适当调小。",
     "llm_concurrency": "Topic 构建期间同时进行的 LLM 请求上限。",
     "rerank_concurrency": "片段匹配期间同时进行的 Rerank 请求上限。",
-    "llm_max_retries": "单次 LLM 调用失败后允许尝试的总次数。",
+    "llm_max_retries": "单次 LLM 调用允许的总尝试次数；Provider 支持请求级重试参数时由 Provider 单层执行，避免与构建器重复重试。",
     "rerank_failure_fallback": "Rerank 不可用或失败时回退到 Embedding 结果继续构建。",
     "auto_debounce_seconds": "自动维护触发后等待并合并连续变化的时间。",
     "incremental_context_similarity": "增量构建补入既有 Timeline 上下文所需的最低相似度。",

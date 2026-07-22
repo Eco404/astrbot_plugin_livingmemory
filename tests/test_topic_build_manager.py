@@ -84,6 +84,36 @@ class _ToolUnsupportedLLM:
         return _Response({"groups": []})
 
 
+class _RetryAwareLLM:
+    def __init__(self):
+        self.calls = 0
+        self.retry_budgets = []
+
+    async def text_chat(
+        self,
+        *,
+        prompt,
+        system_prompt,
+        request_max_retries=None,
+    ):
+        del prompt, system_prompt
+        self.calls += 1
+        self.retry_budgets.append(request_max_retries)
+        return _Response({"ok": True})
+
+
+class _LegacyRetryLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def text_chat(self, *, prompt, system_prompt):
+        del prompt, system_prompt
+        self.calls += 1
+        if self.calls == 1:
+            raise TimeoutError("temporary failure")
+        return _Response({"ok": True})
+
+
 @pytest.mark.asyncio
 async def test_selected_unindexed_build_does_not_expand_to_full_without_topics():
     store = SimpleNamespace(list_topics=AsyncMock(return_value=[]))
@@ -254,7 +284,6 @@ class _GroundedLLM:
                     "unknown-timeline" if self.hallucinate else item["ref"]
                 )
                 travel = "京都" in item["summary"]
-                source_fact = item["source_facts"][0]
                 fragments.append(
                     {
                         "label": "京都旅行" if travel else "Rust 学习",
@@ -270,11 +299,15 @@ class _GroundedLLM:
                                 "importance": 0.8,
                                 "confidence": 0.9,
                                 "source_refs": [source_fact["ref"]],
+                                "actor_refs": [],
                             }
+                            for source_fact in item["source_facts"]
                         ],
                     }
                 )
-            return _Response({"fragments": fragments})
+            return _Response(
+                {"fragments": fragments, "omitted_source_refs": []}
+            )
 
         atoms = []
         for item in inputs["fragments"]:
@@ -901,6 +934,36 @@ async def test_llm_structured_output_falls_back_and_caches_unsupported_provider(
     assert manager._structured_output_capabilities[capability_key] is False
 
 
+@pytest.mark.asyncio
+async def test_llm_retry_budget_is_delegated_to_compatible_provider_once():
+    llm = _RetryAwareLLM()
+    manager = TopicBuildManager(
+        ":memory:", None, None, llm_provider=llm, config={"llm_max_retries": 4}
+    )
+
+    response = await manager._request_llm("prompt", "system")
+
+    assert json.loads(response.completion_text) == {"ok": True}
+    assert llm.calls == 1
+    assert llm.retry_budgets == [4]
+
+
+@pytest.mark.asyncio
+async def test_llm_retry_stays_local_for_legacy_provider(monkeypatch):
+    llm = _LegacyRetryLLM()
+    manager = TopicBuildManager(
+        ":memory:", None, None, llm_provider=llm, config={"llm_max_retries": 2}
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    response = await manager._request_llm("prompt", "system")
+
+    assert json.loads(response.completion_text) == {"ok": True}
+    assert llm.calls == 2
+    sleep.assert_awaited_once()
+
+
 def test_fragment_tool_schema_enforces_actor_role_containers():
     schema = TopicBuildManager._fragment_output_schema()
     fragment = schema["properties"]["fragments"]["items"]
@@ -912,6 +975,11 @@ def test_fragment_tool_schema_enforces_actor_role_containers():
     ]
     assert mentioned["properties"]["relation_type"]["enum"] == [
         "subject", "mentioned", "executor", "requester"
+    ]
+    assert "omitted_source_refs" in schema["required"]
+    omission = schema["properties"]["omitted_source_refs"]["items"]
+    assert omission["properties"]["reason"]["enum"] == [
+        "duplicate", "superseded", "non_durable", "invalid_source"
     ]
 
 
@@ -1841,6 +1909,117 @@ def test_fragment_prompt_uses_local_refs_and_restores_exact_provenance():
     assert decoded["fragments"][0]["timeline_uids"] == [candidate.memory_uid]
     assert fact["source_timeline_uids"] == [candidate.memory_uid]
     assert fact["source_atom_fingerprints"] == [fingerprint]
+
+
+def test_fragment_source_accounting_rejects_silent_loss_and_decodes_omission():
+    manager = TopicBuildManager(":memory:", None, None)
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-accounting",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="session-1",
+        content="",
+        summary="示例甲需要帮助",
+        key_facts=["示例甲请求帮助", "示例甲表达了求助意图"],
+    )
+    _, timeline_refs, source_refs, actor_refs = manager._fragment_llm_context(
+        [candidate]
+    )
+    fragments = [
+        {
+            "label": "求助",
+            "summary": "示例甲请求帮助",
+            "timeline_refs": ["T1"],
+            "facts": [
+                {
+                    "type": "request",
+                    "content": "示例甲请求帮助",
+                    "source_refs": ["T1.K1"],
+                }
+            ],
+        }
+    ]
+
+    with pytest.raises(TopicBuildValidationError, match="is required"):
+        manager._decode_fragment_refs(
+            {"fragments": fragments},
+            timeline_refs,
+            source_refs,
+            actor_refs,
+            require_source_accounting=True,
+        )
+    with pytest.raises(TopicBuildValidationError, match="neither retained"):
+        manager._decode_fragment_refs(
+            {"fragments": fragments, "omitted_source_refs": []},
+            timeline_refs,
+            source_refs,
+            actor_refs,
+            require_source_accounting=True,
+        )
+
+    decoded = manager._decode_fragment_refs(
+        {
+            "fragments": fragments,
+            "omitted_source_refs": [
+                {
+                    "source_ref": "T1.K2",
+                    "reason": "duplicate",
+                    "detail": "与已保留的求助事实语义等价",
+                    "replacement_ref": "T1.K1",
+                }
+            ],
+        },
+        timeline_refs,
+        source_refs,
+        actor_refs,
+        require_source_accounting=True,
+    )
+
+    assert decoded["source_accounting_complete"] is True
+    assert decoded["omitted_source_refs"] == [
+        {
+            "source_ref": "T1.K2",
+            "source_timeline_uid": candidate.memory_uid,
+            "source_atom_fingerprint": None,
+            "reason": "duplicate",
+            "detail": "与已保留的求助事实语义等价",
+            "replacement_ref": "T1.K1",
+        }
+    ]
+
+
+def test_fragment_source_accounting_rejects_cited_omission_overlap():
+    manager = TopicBuildManager(":memory:", None, None)
+    source_refs = {
+        "T1.K1": {"timeline_uid": "timeline-1", "fingerprint": None}
+    }
+    with pytest.raises(TopicBuildValidationError, match="both cited and omitted"):
+        manager._decode_fragment_refs(
+            {
+                "fragments": [
+                    {
+                        "label": "测试",
+                        "summary": "测试",
+                        "timeline_refs": ["T1"],
+                        "facts": [
+                            {"content": "测试", "source_refs": ["T1.K1"]}
+                        ],
+                    }
+                ],
+                "omitted_source_refs": [
+                    {
+                        "source_ref": "T1.K1",
+                        "reason": "non_durable",
+                        "detail": "测试",
+                    }
+                ],
+            },
+            {"T1": "timeline-1"},
+            source_refs,
+            {},
+            require_source_accounting=True,
+        )
 
 
 def test_fragment_actor_refs_are_constrained_and_unresolved_ids_are_fragment_local():
@@ -2855,8 +3034,25 @@ async def test_incremental_build_preserves_topic_uid_and_prior_sources(tmp_path:
     travel = next(
         topic for topic in await store.list_topics(space_id) if topic.title == "京都旅行"
     )
+    rust = next(
+        topic for topic in await store.list_topics(space_id) if topic.title == "Rust 学习"
+    )
 
-    added_at = time.time()
+    # Move the unrelated Rust source into the same local review window. It may
+    # be used as rebuild context but must not be republished.
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "UPDATE memory_source_spans SET started_at = ?, ended_at = ? "
+            "WHERE memory_uid = ?",
+            (1350.0, 1360.0, "timeline-code-1"),
+        )
+        await db.execute(
+            "UPDATE memory_registry SET created_at = ?, updated_at = ? "
+            "WHERE memory_uid = ?",
+            (1350.0, 1360.0, "timeline-code-1"),
+        )
+        await db.commit()
+    added_at = 1400.0
     metadata = {
         "session_id": "bot:FriendMessage:user-1",
         "persona_id": "persona-1",
@@ -2905,6 +3101,9 @@ async def test_incremental_build_preserves_topic_uid_and_prior_sources(tmp_path:
         "timeline-travel-2",
         "timeline-travel-3",
     }
+    unchanged_rust = await store.get_topic(rust.topic_uid)
+    assert unchanged_rust is not None
+    assert unchanged_rust.revision == rust.revision == 1
 
 
 @pytest.mark.asyncio

@@ -86,6 +86,7 @@ async def test_incremental_scope_reuses_full_time_cluster_context():
     )
 
     assert scope["seed_timeline_uids"] == ["timeline-2"]
+    assert scope["seed_topic_uids"] == []
     assert set(scope["timeline_uids"]) == {
         "timeline-1",
         "timeline-2",
