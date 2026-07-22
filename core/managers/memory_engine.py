@@ -10,7 +10,7 @@ import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import aiosqlite
 
@@ -104,6 +104,7 @@ class MemoryEngine:
         rerank_provider=None,
         config: dict[str, Any] | None = None,
         identity_profile_store: AuthoritativeIdentityStore | None = None,
+        topic_provider_resolver: Callable[[], dict[str, Any]] | None = None,
     ):
         """
         初始化记忆引擎
@@ -129,6 +130,7 @@ class MemoryEngine:
         self.identity_profile_store = (
             identity_profile_store or AuthoritativeIdentityStore()
         )
+        self.topic_provider_resolver = topic_provider_resolver
         self.config = config or {}
         self.graph_enabled = bool(self.config.get("graph_memory_enabled", False))
         self.atom_enabled = bool(
@@ -179,12 +181,14 @@ class MemoryEngine:
             rerank_provider=self.rerank_provider,
             config=topic_build_config,
             identity_profile_store=self.identity_profile_store,
+            provider_resolver=self.topic_provider_resolver,
         )
         self.topic_retriever = TopicRetriever(
             self.topic_memory_store,
             embedding_provider=getattr(self.faiss_db, "embedding_provider", None),
             rerank_provider=self.rerank_provider,
             config=topic_build_config,
+            provider_resolver=self.topic_provider_resolver,
         )
         self.topic_recall_pipeline = TopicRecallPipeline(
             self.topic_retriever,

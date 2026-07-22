@@ -391,6 +391,11 @@ class TopicRecallPipeline:
             query_vectors = await self.retriever._get_embeddings(
                 [branch.text for branch in branches]
             )
+        if query_vectors:
+            self.retriever.validate_fragment_embeddings(
+                [row["fragment"] for row in safe_rows],
+                query_vectors[0],
+            )
         parents = {item.topic_uid: item for item in topic_results}
         fragment_counts: dict[str, int] = {}
         for row in safe_rows:

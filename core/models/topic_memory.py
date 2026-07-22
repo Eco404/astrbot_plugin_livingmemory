@@ -77,6 +77,7 @@ class TopicMemory:
     decay_anchor_at: float | None = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    embedding_signature: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     participants: list[TopicActorRef] = field(default_factory=list)
     mentioned_actors: list[TopicActorRef] = field(default_factory=list)
@@ -296,6 +297,7 @@ class TopicFragmentDraft:
     input_hash: str = ""
     provider_id: str = ""
     model_id: str = ""
+    embedding_signature: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)

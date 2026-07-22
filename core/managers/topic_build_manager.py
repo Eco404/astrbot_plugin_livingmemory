@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import inspect
 import json
@@ -12,12 +13,20 @@ import re
 import time
 import uuid
 from collections import Counter
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from astrbot.api import logger
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 
 from ...storage.topic_memory_store import TopicMemoryStore
+from ..embedding_signature import (
+    SUPPORTED_TOPIC_EMBEDDING_FORMATS,
+    TOPIC_CENTROID_EMBEDDING_FORMAT,
+    TOPIC_DIRECT_EMBEDDING_FORMAT,
+    TOPIC_FRAGMENT_EMBEDDING_FORMAT,
+    make_embedding_signature,
+    signature_mismatch_reason,
+)
 from ..models.identity_profile import (
     AuthoritativeIdentityProfile,
     AuthoritativeIdentityStore,
@@ -41,6 +50,7 @@ from ..models.topic_memory import (
     TopicTimelineLink,
 )
 from ..topic_settings import TOPIC_SETTINGS_REVISION
+from ..topic_runtime import TopicBuildRunContext
 from .topic_maintenance_manager import TopicMaintenanceManager
 
 
@@ -96,14 +106,19 @@ class TopicBuildManager:
         config: dict[str, Any] | None = None,
         identity_profile_store: AuthoritativeIdentityStore | None = None,
         conversation_store: Any = None,
+        provider_resolver: Callable[[], dict[str, Any]] | None = None,
     ):
         self.db_path = db_path
         self.store = store
         self.candidate_manager = candidate_manager
-        self.llm_provider = llm_provider
-        self.embedding_provider = embedding_provider
-        self.rerank_provider = rerank_provider
-        self.config = config or {}
+        self._default_llm_provider = llm_provider
+        self._default_embedding_provider = embedding_provider
+        self._default_rerank_provider = rerank_provider
+        self._default_config = dict(config or {})
+        self._runtime_context: contextvars.ContextVar[
+            TopicBuildRunContext | None
+        ] = contextvars.ContextVar("topic_build_runtime_context", default=None)
+        self.provider_resolver = provider_resolver
         self.identity_profile_store = (
             identity_profile_store or AuthoritativeIdentityStore()
         )
@@ -119,23 +134,144 @@ class TopicBuildManager:
         self._llm_semaphore = asyncio.Semaphore(self.llm_concurrency)
         self._rerank_semaphore = asyncio.Semaphore(self.rerank_concurrency)
         self._space_locks: dict[str, asyncio.Lock] = {}
-        self._configuration_lock = asyncio.Lock()
-        self._structured_output_capabilities: dict[tuple[str, str], bool] = {}
+        self._structured_output_capabilities: dict[
+            tuple[str, str, int], bool
+        ] = {}
         self._scheduled: dict[str, asyncio.Task] = {}
         self._scheduled_requests: dict[str, dict[str, Any]] = {}
         self._scheduled_wakeups: dict[str, asyncio.Event] = {}
 
+    @property
+    def config(self) -> Mapping[str, Any]:
+        context = self._runtime_context.get()
+        return context.config if context is not None else self._default_config
+
+    @config.setter
+    def config(self, value: dict[str, Any]) -> None:
+        self._default_config = dict(value)
+
+    @property
+    def llm_provider(self) -> Any:
+        context = self._runtime_context.get()
+        return context.llm_provider if context is not None else self._default_llm_provider
+
+    @llm_provider.setter
+    def llm_provider(self, value: Any) -> None:
+        self._default_llm_provider = value
+
+    @property
+    def embedding_provider(self) -> Any:
+        context = self._runtime_context.get()
+        return (
+            context.embedding_provider
+            if context is not None
+            else self._default_embedding_provider
+        )
+
+    @embedding_provider.setter
+    def embedding_provider(self, value: Any) -> None:
+        self._default_embedding_provider = value
+
+    @property
+    def rerank_provider(self) -> Any:
+        context = self._runtime_context.get()
+        return (
+            context.rerank_provider
+            if context is not None
+            else self._default_rerank_provider
+        )
+
+    @rerank_provider.setter
+    def rerank_provider(self, value: Any) -> None:
+        self._default_rerank_provider = value
+
+    @property
+    def llm_concurrency(self) -> int:
+        context = self._runtime_context.get()
+        return context.llm_concurrency if context is not None else self._default_llm_concurrency
+
+    @llm_concurrency.setter
+    def llm_concurrency(self, value: int) -> None:
+        self._default_llm_concurrency = int(value)
+
+    @property
+    def rerank_concurrency(self) -> int:
+        context = self._runtime_context.get()
+        return (
+            context.rerank_concurrency
+            if context is not None
+            else self._default_rerank_concurrency
+        )
+
+    @rerank_concurrency.setter
+    def rerank_concurrency(self, value: int) -> None:
+        self._default_rerank_concurrency = int(value)
+
+    @property
+    def _llm_semaphore(self) -> asyncio.Semaphore:
+        context = self._runtime_context.get()
+        return context.llm_semaphore if context is not None else self._default_llm_semaphore
+
+    @_llm_semaphore.setter
+    def _llm_semaphore(self, value: asyncio.Semaphore) -> None:
+        self._default_llm_semaphore = value
+
+    @property
+    def _rerank_semaphore(self) -> asyncio.Semaphore:
+        context = self._runtime_context.get()
+        return (
+            context.rerank_semaphore
+            if context is not None
+            else self._default_rerank_semaphore
+        )
+
+    @_rerank_semaphore.setter
+    def _rerank_semaphore(self, value: asyncio.Semaphore) -> None:
+        self._default_rerank_semaphore = value
+
+    def _resolved_providers(self) -> dict[str, Any]:
+        resolved = self.provider_resolver() if self.provider_resolver else {}
+        return {
+            "llm_provider": resolved.get("llm_provider", self._default_llm_provider),
+            "embedding_provider": resolved.get(
+                "embedding_provider", self._default_embedding_provider
+            ),
+            "rerank_provider": resolved.get(
+                "rerank_provider", self._default_rerank_provider
+            ),
+        }
+
+    def _make_run_context(
+        self,
+        *,
+        memory_space_id: str,
+        run_uid: str,
+        config: dict[str, Any],
+    ) -> TopicBuildRunContext:
+        providers = self._resolved_providers()
+        return TopicBuildRunContext.create(
+            memory_space_id=memory_space_id,
+            run_uid=run_uid,
+            config=config,
+            **providers,
+        )
+
     def apply_config(self, config: dict[str, Any]) -> None:
         """Apply settings between builds; callers must reject active mutations."""
-        self.config = dict(config)
-        self.llm_concurrency = max(
-            1, min(64, int(self.config.get("llm_concurrency", 1)))
+        normalized = dict(config)
+        self._default_config = normalized
+        self._default_llm_concurrency = max(
+            1, min(64, int(normalized.get("llm_concurrency", 1)))
         )
-        self.rerank_concurrency = max(
-            1, min(32, int(self.config.get("rerank_concurrency", 1)))
+        self._default_rerank_concurrency = max(
+            1, min(32, int(normalized.get("rerank_concurrency", 1)))
         )
-        self._llm_semaphore = asyncio.Semaphore(self.llm_concurrency)
-        self._rerank_semaphore = asyncio.Semaphore(self.rerank_concurrency)
+        self._default_llm_semaphore = asyncio.Semaphore(
+            self._default_llm_concurrency
+        )
+        self._default_rerank_semaphore = asyncio.Semaphore(
+            self._default_rerank_concurrency
+        )
 
     def schedule_space(
         self,
@@ -261,6 +397,239 @@ class TopicBuildManager:
                 "relation_count": relation_count,
                 "algorithm_version": _RELATION_ALGORITHM_VERSION,
             }
+
+    async def get_embedding_health(self, memory_space_id: str) -> dict[str, Any]:
+        """Inspect persisted vector signatures without making model calls."""
+        embedding_provider = self._resolved_providers()["embedding_provider"]
+        topics = await self.store.list_topics(
+            memory_space_id,
+            status=TopicMemoryStatus.ACTIVE,
+            limit=5000,
+        )
+        fragments = await self.store.list_formal_fragments(memory_space_id)
+        reasons: Counter[str] = Counter()
+        if embedding_provider is None and (topics or fragments):
+            reasons["provider_unavailable"] = len(topics) + len(fragments)
+        else:
+            for topic in topics:
+                vector = topic.metadata.get("embedding", [])
+                reason = (
+                    "missing_embedding"
+                    if not vector
+                    else signature_mismatch_reason(
+                        topic.embedding_signature,
+                        embedding_provider,
+                        expected_formats=SUPPORTED_TOPIC_EMBEDDING_FORMATS,
+                    )
+                )
+                if reason:
+                    reasons[reason] += 1
+            for fragment in fragments:
+                reason = (
+                    "missing_embedding"
+                    if not fragment.embedding
+                    else signature_mismatch_reason(
+                        fragment.embedding_signature,
+                        embedding_provider,
+                        expected_formats={TOPIC_FRAGMENT_EMBEDDING_FORMAT},
+                    )
+                )
+                if reason:
+                    reasons[reason] += 1
+        return {
+            "needs_revectorization": bool(reasons),
+            "topic_count": len(topics),
+            "fragment_count": len(fragments),
+            "incompatible_count": sum(reasons.values()),
+            "reasons": dict(sorted(reasons.items())),
+        }
+
+    async def revectorize_space(
+        self,
+        memory_space_id: str,
+        *,
+        progress_callback=None,
+    ) -> dict[str, Any]:
+        """Regenerate Topic vectors and relations without invoking the LLM."""
+        memory_space_id = str(memory_space_id or "").strip()
+        if not memory_space_id:
+            raise ValueError("memory_space_id is required")
+        lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeError("Topic build is already running for this memory space")
+        async with lock:
+            operation_uid = f"revectorize:{uuid.uuid4()}"
+            context = self._make_run_context(
+                memory_space_id=memory_space_id,
+                run_uid=operation_uid,
+                config=dict(self._default_config),
+            )
+            token = self._runtime_context.set(context)
+            try:
+                return await self._revectorize_space_impl(
+                    memory_space_id,
+                    operation_uid=operation_uid,
+                    progress_callback=progress_callback,
+                )
+            finally:
+                self._runtime_context.reset(token)
+
+    async def _revectorize_space_impl(
+        self,
+        memory_space_id: str,
+        *,
+        operation_uid: str,
+        progress_callback=None,
+    ) -> dict[str, Any]:
+        if self.embedding_provider is None:
+            raise RuntimeError("重新向量化需要可用的 Embedding Provider")
+        topics = await self.store.list_topics(
+            memory_space_id,
+            status=TopicMemoryStatus.ACTIVE,
+            limit=5000,
+        )
+        if not topics:
+            return {
+                "memory_space_id": memory_space_id,
+                "topic_count": 0,
+                "fragment_count": 0,
+                "relation_count": 0,
+            }
+        formal_fragments = await self.store.list_formal_fragments(memory_space_id)
+        batch_size = max(
+            1, min(64, int(self.config.get("embedding_batch_size", 8)))
+        )
+        fragment_updates: list[dict[str, Any]] = []
+        fragment_vectors: dict[str, list[float]] = {}
+        for start in range(0, len(formal_fragments), batch_size):
+            batch = formal_fragments[start : start + batch_size]
+            vectors = await self._get_embeddings(
+                [self._fragment_embedding_text(item) for item in batch]
+            )
+            if len(vectors) != len(batch):
+                raise RuntimeError(
+                    "Embedding Provider returned an unexpected vector count"
+                )
+            for fragment, vector in zip(batch, vectors, strict=True):
+                normalized = [float(value) for value in vector]
+                signature = make_embedding_signature(
+                    self.embedding_provider,
+                    dimension=len(normalized),
+                    input_format_version=TOPIC_FRAGMENT_EMBEDDING_FORMAT,
+                )
+                fragment_vectors[fragment.fragment_uid] = normalized
+                fragment_updates.append(
+                    {
+                        "fragment_uid": fragment.fragment_uid,
+                        "embedding": normalized,
+                        "embedding_signature": signature,
+                    }
+                )
+            await self._emit(
+                progress_callback,
+                operation_uid,
+                "revector_fragments",
+                min(start + len(batch), len(formal_fragments)),
+                len(formal_fragments),
+                activity="embedding",
+            )
+
+        link_rows = await self.store.list_active_fragments_for_topics(
+            [topic.topic_uid for topic in topics]
+        )
+        linked_fragment_uids: dict[str, list[str]] = {}
+        for row in link_rows:
+            linked_fragment_uids.setdefault(str(row["topic_uid"]), []).append(
+                row["fragment"].fragment_uid
+            )
+        direct_topics = [
+            topic
+            for topic in topics
+            if not linked_fragment_uids.get(topic.topic_uid)
+        ]
+        direct_vectors: dict[str, list[float]] = {}
+        for start in range(0, len(direct_topics), batch_size):
+            batch = direct_topics[start : start + batch_size]
+            vectors = await self._get_embeddings(
+                [self._topic_embedding_text(topic) for topic in batch]
+            )
+            if len(vectors) != len(batch):
+                raise RuntimeError(
+                    "Embedding Provider returned an unexpected vector count"
+                )
+            for topic, vector in zip(batch, vectors, strict=True):
+                direct_vectors[topic.topic_uid] = [float(value) for value in vector]
+
+        topic_updates: list[dict[str, Any]] = []
+        topics_with_vectors: list[TopicMemory] = []
+        for position, topic in enumerate(topics, 1):
+            linked_vectors = [
+                fragment_vectors[uid]
+                for uid in linked_fragment_uids.get(topic.topic_uid, [])
+                if uid in fragment_vectors
+            ]
+            if linked_vectors:
+                vector = self._average_vectors(linked_vectors)
+                input_format = TOPIC_CENTROID_EMBEDDING_FORMAT
+            else:
+                vector = direct_vectors.get(topic.topic_uid, [])
+                input_format = TOPIC_DIRECT_EMBEDDING_FORMAT
+            if not vector:
+                raise RuntimeError(f"无法为 Topic {topic.topic_uid} 生成有效向量")
+            signature = make_embedding_signature(
+                self.embedding_provider,
+                dimension=len(vector),
+                input_format_version=input_format,
+            )
+            topic.metadata = {**topic.metadata, "embedding": vector}
+            topic.embedding_signature = signature
+            topic_updates.append(
+                {
+                    "topic_uid": topic.topic_uid,
+                    "expected_revision": topic.revision,
+                    "embedding": vector,
+                    "embedding_signature": signature,
+                }
+            )
+            topics_with_vectors.append(topic)
+            await self._emit(
+                progress_callback,
+                operation_uid,
+                "revector_topics",
+                position,
+                len(topics),
+                activity="centroid",
+            )
+
+        await self._emit(
+            progress_callback,
+            operation_uid,
+            "revector_relations",
+            0,
+            1,
+            activity="relations",
+        )
+        relations = self._derive_topic_relations(operation_uid, topics_with_vectors)
+        published = await self.store.replace_embeddings_and_relations(
+            memory_space_id=memory_space_id,
+            topic_updates=topic_updates,
+            fragment_updates=fragment_updates,
+            relations=relations,
+        )
+        await self._emit(
+            progress_callback,
+            operation_uid,
+            "revector_relations",
+            1,
+            1,
+            activity="publication",
+        )
+        return {
+            "memory_space_id": memory_space_id,
+            "topic_count": published["topics"],
+            "fragment_count": published["fragments"],
+            "relation_count": published["relations"],
+        }
 
     async def clear_topic_space(self, memory_space_id: str) -> dict[str, int]:
         """Clear one space while excluding builds and other Topic maintenance."""
@@ -399,18 +768,21 @@ class TopicBuildManager:
         if run is None:
             raise ValueError(f"Topic maintenance run not found: {run_uid}")
         snapshot = (run.get("config") or {}).get("topic_settings")
-        async with self._configuration_lock:
-            previous = dict(self.config)
-            if isinstance(snapshot, dict):
-                merged = dict(previous)
-                merged.update(snapshot)
-                self.apply_config(merged)
-            try:
-                return await self._build_from_scan_impl(
-                    run_uid, progress_callback=progress_callback
-                )
-            finally:
-                self.apply_config(previous)
+        merged = dict(self._default_config)
+        if isinstance(snapshot, dict):
+            merged.update(snapshot)
+        context = self._make_run_context(
+            memory_space_id=str(run["memory_space_id"]),
+            run_uid=run_uid,
+            config=merged,
+        )
+        token = self._runtime_context.set(context)
+        try:
+            return await self._build_from_scan_impl(
+                run_uid, progress_callback=progress_callback
+            )
+        finally:
+            self._runtime_context.reset(token)
 
     async def _build_from_scan_impl(
         self, run_uid: str, *, progress_callback=None
@@ -1121,6 +1493,11 @@ class TopicBuildManager:
             )
             for (_, _, batch), output in zip(batch_specs, raw_outputs, strict=True):
                 raw, timeline_refs, source_refs, actor_refs, prompt = output
+                batch_payload, _, _, _ = self._fragment_llm_context(batch)
+                batch_input_hash, batch_prompt_hash = self._fragment_request_hashes(
+                    batch_payload,
+                    prompt,
+                )
                 fragment_index_offset = len(fragments)
                 try:
                     parsed = self._parse_json_object(raw)
@@ -1146,10 +1523,20 @@ class TopicBuildManager:
                                 sort_keys=True,
                             )
                         )
+                        batch_payload = evidence_payload
+                        prompt += (
+                            "\n\nThe requested raw evidence has now been attached. "
+                            "Return the final fragments and leave evidence_requests "
+                            "empty."
+                        )
+                        batch_input_hash, batch_prompt_hash = (
+                            self._fragment_request_hashes(
+                                batch_payload,
+                                prompt,
+                            )
+                        )
                         raw = await self._call_llm(
-                            prompt
-                            + "\n\nThe requested raw evidence has now been attached. "
-                            "Return the final fragments and leave evidence_requests empty.",
+                            prompt,
                             self._fragment_system_prompt(),
                             output_contract="fragments",
                         )
@@ -1166,18 +1553,25 @@ class TopicBuildManager:
                         run_uid,
                         group,
                         batch,
-                        prompt_hash,
-                        input_hash,
+                        batch_prompt_hash,
+                        batch_input_hash,
                         provider_id,
                         model_id,
                         fragment_index_offset=fragment_index_offset,
                     )
                 except TopicBuildValidationError as first_exc:
                     try:
+                        correction_prompt = self._validation_correction_prompt(
+                            prompt, raw, first_exc
+                        )
+                        batch_input_hash, batch_prompt_hash = (
+                            self._fragment_request_hashes(
+                                batch_payload,
+                                correction_prompt,
+                            )
+                        )
                         repaired_raw = await self._call_llm(
-                            self._validation_correction_prompt(
-                                prompt, raw, first_exc
-                            ),
+                            correction_prompt,
                             self._fragment_system_prompt(),
                             output_contract="fragments",
                         )
@@ -1193,8 +1587,8 @@ class TopicBuildManager:
                             run_uid,
                             group,
                             batch,
-                            prompt_hash,
-                            input_hash,
+                            batch_prompt_hash,
+                            batch_input_hash,
                             provider_id,
                             model_id,
                             fragment_index_offset=fragment_index_offset,
@@ -1213,8 +1607,8 @@ class TopicBuildManager:
                             run_uid,
                             group,
                             batch,
-                            prompt_hash,
-                            input_hash,
+                            batch_prompt_hash,
+                            batch_input_hash,
                             provider_id,
                             model_id,
                             fragment_index_offset=fragment_index_offset,
@@ -1232,6 +1626,7 @@ class TopicBuildManager:
                 )
             )
             raise
+
         except Exception as exc:
             await self.store.finish_group_job(
                 run_uid,
@@ -1239,6 +1634,21 @@ class TopicBuildManager:
                 error=str(exc),
             )
             raise
+
+    def _fragment_request_hashes(
+        self,
+        payload: dict[str, Any],
+        prompt: str,
+    ) -> tuple[str, str]:
+        input_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        input_hash = hashlib.sha256(input_json.encode()).hexdigest()
+        prompt_hash = hashlib.sha256(
+            (
+                f"{_FRAGMENT_PROMPT_VERSION}\n"
+                f"{self._fragment_system_prompt()}\n{prompt}"
+            ).encode()
+        ).hexdigest()
+        return input_hash, prompt_hash
 
     @staticmethod
     def _requested_evidence_refs(
@@ -1332,7 +1742,17 @@ class TopicBuildManager:
     async def _embed_fragments(
         self, fragments: list[TopicFragmentDraft], progress_callback=None
     ) -> list[TopicFragmentDraft]:
-        missing = [item for item in fragments if not item.embedding]
+        missing = [
+            item
+            for item in fragments
+            if not item.embedding
+            or signature_mismatch_reason(
+                item.embedding_signature,
+                self.embedding_provider,
+                expected_formats={TOPIC_FRAGMENT_EMBEDDING_FORMAT},
+            )
+            is not None
+        ]
         if missing and self.embedding_provider is None:
             raise RuntimeError("Topic build requires an Embedding Provider")
         batch_size = max(1, int(self.config.get("embedding_batch_size", 8)))
@@ -1345,7 +1765,16 @@ class TopicBuildManager:
             for fragment, vector in zip(batch, vectors, strict=True):
                 normalized = [float(value) for value in vector]
                 fragment.embedding = normalized
-                await self.store.update_fragment_embedding(fragment.fragment_uid, normalized)
+                fragment.embedding_signature = make_embedding_signature(
+                    self.embedding_provider,
+                    dimension=len(normalized),
+                    input_format_version=TOPIC_FRAGMENT_EMBEDDING_FORMAT,
+                )
+                await self.store.update_fragment_embedding(
+                    fragment.fragment_uid,
+                    normalized,
+                    fragment.embedding_signature,
+                )
             await self._emit(
                 progress_callback,
                 batch[0].run_uid if batch else "",
@@ -3640,6 +4069,11 @@ class TopicBuildManager:
             access_count=existing.access_count if existing else 0,
             decay_anchor_at=time.time(),
             created_at=existing.created_at if existing else time.time(),
+            embedding_signature=make_embedding_signature(
+                self.embedding_provider,
+                dimension=len(embedding),
+                input_format_version=TOPIC_CENTROID_EMBEDDING_FORMAT,
+            ),
             metadata={
                 "build_run_uid": run_uid,
                 "fragment_uids": [item.fragment_uid for item in fragments],
@@ -4944,7 +5378,7 @@ class TopicBuildManager:
     ) -> str:
         if self.llm_provider is None:
             raise RuntimeError("Topic build requires an LLM Provider")
-        capability_key = self._provider_identity(self.llm_provider)
+        capability_key = self._provider_capability_key(self.llm_provider)
         if (
             output_contract
             and self._structured_output_capabilities.get(capability_key) is not False
@@ -4982,22 +5416,21 @@ class TopicBuildManager:
                     try:
                         self._parse_json_object(raw)
                     except TopicBuildValidationError:
-                        self._disable_structured_output(
-                            capability_key,
-                            "provider ignored the required output tool and returned "
-                            "non-JSON text"
+                        logger.warning(
+                            "[TopicMemory] Provider 本次忽略了必需的结构化输出工具"
+                            "并返回非 JSON 文本，本次请求回退到文本模式"
                         )
                     else:
-                        self._disable_structured_output(
-                            capability_key,
-                            "provider ignored the required output tool and returned "
-                            "JSON text"
+                        logger.info(
+                            "[TopicMemory] Provider 本次忽略了结构化输出工具，"
+                            "但返回了有效 JSON；仅接受本次文本结果"
                         )
                         return raw
-                self._disable_structured_output(
-                    capability_key,
-                    "provider returned neither output-tool arguments nor JSON text"
-                )
+                else:
+                    logger.warning(
+                        "[TopicMemory] Provider 本次未返回结构化输出工具参数或"
+                        "JSON 文本，本次请求回退到文本模式"
+                    )
             except Exception as exc:
                 if not self._is_tool_output_unsupported(exc):
                     raise
@@ -5095,7 +5528,7 @@ class TopicBuildManager:
 
     def _disable_structured_output(
         self,
-        capability_key: tuple[str, str],
+        capability_key: tuple[str, str, int],
         reason: str,
     ) -> None:
         if self._structured_output_capabilities.get(capability_key) is not False:
@@ -6970,6 +7403,13 @@ INPUT:
         return f"{item.label}\n{item.summary}\n{facts}"[:12000]
 
     @staticmethod
+    def _topic_embedding_text(topic: TopicMemory) -> str:
+        keywords = " ".join(
+            str(value) for value in topic.metadata.get("keywords", [])
+        )
+        return f"{topic.title}\n{topic.summary}\n{keywords}"[:12000]
+
+    @staticmethod
     def _provider_identity(provider: Any) -> tuple[str, str]:
         if provider is None:
             return "", ""
@@ -6980,6 +7420,11 @@ INPUT:
             str(config.get("id") or type(provider).__name__),
             str(config.get("model") or config.get("model_name") or ""),
         )
+
+    @classmethod
+    def _provider_capability_key(cls, provider: Any) -> tuple[str, str, int]:
+        provider_id, model_id = cls._provider_identity(provider)
+        return provider_id, model_id, id(provider)
 
     @staticmethod
     def _checkpoint_hash(payload: Any) -> str:

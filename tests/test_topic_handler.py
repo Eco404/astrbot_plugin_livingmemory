@@ -66,6 +66,9 @@ async def test_failed_build_overrides_completed_scan_stage(monkeypatch):
         ("topic_synthesis", 1, 2, 87.0),
         ("materialization", 1, 2, 95.0),
         ("publication", 1, 2, 99.0),
+        ("revector_fragments", 1, 2, 27.5),
+        ("revector_topics", 1, 2, 67.5),
+        ("revector_relations", 1, 2, 90.0),
         ("completed", 0, 0, 100.0),
     ],
 )
@@ -132,6 +135,46 @@ async def test_recomputes_only_topic_relations(monkeypatch):
     assert response["status"] == "ok"
     assert response["data"]["relation_count"] == 42
     manager.recompute_topic_relations.assert_awaited_once_with("space-1")
+
+
+@pytest.mark.asyncio
+async def test_revectorization_runs_as_background_maintenance(monkeypatch):
+    request = MagicMock()
+    request.get_json = AsyncMock(return_value={"memory_space_id": "space-1"})
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+
+    async def revectorize(memory_space_id, *, progress_callback):
+        await progress_callback(
+            {
+                "stage": "revector_fragments",
+                "current": 2,
+                "total": 4,
+            }
+        )
+        return {
+            "memory_space_id": memory_space_id,
+            "topic_count": 3,
+            "fragment_count": 4,
+            "relation_count": 2,
+        }
+
+    manager = SimpleNamespace(
+        has_active_builds=lambda: False,
+        revectorize_space=AsyncMock(side_effect=revectorize),
+    )
+    handler = TopicHandler(PageApiUtils())
+    response = await handler.start_revectorization(
+        SimpleNamespace(topic_build_manager=manager)
+    )
+    job_uid = response["data"]["job_uid"]
+    await next(iter(handler._tasks))
+
+    assert handler._jobs[job_uid]["status"] == "completed"
+    assert handler._jobs[job_uid]["overall_percent"] == 100.0
+    manager.revectorize_space.assert_awaited_once()
 
 
 @pytest.mark.asyncio

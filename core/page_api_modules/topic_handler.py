@@ -64,6 +64,9 @@ class TopicHandler:
         "topic_synthesis": (82.0, 92.0),
         "materialization": (92.0, 98.0),
         "publication": (98.0, 100.0),
+        "revector_fragments": (0.0, 55.0),
+        "revector_topics": (55.0, 80.0),
+        "revector_relations": (80.0, 100.0),
         "completed": (100.0, 100.0),
     }
 
@@ -105,6 +108,20 @@ class TopicHandler:
                 ),
                 None,
             )
+            if memory_space_id:
+                overview["embedding_health"] = (
+                    await memory_engine.topic_build_manager.get_embedding_health(
+                        memory_space_id
+                    )
+                )
+            else:
+                overview["embedding_health"] = {
+                    "needs_revectorization": False,
+                    "topic_count": 0,
+                    "fragment_count": 0,
+                    "incompatible_count": 0,
+                    "reasons": {},
+                }
             overview["resumable_run"] = next(
                 (
                     self._resumable_run_payload(run)
@@ -295,6 +312,93 @@ class TopicHandler:
         except Exception as exc:
             logger.error("[PageAPI] 重算 Topic 关系失败", exc_info=True)
             return self.utils.error(str(exc))
+
+    async def start_revectorization(self, memory_engine) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        memory_space_id = self.utils.optional_text(payload.get("memory_space_id"))
+        if not memory_space_id:
+            return self.utils.error("memory_space_id 不能为空")
+        if self.has_active_jobs() or memory_engine.topic_build_manager.has_active_builds():
+            return self.utils.error("Topic 维护正在运行，请等待当前任务完成")
+        job_uid = str(uuid.uuid4())
+        now = time.time()
+        self._jobs[job_uid] = {
+            "job_uid": job_uid,
+            "operation": "revectorize",
+            "memory_space_id": memory_space_id,
+            "status": "pending",
+            "stage": "revector_fragments",
+            "current": 0,
+            "total": 0,
+            "overall_percent": 0.0,
+            "created_at": now,
+            "last_progress_at": now,
+        }
+
+        async def progress(event: dict[str, Any]) -> None:
+            job = self._jobs[job_uid]
+            stage = str(event.get("stage") or "revector_fragments")
+            current = int(event.get("current") or 0)
+            total = int(event.get("total") or 0)
+            job.update(
+                {
+                    "status": "running",
+                    "stage": stage,
+                    "current": current,
+                    "total": total,
+                    "overall_percent": self._overall_percent(
+                        stage, current, total
+                    ),
+                    "last_progress_at": time.time(),
+                }
+            )
+
+        async def run() -> None:
+            self._jobs[job_uid]["status"] = "running"
+            try:
+                result = await memory_engine.topic_build_manager.revectorize_space(
+                    memory_space_id,
+                    progress_callback=progress,
+                )
+                self._jobs[job_uid].update(
+                    {
+                        "status": "completed",
+                        "stage": "completed",
+                        "overall_percent": 100.0,
+                        "result": result,
+                        "completed_at": time.time(),
+                        "last_progress_at": time.time(),
+                    }
+                )
+            except asyncio.CancelledError:
+                self._jobs[job_uid].update(
+                    {
+                        "status": "cancelled",
+                        "stage": "cancelled",
+                        "completed_at": time.time(),
+                    }
+                )
+                raise
+            except Exception as exc:
+                failed_stage = str(self._jobs[job_uid].get("stage") or "")
+                self._jobs[job_uid].update(
+                    {
+                        "status": "failed",
+                        "stage": "failed",
+                        "failed_stage": failed_stage,
+                        "error": str(exc),
+                        "completed_at": time.time(),
+                        "last_progress_at": time.time(),
+                    }
+                )
+                logger.error("[PageAPI] Topic 重新向量化失败", exc_info=True)
+
+        task = asyncio.create_task(
+            run(), name=f"livingmemory-topic-revector-{job_uid[:8]}"
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return self.utils.ok(dict(self._jobs[job_uid]))
 
     async def clear_topics(self, memory_engine) -> dict[str, Any]:
         """Permanently clear one space after the WebUI confirmation step."""

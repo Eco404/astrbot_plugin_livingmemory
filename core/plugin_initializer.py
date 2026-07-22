@@ -421,6 +421,47 @@ class PluginInitializer:
             return inst_map.get(provider_id)
         return None
 
+    def resolve_topic_providers(self) -> dict[str, Any]:
+        """Resolve AstrBot-managed providers while retaining the built-in reranker."""
+        embedding = None
+        embedding_id = self.config_manager.get(
+            "provider_settings.embedding_provider_id"
+        )
+        if embedding_id:
+            candidate = self._get_provider_by_id(embedding_id, silent=True)
+            if isinstance(candidate, EmbeddingProvider):
+                embedding = candidate
+        if embedding is None:
+            providers = self.context.get_all_embedding_providers()
+            embedding = providers[0] if providers else None
+
+        llm = None
+        llm_id = self.config_manager.get("provider_settings.llm_provider_id")
+        if llm_id:
+            candidate = self._get_provider_by_id(llm_id, silent=True)
+            if isinstance(candidate, Provider):
+                llm = candidate
+        if llm is None:
+            candidate = self.context.get_using_provider()
+            llm = candidate if isinstance(candidate, Provider) else None
+
+        rerank = None
+        if isinstance(self.rerank_provider, CloudflareRerankClient):
+            rerank = self.rerank_provider
+        else:
+            rerank_id = self.config_manager.get(
+                "provider_settings.rerank_provider_id"
+            )
+            if rerank_id:
+                candidate = self._get_provider_by_id(rerank_id, silent=True)
+                if callable(getattr(candidate, "rerank", None)):
+                    rerank = candidate
+        return {
+            "llm_provider": llm,
+            "embedding_provider": embedding,
+            "rerank_provider": rerank,
+        }
+
     def _check_faiss_runtime(self) -> None:
         try:
             result = subprocess.run(
@@ -719,6 +760,7 @@ class PluginInitializer:
                 rerank_provider=self.rerank_provider,
                 config=memory_engine_config,
                 identity_profile_store=self.identity_profile_store,
+                topic_provider_resolver=self.resolve_topic_providers,
             )
             await self.memory_engine.initialize()
             logger.info("MemoryEngine 已初始化")

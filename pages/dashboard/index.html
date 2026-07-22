@@ -216,6 +216,7 @@
             <div class="topic-overview-compact">
               <div class="topic-overview-meta">
                 <div id="topic-flags" class="topic-flags text-secondary"></div>
+                <div id="topic-vector-warning" class="topic-vector-warning hidden" role="status"></div>
                 <div class="topic-stats">
                   <div class="topic-stat"><span data-i18n="topic.total">Topic 总数</span><strong id="topic-total">0</strong></div>
                   <div class="topic-stat"><span data-i18n="topic.active">活跃 Topic</span><strong id="topic-active">0</strong></div>
@@ -416,6 +417,13 @@
         </div>
         <div class="modal-body">
           <p class="topic-maintenance-intro text-secondary" id="topic-maintenance-intro" data-i18n="topic.maintenanceIntro">检查尚未被活跃 Topic 以当前版本索引的 Timeline，确认后仅补建所选条目。</p>
+          <div class="topic-maintenance-action">
+            <div>
+              <strong data-i18n="topic.revectorizeTitle">重新向量化并重算关系</strong>
+              <p class="text-secondary" data-i18n="topic.revectorizeIntro">使用当前 Embedding 模型更新正式片段和 Topic 向量，并重算相关话题；不调用 LLM。</p>
+            </div>
+            <button class="btn btn-secondary btn-sm" id="topic-revectorize" type="button" data-i18n="topic.revectorize">开始</button>
+          </div>
           <div class="topic-maintenance-action">
             <div>
               <strong data-i18n="topic.recomputeRelationsTitle">重新计算相关话题</strong>
