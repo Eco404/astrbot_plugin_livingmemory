@@ -10,7 +10,7 @@ import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import aiosqlite
 
@@ -48,6 +48,7 @@ from ..topic_settings import (
     topic_setting_defaults,
     validate_topic_setting,
 )
+from ..topic_vector_index import TopicVectorIndex
 from .topic_build_manager import TopicBuildManager
 from .topic_maintenance_manager import TopicMaintenanceManager
 
@@ -164,6 +165,7 @@ class MemoryEngine:
         self.atom_retriever = None
         self.memory_identity_store = MemoryIdentityStore(self.db_path)
         self.topic_memory_store = TopicMemoryStore(self.db_path)
+        self.topic_vector_index = TopicVectorIndex(self.topic_memory_store)
         self.topic_maintenance_manager = TopicMaintenanceManager(
             self.db_path,
             self.topic_memory_store,
@@ -182,6 +184,7 @@ class MemoryEngine:
             config=topic_build_config,
             identity_profile_store=self.identity_profile_store,
             provider_resolver=self.topic_provider_resolver,
+            vector_index=self.topic_vector_index,
         )
         self.topic_retriever = TopicRetriever(
             self.topic_memory_store,
@@ -189,6 +192,7 @@ class MemoryEngine:
             rerank_provider=self.rerank_provider,
             config=topic_build_config,
             provider_resolver=self.topic_provider_resolver,
+            vector_index=self.topic_vector_index,
         )
         self.topic_recall_pipeline = TopicRecallPipeline(
             self.topic_retriever,
@@ -303,6 +307,13 @@ class MemoryEngine:
     async def close(self):
         """关闭数据库连接和清理资源"""
         await self.topic_build_manager.close()
+        rerank_config = getattr(self.rerank_provider, "provider_config", {}) or {}
+        close_rerank = getattr(self.rerank_provider, "aclose", None)
+        if (
+            rerank_config.get("id") == "cloudflare_workers_ai_rerank"
+            and callable(close_rerank)
+        ):
+            await close_rerank()
         if self.atom_lifecycle_manager is not None:
             await self.atom_lifecycle_manager.stop()
         if self._pending_tasks:
@@ -562,15 +573,27 @@ class MemoryEngine:
         *,
         reason: str,
     ) -> None:
-        """Invalidate derived Topics without making Timeline writes unavailable."""
+        """Record affected Topics while preserving atomic replacement on edits."""
         if not memory_uid:
             return
         try:
-            affected = await self.topic_memory_store.mark_timeline_stale(memory_uid)
+            if "deleted" in reason:
+                affected = await self.topic_memory_store.mark_timeline_stale(
+                    memory_uid
+                )
+            else:
+                affected = [
+                    str(row["topic_uid"])
+                    for row in await self.topic_memory_store.get_topics_for_timeline(
+                        memory_uid
+                    )
+                    if str(row.get("status") or "") == "active"
+                    and str(row.get("link_status") or "") == "active"
+                ]
             if affected:
                 logger.info(
-                    f"[TopicMemory] Timeline 变化已标记 {len(affected)} 个 Topic "
-                    f"待重建 (reason={reason})"
+                    f"[TopicMemory] Timeline 变化影响 {len(affected)} 个 Topic；"
+                    f"正式数据将在局部构建发布时原子替换 (reason={reason})"
                 )
         except asyncio.CancelledError:
             raise
@@ -589,6 +612,7 @@ class MemoryEngine:
         *,
         full: bool,
         since: float | None = None,
+        timeline_uids: Iterable[str] | None = None,
     ) -> None:
         if (
             not self.topic_memory_enabled
@@ -597,7 +621,10 @@ class MemoryEngine:
         ):
             return
         self.topic_build_manager.schedule_space(
-            str(memory_space_id), full=full, since=since
+            str(memory_space_id),
+            full=full,
+            since=since,
+            timeline_uids=timeline_uids,
         )
 
     async def handle_identity_profiles_changed(
@@ -1854,7 +1881,10 @@ class MemoryEngine:
                     )
                     self._schedule_topic_maintenance(
                         str(current_metadata.get("memory_space_id") or ""),
-                        full=True,
+                        full=False,
+                        timeline_uids=[
+                            str(current_metadata.get("memory_uid") or "")
+                        ],
                     )
                 self._invalidate_search_cache()
             else:
@@ -1981,7 +2011,10 @@ class MemoryEngine:
             )
             self._schedule_topic_maintenance(
                 str(replacement_metadata.get("memory_space_id") or ""),
-                full=True,
+                full=False,
+                timeline_uids=[
+                    str(replacement_metadata.get("memory_uid") or "")
+                ],
             )
 
             self._invalidate_search_cache()

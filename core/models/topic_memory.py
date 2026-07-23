@@ -23,6 +23,8 @@ class TopicLinkStatus(str, Enum):
 
 
 class TopicRelationType(str, Enum):
+    RELATED = "related"
+    # Read compatibility for databases created before v9.11.
     RELATED_SUBTOPIC = "related_subtopic"
 
 
@@ -196,7 +198,7 @@ class TopicRelation:
     right_topic_uid: str
     confidence: float
     semantic_similarity: float
-    relation_type: TopicRelationType = TopicRelationType.RELATED_SUBTOPIC
+    relation_type: TopicRelationType = TopicRelationType.RELATED
     relation_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
     status: str = "active"
     build_run_uid: str | None = None
@@ -289,6 +291,8 @@ class TopicFragmentDraft:
     importance: float = 0.5
     confidence: float = 0.7
     fragment_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    logical_fragment_uid: str = ""
+    fragment_revision: int = 1
     embedding: list[float] = field(default_factory=list)
     started_at: float | None = None
     ended_at: float | None = None

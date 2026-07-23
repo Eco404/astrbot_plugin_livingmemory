@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 
-TOPIC_SETTINGS_REVISION = 6
+TOPIC_SETTINGS_REVISION = 8
 
 
 TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "recall_top_k": {"default": 3, "type": "int", "min": 1, "max": 20, "category": "recall", "label": "Topic 最大召回数量", "effect": "recall"},
     "recall_candidate_multiplier": {"default": 4, "type": "int", "min": 1, "max": 10, "category": "recall", "label": "召回候选倍率", "effect": "recall"},
-    "recall_scan_limit": {"default": 2000, "type": "int", "min": 100, "max": 5000, "category": "recall", "label": "单次扫描上限", "effect": "recall"},
+    "recall_scan_limit": {"default": 2000, "type": "int", "min": 100, "max": 5000, "category": "recall", "label": "旧版扫描上限", "effect": "recall", "deprecated": True},
     "recall_min_relevance": {"default": 0.32, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "最低相关度", "effect": "recall"},
     "recall_relative_floor": {"default": 0.70, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "相对相关度下限", "effect": "recall"},
     "recall_selection_relative_floor": {"default": 0.90, "type": "float", "min": 0.5, "max": 1.0, "step": 0.01, "category": "recall", "label": "动态结果保留比例", "effect": "recall"},
@@ -41,7 +41,7 @@ TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "rerank_top_n": {"default": 5, "type": "int", "min": 1, "max": 100, "category": "build", "label": "Rerank 候选数量", "effect": "rebuild"},
     "related_topic_similarity_threshold": {"default": 0.60, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "Topic 关联相似度阈值", "effect": "relations"},
     "related_topic_top_n": {"default": 3, "type": "int", "min": 1, "max": 20, "category": "build", "label": "每个 Topic 的最大关联数量", "effect": "relations"},
-    "existing_topic_match_threshold": {"default": 0.55, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "已有 Topic 延续阈值", "effect": "rebuild", "deprecated": True},
+    "existing_topic_match_threshold": {"default": 0.55, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "全量构建 Topic 延续阈值", "effect": "rebuild"},
     "candidate_batch_size": {"default": 100, "type": "int", "min": 1, "max": 1000, "category": "performance", "label": "候选扫描批量", "effect": "next_build"},
     "fragment_extraction_batch_size": {"default": 12, "type": "int", "min": 1, "max": 100, "category": "performance", "label": "片段提取批量", "effect": "rebuild"},
     "synthesis_batch_size": {"default": 12, "type": "int", "min": 2, "max": 50, "category": "performance", "label": "分层合成批量", "effect": "rebuild"},
@@ -51,15 +51,19 @@ TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "llm_max_retries": {"default": 3, "type": "int", "min": 1, "max": 8, "category": "performance", "label": "模型调用重试次数", "effect": "next_build"},
     "rerank_failure_fallback": {"default": True, "type": "bool", "category": "performance", "label": "Rerank 失败时回退 Embedding", "effect": "next_build"},
     "auto_debounce_seconds": {"default": 60.0, "type": "float", "min": 0.0, "max": 3600.0, "step": 1.0, "category": "performance", "label": "自动维护合并等待（秒）", "effect": "next_build"},
-    "incremental_context_similarity": {"default": 0.58, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "增量局部上下文相似度", "effect": "rebuild"},
-    "incremental_max_timelines": {"default": 120, "type": "int", "min": 10, "max": 1000, "category": "performance", "label": "增量局部重构 Timeline 上限", "effect": "next_build"},
+    "incremental_context_similarity": {"default": 0.58, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "旧版增量上下文阈值", "effect": "rebuild", "deprecated": True},
+    "incremental_max_timelines": {"default": 120, "type": "int", "min": 1, "max": 1000, "category": "performance", "label": "单批增量 Timeline 上限", "effect": "next_build"},
+    "incremental_auto_max_timelines": {"default": 240, "type": "int", "min": 1, "max": 5000, "category": "performance", "label": "自动增量总量上限", "effect": "next_build"},
+    "incremental_topic_candidate_k": {"default": 8, "type": "int", "min": 2, "max": 64, "category": "build", "label": "增量匹配 Topic 候选数", "effect": "next_build"},
+    "incremental_topic_match_threshold": {"default": 0.55, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "增量 Topic 延续阈值", "effect": "next_build"},
+    "incremental_topic_match_margin": {"default": 0.04, "type": "float", "min": 0.0, "max": 0.5, "step": 0.01, "category": "build", "label": "增量匹配歧义间隔", "effect": "next_build"},
 }
 
 
 TOPIC_SETTING_DESCRIPTIONS: dict[str, str] = {
     "recall_top_k": "一次召回最多保留的 Topic 数量；过滤后结果可以少于该值。",
     "recall_candidate_multiplier": "扩大初始候选池后再过滤和去重；越大覆盖更广，但计算量更高。",
-    "recall_scan_limit": "一次召回最多读取的活跃 Topic 数量，用于限制大库扫描开销。",
+    "recall_scan_limit": "仅供无派生向量索引的兼容路径使用；正式运行时召回不再按重要性截断 Topic。",
     "recall_min_relevance": "候选进入结果所需的最低综合相关度；调低会增加弱相关召回。",
     "recall_relative_floor": "相对本轮最佳候选的保留比例，用于过滤明显落后的结果。",
     "recall_selection_relative_floor": "候选通过基本门槛后，最终结果仍需达到本轮最佳当前相关度的该比例；用于让模糊查询自然少返回，而不是勉强填满数量。",
@@ -89,7 +93,7 @@ TOPIC_SETTING_DESCRIPTIONS: dict[str, str] = {
     "rerank_top_n": "每个片段最多送入 Rerank 比较的候选数量。",
     "related_topic_similarity_threshold": "构建相关话题图时考虑候选边的最低语义相似度。",
     "related_topic_top_n": "每个 Topic 在相关话题图中允许保留的最大连接数。",
-    "existing_topic_match_threshold": "旧版已有 Topic 延续参数，当前管线不再使用。",
+    "existing_topic_match_threshold": "全量构建未清空旧 Topic 时，判定新组件是否延续已有 Topic 的最低得分。",
     "candidate_batch_size": "候选扫描每批处理的 Timeline 数量，主要影响内存和进度刷新频率。",
     "fragment_extraction_batch_size": "一次 LLM 片段提取请求包含的 Timeline 数量。",
     "synthesis_batch_size": "一次 LLM 分层合成最多处理的正式片段数量。",
@@ -99,8 +103,12 @@ TOPIC_SETTING_DESCRIPTIONS: dict[str, str] = {
     "llm_max_retries": "单次 LLM 调用允许的总尝试次数；Provider 支持请求级重试参数时由 Provider 单层执行，避免与构建器重复重试。",
     "rerank_failure_fallback": "Rerank 不可用或失败时回退到 Embedding 结果继续构建。",
     "auto_debounce_seconds": "自动维护触发后等待并合并连续变化的时间。",
-    "incremental_context_similarity": "增量构建补入既有 Timeline 上下文所需的最低相似度。",
-    "incremental_max_timelines": "一次增量局部重构允许包含的 Timeline 上限，超出后采用保守路径。",
+    "incremental_context_similarity": "旧版兼容参数；delta-first 增量管线不再回读相似旧 Timeline。",
+    "incremental_max_timelines": "每个增量批次最多处理的新增或变更 Timeline 数量；更大的任务会自动拆成多个有边界批次。",
+    "incremental_auto_max_timelines": "自动维护一次允许处理的 Timeline 总数；超过时不调用模型并等待用户在维护面板确认，手动确认的任务仍按单批上限拆分。",
+    "incremental_topic_candidate_k": "每个新增组件只与向量最接近的若干已有 Topic 比较，并额外包含直接受影响的 Topic。",
+    "incremental_topic_match_threshold": "新增组件更新已有 Topic 所需的最低综合得分；低于该值时创建新 Topic。",
+    "incremental_topic_match_margin": "最佳与次佳已有 Topic 的分差低于该值时视为有歧义，不自动合并并加入维护队列。",
 }
 
 for _setting_key, _description in TOPIC_SETTING_DESCRIPTIONS.items():

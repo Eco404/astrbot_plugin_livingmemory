@@ -51,7 +51,11 @@ from ..models.topic_memory import (
 )
 from ..topic_settings import TOPIC_SETTINGS_REVISION
 from ..topic_runtime import TopicBuildRunContext
+from ..topic_similarity import average_vectors, cosine_similarity
+from ..topic_vector_index import TopicVectorIndex
+from .topic_fragment_identity import logical_fragment_uid
 from .topic_maintenance_manager import TopicMaintenanceManager
+from .topic_relation_builder import vector_neighbor_rankings
 
 
 _FRAGMENT_PROMPT_VERSION = "topic-fragment-v14-source-accounting"
@@ -107,6 +111,7 @@ class TopicBuildManager:
         identity_profile_store: AuthoritativeIdentityStore | None = None,
         conversation_store: Any = None,
         provider_resolver: Callable[[], dict[str, Any]] | None = None,
+        vector_index: Any = None,
     ):
         self.db_path = db_path
         self.store = store
@@ -123,6 +128,7 @@ class TopicBuildManager:
             identity_profile_store or AuthoritativeIdentityStore()
         )
         self.conversation_store = conversation_store
+        self.vector_index = vector_index or TopicVectorIndex(store)
         self.llm_concurrency = max(
             1,
             int(self.config.get("llm_concurrency", 1)),
@@ -343,6 +349,7 @@ class TopicBuildManager:
                     else float(since)
                 ),
                 timeline_uids=None if full else timeline_uids or None,
+                automatic=True,
             )
         except asyncio.CancelledError:
             raise
@@ -380,10 +387,9 @@ class TopicBuildManager:
         if lock.locked():
             raise RuntimeError("Topic build is already running for this memory space")
         async with lock:
-            topics = await self.store.list_topics(
+            topics = await self.store.list_all_topics(
                 memory_space_id,
                 status=TopicMemoryStatus.ACTIVE,
-                limit=5000,
             )
             run_uid = f"relation-recompute:{uuid.uuid4()}"
             relations = self._derive_topic_relations(run_uid, topics)
@@ -401,10 +407,9 @@ class TopicBuildManager:
     async def get_embedding_health(self, memory_space_id: str) -> dict[str, Any]:
         """Inspect persisted vector signatures without making model calls."""
         embedding_provider = self._resolved_providers()["embedding_provider"]
-        topics = await self.store.list_topics(
+        topics = await self.store.list_all_topics(
             memory_space_id,
             status=TopicMemoryStatus.ACTIVE,
-            limit=5000,
         )
         fragments = await self.store.list_formal_fragments(memory_space_id)
         reasons: Counter[str] = Counter()
@@ -483,10 +488,9 @@ class TopicBuildManager:
     ) -> dict[str, Any]:
         if self.embedding_provider is None:
             raise RuntimeError("重新向量化需要可用的 Embedding Provider")
-        topics = await self.store.list_topics(
+        topics = await self.store.list_all_topics(
             memory_space_id,
             status=TopicMemoryStatus.ACTIVE,
-            limit=5000,
         )
         if not topics:
             return {
@@ -616,6 +620,8 @@ class TopicBuildManager:
             fragment_updates=fragment_updates,
             relations=relations,
         )
+        if self.vector_index is not None:
+            self.vector_index.invalidate(memory_space_id)
         await self._emit(
             progress_callback,
             operation_uid,
@@ -640,7 +646,10 @@ class TopicBuildManager:
         if lock.locked():
             raise RuntimeError("Topic build is already running for this memory space")
         async with lock:
-            return await self.store.clear_space(memory_space_id)
+            result = await self.store.clear_space(memory_space_id)
+            if self.vector_index is not None:
+                self.vector_index.invalidate(memory_space_id)
+            return result
 
     async def build_space(
         self,
@@ -651,6 +660,7 @@ class TopicBuildManager:
         timeline_uids: list[str] | None = None,
         reset_topics: bool = False,
         progress_callback=None,
+        automatic: bool = False,
     ) -> dict[str, Any]:
         """Scan and build one memory space while serializing concurrent runs."""
         mode = TopicMaintenanceMode(mode)
@@ -658,77 +668,212 @@ class TopicBuildManager:
             raise ValueError("Topic reset is only available for full builds")
         lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
         async with lock:
-            incremental_scope: dict[str, Any] | None = None
-            scan_only_unindexed = False
-            if mode is TopicMaintenanceMode.INCREMENTAL:
+            selected = list(dict.fromkeys(timeline_uids or []))
+            batch_limit = max(
+                1, int(self.config.get("incremental_max_timelines", 120))
+            )
+            if mode is TopicMaintenanceMode.INCREMENTAL and timeline_uids is None:
                 existing = await self.store.list_topics(
                     memory_space_id,
                     status=TopicMemoryStatus.ACTIVE,
                     limit=1,
                 )
-                if not existing:
-                    if timeline_uids is None:
-                        mode = TopicMaintenanceMode.FULL
-                        since = None
-                    else:
-                        scan_only_unindexed = True
-                else:
-                    selected_only = timeline_uids is not None
-                    seeds = await self.candidate_manager.load_candidates(
+                if existing:
+                    selected = await self.candidate_manager.list_candidate_uids(
                         memory_space_id,
                         since=since,
-                        timeline_uids=timeline_uids,
-                        only_unindexed=selected_only,
+                        only_unindexed=True,
                     )
-                    incremental_scope = (
-                        await self.candidate_manager.prepare_incremental_scope(
-                            memory_space_id,
-                            seeds,
-                            time_gap_seconds=float(
-                                self.config.get("time_gap_hours", 6.0)
-                            )
-                            * 3600.0,
-                            similarity_threshold=float(
-                                self.config.get(
-                                    "incremental_context_similarity", 0.58
-                                )
-                            ),
-                            max_timelines=int(
-                                self.config.get("incremental_max_timelines", 120)
-                            ),
-                        )
-                    )
-                    timeline_uids = list(incremental_scope["timeline_uids"])
+                    timeline_uids = selected
                     since = None
-            scan = await self.candidate_manager.start_scan(
+                    if not selected:
+                        return {
+                            "status": "completed",
+                            "memory_space_id": memory_space_id,
+                            "batch_count": 0,
+                            "run_uids": [],
+                            "timeline_count": 0,
+                            "fragment_count": 0,
+                            "topic_count": 0,
+                            "topics": [],
+                            "pipeline": "bounded_delta_batches",
+                        }
+            if mode is TopicMaintenanceMode.INCREMENTAL and automatic:
+                auto_limit = max(
+                    1,
+                    int(self.config.get("incremental_auto_max_timelines", 240)),
+                )
+                if len(selected) > auto_limit:
+                    review_uid = await self.store.enqueue_maintenance_review(
+                        memory_space_id=memory_space_id,
+                        review_type="incremental_scope_too_large",
+                        timeline_uids=selected,
+                        topic_uids=[],
+                        details={
+                            "timeline_count": len(selected),
+                            "automatic_limit": auto_limit,
+                        },
+                    )
+                    logger.warning(
+                        "[TopicMemory] 自动增量范围超过上限，已等待用户确认 "
+                        "(memory_space_id=%s, timelines=%s, limit=%s)",
+                        memory_space_id,
+                        len(selected),
+                        auto_limit,
+                    )
+                    return {
+                        "status": "pending_confirmation",
+                        "memory_space_id": memory_space_id,
+                        "review_uid": review_uid,
+                        "timeline_count": len(selected),
+                        "automatic_limit": auto_limit,
+                        "pipeline": "bounded_delta_batches",
+                    }
+            if mode is TopicMaintenanceMode.INCREMENTAL and len(selected) > batch_limit:
+                results: list[dict[str, Any]] = []
+                total_batches = (len(selected) + batch_limit - 1) // batch_limit
+                for batch_index, offset in enumerate(
+                    range(0, len(selected), batch_limit), 1
+                ):
+                    batch = selected[offset : offset + batch_limit]
+                    batch_progress = self._batched_progress_callback(
+                        progress_callback,
+                        batch_index=batch_index,
+                        total_batches=total_batches,
+                    )
+                    result = await self._build_space_locked(
+                        memory_space_id,
+                        mode=mode,
+                        since=None,
+                        timeline_uids=batch,
+                        reset_topics=False,
+                        progress_callback=batch_progress,
+                        batch_index=batch_index,
+                        total_batches=total_batches,
+                    )
+                    results.append(result)
+                await self._resolve_maintenance_reviews_safely(
+                    memory_space_id,
+                    timeline_uids=selected,
+                )
+                return {
+                    "status": "completed",
+                    "memory_space_id": memory_space_id,
+                    "batch_count": total_batches,
+                    "run_uids": [item["run_uid"] for item in results],
+                    "timeline_count": sum(item.get("timeline_count", 0) for item in results),
+                    "fragment_count": sum(item.get("fragment_count", 0) for item in results),
+                    "topic_count": sum(item.get("topic_count", 0) for item in results),
+                    "topics": [topic for item in results for topic in item.get("topics", [])],
+                    "pipeline": "bounded_delta_batches",
+                }
+            return await self._build_space_locked(
                 memory_space_id,
                 mode=mode,
                 since=since,
                 timeline_uids=timeline_uids,
-                only_unindexed=scan_only_unindexed,
-                batch_size=int(self.config.get("candidate_batch_size", 100)),
-                time_gap_seconds=float(self.config.get("time_gap_hours", 6.0))
-                * 3600.0,
-                similarity_threshold=float(
-                    self.config.get("candidate_similarity_threshold", 0.52)
-                ),
+                reset_topics=reset_topics,
                 progress_callback=progress_callback,
-                run_config={
-                    "topic_settings": dict(self.config),
-                    "topic_settings_revision": TOPIC_SETTINGS_REVISION,
-                    "time_cluster_keys": dict(
-                        (incremental_scope or {}).get("time_cluster_keys", {})
+                batch_index=1,
+                total_batches=1,
+            )
+
+    @staticmethod
+    def _batched_progress_callback(
+        progress_callback,
+        *,
+        batch_index: int,
+        total_batches: int,
+    ):
+        if progress_callback is None:
+            return None
+
+        async def emit(event: dict[str, Any]) -> None:
+            await progress_callback(
+                {
+                    **event,
+                    "maintenance_batch_index": batch_index,
+                    "maintenance_batch_total": total_batches,
+                }
+            )
+
+        return emit
+
+    async def _build_space_locked(
+        self,
+        memory_space_id: str,
+        *,
+        mode: TopicMaintenanceMode,
+        since: float | None,
+        timeline_uids: list[str] | None,
+        reset_topics: bool,
+        progress_callback,
+        batch_index: int,
+        total_batches: int,
+    ) -> dict[str, Any]:
+        incremental_scope: dict[str, Any] | None = None
+        scan_only_unindexed = False
+        if mode is TopicMaintenanceMode.INCREMENTAL:
+            existing = await self.store.list_topics(
+                memory_space_id,
+                status=TopicMemoryStatus.ACTIVE,
+                limit=1,
+            )
+            if not existing:
+                if timeline_uids is None:
+                    mode = TopicMaintenanceMode.FULL
+                    since = None
+                else:
+                    scan_only_unindexed = True
+            else:
+                selected_only = timeline_uids is not None
+                seeds = await self.candidate_manager.load_candidates(
+                    memory_space_id,
+                    since=since,
+                    timeline_uids=timeline_uids,
+                    only_unindexed=selected_only,
+                )
+                incremental_scope = await self.candidate_manager.prepare_incremental_scope(
+                    memory_space_id,
+                    seeds,
+                    time_gap_seconds=float(self.config.get("time_gap_hours", 6.0))
+                    * 3600.0,
+                    max_timelines=int(
+                        self.config.get("incremental_max_timelines", 120)
                     ),
-                },
-                run_metadata={
-                    "incremental_scope": incremental_scope or {},
-                    "pipeline": "shared_full_pipeline",
-                    "reset_topics": bool(reset_topics),
-                },
-            )
-            return await self.build_from_scan(
-                scan["run_uid"], progress_callback=progress_callback
-            )
+                )
+                timeline_uids = list(incremental_scope["timeline_uids"])
+                since = None
+        scan = await self.candidate_manager.start_scan(
+            memory_space_id,
+            mode=mode,
+            since=since,
+            timeline_uids=timeline_uids,
+            only_unindexed=scan_only_unindexed,
+            batch_size=int(self.config.get("candidate_batch_size", 100)),
+            time_gap_seconds=float(self.config.get("time_gap_hours", 6.0)) * 3600.0,
+            similarity_threshold=float(
+                self.config.get("candidate_similarity_threshold", 0.52)
+            ),
+            progress_callback=progress_callback,
+            run_config={
+                "topic_settings": dict(self.config),
+                "topic_settings_revision": TOPIC_SETTINGS_REVISION,
+                "time_cluster_keys": dict(
+                    (incremental_scope or {}).get("time_cluster_keys", {})
+                ),
+            },
+            run_metadata={
+                "incremental_scope": incremental_scope or {},
+                "pipeline": "bounded_delta_full_pipeline",
+                "reset_topics": bool(reset_topics),
+                "batch_index": batch_index,
+                "total_batches": total_batches,
+            },
+        )
+        return await self.build_from_scan(
+            scan["run_uid"], progress_callback=progress_callback
+        )
 
     async def resume_run(self, run_uid: str, *, progress_callback=None) -> dict[str, Any]:
         """Resume a persisted run from its latest durable stage boundary."""
@@ -850,12 +995,6 @@ class TopicBuildManager:
 
             built: list[dict[str, Any]] = []
             plans: list[dict[str, Any]] = []
-            all_existing = await self.store.list_topics(
-                memory_space_id,
-                status=TopicMemoryStatus.ACTIVE,
-                limit=1000,
-            )
-            existing = [] if reset_topics else list(all_existing)
             incremental_scope = (
                 (run.get("metadata") or {}).get("incremental_scope", {})
                 if run_mode is TopicMaintenanceMode.INCREMENTAL
@@ -866,6 +1005,18 @@ class TopicBuildManager:
                 for uid in incremental_scope.get("affected_topic_uids", [])
                 if str(uid)
             }
+            all_existing = (
+                await self.store.list_all_topics(
+                    memory_space_id,
+                    status=TopicMemoryStatus.ACTIVE,
+                )
+                if run_mode is TopicMaintenanceMode.FULL
+                else await self.store.get_topics_by_uids(
+                    memory_space_id,
+                    sorted(affected_topic_uids),
+                )
+            )
+            existing = [] if reset_topics else list(all_existing)
             seed_timeline_uids = {
                 str(uid)
                 for uid in incremental_scope.get("seed_timeline_uids", [])
@@ -895,15 +1046,6 @@ class TopicBuildManager:
                 run_mode is TopicMaintenanceMode.INCREMENTAL
                 and seed_timeline_uids
             )
-            if (
-                run_mode is TopicMaintenanceMode.INCREMENTAL
-                and affected_topic_uids
-            ):
-                existing = [
-                    topic
-                    for topic in existing
-                    if topic.topic_uid in affected_topic_uids
-                ]
             used_existing: set[str] = set()
             component_fragment_sets = [
                 [fragments[index] for index in component]
@@ -996,16 +1138,46 @@ class TopicBuildManager:
                 1,
             ):
                 component_fragments = list(initial_fragments)
-                matched = await self._match_existing_topic(
+                match_pool = existing
+                if run_mode is TopicMaintenanceMode.INCREMENTAL:
+                    match_pool = await self._incremental_existing_candidates(
+                        memory_space_id,
+                        component_fragments,
+                        existing,
+                        affected_topic_uids,
+                    )
+                matched, match_scores, ambiguous = await self._match_existing_topic_decision(
                     synthesis,
                     component_fragments,
-                    existing,
+                    match_pool,
                     used_existing,
-                    require_source_overlap=(
-                        run_mode is TopicMaintenanceMode.INCREMENTAL
-                        and bool(affected_topic_uids)
-                    ),
+                    require_source_overlap=False,
+                    incremental=(run_mode is TopicMaintenanceMode.INCREMENTAL),
                 )
+                if ambiguous:
+                    await self.store.enqueue_maintenance_review(
+                        memory_space_id=memory_space_id,
+                        review_type="ambiguous_topic_match",
+                        timeline_uids=sorted(
+                            {
+                                uid
+                                for fragment in component_fragments
+                                for uid in fragment.timeline_uids
+                            }
+                        ),
+                        topic_uids=[item[1].topic_uid for item in match_scores[:2]],
+                        details={
+                            "run_uid": run_uid,
+                            "scores": [
+                                {"topic_uid": item[1].topic_uid, "score": item[0]}
+                                for item in match_scores[:3]
+                            ],
+                        },
+                    )
+                    # Do not publish a duplicate Topic merely because the local
+                    # match is ambiguous. With no active link the Timeline stays
+                    # eligible for a later confirmed/full maintenance run.
+                    continue
                 component_timeline_uids = {
                     uid
                     for fragment in component_fragments
@@ -1020,22 +1192,11 @@ class TopicBuildManager:
                     )
                 ):
                     continue
-                if (
-                    matched is not None
-                    and run_mode is TopicMaintenanceMode.INCREMENTAL
-                    and not (
-                        {
-                            uid
-                            for fragment in component_fragments
-                            for uid in fragment.timeline_uids
-                        }
-                        & set(
-                            matched.metadata.get("source_timeline_uids", [])
-                        )
-                    )
-                ):
+                if matched is not None and run_mode is TopicMaintenanceMode.INCREMENTAL:
                     existing_fragment = await self._existing_topic_fragment(
-                        run_uid, matched
+                        run_uid,
+                        matched,
+                        exclude_timeline_uids=seed_timeline_uids,
                     )
                     if existing_fragment is not None:
                         component_fragments = [existing_fragment, *component_fragments]
@@ -1097,6 +1258,24 @@ class TopicBuildManager:
                     fragment_count=len(component_fragments),
                 )
 
+            if run_mode is TopicMaintenanceMode.INCREMENTAL:
+                for affected_topic in all_existing:
+                    if (
+                        affected_topic.topic_uid not in affected_topic_uids
+                        or affected_topic.topic_uid in used_existing
+                    ):
+                        continue
+                    retained_plan = await self._retained_affected_topic_plan(
+                        run_uid=run_uid,
+                        topic=affected_topic,
+                        excluded_timeline_uids=seed_timeline_uids,
+                        candidate_map=candidate_map,
+                    )
+                    if retained_plan is None:
+                        continue
+                    plans.append(retained_plan)
+                    used_existing.add(affected_topic.topic_uid)
+
             await self.store.update_maintenance_run(
                 run_uid,
                 stage="materialization",
@@ -1127,7 +1306,12 @@ class TopicBuildManager:
                         [existing_topic_uid]
                     )
                     formal_fragments.extend(
-                        row["fragment"] for row in existing_rows
+                        row["fragment"]
+                        for row in existing_rows
+                        if not (
+                            set(row["fragment"].timeline_uids)
+                            & seed_timeline_uids
+                        )
                     )
                 formal_fragments = list(
                     {
@@ -1187,27 +1371,28 @@ class TopicBuildManager:
                     len(plans),
                 )
 
-            final_topic_map = (
-                {}
-                if run_mode is TopicMaintenanceMode.FULL
-                else {topic.topic_uid: topic for topic in all_existing}
-            )
             publication_affected_topic_uids = set(affected_topic_uids)
-            if scoped_incremental_publish:
-                publication_affected_topic_uids = {
-                    *seed_topic_uids,
-                    *used_existing,
-                }
+            relation_scope_topic_uids: set[str] | None = None
             if run_mode is TopicMaintenanceMode.INCREMENTAL:
-                for topic_uid in publication_affected_topic_uids:
-                    final_topic_map.pop(topic_uid, None)
-            final_topic_map.update(
-                (snapshot["topic"].topic_uid, snapshot["topic"])
-                for snapshot in snapshots
-            )
-            relations = self._derive_topic_relations(
-                run_uid, list(final_topic_map.values())
-            )
+                relation_scope_topic_uids = {
+                    *publication_affected_topic_uids,
+                    *(snapshot["topic"].topic_uid for snapshot in snapshots),
+                }
+                relation_topics = await self._incremental_relation_topics(
+                    memory_space_id,
+                    [snapshot["topic"] for snapshot in snapshots],
+                    {snapshot["topic"].topic_uid for snapshot in snapshots},
+                )
+            else:
+                relation_topics = [snapshot["topic"] for snapshot in snapshots]
+            relations = self._derive_topic_relations(run_uid, relation_topics)
+            if relation_scope_topic_uids is not None:
+                relations = [
+                    relation
+                    for relation in relations
+                    if relation.left_topic_uid in relation_scope_topic_uids
+                    or relation.right_topic_uid in relation_scope_topic_uids
+                ]
             await self.store.update_maintenance_run(
                 run_uid,
                 stage="publication",
@@ -1232,7 +1417,25 @@ class TopicBuildManager:
                 relations=relations,
                 affected_topic_uids=publication_affected_topic_uids,
                 reset_topics=reset_topics,
+                relation_scope_topic_uids=relation_scope_topic_uids,
             )
+            published_timeline_uids = {
+                link.timeline_uid
+                for snapshot in snapshots
+                for link in snapshot["links"]
+            }
+            resolved_timeline_uids = (
+                published_timeline_uids
+                if run_mode is TopicMaintenanceMode.FULL
+                else published_timeline_uids & seed_timeline_uids
+            )
+            if resolved_timeline_uids:
+                await self._resolve_maintenance_reviews_safely(
+                    memory_space_id,
+                    timeline_uids=sorted(resolved_timeline_uids),
+                )
+            if self.vector_index is not None:
+                self.vector_index.invalidate(memory_space_id)
             await self._emit(
                 progress_callback,
                 run_uid,
@@ -2731,7 +2934,11 @@ class TopicBuildManager:
         )
         max_degree = max(1, int(self.config.get("related_topic_top_n", 3)))
         candidate_limit = max(8, max_degree * 4)
-        rankings: dict[str, list[tuple[float, str]]] = {}
+        rankings = vector_neighbor_rankings(
+            topics,
+            candidate_limit=candidate_limit,
+            similarity_threshold=threshold,
+        )
         topic_by_uid = {topic.topic_uid: topic for topic in topics}
         keyword_sets = {
             topic.topic_uid: self._topic_keyword_terms(topic) for topic in topics
@@ -2748,22 +2955,6 @@ class TopicBuildManager:
         text_document_frequency = Counter(
             token for tokens in text_token_sets.values() for token in tokens
         )
-        for topic in topics:
-            vector = topic.metadata.get("embedding", [])
-            candidates = []
-            if vector:
-                for other in topics:
-                    if other.topic_uid == topic.topic_uid:
-                        continue
-                    other_vector = other.metadata.get("embedding", [])
-                    similarity = self._cosine(vector, other_vector)
-                    if other_vector and similarity >= threshold:
-                        candidates.append((similarity, other.topic_uid))
-            rankings[topic.topic_uid] = sorted(
-                candidates,
-                key=lambda item: (-item[0], item[1]),
-            )
-
         rank_positions = {
             uid: {
                 other_uid: index
@@ -2999,7 +3190,7 @@ class TopicBuildManager:
             relation_uid = str(
                 uuid.uuid5(
                     uuid.NAMESPACE_URL,
-                    f"livingmemory:topic-relation:{left_uid}:{right_uid}:related_subtopic",
+                    f"livingmemory:topic-relation:{left_uid}:{right_uid}:related",
                 )
             )
             relations.append(
@@ -3831,7 +4022,88 @@ class TopicBuildManager:
         }
         return expanded
 
-    async def _match_existing_topic(
+    async def _incremental_existing_candidates(
+        self,
+        memory_space_id: str,
+        fragments: list[TopicFragmentDraft],
+        existing: list[TopicMemory],
+        directly_affected_uids: set[str],
+    ) -> list[TopicMemory]:
+        """Bound matching to vector neighbors plus directly affected Topics."""
+        by_uid = {topic.topic_uid: topic for topic in existing}
+        selected_uids = set(directly_affected_uids)
+        target_vector = self._average_vectors(
+            [item.embedding for item in fragments if item.embedding]
+        )
+        if self.vector_index is not None and target_vector:
+            hits = await self.vector_index.search(
+                memory_space_id=memory_space_id,
+                artifact_type="topic",
+                query_vector=target_vector,
+                limit=max(
+                    2,
+                    min(
+                        64,
+                        int(self.config.get("incremental_topic_candidate_k", 8)),
+                    ),
+                ),
+                provider=self.embedding_provider,
+                input_format_versions=SUPPORTED_TOPIC_EMBEDDING_FORMATS,
+            )
+            selected_uids.update(hit.artifact_uid for hit in hits)
+        elif not directly_affected_uids:
+            # Compatibility fallback for tests or custom embeddings without an index.
+            return existing
+        missing_uids = sorted(selected_uids - set(by_uid))
+        if missing_uids:
+            for topic in await self.store.get_topics_by_uids(
+                memory_space_id,
+                missing_uids,
+            ):
+                by_uid[topic.topic_uid] = topic
+        return [by_uid[uid] for uid in sorted(selected_uids) if uid in by_uid]
+
+    async def _incremental_relation_topics(
+        self,
+        memory_space_id: str,
+        changed_topics: list[TopicMemory],
+        changed_topic_uids: set[str],
+    ) -> list[TopicMemory]:
+        """Load only changed Topics and their bounded vector neighborhoods."""
+        by_uid = {topic.topic_uid: topic for topic in changed_topics}
+        selected_uids = set(changed_topic_uids)
+        candidate_limit = max(
+            8,
+            int(self.config.get("related_topic_candidate_limit", 24)),
+            int(self.config.get("related_topic_top_n", 3)) * 4,
+        )
+        if self.vector_index is not None:
+            for topic in changed_topics:
+                vector = [
+                    float(value)
+                    for value in topic.metadata.get("embedding", [])
+                ]
+                if not vector:
+                    continue
+                hits = await self.vector_index.search(
+                    memory_space_id=memory_space_id,
+                    artifact_type="topic",
+                    query_vector=vector,
+                    limit=min(128, candidate_limit),
+                    provider=self.embedding_provider,
+                    input_format_versions=SUPPORTED_TOPIC_EMBEDDING_FORMATS,
+                )
+                selected_uids.update(hit.artifact_uid for hit in hits)
+        missing_uids = sorted(selected_uids - set(by_uid))
+        if missing_uids:
+            for topic in await self.store.get_topics_by_uids(
+                memory_space_id,
+                missing_uids,
+            ):
+                by_uid[topic.topic_uid] = topic
+        return [by_uid[uid] for uid in sorted(by_uid)]
+
+    async def _match_existing_topic_decision(
         self,
         synthesis: dict[str, Any],
         fragments: list[TopicFragmentDraft],
@@ -3839,13 +4111,12 @@ class TopicBuildManager:
         used: set[str],
         *,
         require_source_overlap: bool = False,
-    ) -> TopicMemory | None:
+        incremental: bool = False,
+    ) -> tuple[TopicMemory | None, list[tuple[float, TopicMemory]], bool]:
         source_uids = {uid for item in fragments for uid in item.timeline_uids}
-        best: tuple[float, TopicMemory] | None = None
+        ranked: list[tuple[float, TopicMemory]] = []
         target_vector = self._average_vectors([item.embedding for item in fragments])
         for topic in existing:
-            if topic.topic_uid in used:
-                continue
             metadata = topic.metadata
             previous_sources = set(metadata.get("source_timeline_uids", []))
             overlap = len(source_uids & previous_sources) / max(1, len(source_uids | previous_sources))
@@ -3859,12 +4130,56 @@ class TopicBuildManager:
                 if overlap > 0.0
                 else 0.85 * semantic + 0.15 * title
             )
-            if best is None or score > best[0]:
-                best = (score, topic)
-        return best[1] if best and best[0] >= float(self.config.get("existing_topic_match_threshold", 0.55)) else None
+            ranked.append((score, topic))
+        ranked.sort(key=lambda item: (-item[0], item[1].topic_uid))
+        threshold = float(
+            self.config.get(
+                "incremental_topic_match_threshold"
+                if incremental
+                else "existing_topic_match_threshold",
+                0.55,
+            )
+        )
+        if not ranked or ranked[0][0] < threshold:
+            return None, ranked, False
+        if incremental and ranked[0][1].topic_uid in used:
+            return None, ranked, True
+        margin = float(self.config.get("incremental_topic_match_margin", 0.04))
+        ambiguous = bool(
+            incremental
+            and len(ranked) > 1
+            and ranked[1][0] >= threshold
+            and ranked[0][0] - ranked[1][0] < margin
+        )
+        if ambiguous:
+            return None, ranked, True
+        return ranked[0][1], ranked, False
+
+    async def _match_existing_topic(
+        self,
+        synthesis: dict[str, Any],
+        fragments: list[TopicFragmentDraft],
+        existing: list[TopicMemory],
+        used: set[str],
+        *,
+        require_source_overlap: bool = False,
+    ) -> TopicMemory | None:
+        matched, _, _ = await self._match_existing_topic_decision(
+            synthesis,
+            fragments,
+            existing,
+            used,
+            require_source_overlap=require_source_overlap,
+            incremental=False,
+        )
+        return matched
 
     async def _existing_topic_fragment(
-        self, run_uid: str, topic: TopicMemory
+        self,
+        run_uid: str,
+        topic: TopicMemory,
+        *,
+        exclude_timeline_uids: set[str] | None = None,
     ) -> TopicFragmentDraft | None:
         """Project an existing Topic into a source-grounded incremental input."""
         provenance = await self.store.get_topic_provenance(topic.topic_uid)
@@ -3882,8 +4197,14 @@ class TopicBuildManager:
                 actor_links_by_atom.setdefault(
                     str(value.get("topic_atom_uid") or ""), []
                 ).append(dict(value))
+        excluded = set(exclude_timeline_uids or set())
         timeline_uids = sorted(
-            {str(row.get("timeline_uid") or "") for row in links if row.get("timeline_uid")}
+            {
+                str(row.get("timeline_uid") or "")
+                for row in links
+                if row.get("timeline_uid")
+                and str(row.get("timeline_uid")) not in excluded
+            }
         )
         if not timeline_uids:
             return None
@@ -3895,7 +4216,11 @@ class TopicBuildManager:
         facts: list[dict[str, Any]] = []
         for atom in atoms:
             atom_uid = str(atom.get("atom_uid") or "")
-            atom_sources = sources_by_atom.get(atom_uid, [])
+            atom_sources = [
+                row
+                for row in sources_by_atom.get(atom_uid, [])
+                if str(row.get("timeline_uid") or "") not in excluded
+            ]
             source_timelines = sorted(
                 {
                     str(row.get("timeline_uid") or "")
@@ -3952,6 +4277,7 @@ class TopicBuildManager:
             str(row["timeline_uid"]): str(row.get("time_cluster_key") or "")
             for row in links
             if row.get("timeline_uid")
+            and str(row.get("timeline_uid")) not in excluded
         }
         return TopicFragmentDraft(
             fragment_uid=f"existing:{topic.topic_uid}:r{topic.revision}",
@@ -3965,6 +4291,7 @@ class TopicBuildManager:
                 str(row["timeline_uid"]): int(row.get("source_timeline_revision") or 1)
                 for row in links
                 if row.get("timeline_uid")
+                and str(row.get("timeline_uid")) not in excluded
             },
             facts=facts,
             time_cluster_keys=sorted({value for value in cluster_map.values() if value}),
@@ -3998,6 +4325,75 @@ class TopicBuildManager:
                 ],
             },
         )
+
+    async def _retained_affected_topic_plan(
+        self,
+        *,
+        run_uid: str,
+        topic: TopicMemory,
+        excluded_timeline_uids: set[str],
+        candidate_map: dict[str, TimelineTopicCandidate],
+    ) -> dict[str, Any] | None:
+        """Rebuild an edited Topic from sources that still remain valid."""
+        retained = await self._existing_topic_fragment(
+            run_uid,
+            topic,
+            exclude_timeline_uids=excluded_timeline_uids,
+        )
+        if retained is None:
+            return None
+        synthesis = await self._synthesize_component_checkpointed(
+            run_uid,
+            [retained],
+        )
+        (
+            rebuilt_topic,
+            atoms,
+            links,
+            sources,
+            actor_links,
+            atom_actor_links,
+        ) = self._materialize_snapshot(
+            run_uid,
+            topic.memory_space_id,
+            synthesis,
+            [retained],
+            candidate_map,
+            topic,
+        )
+        return {
+            "topic": rebuilt_topic,
+            "atoms": atoms,
+            "links": links,
+            "sources": sources,
+            "actor_links": actor_links,
+            "atom_actor_links": atom_actor_links,
+            "matched": topic,
+            "fragments": [retained],
+            "synthesis": synthesis,
+        }
+
+    async def _resolve_maintenance_reviews_safely(
+        self,
+        memory_space_id: str,
+        *,
+        timeline_uids: list[str],
+    ) -> None:
+        """Keep optional queue bookkeeping from invalidating a published build."""
+        try:
+            await self.store.resolve_maintenance_reviews(
+                memory_space_id,
+                timeline_uids=timeline_uids,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "[TopicMemory] Topic 已发布，但维护判定队列未能自动消项 "
+                "(memory_space_id=%s)",
+                memory_space_id,
+                exc_info=True,
+            )
 
     def _materialize_snapshot(
         self,
@@ -4053,6 +4449,30 @@ class TopicBuildManager:
             independent_clusters=len(evidence_clusters),
             supporting_timelines=len(timeline_uids),
         )
+        repair_count = len(
+            [
+                item
+                for item in synthesis.get("validation_repairs", [])
+                if isinstance(item, dict)
+            ]
+        ) + sum(
+            len(
+                [
+                    value
+                    for value in fragment.metadata.get("validation_repairs", [])
+                    if isinstance(value, dict)
+                ]
+            )
+            for fragment in fragments
+        )
+        quality_units = max(
+            1,
+            len(synthesis.get("atoms", []))
+            + sum(len(fragment.facts) for fragment in fragments),
+        )
+        repair_ratio = min(1.0, repair_count / quality_units)
+        quality_penalty = min(0.15, repair_ratio * 0.12)
+        topic_confidence = max(0.0, topic_confidence - quality_penalty)
         topic = TopicMemory(
             topic_uid=topic_uid,
             memory_space_id=memory_space_id,
@@ -4092,6 +4512,12 @@ class TopicBuildManager:
                 "manually_editable": False,
                 "algorithm_version": _MATCHING_ALGORITHM_VERSION,
                 "confidence_calibration": topic_confidence_audit,
+                "quality": {
+                    "deterministic_repair_count": repair_count,
+                    "evaluated_units": quality_units,
+                    "deterministic_repair_ratio": repair_ratio,
+                    "confidence_penalty": quality_penalty,
+                },
                 "narrative_schema_version": (
                     _NARRATIVE_SCHEMA_VERSION
                     if fragments
@@ -4450,6 +4876,18 @@ class TopicBuildManager:
                         "confidence": 0.7,
                         "source_timeline_uids": [candidate.memory_uid],
                         "source_atom_fingerprints": fingerprints,
+                        "source_fact_keys": (
+                            [
+                                f"{candidate.memory_uid}:atom:{fingerprint}"
+                                for fingerprint in fingerprints
+                            ]
+                            or [
+                                f"{candidate.memory_uid}:fallback:"
+                                + hashlib.sha256(
+                                    self._norm(content).encode("utf-8")
+                                ).hexdigest()
+                            ]
+                        ),
                         "source_timeline_uids_by_fingerprint": {
                             fingerprint: [candidate.memory_uid]
                             for fingerprint in fingerprints
@@ -4459,6 +4897,11 @@ class TopicBuildManager:
             result.append(
                 TopicFragmentDraft(
                     fragment_uid=fragment_uid,
+                    logical_fragment_uid=logical_fragment_uid(
+                        memory_space_id=group.memory_space_id,
+                        timeline_uids=[candidate.memory_uid],
+                        facts=facts,
+                    ),
                     run_uid=run_uid,
                     candidate_group_uid=group.group_uid,
                     memory_space_id=group.memory_space_id,
@@ -4739,6 +5182,9 @@ class TopicBuildManager:
                         "confidence": self._score(fact.get("confidence"), 0.7),
                         "source_timeline_uids": fact_sources,
                         "source_atom_fingerprints": fingerprints,
+                        "source_fact_keys": self._unique_strings(
+                            fact.get("source_fact_keys")
+                        ),
                         "source_timeline_uids_by_fingerprint": timelines_by_fingerprint,
                         "actor_refs": [
                             dict(value)
@@ -4836,6 +5282,11 @@ class TopicBuildManager:
             result.append(
                 TopicFragmentDraft(
                     fragment_uid=fragment_uid,
+                    logical_fragment_uid=logical_fragment_uid(
+                        memory_space_id=group.memory_space_id,
+                        timeline_uids=timeline_uids,
+                        facts=normalized_facts,
+                    ),
                     run_uid=run_uid,
                     candidate_group_uid=group.group_uid,
                     memory_space_id=group.memory_space_id,
@@ -6230,6 +6681,7 @@ INPUT:
                 source_refs[source_ref] = {
                     "timeline_uid": item.memory_uid,
                     "fingerprint": fingerprint,
+                    "source_key": f"{item.memory_uid}:atom:{fingerprint}",
                 }
             key_index = 0
             for content in item.key_facts:
@@ -6244,6 +6696,12 @@ INPUT:
                 source_refs[source_ref] = {
                     "timeline_uid": item.memory_uid,
                     "fingerprint": None,
+                    "source_key": (
+                        f"{item.memory_uid}:key_fact:"
+                        + hashlib.sha256(
+                            self._norm(content).encode("utf-8")
+                        ).hexdigest()
+                    ),
                 }
             timelines.append(
                 {
@@ -6373,6 +6831,13 @@ INPUT:
                         **fact,
                         "source_timeline_uids": fact_timeline_uids,
                         "source_atom_fingerprints": fingerprints,
+                        "source_fact_keys": sorted(
+                            {
+                                str(source_refs[ref].get("source_key") or "")
+                                for ref in cited_refs
+                                if source_refs[ref].get("source_key")
+                            }
+                        ),
                         "actor_refs": self._decode_actor_relations(
                             fact.get("actor_refs"),
                             actor_refs,
@@ -7520,20 +7985,11 @@ INPUT:
             a, b = [float(item) for item in left], [float(item) for item in right]
         except (TypeError, ValueError):
             return 0.0
-        if not a or len(a) != len(b):
-            return 0.0
-        numerator = sum(x * y for x, y in zip(a, b, strict=True))
-        denominator = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
-        return numerator / denominator if denominator else 0.0
+        return cosine_similarity(a, b)
 
     @staticmethod
     def _average_vectors(vectors: list[list[float]]) -> list[float]:
-        valid = [vector for vector in vectors if vector]
-        if not valid:
-            return []
-        width = len(valid[0])
-        valid = [vector for vector in valid if len(vector) == width]
-        return [sum(float(vector[i]) for vector in valid) / len(valid) for i in range(width)]
+        return average_vectors(vectors)
 
     @staticmethod
     def _cluster_aware_importance(

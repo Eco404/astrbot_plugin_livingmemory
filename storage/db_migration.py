@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.10"
+    CURRENT_VERSION = "9.11"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -47,6 +47,7 @@ class DBMigration:
         "9.8": "Fact-level Topic actor relations and evidence repair",
         "9.9": "WebUI-managed Timeline runtime settings",
         "9.10": "Topic embedding signatures and model-safe revectorization",
+        "9.11": "Bounded incremental Topic maintenance and stable fragment identity",
     }
 
     def __init__(self, db_path: str):
@@ -339,6 +340,9 @@ class DBMigration:
                 # 从版本9.9升级到版本9.10
                 if current_key <= self.version_key("9.9"):
                     migration_steps.append(self._migrate_v9_9_to_v9_10)
+
+                if current_key <= self.version_key("9.10"):
+                    migration_steps.append(self._migrate_v9_10_to_v9_11)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1275,6 +1279,40 @@ class DBMigration:
         if progress_callback:
             progress_callback("创建 Topic 向量签名字段", 1, 1)
         logger.info("v9.9 -> v9.10 迁移完成；旧向量需在 WebUI 中重新向量化")
+
+    async def _migrate_v9_10_to_v9_11(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ):
+        """Add stable fragment identities and bounded-maintenance review state."""
+        logger.info("执行迁移步骤: v9.10 -> v9.11 (bounded Topic maintenance)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            for table in ("topic_fragment_drafts", "topic_fragments"):
+                if not await self._column_exists(db, table, "logical_fragment_uid"):
+                    await db.execute(
+                        f"ALTER TABLE {table} ADD COLUMN "
+                        "logical_fragment_uid TEXT NOT NULL DEFAULT ''"
+                    )
+                if not await self._column_exists(db, table, "fragment_revision"):
+                    await db.execute(
+                        f"ALTER TABLE {table} ADD COLUMN "
+                        "fragment_revision INTEGER NOT NULL DEFAULT 1"
+                    )
+                await db.execute(
+                    f"UPDATE {table} SET logical_fragment_uid = fragment_uid "
+                    "WHERE logical_fragment_uid = ''"
+                )
+            await TopicMemoryStore.create_tables(db)
+            await db.execute(
+                "UPDATE topic_relations SET relation_type = 'related' "
+                "WHERE relation_type = 'related_subtopic'"
+            )
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建稳定片段身份与维护审查队列", 1, 1)
+        logger.info("v9.10 -> v9.11 迁移完成")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(
