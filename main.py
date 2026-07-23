@@ -605,6 +605,9 @@ class LivingMemoryPlugin(Star):
         # 停止衰减调度器
         await self.initializer.stop_scheduler()
 
+        if self.initializer.session_maintenance_manager:
+            await self.initializer.session_maintenance_manager.shutdown()
+
         # 关闭 ConversationManager
         if (
             self.initializer.conversation_manager

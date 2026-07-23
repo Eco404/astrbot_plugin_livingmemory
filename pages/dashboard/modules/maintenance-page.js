@@ -9,6 +9,8 @@ export class MaintenancePage {
     this.tab = "topic";
     this.reviewUid = null;
     this.governance = null;
+    this.sessionAudit = [];
+    this.sessionPreview = null;
   }
 
   initEventListeners() {
@@ -30,6 +32,16 @@ export class MaintenancePage {
       if (event.target.closest("[data-review-sync-identities]")) this.syncIdentityTopics();
     });
     document.getElementById("maintenance-open-governance")?.addEventListener("click", () => this.openGovernance());
+    document.getElementById("session-audit-refresh")?.addEventListener("click", () => this.loadSessionAudit());
+    document.getElementById("session-audit-filter")?.addEventListener("input", () => this.renderSessionAudit());
+    document.getElementById("session-audit-action")?.addEventListener("click", () => this.openSessionMaintenance());
+    document.getElementById("session-maintenance-operation")?.addEventListener("change", () => this.resetSessionPreview());
+    document.getElementById("session-maintenance-close")?.addEventListener("click", () => this.closeSessionMaintenance());
+    document.getElementById("session-maintenance-cancel")?.addEventListener("click", () => this.closeSessionMaintenance());
+    document.getElementById("session-maintenance-submit")?.addEventListener("click", () => this.submitSessionMaintenance());
+    document.getElementById("session-maintenance-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeSessionMaintenance();
+    });
     document.getElementById("topic-governance-close")?.addEventListener("click", () => this.closeGovernance());
     document.getElementById("topic-governance-cancel")?.addEventListener("click", () => this.closeGovernance());
     document.getElementById("topic-governance-submit")?.addEventListener("click", () => this.submitGovernance());
@@ -48,6 +60,7 @@ export class MaintenancePage {
     if (this.tab === "models") this.modelPage.fetch();
     if (this.tab === "recall") this.recallPage.fetchSessions();
     if (this.tab === "review") this.loadReviews();
+    if (this.tab === "sessions") this.loadSessionAudit();
   }
 
   selectTab(tab) {
@@ -62,6 +75,7 @@ export class MaintenancePage {
     if (tab === "models") this.modelPage.fetch();
     if (tab === "recall") this.recallPage.fetchSessions();
     if (tab === "review") this.loadReviews();
+    if (tab === "sessions") this.loadSessionAudit();
   }
 
   syncTopicSpaces() {
@@ -87,6 +101,142 @@ export class MaintenancePage {
     topicSpace.value = selected;
     await this.topicPage.fetch();
     this.topicPage.openMaintenance(trigger);
+  }
+
+  selectedSessionIds() {
+    return Array.from(document.querySelectorAll("[data-session-audit-select]:checked")).map(input => input.value);
+  }
+
+  async loadSessionAudit() {
+    const list = document.getElementById("session-audit-list");
+    if (!list) return;
+    list.innerHTML = `<div class="identity-state">${esc(window.t("common.loading"))}</div>`;
+    try {
+      const [audit, tasks] = await Promise.all([
+        this.topicPage.api.get("sessions/audit", { limit: 2000 }),
+        this.topicPage.api.get("sessions/maintenance/tasks", { limit: 20 }),
+      ]);
+      this.sessionAudit = audit.items || [];
+      this.renderSessionAudit();
+      this.renderSessionTasks(tasks.items || []);
+    } catch (error) {
+      list.innerHTML = `<div class="identity-state identity-state-error">${esc(error.message)}</div>`;
+    }
+  }
+
+  renderSessionAudit() {
+    const list = document.getElementById("session-audit-list");
+    if (!list) return;
+    const query = String(document.getElementById("session-audit-filter")?.value || "").trim().toLowerCase();
+    const visible = this.sessionAudit.filter(item => !query || [item.session_id, item.platform, item.bot_account, item.target_id].join(" ").toLowerCase().includes(query));
+    document.getElementById("session-audit-summary").textContent = window.t("maintenance.sessionsSummary", visible.length, this.sessionAudit.length);
+    list.innerHTML = visible.length ? visible.map(item => {
+      const state = item.active ? window.t("maintenance.activeSession") : item.raw_session_missing ? window.t("maintenance.rawMissing") : window.t("maintenance.inactiveSession");
+      const blocked = (item.cleanup_block_reasons || []).join("；");
+      const aliases = item.possible_aliases || [];
+      const safety = item.safe_to_cleanup ? window.t("maintenance.safeCleanup") : window.t("maintenance.reviewRequired");
+      return `<label class="session-audit-row">
+        <input type="checkbox" data-session-audit-select value="${esc(item.session_id)}">
+        <span class="session-audit-main"><strong>${esc(item.target_id || item.session_id)}</strong><code>${esc(item.session_id)}</code><small>${esc(item.platform)} · ${esc(window.t("maintenance.botAccount"))} ${esc(item.bot_account || "--")} · ${esc(item.chat_type)} · ${esc(state)}</small></span>
+        <span class="session-audit-counts"><span>${esc(window.t("maintenance.rawMessages"))} <b>${Number(item.message_count || 0)}</b></span><span>${esc(window.t("maintenance.unsummarized"))} <b>${Number(item.unsummarized_message_count || 0)}</b></span><span>Timeline <b>${Number(item.timeline_count || 0)}</b></span><span>Topic <b>${Number(item.topic_count || 0)}</b></span><span>Fragment <b>${Number(item.fragment_count || 0)}</b></span><span>${esc(window.t("maintenance.evidenceRefs"))} <b>${Number(item.raw_evidence_reference_count || 0)}</b></span></span>
+        <span class="session-audit-meta"><time>${this.formatTimestamp(item.last_active_at) || "--"}</time><small class="${item.safe_to_cleanup ? "session-audit-safe" : "session-audit-blocked"}">${esc(safety)}</small>${item.is_alias ? `<small>${esc(window.t("maintenance.aliasOf"))}: ${esc(item.canonical_session_id)}</small>` : ""}${aliases.length ? `<small>${esc(window.t("maintenance.possibleAliases"))}: ${aliases.map(esc).join(" · ")}</small>` : ""}${blocked ? `<small class="session-audit-blocked">${esc(blocked)}</small>` : ""}</span>
+      </label>`;
+    }).join("") : `<div class="identity-state">${esc(window.t("maintenance.sessionsEmpty"))}</div>`;
+  }
+
+  renderSessionTasks(tasks) {
+    const target = document.getElementById("session-task-list");
+    if (!target) return;
+    target.innerHTML = tasks.length ? tasks.map(task => `<div class="session-task-row"><span><strong>${esc(window.t(`maintenance.operation.${task.operation}`))}</strong><small>${(task.source_session_ids || []).map(esc).join(" · ")}</small></span><span class="status-badge status-${esc(task.status)}">${esc(task.status)}</span><small>${esc(task.current_step || "")}${task.error ? ` · ${esc(task.error)}` : ""}</small></div>`).join("") : `<span class="text-tertiary">${esc(window.t("maintenance.noTasks"))}</span>`;
+  }
+
+  openSessionMaintenance() {
+    const selected = this.selectedSessionIds();
+    if (!selected.length) return this.showToast(window.t("maintenance.selectSessions"), true);
+    this.sessionPreview = null;
+    const selection = document.getElementById("session-maintenance-selection");
+    selection.innerHTML = selected.map(id => `<span class="topic-actor-chip">${esc(id)}</span>`).join("");
+    const canonical = document.getElementById("session-maintenance-canonical");
+    canonical.innerHTML = selected.map(id => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
+    document.getElementById("session-maintenance-preview").innerHTML = "";
+    document.getElementById("session-maintenance-force").checked = false;
+    document.getElementById("session-maintenance-submit").textContent = window.t("maintenance.previewChanges");
+    this.resetSessionPreview();
+    const overlay = document.getElementById("session-maintenance-overlay");
+    overlay.classList.add("visible");
+    overlay.setAttribute("aria-hidden", "false");
+  }
+
+  resetSessionPreview() {
+    this.sessionPreview = null;
+    const merge = document.getElementById("session-maintenance-operation")?.value === "merge_aliases";
+    document.getElementById("session-canonical-field")?.classList.toggle("hidden", !merge);
+    document.getElementById("session-force-field")?.classList.add("hidden");
+    const preview = document.getElementById("session-maintenance-preview");
+    if (preview) preview.innerHTML = "";
+    const submit = document.getElementById("session-maintenance-submit");
+    if (submit) submit.textContent = window.t("maintenance.previewChanges");
+  }
+
+  closeSessionMaintenance() {
+    const overlay = document.getElementById("session-maintenance-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    this.sessionPreview = null;
+  }
+
+  sessionMaintenancePayload() {
+    const operation = document.getElementById("session-maintenance-operation").value;
+    return {
+      operation,
+      session_ids: this.selectedSessionIds(),
+      canonical_session_id: operation === "merge_aliases" ? document.getElementById("session-maintenance-canonical").value : null,
+    };
+  }
+
+  async submitSessionMaintenance() {
+    const submit = document.getElementById("session-maintenance-submit");
+    try {
+      if (!this.sessionPreview) {
+        const payload = this.sessionMaintenancePayload();
+        this.sessionPreview = await this.topicPage.api.post("sessions/maintenance/preview", payload);
+        const blocked = this.sessionPreview.blocked_reasons || [];
+        const warnings = this.sessionPreview.warnings || [];
+        const impacts = (this.sessionPreview.items || []).map(item => {
+          const messages = this.sessionPreview.operation === "cleanup_summarized"
+            ? Number(item.eligible_message_count || 0)
+            : Number(item.message_count || 0);
+          return `<div class="session-preview-impact"><code>${esc(item.session_id)}</code><small>${esc(window.t("maintenance.previewCounts", messages, Number(item.timeline_count || 0), Number(item.topic_count || 0), Number(item.raw_evidence_reference_count || 0)))}</small></div>`;
+        }).join("");
+        document.getElementById("session-maintenance-preview").innerHTML = `<strong>${esc(window.t("maintenance.changePreview"))}</strong><p>${esc(window.t("maintenance.sessionImpact", (this.sessionPreview.items || []).length))}</p><div class="session-preview-impacts">${impacts}</div>${warnings.map(item => `<div class="session-preview-warning">${esc(item)}</div>`).join("")}${blocked.map(item => `<div class="session-preview-blocked">${esc(item)}</div>`).join("")}`;
+        document.getElementById("session-force-field").classList.toggle("hidden", !this.sessionPreview.requires_force);
+        submit.textContent = window.t("maintenance.confirmExecute");
+        return;
+      }
+      const force = document.getElementById("session-maintenance-force").checked;
+      if (this.sessionPreview.requires_force && !force) throw new Error(window.t("maintenance.forceRequired"));
+      submit.disabled = true;
+      const task = await this.topicPage.api.post("sessions/maintenance/start", { ...this.sessionMaintenancePayload(), confirmed: true, force });
+      this.showToast(window.t("maintenance.taskStarted"));
+      await this.pollSessionTask(task.task_uid);
+      this.closeSessionMaintenance();
+      await this.loadSessionAudit();
+    } catch (error) {
+      this.showToast(error.message, true);
+    } finally {
+      submit.disabled = false;
+    }
+  }
+
+  async pollSessionTask(taskUid) {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      const task = await this.topicPage.api.get("sessions/maintenance/task", { task_uid: taskUid });
+      document.getElementById("session-maintenance-preview").innerHTML = `<strong>${esc(window.t("maintenance.taskRunning"))}</strong><p>${esc(task.current_step || task.status)}</p>${task.error ? `<div class="session-preview-blocked">${esc(task.error)}</div>` : ""}`;
+      if (task.status === "completed") return task;
+      if (task.status === "failed") throw new Error(task.error || window.t("maintenance.taskFailed"));
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    throw new Error(window.t("maintenance.taskTimeout"));
   }
 
   reviewSpace() {

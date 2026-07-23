@@ -29,6 +29,7 @@ from .base.config_manager import ConfigManager
 from .base.exceptions import InitializationError, ProviderNotReadyError
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
+from .managers.session_maintenance_manager import SessionMaintenanceManager
 from .managers.timeline_summary_service import TimelineSummaryService
 from .models.identity_profile import AuthoritativeIdentityStore
 from .processors.memory_processor import MemoryProcessor
@@ -128,6 +129,7 @@ class PluginInitializer:
         self.decay_scheduler: DecayScheduler | None = None
         self.timeline_summary_service: TimelineSummaryService | None = None
         self.idle_summary_scheduler: IdleSummaryScheduler | None = None
+        self.session_maintenance_manager: SessionMaintenanceManager | None = None
 
         # 初始化状态
         self._initialization_complete = False
@@ -795,6 +797,15 @@ class PluginInitializer:
             )
             if topic_build_manager is not None:
                 topic_build_manager.conversation_store = conversation_store
+            self.memory_engine.set_session_scope_resolver(
+                self.conversation_manager.get_session_scope
+            )
+            self.session_maintenance_manager = SessionMaintenanceManager(
+                str(db_path),
+                self.conversation_manager,
+                self.memory_engine,
+            )
+            await self.session_maintenance_manager.initialize()
             logger.info("ConversationManager 已初始化")
 
             # 自动修复 message_count 不一致问题
@@ -880,7 +891,7 @@ class PluginInitializer:
         store = TopicMemoryStore(db_path)
         await store.initialize()
         stored = await store.get_timeline_setting_overrides()
-        if not stored.get("__legacy_imported_v3__"):
+        if not stored.get("__legacy_imported_v4__"):
             defaults = timeline_setting_defaults()
             imported: dict[str, Any] = {}
             for key in TIMELINE_SETTING_DEFINITIONS:
@@ -897,6 +908,7 @@ class PluginInitializer:
             imported["__legacy_imported_v1__"] = True
             imported["__legacy_imported_v2__"] = True
             imported["__legacy_imported_v3__"] = True
+            imported["__legacy_imported_v4__"] = True
             stored = await store.update_timeline_setting_overrides(
                 imported,
                 settings_revision=TIMELINE_SETTINGS_REVISION,

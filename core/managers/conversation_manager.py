@@ -69,6 +69,8 @@ class ConversationManager:
         self.max_cache_size = max_cache_size
         self.context_window_size = context_window_size
         self.session_ttl = session_ttl
+        self.raw_message_retention_days = 0
+        self.auto_delete_raw_sessions = False
 
         # LRU缓存: {session_id: (messages, last_access_time)}
         self._cache: OrderedDict = OrderedDict()
@@ -217,7 +219,8 @@ class ConversationManager:
         Returns:
             创建的Message对象
         """
-        # 如果没有sender_id,使用session_id
+        session_id = await self.resolve_session_id(session_id)
+        # 如果没有sender_id,使用规范会话 ID
         if not sender_id:
             sender_id = session_id
 
@@ -419,6 +422,7 @@ class ConversationManager:
         Returns:
             Message对象列表
         """
+        session_id = await self.resolve_session_id(session_id)
         # 如果指定了sender_id,不使用缓存(需要过滤)
         if sender_id:
             use_cache = False
@@ -454,6 +458,7 @@ class ConversationManager:
         Returns:
             Session对象
         """
+        session_id = await self.resolve_session_id(session_id)
         # 尝试获取现有会话
         session = await self.store.get_session(session_id)
 
@@ -478,6 +483,7 @@ class ConversationManager:
         Returns:
             Session对象,不存在则返回None
         """
+        session_id = await self.resolve_session_id(session_id)
         session = await self.store.get_session(session_id)
         if session:
             logger.debug(
@@ -509,6 +515,7 @@ class ConversationManager:
         Args:
             session_id: 会话ID
         """
+        session_id = await self.resolve_session_id(session_id)
         # 删除数据库中的消息
         await self.store.delete_session_messages(session_id)
 
@@ -522,26 +529,40 @@ class ConversationManager:
         logger.info(f"[ConversationManager] 已清空会话并重置记忆上下文: {session_id}")
 
     async def cleanup_expired_sessions(self) -> int:
-        """
-        清理过期会话
-
-        Returns:
-            清理的会话数量
-        """
-        ttl_seconds = max(60, int(self.session_ttl))
-        deleted_count = await self.store.delete_old_sessions(ttl_seconds=ttl_seconds)
-
-        # 清空缓存(可能包含已删除的会话)
+        """Evict idle in-memory entries; persisted conversations are untouched."""
+        cutoff = time.time() - max(60, int(self.session_ttl))
+        removed = 0
         async with self._cache_lock:
-            self._cache.clear()
+            for session_id, (_, last_access) in list(self._cache.items()):
+                if float(last_access) < cutoff:
+                    self._cache.pop(session_id, None)
+                    removed += 1
+        return removed
 
-        if deleted_count > 0:
-            logger.info(
-                f"[ConversationManager] 清理过期会话: {deleted_count}个 "
-                f"(TTL={ttl_seconds}秒)"
-            )
+    async def resolve_session_id(self, session_id: str) -> str:
+        """Resolve a user-confirmed session alias to its canonical ID."""
+        return await self.store.resolve_session_id(session_id)
 
-        return deleted_count
+    async def get_session_scope(self, session_id: str) -> list[str]:
+        """Return the canonical ID followed by its legacy aliases."""
+        return await self.store.list_session_alias_group(session_id)
+
+    async def active_session_ids(self) -> set[str]:
+        async with self._cache_lock:
+            return set(self._cache.keys())
+
+    async def invalidate_session_cache(self, session_ids: list[str]) -> None:
+        """Drop raw and canonical cache entries after out-of-band maintenance."""
+        normalized = {
+            str(item or "").strip() for item in session_ids if str(item or "").strip()
+        }
+        for session_id in list(normalized):
+            canonical = await self.resolve_session_id(session_id)
+            if canonical:
+                normalized.add(canonical)
+        async with self._cache_lock:
+            for session_id in normalized:
+                self._cache.pop(session_id, None)
 
     async def _update_cache(self, session_id: str, messages: list[Message]):
         """
@@ -620,6 +641,7 @@ class ConversationManager:
         Returns:
             Message对象列表
         """
+        session_id = await self.resolve_session_id(session_id)
         # 先获取会话信息以确定消息总数
         session_info = await self.get_session_info(session_id)
         if not session_info:
@@ -719,6 +741,7 @@ class ConversationManager:
             key: 元数据键
             value: 元数据值
         """
+        session_id = await self.resolve_session_id(session_id)
         updated = await self.store.update_session_metadata_values(
             session_id, {key: value}
         )
@@ -736,6 +759,7 @@ class ConversationManager:
         self, session_id: str, changes: dict[str, Any]
     ) -> bool:
         """Atomically update multiple metadata keys."""
+        session_id = await self.resolve_session_id(session_id)
         return await self.store.update_session_metadata_values(session_id, changes)
 
     async def apply_runtime_settings(self, effective: dict[str, Any]) -> None:
@@ -750,6 +774,21 @@ class ConversationManager:
         )
         self.session_ttl = int(
             effective.get("session_manager.session_ttl", self.session_ttl)
+        )
+        self.raw_message_retention_days = max(
+            0,
+            int(
+                effective.get(
+                    "session_manager.raw_message_retention_days",
+                    self.raw_message_retention_days,
+                )
+            ),
+        )
+        self.auto_delete_raw_sessions = bool(
+            effective.get(
+                "session_manager.auto_delete_raw_sessions",
+                self.auto_delete_raw_sessions,
+            )
         )
         async with self._cache_lock:
             while len(self._cache) > self.max_cache_size:
@@ -769,6 +808,7 @@ class ConversationManager:
         Returns:
             元数据值，不存在则返回default
         """
+        session_id = await self.resolve_session_id(session_id)
         session = await self.store.get_session(session_id)
         if not session:
             return default
@@ -780,6 +820,7 @@ class ConversationManager:
         重置指定会话的所有元数据，特别是 'last_summarized_index'。
         这会使下一次记忆总结从头开始，不会包含旧的上下文。
         """
+        session_id = await self.resolve_session_id(session_id)
         session = await self.store.get_session(session_id)
         if not session:
             logger.warning(

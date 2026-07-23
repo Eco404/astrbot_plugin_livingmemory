@@ -68,7 +68,9 @@ class MemoryRecall:
     ):
         """Query and inject long-term memory before LLM request"""
         try:
-            session_id = event.unified_msg_origin
+            raw_session_id = event.unified_msg_origin
+            session_scope = await self.memory_engine.resolve_session_scope(raw_session_id)
+            session_id = session_scope[0] if session_scope else raw_session_id
             logger.debug(f"[DEBUG-Recall] 获取到 unified_msg_origin: {session_id}")
 
             # 检测异常session_id
@@ -217,9 +219,10 @@ class MemoryRecall:
                         expansion_enabled=expansion_enabled,
                         assistant_mode=assistant_mode,
                     )
-                    memory_space_id = resolve_memory_space(
-                        session_id, persona_id
-                    ).memory_space_id
+                    memory_space_ids = [
+                        resolve_memory_space(scope_session_id, persona_id).memory_space_id
+                        for scope_session_id in (session_scope or [session_id])
+                    ]
                     sender_id = (
                         event.get_sender_id()
                         if hasattr(event, "get_sender_id")
@@ -249,9 +252,9 @@ class MemoryRecall:
                             fallback_platform=platform,
                         )
                     topic_search = self._safe_topic_recall(
-                        self.memory_engine.topic_recall_pipeline.search(
+                        self.memory_engine.topic_recall_pipeline.search_spaces(
                             branches=branches,
-                            memory_space_id=memory_space_id,
+                            memory_space_ids=memory_space_ids,
                             final_k=min(
                                 top_k,
                                 int(topic_config.get("recall_top_k", 3)),

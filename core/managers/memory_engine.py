@@ -132,6 +132,7 @@ class MemoryEngine:
             identity_profile_store or AuthoritativeIdentityStore()
         )
         self.topic_provider_resolver = topic_provider_resolver
+        self._session_scope_resolver: Callable[[str], Any] | None = None
         self.config = config or {}
         self.graph_enabled = bool(self.config.get("graph_memory_enabled", False))
         self.atom_enabled = bool(
@@ -518,6 +519,19 @@ class MemoryEngine:
         """Invalidate cached retrieval results after memory writes."""
         self._search_cache_generation += 1
         self._search_cache.clear()
+
+    def set_session_scope_resolver(self, resolver: Callable[[str], Any] | None) -> None:
+        """Attach the explicit conversation-alias resolver after initialization."""
+        self._session_scope_resolver = resolver
+
+    async def resolve_session_scope(self, session_id: str | None) -> list[str]:
+        if not session_id or self._session_scope_resolver is None:
+            return [session_id] if session_id else []
+        resolved = await self._session_scope_resolver(str(session_id))
+        return list(dict.fromkeys(str(item) for item in (resolved or []) if str(item)))
+
+    async def invalidate_session_alias_cache(self) -> None:
+        self._invalidate_search_cache()
 
     def _apply_stable_identity(
         self,
@@ -1526,6 +1540,11 @@ class MemoryEngine:
         if not content or not content.strip():
             raise ValueError("记忆内容不能为空")
 
+        if session_id:
+            scope = await self.resolve_session_scope(session_id)
+            if scope:
+                session_id = scope[0]
+
         op_id = await self._start_write_op(
             "add",
             {
@@ -1555,6 +1574,16 @@ class MemoryEngine:
         # 注意：先合并外部metadata，再确保时间字段不被覆盖
         if metadata:
             full_metadata.update(metadata)
+
+        # A confirmed alias only broadens reads for legacy data. New Timeline
+        # records and their source spans must consistently use the canonical ID.
+        if session_id:
+            full_metadata["session_id"] = session_id
+            source_window = full_metadata.get("source_window")
+            if isinstance(source_window, dict):
+                source_window = dict(source_window)
+                source_window["session_id"] = session_id
+                full_metadata["source_window"] = source_window
 
         # 普通新增始终使用当前时间；结构化替换可保留原始时间轴位置。
         preserved_create_time = None
@@ -1607,7 +1636,7 @@ class MemoryEngine:
         if atoms and self.atom_store is not None and self.atom_enabled:
             prepared_atoms = []
             for atom in atoms:
-                atom.session_id = atom.session_id or session_id
+                atom.session_id = session_id or atom.session_id
                 atom.persona_id = atom.persona_id or persona_id
                 atom.parent_memory_id = doc_id
                 prepared_atoms.append(atom)
@@ -1736,6 +1765,7 @@ class MemoryEngine:
         session_id: str | None = None,
         persona_id: str | None = None,
         track_access: bool = True,
+        _expand_aliases: bool = True,
     ) -> list[HybridResult]:
         """
         检索相关记忆
@@ -1752,6 +1782,37 @@ class MemoryEngine:
         """
         if not query or not query.strip():
             return []
+
+        if session_id and _expand_aliases:
+            session_scope = await self.resolve_session_scope(session_id)
+            if len(session_scope) > 1:
+                batches = await asyncio.gather(
+                    *(
+                        self.search_memories(
+                            query,
+                            k=max(k, k * 2),
+                            session_id=scope_session_id,
+                            persona_id=persona_id,
+                            track_access=False,
+                            _expand_aliases=False,
+                        )
+                        for scope_session_id in session_scope
+                    )
+                )
+                merged: dict[int, HybridResult] = {}
+                for batch in batches:
+                    for result in batch:
+                        previous = merged.get(int(result.doc_id))
+                        if previous is None or result.final_score > previous.final_score:
+                            merged[int(result.doc_id)] = result
+                results = sorted(
+                    merged.values(), key=lambda item: item.final_score, reverse=True
+                )[:k]
+                if track_access:
+                    self.record_memory_access([item.doc_id for item in results])
+                return results
+            if session_scope:
+                session_id = session_scope[0]
 
         cache_key = self._search_cache_key(query, k, session_id, persona_id)
         cached_results = self._get_cached_search_results(cache_key)

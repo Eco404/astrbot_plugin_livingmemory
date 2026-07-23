@@ -1944,12 +1944,17 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 40
+        assert len(plugin._api_routes) == 45
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
         assert f"{prefix}/stats" in paths
         assert f"{prefix}/sessions" in paths
+        assert f"{prefix}/sessions/audit" in paths
+        assert f"{prefix}/sessions/maintenance/preview" in paths
+        assert f"{prefix}/sessions/maintenance/start" in paths
+        assert f"{prefix}/sessions/maintenance/task" in paths
+        assert f"{prefix}/sessions/maintenance/tasks" in paths
         assert f"{prefix}/memories" in paths
         assert f"{prefix}/memories/update" in paths
         assert f"{prefix}/memories/related" in paths

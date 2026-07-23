@@ -284,6 +284,61 @@ async def test_memory_engine_add_search_get_delete(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_add_memory_routes_alias_identity_and_source_span_to_canonical(
+    tmp_path: Path,
+):
+    engine = MemoryEngine(
+        db_path=str(tmp_path / "canonical_memory.db"),
+        faiss_db=_FakeFaissDB(),
+        config={"fallback_enabled": True, "rrf_k": 60, "atom_enabled": True},
+    )
+    await engine.initialize()
+    engine.atom_store = AtomStore(str(tmp_path / "canonical_memory.db"))
+    await engine.atom_store.initialize()
+    canonical = "bot-a:FriendMessage:user-1"
+    alias = "bot-a:private:user-1"
+
+    async def resolve_scope(session_id: str) -> list[str]:
+        return [canonical, alias] if session_id in {canonical, alias} else [session_id]
+
+    engine.set_session_scope_resolver(resolve_scope)
+    memory_id = await engine.add_memory(
+        content="别名会话产生的新 Timeline",
+        session_id=alias,
+        persona_id="p1",
+        metadata={
+            "session_id": alias,
+            "source_window": {
+                "session_id": alias,
+                "first_message_id": 1,
+                "last_message_id": 2,
+            },
+        },
+        atoms=[
+            MemoryAtom(
+                parent_memory_id=0,
+                content="别名来源事实",
+                session_id=alias,
+            )
+        ],
+    )
+
+    memory = await engine.get_memory(memory_id)
+    assert memory is not None
+    assert memory["metadata"]["session_id"] == canonical
+    source_span = await engine.memory_identity_store.get_source_span(
+        memory["metadata"]["memory_uid"]
+    )
+    assert source_span is not None
+    assert source_span["session_id"] == canonical
+    atoms = await engine.atom_store.get_by_parent(memory_id)
+    assert len(atoms) == 1
+    assert atoms[0].session_id == canonical
+
+    await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_replace_memory_preserves_logical_uid_and_increments_revision(
     tmp_path: Path,
 ):
@@ -907,6 +962,44 @@ async def test_memory_engine_session_filter_isolates_sessions(tmp_path: Path):
     for r in results_a:
         assert r.metadata.get("session_id") == "test:private:session_A"
 
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_engine_alias_scope_recalls_canonical_and_legacy_sessions(
+    tmp_path: Path,
+):
+    engine = MemoryEngine(
+        db_path=str(tmp_path / "alias_scope.db"),
+        faiss_db=_FakeFaissDB(),
+        config={"fallback_enabled": True},
+    )
+    await engine.initialize()
+    canonical = "bot-a:FriendMessage:user-1"
+    legacy = "bot-a:private:user-1"
+    canonical_id = await engine.add_memory(
+        content="共同关键词：规范会话记忆",
+        session_id=canonical,
+        persona_id="p1",
+    )
+    legacy_id = await engine.add_memory(
+        content="共同关键词：旧会话记忆",
+        session_id=legacy,
+        persona_id="p1",
+    )
+
+    async def resolve_scope(session_id: str) -> list[str]:
+        return [canonical, legacy] if session_id in {canonical, legacy} else [session_id]
+
+    engine.set_session_scope_resolver(resolve_scope)
+    results = await engine.search_memories(
+        query="共同关键词",
+        k=5,
+        session_id=legacy,
+        persona_id="p1",
+    )
+
+    assert {item.doc_id for item in results} == {canonical_id, legacy_id}
     await engine.close()
 
 
