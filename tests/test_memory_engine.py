@@ -51,6 +51,7 @@ async def test_identity_profile_change_marks_and_queues_only_affected_timelines(
     engine.topic_build_manager.schedule_space.assert_called_once_with(
         "space-1",
         timeline_uids=["timeline-1", "timeline-2"],
+        immediate=False,
     )
     assert result["queued"] is True
 

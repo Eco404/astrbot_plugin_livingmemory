@@ -9,6 +9,7 @@ export class IdentityPage {
     this.expandedProfiles = new Set();
     this.dirty = false;
     this.loaded = false;
+    this.pendingImpact = null;
   }
 
   initEventListeners() {
@@ -16,6 +17,15 @@ export class IdentityPage {
     document.getElementById("identity-sync-topics")?.addEventListener("click", () => this.syncTopics());
     document.getElementById("identity-add")?.addEventListener("click", () => this.add());
     document.getElementById("identity-save")?.addEventListener("click", () => this.save());
+    document.getElementById("identity-impact-close")?.addEventListener("click", () => this.closeImpact());
+    document.getElementById("identity-impact-cancel")?.addEventListener("click", () => this.closeImpact());
+    document.getElementById("identity-impact-confirm")?.addEventListener("click", () => {
+      const syncMode = document.querySelector('input[name="identity-impact-sync"]:checked')?.value || "queue";
+      this.persist(syncMode, true);
+    });
+    document.getElementById("identity-impact-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeImpact();
+    });
     const container = document.getElementById("identity-list");
     container?.addEventListener("input", event => this.updateField(event));
     container?.addEventListener("click", event => {
@@ -184,10 +194,31 @@ export class IdentityPage {
       this.showToast(error.message, true);
       return;
     }
-    const button = document.getElementById("identity-save");
-    if (button) button.disabled = true;
     try {
-      const data = await this.api.post("identities/save", { profiles: this.profiles });
+      const impact = await this.api.post("identities/impact", { profiles: this.profiles });
+      if (Number(impact.deleted_profile_count || 0) > 0) {
+        this.openImpact(impact);
+        return;
+      }
+      await this.persist("queue", false);
+    } catch (error) {
+      this.showToast(error.message || window.t("identity.saveFailed"), true);
+      this.updateSaveState();
+    }
+  }
+
+  async persist(syncMode, confirmDeletions) {
+    const button = document.getElementById("identity-save");
+    const confirmButton = document.getElementById("identity-impact-confirm");
+    if (button) button.disabled = true;
+    if (confirmButton) confirmButton.disabled = true;
+    try {
+      const data = await this.api.post("identities/save", {
+        profiles: this.profiles,
+        sync_mode: syncMode,
+        confirm_identity_deletions: Boolean(confirmDeletions),
+      });
+      this.closeImpact({ restoreFocus: false });
       this.platformOptions = Array.isArray(data.platform_options) ? data.platform_options : this.platformOptions;
       this.profiles = (data.profiles || []).map(profile => this.normalize(profile, true));
       this.expandedProfiles.clear();
@@ -211,7 +242,44 @@ export class IdentityPage {
     } catch (error) {
       this.showToast(error.message || window.t("identity.saveFailed"), true);
       this.updateSaveState();
+    } finally {
+      if (confirmButton) confirmButton.disabled = false;
     }
+  }
+
+  openImpact(impact) {
+    this.pendingImpact = impact;
+    const body = document.getElementById("identity-impact-body");
+    const deleted = impact.deleted_profiles || [];
+    const topics = impact.topics || [];
+    body.innerHTML = `
+      <div class="identity-impact-warning">${esc(window.t("identity.deleteImpactWarning"))}</div>
+      <dl class="identity-impact-stats">
+        <div><dt>${esc(window.t("identity.deletedProfiles"))}</dt><dd>${deleted.length}</dd></div>
+        <div><dt>Topic</dt><dd>${Number(impact.topic_count || 0)}</dd></div>
+        <div><dt>Timeline</dt><dd>${(impact.timeline_uids || []).length}</dd></div>
+      </dl>
+      <div class="identity-impact-names">${deleted.map(profile => `<span class="topic-actor-chip">${esc(profile.display_name || profile.user_id)} <small>${esc(profile.platform || window.t("identity.platformWildcard"))}</small></span>`).join("")}</div>
+      <details class="topic-compact-details"><summary>${esc(window.t("identity.affectedTopics"))} (${topics.length})</summary>
+        <div class="identity-impact-topic-list">${topics.length ? topics.map(topic => `<div><strong>${esc(topic.title)}</strong><small>${esc(topic.topic_uid)} · r${Number(topic.revision || 0)}</small></div>`).join("") : `<span class="text-tertiary">${esc(window.t("topic.none"))}</span>`}</div>
+      </details>
+      <fieldset class="identity-impact-sync"><legend>${esc(window.t("identity.syncChoice"))}</legend>
+        <label><input type="radio" name="identity-impact-sync" value="queue" checked><span><strong>${esc(window.t("identity.syncQueue"))}</strong><small>${esc(window.t("identity.syncQueueHelp"))}</small></span></label>
+        <label><input type="radio" name="identity-impact-sync" value="immediate"><span><strong>${esc(window.t("identity.syncImmediate"))}</strong><small>${esc(window.t("identity.syncImmediateHelp"))}</small></span></label>
+      </fieldset>`;
+    const overlay = document.getElementById("identity-impact-overlay");
+    overlay?.classList.add("visible");
+    overlay?.setAttribute("aria-hidden", "false");
+    document.getElementById("identity-impact-close")?.focus();
+  }
+
+  closeImpact({ restoreFocus = true } = {}) {
+    const overlay = document.getElementById("identity-impact-overlay");
+    if (!overlay?.classList.contains("visible")) return;
+    overlay.classList.remove("visible");
+    overlay.setAttribute("aria-hidden", "true");
+    this.pendingImpact = null;
+    if (restoreFocus) document.getElementById("identity-save")?.focus();
   }
 
   async syncTopics() {

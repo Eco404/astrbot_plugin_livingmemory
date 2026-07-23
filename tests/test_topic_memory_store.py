@@ -14,6 +14,8 @@ from astrbot_plugin_livingmemory.core.models.memory_identity import (
 )
 from astrbot_plugin_livingmemory.core.models.topic_memory import (
     TimelineTopicCandidate,
+    TopicActorLink,
+    TopicAtomActorLink,
     TopicFragmentDraft,
     TopicAtomSource,
     TopicMaintenanceMode,
@@ -251,6 +253,213 @@ async def test_maintenance_reviews_resolve_only_after_full_timeline_scope(tmp_pa
     assert await store.list_maintenance_reviews("space-1") == []
     resolved = await store.list_maintenance_reviews("space-1", status="resolved")
     assert [item["review_uid"] for item in resolved] == [review_uid]
+
+
+@pytest.mark.asyncio
+async def test_review_publication_is_atomic_and_rejects_stale_candidate_revision(
+    tmp_path: Path,
+):
+    db_path = str(tmp_path / "review-publication.db")
+    space_id = await _register_timeline(
+        db_path,
+        memory_uid="timeline-1",
+        document_id=1,
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    topic = TopicMemory(
+        topic_uid="topic-1",
+        memory_space_id=space_id,
+        title="工资",
+        summary="旧摘要",
+    )
+    link = TopicTimelineLink(
+        topic_uid=topic.topic_uid,
+        timeline_uid="timeline-1",
+        time_cluster_key="cluster-1",
+    )
+    saved = await store.save_topic_snapshot(
+        topic,
+        atoms=[],
+        links=[link],
+        atom_sources=[],
+    )
+    review_uid = await store.enqueue_maintenance_review(
+        memory_space_id=space_id,
+        review_type="ambiguous_topic_match",
+        timeline_uids=["timeline-1"],
+        topic_uids=[topic.topic_uid],
+        details={"proposed_title": "工资补发"},
+    )
+    run = await store.create_maintenance_run(
+        TopicMaintenanceRun(
+            memory_space_id=space_id,
+            mode=TopicMaintenanceMode.REPAIR,
+        )
+    )
+    result = await store.publish_topic_build(
+        run_uid=run.run_uid,
+        memory_space_id=space_id,
+        mode=TopicMaintenanceMode.REPAIR,
+        snapshots=[
+            {
+                "topic": replace(saved, title="工资补发", summary="新摘要"),
+                "atoms": [],
+                "links": [link],
+                "atom_sources": [],
+                "expected_revision": saved.revision,
+            }
+        ],
+        relations=[],
+        review_resolution={
+            "review_uid": review_uid,
+            "action": "merge",
+            "payload": {"target_topic_uid": topic.topic_uid},
+        },
+    )
+
+    assert result["topics"][0].revision == 2
+    review = await store.get_maintenance_review(review_uid)
+    assert review["status"] == "resolved"
+    assert review["resolution_action"] == "merge"
+    assert review["resolution_payload"] == {"target_topic_uid": "topic-1"}
+
+    stale_review_uid = await store.enqueue_maintenance_review(
+        memory_space_id=space_id,
+        review_type="ambiguous_topic_match",
+        timeline_uids=["timeline-1"],
+        topic_uids=[topic.topic_uid],
+        details={"proposed_title": "过期决策"},
+    )
+    current = await store.get_topic(topic.topic_uid)
+    advanced = await store.save_topic_snapshot(
+        replace(current, summary="外部更新"),
+        atoms=[],
+        links=[link],
+        atom_sources=[],
+        expected_revision=current.revision,
+    )
+    stale_run = await store.create_maintenance_run(
+        TopicMaintenanceRun(
+            memory_space_id=space_id,
+            mode=TopicMaintenanceMode.REPAIR,
+        )
+    )
+    with pytest.raises(TopicRevisionConflict, match="preview is stale"):
+        await store.publish_topic_build(
+            run_uid=stale_run.run_uid,
+            memory_space_id=space_id,
+            mode=TopicMaintenanceMode.REPAIR,
+            snapshots=[
+                {
+                    "topic": replace(advanced, summary="不应写入"),
+                    "atoms": [],
+                    "links": [link],
+                    "atom_sources": [],
+                    "expected_revision": advanced.revision,
+                }
+            ],
+            relations=[],
+            review_resolution={
+                "review_uid": stale_review_uid,
+                "action": "merge",
+                "payload": {},
+            },
+        )
+
+    assert (await store.get_topic(topic.topic_uid)).summary == "外部更新"
+    stale_review = await store.get_maintenance_review(stale_review_uid)
+    assert stale_review["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_actor_filter_and_fact_groups_expose_concrete_provenance(tmp_path: Path):
+    db_path = str(tmp_path / "actor-filter.db")
+    space_id = await _register_timeline(
+        db_path,
+        memory_uid="timeline-1",
+        document_id=1,
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    topic = TopicMemory(
+        topic_uid="topic-actor",
+        memory_space_id=space_id,
+        title="工资补发",
+        summary="示例甲的工资补发记录",
+    )
+    atom = TopicMemoryAtom(
+        atom_uid="atom-salary",
+        topic_uid=topic.topic_uid,
+        atom_type="factual",
+        content="示例甲的六月工资少发了 600 元",
+    )
+    link = TopicTimelineLink(
+        topic_uid=topic.topic_uid,
+        timeline_uid="timeline-1",
+        time_cluster_key="cluster-1",
+    )
+    actor = TopicActorLink(
+        topic_uid=topic.topic_uid,
+        actor_id="qq:human:10000001",
+        actor_type="human",
+        relation_type="subject",
+        display_name_snapshot="示例甲",
+        resolution_status="profile_inferred",
+        metadata={
+            "fragment_uids": ["fragment-1"],
+            "timeline_uids": ["timeline-1"],
+            "identity_sources": ["authoritative_profile"],
+        },
+    )
+    atom_actor = TopicAtomActorLink(
+        topic_atom_uid=atom.atom_uid,
+        actor_id=actor.actor_id,
+        relation_type=actor.relation_type,
+        fragment_uid="fragment-1",
+        timeline_uid="timeline-1",
+        metadata={"identity_source": "authoritative_profile"},
+    )
+    fragment = TopicFragmentDraft(
+        fragment_uid="fragment-1",
+        run_uid="run-actor",
+        candidate_group_uid="group-actor",
+        memory_space_id=space_id,
+        label="工资补发",
+        summary="示例甲的六月工资补发片段",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[{"content": atom.content}],
+    )
+    await store.save_topic_snapshot(
+        topic,
+        atoms=[atom],
+        links=[link],
+        atom_sources=[],
+        actor_links=[actor],
+        atom_actor_links=[atom_actor],
+        fragments=[fragment],
+    )
+
+    matched = await store.list_topics(space_id, actor_id=actor.actor_id)
+    assert [item.topic_uid for item in matched] == [topic.topic_uid]
+    assert await store.list_topics(space_id, actor_id="qq:human:other") == []
+    catalog = await store.list_topic_actors(space_id)
+    assert catalog[0]["display_name"] == "示例甲"
+    assert catalog[0]["topic_count"] == 1
+    provenance = await store.get_topic_provenance(topic.topic_uid)
+    group = provenance["actor_fact_groups"][0]
+    assert group["resolution_status"] == "profile_inferred"
+    assert group["identity_sources"] == ["authoritative_profile"]
+    assert group["facts"] == [
+        {
+            "atom_uid": "atom-salary",
+            "content": "示例甲的六月工资少发了 600 元",
+            "atom_type": "factual",
+            "fragment_uids": ["fragment-1"],
+            "timeline_uids": ["timeline-1"],
+        }
+    ]
 
 
 async def _register_timeline(

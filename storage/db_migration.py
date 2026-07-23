@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.12"
+    CURRENT_VERSION = "9.13"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -49,6 +49,7 @@ class DBMigration:
         "9.10": "Topic embedding signatures and model-safe revectorization",
         "9.11": "Bounded incremental Topic maintenance and stable fragment identity",
         "9.12": "Unified runtime settings and resumable idle Timeline summaries",
+        "9.13": "Topic review decisions and identity governance",
     }
 
     def __init__(self, db_path: str):
@@ -347,6 +348,8 @@ class DBMigration:
 
                 if current_key <= self.version_key("9.11"):
                     migration_steps.append(self._migrate_v9_11_to_v9_12)
+                if current_key <= self.version_key("9.12"):
+                    migration_steps.append(self._migrate_v9_12_to_v9_13)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1331,6 +1334,44 @@ class DBMigration:
         if progress_callback:
             progress_callback("初始化统一运行时设置", 1, 1)
         logger.info("v9.11 -> v9.12 迁移完成")
+
+    async def _migrate_v9_12_to_v9_13(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Add auditable user decisions to the Topic maintenance queue."""
+        logger.info("执行迁移步骤: v9.12 -> v9.13 (Topic review governance)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await TopicMemoryStore.create_tables(db)
+            columns = {
+                str(row[1])
+                for row in await (await db.execute(
+                    "PRAGMA table_info(topic_maintenance_queue)"
+                )).fetchall()
+            }
+            additions = {
+                "resolved_at": "REAL",
+                "resolution_action": "TEXT NOT NULL DEFAULT ''",
+                "resolution_payload": "TEXT NOT NULL DEFAULT '{}'",
+                "expected_topic_revisions": "TEXT NOT NULL DEFAULT '{}'",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    await db.execute(
+                        f"ALTER TABLE topic_maintenance_queue ADD COLUMN {name} {definition}"
+                    )
+            await db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_topic_actor_display_name
+                ON topic_actor_links(display_name_snapshot, topic_uid)
+                """
+            )
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建 Topic 审查决策与人物治理字段", 1, 1)
+        logger.info("v9.12 -> v9.13 迁移完成")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

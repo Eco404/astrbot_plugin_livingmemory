@@ -224,6 +224,12 @@
               </div>
             </div>
             <div id="topic-progress" class="system-panel hidden mb-4"></div>
+            <div class="topic-list-toolbar">
+              <label for="topic-actor-filter" data-i18n="topic.actorFilter">按人物筛选</label>
+              <select id="topic-actor-filter" class="select input input-sm">
+                <option value="" data-i18n="topic.actorFilterAll">全部人物</option>
+              </select>
+            </div>
             <div class="table-container topic-table-container">
               <div class="table-scroll topic-table-scroll">
                 <table class="data-table topic-data-table">
@@ -270,8 +276,27 @@
           <div class="page-body maintenance-page-body">
             <div class="maintenance-tabs" role="tablist">
               <button class="maintenance-tab active" type="button" data-maintenance-tab="topic" role="tab" aria-selected="true" data-i18n="maintenance.topicTab">Topic 维护</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="review" role="tab" aria-selected="false" data-i18n="maintenance.reviewTab">Topic 待审查</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="recall" role="tab" aria-selected="false" data-i18n="nav.recall">召回测试</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="models" role="tab" aria-selected="false" data-i18n="nav.models">模型测试</button>
+            </div>
+            <div class="maintenance-panel" id="maintenance-panel-review">
+              <div class="maintenance-review-toolbar">
+                <div>
+                  <h2 data-i18n="maintenance.reviewTitle">Topic 待审查</h2>
+                  <p class="text-secondary" data-i18n="maintenance.reviewIntro">核对歧义片段与候选 Topic，再决定合并、新建、暂缓或忽略。</p>
+                </div>
+                <div class="maintenance-topic-controls">
+                  <select id="maintenance-review-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
+                  <button class="btn btn-secondary btn-sm" id="maintenance-review-refresh" type="button" data-i18n="common.refresh">刷新</button>
+                  <button class="btn btn-primary btn-sm" id="maintenance-open-governance" type="button" data-i18n="maintenance.governance">合并 / 拆分</button>
+                </div>
+              </div>
+              <div id="maintenance-identity-pending" class="maintenance-pending-sync hidden"></div>
+              <div class="maintenance-review-layout">
+                <div class="maintenance-review-list" id="maintenance-review-list"><div class="identity-state" data-i18n="maintenance.chooseReviewSpace">请选择记忆空间</div></div>
+                <div class="maintenance-review-detail" id="maintenance-review-detail"><div class="identity-state" data-i18n="maintenance.chooseReview">请选择待审查项</div></div>
+              </div>
             </div>
             <div class="maintenance-panel active" id="maintenance-panel-topic">
               <div class="maintenance-tool-band">
@@ -434,6 +459,40 @@
           </button>
         </div>
         <div class="modal-body topic-timeline-detail-body" id="topic-timeline-detail-body"></div>
+      </div>
+    </div>
+
+    <!-- Topic Governance Modal -->
+    <div class="modal-overlay topic-governance-overlay" id="topic-governance-overlay" aria-hidden="true">
+      <div class="modal topic-governance-modal" role="dialog" aria-modal="true" aria-labelledby="topic-governance-title">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-governance-title" data-i18n="maintenance.governance">合并 / 拆分</div>
+          <button class="modal-close" id="topic-governance-close" type="button" data-i18n-aria="common.close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body topic-governance-body" id="topic-governance-body"></div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="topic-governance-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-primary" id="topic-governance-submit" type="button" data-i18n="maintenance.previewChanges">预览变更</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Identity Deletion Impact Modal -->
+    <div class="modal-overlay identity-impact-overlay" id="identity-impact-overlay" aria-hidden="true">
+      <div class="modal identity-impact-modal" role="dialog" aria-modal="true" aria-labelledby="identity-impact-title">
+        <div class="modal-header">
+          <div class="modal-title" id="identity-impact-title" data-i18n="identity.deleteImpactTitle">删除人物资料影响</div>
+          <button class="modal-close" id="identity-impact-close" type="button" data-i18n-aria="common.close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body" id="identity-impact-body"></div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="identity-impact-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-danger" id="identity-impact-confirm" type="button" data-i18n="identity.confirmDeleteSave">确认删除并保存</button>
+        </div>
       </div>
     </div>
 

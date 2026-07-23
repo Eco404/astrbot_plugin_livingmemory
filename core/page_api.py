@@ -204,6 +204,36 @@ class PluginPageApi:
             "LivingMemory Page incremental Topic maintenance preview",
         )
         register(
+            f"{PAGE_API_PREFIX}/topics/reviews",
+            self.list_topic_reviews,
+            ["GET"],
+            "LivingMemory Page Topic review queue",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/reviews/detail",
+            self.get_topic_review_detail,
+            ["GET"],
+            "LivingMemory Page Topic review detail",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/reviews/resolve",
+            self.resolve_topic_review,
+            ["POST"],
+            "LivingMemory Page resolve Topic review",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/governance/preview",
+            self.preview_topic_governance,
+            ["POST"],
+            "LivingMemory Page preview Topic merge or split",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/governance/execute",
+            self.execute_topic_governance,
+            ["POST"],
+            "LivingMemory Page execute Topic merge or split",
+        )
+        register(
             f"{PAGE_API_PREFIX}/topics/relations/recompute",
             self.recompute_topic_relations,
             ["POST"],
@@ -262,6 +292,12 @@ class PluginPageApi:
             self.save_identity_profiles,
             ["POST"],
             "LivingMemory Page save authoritative identity profiles",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/identities/impact",
+            self.preview_identity_profile_impact,
+            ["POST"],
+            "LivingMemory Page preview identity profile impact",
         )
         register(
             f"{PAGE_API_PREFIX}/identities/topics/sync",
@@ -442,6 +478,36 @@ class PluginPageApi:
             ready["memory_engine"]
         )
 
+    async def list_topic_reviews(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.list_reviews(ready["memory_engine"])
+
+    async def get_topic_review_detail(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.get_review_detail(ready["memory_engine"])
+
+    async def resolve_topic_review(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.resolve_review(ready["memory_engine"])
+
+    async def preview_topic_governance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.preview_governance(ready["memory_engine"])
+
+    async def execute_topic_governance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.execute_governance(ready["memory_engine"])
+
     async def start_topic_build(self):
         ready, error = await self._ensure_plugin_ready()
         if error:
@@ -518,6 +584,18 @@ class PluginPageApi:
             platform_manager=getattr(self.plugin.context, "platform_manager", None),
             conversation_manager=ready.get("conversation_manager"),
             on_saved=ready["memory_engine"].handle_identity_profiles_changed,
+        )
+
+    async def preview_identity_profile_impact(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        store = ready.get("identity_profile_store")
+        if store is None:
+            return self.utils.error("人物资料存储尚未初始化")
+        return await self.identity_handler.preview_profile_changes(
+            store,
+            impact_resolver=ready["memory_engine"].preview_identity_profiles_changed,
         )
 
     async def sync_identity_topics(self):

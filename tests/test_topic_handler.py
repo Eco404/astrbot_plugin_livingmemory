@@ -10,6 +10,10 @@ import pytest
 
 from astrbot_plugin_livingmemory.core.page_api_modules.topic_handler import TopicHandler
 from astrbot_plugin_livingmemory.core.page_api_modules.utils import PageApiUtils
+from astrbot_plugin_livingmemory.core.models.topic_memory import (
+    TopicFragmentDraft,
+    TopicMemory,
+)
 
 
 @pytest.mark.asyncio
@@ -661,3 +665,122 @@ async def test_shutdown_cancels_and_drains_page_owned_build_tasks(monkeypatch):
 
     assert handler._tasks == set()
     assert handler._jobs[job_uid]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_governance_requires_preview_confirmation_and_forwards_merge(
+    monkeypatch,
+):
+    manager = SimpleNamespace(
+        has_active_builds=lambda: False,
+        merge_topics=AsyncMock(return_value={"status": "completed"}),
+    )
+    engine = SimpleNamespace(topic_build_manager=manager)
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={
+            "memory_space_id": "space-1",
+            "operation": "merge",
+            "topic_uids": ["topic-a", "topic-b"],
+            "main_topic_uid": "topic-a",
+            "confirmed": False,
+        }
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    handler = TopicHandler(PageApiUtils())
+
+    rejected = await handler.execute_governance(engine)
+    assert rejected["status"] == "error"
+    manager.merge_topics.assert_not_awaited()
+
+    request.get_json = AsyncMock(
+        return_value={
+            "memory_space_id": "space-1",
+            "operation": "merge",
+            "topic_uids": ["topic-a", "topic-b"],
+            "main_topic_uid": "topic-a",
+            "confirmed": True,
+        }
+    )
+    accepted = await handler.execute_governance(engine)
+
+    assert accepted["status"] == "ok"
+    manager.merge_topics.assert_awaited_once_with(
+        "space-1",
+        topic_uids=["topic-a", "topic-b"],
+        main_topic_uid="topic-a",
+    )
+
+
+@pytest.mark.asyncio
+async def test_governance_preview_exposes_sources_actors_and_relation_rebuild(
+    monkeypatch,
+):
+    topics = [
+        TopicMemory(
+            memory_space_id="space-1",
+            topic_uid=uid,
+            title=uid,
+            summary=f"{uid} summary",
+            revision=1,
+        )
+        for uid in ("topic-a", "topic-b")
+    ]
+    fragment = TopicFragmentDraft(
+        run_uid="run-old",
+        candidate_group_uid="group-old",
+        memory_space_id="space-1",
+        fragment_uid="fragment-1",
+        label="工资补发",
+        summary="六月工资补发",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[{"content": "六月工资少发600元"}],
+        metadata={
+            "participant_refs": [{"display_name": "示例甲", "actor_id": "qq:1"}],
+            "mentioned_actor_refs": [],
+        },
+    )
+    store = SimpleNamespace(
+        get_topics_by_uids=AsyncMock(return_value=topics),
+        list_active_fragments_for_topics=AsyncMock(
+            return_value=[{"topic_uid": "topic-a", "fragment": fragment}]
+        ),
+        list_topic_relations=AsyncMock(
+            return_value=[
+                {
+                    "relation_uid": "relation-1",
+                    "topic_uid": "topic-a",
+                    "related_topic_uid": "topic-b",
+                }
+            ]
+        ),
+    )
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={
+            "memory_space_id": "space-1",
+            "operation": "merge",
+            "topic_uids": ["topic-a", "topic-b"],
+        }
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+
+    response = await TopicHandler(PageApiUtils()).preview_governance(
+        SimpleNamespace(topic_memory_store=store)
+    )
+
+    assert response["status"] == "ok"
+    data = response["data"]
+    assert data["topic_count"] == 2
+    assert data["fragment_count"] == 1
+    assert data["timeline_count"] == 1
+    assert data["relation_count"] == 1
+    assert data["relations_will_be_recomputed"] is True
+    assert data["fragments"][0]["participant_refs"][0]["display_name"] == "示例甲"

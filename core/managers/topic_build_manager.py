@@ -42,6 +42,7 @@ from ..models.topic_memory import (
     TopicCandidateGroup,
     TopicFragmentDraft,
     TopicMaintenanceMode,
+    TopicMaintenanceRun,
     TopicMaintenanceStatus,
     TopicMemory,
     TopicMemoryAtom,
@@ -403,6 +404,328 @@ class TopicBuildManager:
                 "relation_count": relation_count,
                 "algorithm_version": _RELATION_ALGORITHM_VERSION,
             }
+
+    async def resolve_maintenance_review(
+        self,
+        review_uid: str,
+        *,
+        action: str,
+        target_topic_uid: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply one user decision without rerunning fragment extraction."""
+        action = str(action or "").strip().lower()
+        if action == "defer":
+            changed = await self.store.set_maintenance_review_status(
+                review_uid,
+                status="pending",
+                action="defer",
+                payload={},
+            )
+            if not changed:
+                raise ValueError("Topic review is no longer pending")
+            return {"review_uid": review_uid, "status": "pending", "action": action}
+        if action == "ignore":
+            changed = await self.store.set_maintenance_review_status(
+                review_uid,
+                status="ignored",
+                action="ignore",
+                payload={},
+            )
+            if not changed:
+                raise ValueError("Topic review is no longer pending")
+            return {"review_uid": review_uid, "status": "ignored", "action": action}
+        if action not in {"merge", "new"}:
+            raise ValueError("Unsupported Topic review action")
+        review = await self.store.get_maintenance_review_context(review_uid)
+        if review is None or str(review.get("status")) != "pending":
+            raise ValueError("Topic review is missing or no longer pending")
+        if str(review.get("review_type")) != "ambiguous_topic_match":
+            raise ValueError("This review type cannot materialize a Topic directly")
+        memory_space_id = str(review["memory_space_id"])
+        if action == "merge" and not str(target_topic_uid or "").strip():
+            raise ValueError("target_topic_uid is required for merge")
+        lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeError("Topic build is already running for this memory space")
+        async with lock:
+            context = await self.store.get_maintenance_review_context(review_uid)
+            if context is None or str(context.get("status")) != "pending":
+                raise ValueError("Topic review changed; refresh before applying")
+            details = dict(context.get("details") or {})
+            source_run_uid = str(details.get("run_uid") or "").strip()
+            fragments = (
+                await self.store.list_fragments(run_uid=source_run_uid)
+                if source_run_uid
+                else []
+            )
+            fragment_uids = {
+                str(value)
+                for value in details.get("fragment_uids", [])
+                if str(value)
+            }
+            review_timelines = {
+                str(value)
+                for value in context.get("timeline_uids", [])
+                if str(value)
+            }
+            fragments = [
+                item
+                for item in fragments
+                if (
+                    item.fragment_uid in fragment_uids
+                    if fragment_uids
+                    else bool(set(item.timeline_uids) & review_timelines)
+                )
+            ]
+            if not fragments:
+                raise ValueError("The reusable fragments for this review are unavailable")
+            existing = None
+            if action == "merge":
+                existing = await self.store.get_topic(str(target_topic_uid))
+                if (
+                    existing is None
+                    or existing.memory_space_id != memory_space_id
+                    or existing.status != TopicMemoryStatus.ACTIVE
+                ):
+                    raise ValueError("The selected target Topic is unavailable")
+                if existing.topic_uid not in set(context.get("topic_uids") or []):
+                    raise ValueError("The target Topic is not one of the reviewed candidates")
+                existing_rows = await self.store.list_active_fragments_for_topics(
+                    [existing.topic_uid]
+                )
+                fragments = [
+                    *(row["fragment"] for row in existing_rows),
+                    *fragments,
+                ]
+            return await self._publish_governance_groups(
+                memory_space_id,
+                [fragments],
+                retained_topics=[existing],
+                affected_topic_uids={existing.topic_uid} if existing else set(),
+                operation="review_merge" if existing else "review_new",
+                review_resolution={
+                    "review_uid": review_uid,
+                    "action": action,
+                    "payload": {"target_topic_uid": existing.topic_uid if existing else None},
+                },
+            )
+
+    async def merge_topics(
+        self,
+        memory_space_id: str,
+        *,
+        topic_uids: list[str],
+        main_topic_uid: str,
+    ) -> dict[str, Any]:
+        """Merge existing Topics from their formal fragments, retaining one UID."""
+        normalized = list(dict.fromkeys(str(uid).strip() for uid in topic_uids if str(uid).strip()))
+        main_topic_uid = str(main_topic_uid or "").strip()
+        if len(normalized) < 2:
+            raise ValueError("Select at least two Topics to merge")
+        if main_topic_uid not in normalized:
+            raise ValueError("The retained Topic must be included in the merge")
+        lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeError("Topic build is already running for this memory space")
+        async with lock:
+            topics = await self.store.get_topics_by_uids(memory_space_id, normalized)
+            if {topic.topic_uid for topic in topics} != set(normalized):
+                raise ValueError("One or more selected Topics are unavailable")
+            main = next(topic for topic in topics if topic.topic_uid == main_topic_uid)
+            rows = await self.store.list_active_fragments_for_topics(normalized)
+            fragments = list(
+                {row["fragment"].fragment_uid: row["fragment"] for row in rows}.values()
+            )
+            if not fragments:
+                raise ValueError("Selected Topics do not have reusable formal fragments")
+            return await self._publish_governance_groups(
+                memory_space_id,
+                [fragments],
+                retained_topics=[main],
+                affected_topic_uids=set(normalized),
+                operation="manual_merge",
+                operation_payload={
+                    "topic_uids": normalized,
+                    "main_topic_uid": main_topic_uid,
+                },
+            )
+
+    async def split_topic(
+        self,
+        memory_space_id: str,
+        *,
+        topic_uid: str,
+        fragment_groups: list[list[str]],
+    ) -> dict[str, Any]:
+        """Split one Topic by exhaustive formal-fragment groups."""
+        topic = await self.store.get_topic(str(topic_uid or "").strip())
+        if (
+            topic is None
+            or topic.memory_space_id != memory_space_id
+            or topic.status != TopicMemoryStatus.ACTIVE
+        ):
+            raise ValueError("Topic is unavailable")
+        rows = await self.store.list_active_fragments_for_topics([topic.topic_uid])
+        fragments_by_uid = {
+            row["fragment"].fragment_uid: row["fragment"] for row in rows
+        }
+        normalized_groups = [
+            list(dict.fromkeys(str(uid).strip() for uid in group if str(uid).strip()))
+            for group in fragment_groups
+            if isinstance(group, list) and group
+        ]
+        flattened = [uid for group in normalized_groups for uid in group]
+        if len(normalized_groups) < 2:
+            raise ValueError("A split requires at least two fragment groups")
+        if len(flattened) != len(set(flattened)):
+            raise ValueError("A formal fragment cannot belong to two split groups")
+        if set(flattened) != set(fragments_by_uid):
+            raise ValueError("Every formal fragment must be assigned exactly once")
+        lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
+        if lock.locked():
+            raise RuntimeError("Topic build is already running for this memory space")
+        async with lock:
+            current = await self.store.get_topic(topic.topic_uid)
+            if current is None or current.revision != topic.revision:
+                raise RuntimeError("Topic changed; refresh the split preview")
+            return await self._publish_governance_groups(
+                memory_space_id,
+                [[fragments_by_uid[uid] for uid in group] for group in normalized_groups],
+                retained_topics=[current, *([None] * (len(normalized_groups) - 1))],
+                affected_topic_uids={current.topic_uid},
+                operation="manual_split",
+                operation_payload={
+                    "topic_uid": current.topic_uid,
+                    "fragment_groups": normalized_groups,
+                },
+            )
+
+    async def _publish_governance_groups(
+        self,
+        memory_space_id: str,
+        fragment_groups: list[list[TopicFragmentDraft]],
+        *,
+        retained_topics: list[TopicMemory | None],
+        affected_topic_uids: set[str],
+        operation: str,
+        operation_payload: dict[str, Any] | None = None,
+        review_resolution: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Synthesize selected fragments and publish every governance result atomically."""
+        run = TopicMaintenanceRun(
+            memory_space_id=memory_space_id,
+            mode=TopicMaintenanceMode.REPAIR,
+            status=TopicMaintenanceStatus.RUNNING,
+            total_items=sum(len(group) for group in fragment_groups),
+            config={"topic_settings": dict(self._default_config)},
+            metadata={
+                "governance_operation": operation,
+                **dict(operation_payload or {}),
+            },
+        )
+        await self.store.create_maintenance_run(run)
+        context = self._make_run_context(
+            memory_space_id=memory_space_id,
+            run_uid=run.run_uid,
+            config=dict(self._default_config),
+        )
+        token = self._runtime_context.set(context)
+        try:
+            all_timeline_uids = sorted(
+                {
+                    uid
+                    for fragments in fragment_groups
+                    for fragment in fragments
+                    for uid in fragment.timeline_uids
+                }
+            )
+            candidates = await self.candidate_manager.load_candidates(
+                memory_space_id,
+                timeline_uids=all_timeline_uids,
+            )
+            candidate_map = {item.memory_uid: item for item in candidates}
+            if set(candidate_map) != set(all_timeline_uids):
+                raise ValueError("One or more source Timelines are no longer available")
+            snapshots: list[dict[str, Any]] = []
+            materialized_topics: list[TopicMemory] = []
+            for index, fragments in enumerate(fragment_groups):
+                existing = retained_topics[index] if index < len(retained_topics) else None
+                synthesis = await self._synthesize_component_checkpointed(
+                    run.run_uid, fragments
+                )
+                topic, atoms, links, sources, actor_links, atom_actor_links = (
+                    self._materialize_snapshot(
+                        run.run_uid,
+                        memory_space_id,
+                        synthesis,
+                        fragments,
+                        candidate_map,
+                        existing,
+                    )
+                )
+                topic.metadata["governance"] = {
+                    "operation": operation,
+                    "run_uid": run.run_uid,
+                    "source_topic_uids": sorted(affected_topic_uids),
+                }
+                materialized_topics.append(topic)
+                snapshots.append(
+                    {
+                        "topic": topic,
+                        "atoms": atoms,
+                        "links": links,
+                        "atom_sources": sources,
+                        "actor_links": actor_links,
+                        "atom_actor_links": atom_actor_links,
+                        "fragments": fragments,
+                        "expected_revision": existing.revision if existing else None,
+                        "decision": {
+                            "decision_uid": str(uuid.uuid4()),
+                            "action": operation,
+                            "fragment_uids": [item.fragment_uid for item in fragments],
+                            "metadata": dict(operation_payload or {}),
+                            "llm_output": synthesis,
+                        },
+                    }
+                )
+            active_topics = await self.store.list_all_topics(
+                memory_space_id, status=TopicMemoryStatus.ACTIVE
+            )
+            relation_topics = [
+                topic
+                for topic in active_topics
+                if topic.topic_uid not in affected_topic_uids
+            ] + materialized_topics
+            relations = self._derive_topic_relations(run.run_uid, relation_topics)
+            publication = await self.store.publish_topic_build(
+                run_uid=run.run_uid,
+                memory_space_id=memory_space_id,
+                mode=TopicMaintenanceMode.REPAIR,
+                snapshots=snapshots,
+                relations=relations,
+                affected_topic_uids=affected_topic_uids,
+                relation_scope_topic_uids=None,
+                review_resolution=review_resolution,
+            )
+            if self.vector_index is not None:
+                self.vector_index.invalidate(memory_space_id)
+            return {
+                "run_uid": run.run_uid,
+                "operation": operation,
+                "status": "completed",
+                "topic_uids": [topic.topic_uid for topic in publication["topics"]],
+                "archived_topics": int(publication.get("archived_topics") or 0),
+                "relation_count": int(publication.get("relation_count") or 0),
+            }
+        except Exception as exc:
+            await self.store.update_maintenance_run(
+                run.run_uid,
+                status=TopicMaintenanceStatus.FAILED,
+                error=str(exc),
+            )
+            raise
+        finally:
+            self._runtime_context.reset(token)
 
     async def get_embedding_health(self, memory_space_id: str) -> dict[str, Any]:
         """Inspect persisted vector signatures without making model calls."""
@@ -1168,6 +1491,12 @@ class TopicBuildManager:
                         topic_uids=[item[1].topic_uid for item in match_scores[:2]],
                         details={
                             "run_uid": run_uid,
+                            "fragment_uids": [
+                                fragment.fragment_uid
+                                for fragment in component_fragments
+                            ],
+                            "proposed_title": str(synthesis.get("title") or ""),
+                            "proposed_summary": str(synthesis.get("summary") or ""),
                             "scores": [
                                 {"topic_uid": item[1].topic_uid, "score": item[0]}
                                 for item in match_scores[:3]

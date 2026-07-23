@@ -204,6 +204,54 @@ async def test_v9_10_migration_adds_embedding_signatures_idempotently(tmp_path):
             assert "embedding_signature" in columns
 
 
+@pytest.mark.asyncio
+async def test_v9_13_migration_adds_review_governance_fields_idempotently(tmp_path):
+    db_path = str(tmp_path / "v9.12-topic.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE topic_maintenance_queue (
+                review_uid TEXT PRIMARY KEY,
+                memory_space_id TEXT NOT NULL,
+                review_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                timeline_uids TEXT NOT NULL DEFAULT '[]',
+                topic_uids TEXT NOT NULL DEFAULT '[]',
+                details TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_12_to_v9_13(None)
+    await migration._migrate_v9_12_to_v9_13(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        columns = {
+            str(row[1])
+            for row in await (
+                await db.execute("PRAGMA table_info(topic_maintenance_queue)")
+            ).fetchall()
+        }
+        indexes = {
+            str(row[1])
+            for row in await (
+                await db.execute("PRAGMA index_list(topic_actor_links)")
+            ).fetchall()
+        }
+
+    assert {
+        "resolved_at",
+        "resolution_action",
+        "resolution_payload",
+        "expected_topic_revisions",
+    } <= columns
+    assert "idx_topic_actor_display_name" in indexes
+
+
 # ===========================================================================
 # 一、迁移正确性测试
 # ===========================================================================

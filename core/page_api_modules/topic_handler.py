@@ -143,6 +143,7 @@ class TopicHandler:
         if not memory_space_id:
             return self.utils.ok({"items": [], "memory_space_id": None})
         status = self.utils.optional_text(request.args.get("status"))
+        actor_id = self.utils.optional_text(request.args.get("actor_id"))
         try:
             limit = max(1, min(int(request.args.get("limit", 100)), 500))
             offset = max(0, int(request.args.get("offset", 0)))
@@ -151,6 +152,7 @@ class TopicHandler:
                 status=None if status in (None, "all") else status,
                 limit=limit,
                 offset=offset,
+                actor_id=actor_id,
             )
             items = [self._topic_payload(item) for item in topics]
             for item in items:
@@ -158,7 +160,14 @@ class TopicHandler:
                     item["topic_uid"]
                 )
             return self.utils.ok(
-                {"items": items, "memory_space_id": memory_space_id}
+                {
+                    "items": items,
+                    "memory_space_id": memory_space_id,
+                    "actors": await memory_engine.topic_memory_store.list_topic_actors(
+                        memory_space_id
+                    ),
+                    "actor_id": actor_id,
+                }
             )
         except Exception as exc:
             logger.error("[PageAPI] 获取 Topic 列表失败", exc_info=True)
@@ -277,6 +286,207 @@ class TopicHandler:
             )
         except Exception as exc:
             logger.error("[PageAPI] 获取 Topic 详情失败", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def list_reviews(self, memory_engine) -> dict[str, Any]:
+        memory_space_id = self.utils.optional_text(request.args.get("memory_space_id"))
+        if not memory_space_id:
+            return self.utils.error("memory_space_id 不能为空")
+        status = self.utils.optional_text(request.args.get("status")) or "pending"
+        try:
+            reviews = await memory_engine.topic_memory_store.list_maintenance_reviews(
+                memory_space_id,
+                status=status,
+                limit=max(1, min(int(request.args.get("limit", 100)), 500)),
+            )
+            topic_uids = sorted(
+                {
+                    str(uid)
+                    for review in reviews
+                    for uid in review.get("topic_uids", [])
+                    if str(uid)
+                }
+            )
+            topics = await memory_engine.topic_memory_store.get_topics_by_uids(
+                memory_space_id, topic_uids, status=None
+            )
+            titles = {topic.topic_uid: topic.title for topic in topics}
+            for review in reviews:
+                review["candidate_titles"] = [
+                    {
+                        "topic_uid": uid,
+                        "title": titles.get(uid, uid),
+                    }
+                    for uid in review.get("topic_uids", [])
+                ]
+            return self.utils.ok(
+                {
+                    "memory_space_id": memory_space_id,
+                    "status": status,
+                    "items": reviews,
+                    "total": len(reviews),
+                }
+            )
+        except Exception as exc:
+            logger.error("[PageAPI] 获取 Topic 待审查列表失败", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def get_review_detail(self, memory_engine) -> dict[str, Any]:
+        review_uid = self.utils.optional_text(request.args.get("review_uid"))
+        if not review_uid:
+            return self.utils.error("review_uid 不能为空")
+        try:
+            review = await memory_engine.topic_memory_store.get_maintenance_review_context(
+                review_uid
+            )
+            if review is None:
+                return self.utils.error("Topic 审查项不存在")
+            return self.utils.ok({"review": review})
+        except Exception as exc:
+            logger.error("[PageAPI] 获取 Topic 审查详情失败", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def resolve_review(self, memory_engine) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        review_uid = self.utils.optional_text(payload.get("review_uid"))
+        action = self.utils.optional_text(payload.get("action"))
+        if not review_uid or not action:
+            return self.utils.error("review_uid 和 action 不能为空")
+        if self.has_active_jobs() or memory_engine.topic_build_manager.has_active_builds():
+            return self.utils.error("Topic 构建正在运行，暂时不能处理审查项")
+        try:
+            result = await memory_engine.topic_build_manager.resolve_maintenance_review(
+                review_uid,
+                action=action,
+                target_topic_uid=self.utils.optional_text(
+                    payload.get("target_topic_uid")
+                ),
+            )
+            return self.utils.ok(result)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+        except Exception as exc:
+            logger.error("[PageAPI] 应用 Topic 审查决策失败", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def preview_governance(self, memory_engine) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        memory_space_id = self.utils.optional_text(payload.get("memory_space_id"))
+        operation = self.utils.optional_text(payload.get("operation"))
+        if not memory_space_id or operation not in {"merge", "split"}:
+            return self.utils.error("memory_space_id 或 operation 无效")
+        try:
+            if operation == "merge":
+                topic_uids = list(
+                    dict.fromkeys(
+                        str(uid).strip()
+                        for uid in payload.get("topic_uids", [])
+                        if str(uid).strip()
+                    )
+                )
+            else:
+                topic_uids = [str(payload.get("topic_uid") or "").strip()]
+            topics = await memory_engine.topic_memory_store.get_topics_by_uids(
+                memory_space_id, topic_uids
+            )
+            if len(topics) != len(set(topic_uids)):
+                return self.utils.error("一个或多个 Topic 不存在")
+            rows = await memory_engine.topic_memory_store.list_active_fragments_for_topics(
+                topic_uids
+            )
+            related_rows: dict[str, dict[str, Any]] = {}
+            for topic_uid in topic_uids:
+                for relation in await memory_engine.topic_memory_store.list_topic_relations(
+                    topic_uid
+                ):
+                    relation_uid = str(
+                        relation.get("relation_uid")
+                        or ":".join(
+                            sorted(
+                                [
+                                    str(relation.get("topic_uid") or topic_uid),
+                                    str(relation.get("related_topic_uid") or ""),
+                                ]
+                            )
+                        )
+                    )
+                    related_rows[relation_uid] = relation
+            fragments = []
+            for row in rows:
+                fragment = row["fragment"]
+                fragments.append(
+                    {
+                        "topic_uid": row["topic_uid"],
+                        "fragment_uid": fragment.fragment_uid,
+                        "label": fragment.label,
+                        "summary": fragment.summary,
+                        "facts": list(fragment.facts),
+                        "timeline_uids": list(fragment.timeline_uids),
+                        "started_at": fragment.started_at,
+                        "ended_at": fragment.ended_at,
+                        "participant_refs": list(
+                            fragment.metadata.get("participant_refs", [])
+                        ),
+                        "mentioned_actor_refs": list(
+                            fragment.metadata.get("mentioned_actor_refs", [])
+                        ),
+                    }
+                )
+            return self.utils.ok(
+                {
+                    "operation": operation,
+                    "memory_space_id": memory_space_id,
+                    "topics": [self._topic_payload(topic) for topic in topics],
+                    "fragments": fragments,
+                    "topic_count": len(topics),
+                    "fragment_count": len(fragments),
+                    "timeline_count": len(
+                        {
+                            uid
+                            for fragment in fragments
+                            for uid in fragment["timeline_uids"]
+                        }
+                    ),
+                    "relations": list(related_rows.values()),
+                    "relation_count": len(related_rows),
+                    "relations_will_be_recomputed": True,
+                    "requires_confirmation": True,
+                }
+            )
+        except (TypeError, ValueError) as exc:
+            return self.utils.error(str(exc))
+        except Exception as exc:
+            logger.error("[PageAPI] 生成 Topic 治理预览失败", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def execute_governance(self, memory_engine) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        memory_space_id = self.utils.optional_text(payload.get("memory_space_id"))
+        operation = self.utils.optional_text(payload.get("operation"))
+        if not memory_space_id or operation not in {"merge", "split"}:
+            return self.utils.error("memory_space_id 或 operation 无效")
+        if payload.get("confirmed") is not True:
+            return self.utils.error("执行 Topic 治理操作前必须确认预览")
+        if self.has_active_jobs() or memory_engine.topic_build_manager.has_active_builds():
+            return self.utils.error("Topic 构建正在运行，暂时不能执行治理操作")
+        try:
+            if operation == "merge":
+                result = await memory_engine.topic_build_manager.merge_topics(
+                    memory_space_id,
+                    topic_uids=list(payload.get("topic_uids") or []),
+                    main_topic_uid=str(payload.get("main_topic_uid") or ""),
+                )
+            else:
+                result = await memory_engine.topic_build_manager.split_topic(
+                    memory_space_id,
+                    topic_uid=str(payload.get("topic_uid") or ""),
+                    fragment_groups=list(payload.get("fragment_groups") or []),
+                )
+            return self.utils.ok(result)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+        except Exception as exc:
+            logger.error("[PageAPI] 执行 Topic 治理操作失败", exc_info=True)
             return self.utils.error(str(exc))
 
     async def list_unindexed_timelines(self, memory_engine) -> dict[str, Any]:

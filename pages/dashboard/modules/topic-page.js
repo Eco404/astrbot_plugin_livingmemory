@@ -25,11 +25,19 @@ export class TopicPage {
     this.settingsData = null;
     this.settingsResetKeys = new Set();
     this.settingsResetAll = false;
+    this.actorFilter = "";
   }
 
   initEventListeners() {
     document.getElementById("topic-refresh")?.addEventListener("click", () => this.fetch());
-    document.getElementById("topic-space")?.addEventListener("change", () => this.fetch());
+    document.getElementById("topic-space")?.addEventListener("change", () => {
+      this.actorFilter = "";
+      this.fetch();
+    });
+    document.getElementById("topic-actor-filter")?.addEventListener("change", event => {
+      this.actorFilter = event.currentTarget.value || "";
+      this.fetchTopics();
+    });
     document.getElementById("topic-build-full")?.addEventListener("click", event => this.requestFullBuild(event.currentTarget));
     document.getElementById("topic-maintenance")?.addEventListener("click", event => this.openMaintenance(event.currentTarget));
     document.getElementById("topic-settings")?.addEventListener("click", event => this.openSettings(event.currentTarget));
@@ -189,8 +197,20 @@ export class TopicPage {
       return;
     }
     try {
-      const data = await this.api.get("topics", { memory_space_id: space, limit: 200 });
+      const data = await this.api.get("topics", {
+        memory_space_id: space,
+        actor_id: this.actorFilter,
+        limit: 200,
+      });
       const items = data.items || [];
+      const actorFilter = document.getElementById("topic-actor-filter");
+      if (actorFilter) {
+        const selectedActor = this.actorFilter;
+        actorFilter.innerHTML = `<option value="">${esc(window.t("topic.actorFilterAll"))}</option>`
+          + (data.actors || []).map(actor => `<option value="${esc(actor.actor_id)}">${esc(actor.display_name)} (${Number(actor.topic_count || 0)})</option>`).join("");
+        actorFilter.value = Array.from(actorFilter.options).some(option => option.value === selectedActor) ? selectedActor : "";
+        this.actorFilter = actorFilter.value;
+      }
       body.innerHTML = items.length ? items.map(item => `
         <tr class="topic-row" data-topic-uid="${esc(item.topic_uid)}" tabindex="0" role="button" aria-label="${esc(`${window.t("topic.viewDetails")}: ${item.title}`)}">
           <td class="text-mono">${esc(item.topic_uid.slice(0, 12))}</td>
@@ -240,11 +260,8 @@ export class TopicPage {
         (sourcesByAtom[source.topic_atom_uid] ||= []).push(source);
       });
       const actorLinks = provenance.actor_links || [];
+      const actorFactGroups = provenance.actor_fact_groups || [];
       this.timelineSources = provenance.links || [];
-      const atomActorsByActor = {};
-      (provenance.atom_actor_links || []).forEach(link => {
-        (atomActorsByActor[link.actor_id] ||= []).push(link);
-      });
       const participantRoles = new Set(["speaker", "narrator", "responder"]);
       const groupActors = links => {
         const grouped = new Map();
@@ -265,15 +282,19 @@ export class TopicPage {
         if (!groups.length) return `<div class="text-tertiary">${esc(window.t("topic.none"))}</div>`;
         const chips = groups.map(item => `<span class="topic-actor-chip">${esc(item.displayName)} <span>(${item.links.length})</span></span>`).join("");
         const details = links.map(link => {
-          const actorFacts = atomActorsByActor[link.actor_id] || [];
+          const factGroup = actorFactGroups.find(group => group.actor_id === link.actor_id && group.relation_type === link.relation_type);
+          const actorFacts = factGroup?.facts || [];
           const metadata = link.metadata || {};
           const roleKey = `topic.role.${link.relation_type}`;
           const displayName = link.display_name_snapshot || link.actor_id;
-          const resolution = link.resolution_status === "unresolved"
-            ? window.t("topic.actorUnresolved") : window.t("topic.actorResolved");
+          const resolution = window.t(`topic.resolution.${link.resolution_status || "unresolved"}`);
+          const identitySources = factGroup?.identity_sources || [];
           return `<div class="topic-actor-detail-row">
             <div><strong>${esc(displayName)}</strong><span>${esc(window.t(roleKey))}</span></div>
-            <small class="text-tertiary">${esc(resolution)} · ${Number(link.confidence || 0).toFixed(2)} · ${esc(window.t("topic.actorFacts"))} ${actorFacts.length} · Fragment ${(metadata.fragment_uids || []).length} · Timeline ${(metadata.timeline_uids || []).length}</small>
+            <small class="text-tertiary">${esc(resolution)} · ${Number(link.confidence || 0).toFixed(2)} · ${esc(window.t("topic.actorFacts"))} ${actorFacts.length} · Fragment ${(metadata.fragment_uids || []).length} · Timeline ${(metadata.timeline_uids || []).length}${identitySources.length ? ` · ${esc(window.t("topic.identitySources"))}: ${esc(identitySources.join(", "))}` : ""}</small>
+            <details class="topic-actor-facts"><summary>${esc(window.t("topic.actorFacts"))} (${actorFacts.length})</summary>
+              <div>${actorFacts.length ? actorFacts.map(fact => `<div class="topic-actor-fact"><span>${esc(fact.content)}</span><details class="topic-compact-details"><summary>${esc(window.t("topic.identifierDetails"))}</summary><code>${esc(fact.atom_uid)}</code></details></div>`).join("") : `<span class="text-tertiary">${esc(window.t("topic.none"))}</span>`}</div>
+            </details>
             <code>${esc(link.actor_id)}</code>
           </div>`;
         }).join("");
