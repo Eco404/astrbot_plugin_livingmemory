@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.13"
+    CURRENT_VERSION = "9.14"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -50,6 +50,7 @@ class DBMigration:
         "9.11": "Bounded incremental Topic maintenance and stable fragment identity",
         "9.12": "Unified runtime settings and resumable idle Timeline summaries",
         "9.13": "Topic review decisions and identity governance",
+        "9.14": "Session audit, raw-message maintenance, and canonical aliases",
     }
 
     def __init__(self, db_path: str):
@@ -350,6 +351,8 @@ class DBMigration:
                     migration_steps.append(self._migrate_v9_11_to_v9_12)
                 if current_key <= self.version_key("9.12"):
                     migration_steps.append(self._migrate_v9_12_to_v9_13)
+                if current_key <= self.version_key("9.13"):
+                    migration_steps.append(self._migrate_v9_13_to_v9_14)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1372,6 +1375,63 @@ class DBMigration:
         if progress_callback:
             progress_callback("创建 Topic 审查决策与人物治理字段", 1, 1)
         logger.info("v9.12 -> v9.13 迁移完成")
+
+    async def _migrate_v9_13_to_v9_14(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Add an idempotent journal for maintenance spanning two SQLite files."""
+        logger.info("执行迁移步骤: v9.13 -> v9.14 (session maintenance journal)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_maintenance_tasks (
+                    task_uid TEXT PRIMARY KEY,
+                    operation TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    source_session_ids TEXT NOT NULL DEFAULT '[]',
+                    canonical_session_id TEXT,
+                    current_step TEXT NOT NULL DEFAULT 'planned',
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    result TEXT NOT NULL DEFAULT '{}',
+                    error TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    completed_at REAL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_session_maintenance_task_status
+                ON session_maintenance_tasks(status, updated_at)
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_maintenance_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_uid TEXT NOT NULL,
+                    step TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    details TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY(task_uid) REFERENCES session_maintenance_tasks(task_uid)
+                        ON DELETE CASCADE
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_session_maintenance_event_task
+                ON session_maintenance_events(task_uid, id)
+                """
+            )
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建会话审计与可恢复维护任务", 1, 1)
+        logger.info("v9.13 -> v9.14 迁移完成")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

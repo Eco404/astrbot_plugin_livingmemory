@@ -268,6 +268,69 @@ class TopicRecallPipeline:
             query_vectors=query_vectors,
         )
 
+    async def search_spaces(
+        self,
+        *,
+        branches: list[RecallQueryBranch],
+        memory_space_ids: list[str],
+        final_k: int,
+        context_session_id: str | None = None,
+        visible_message_start_index: int | None = None,
+        visible_message_end_index: int | None = None,
+        current_actor_ids: set[str] | None = None,
+    ) -> TopicRecallOutcome:
+        """Search an explicit canonical/alias space group and merge by Topic UID."""
+        spaces = list(dict.fromkeys(item for item in memory_space_ids if item))
+        if not spaces:
+            return TopicRecallOutcome([], [], 0.0)
+        if len(spaces) == 1:
+            return await self.search(
+                branches=branches,
+                memory_space_id=spaces[0],
+                final_k=final_k,
+                context_session_id=context_session_id,
+                visible_message_start_index=visible_message_start_index,
+                visible_message_end_index=visible_message_end_index,
+                current_actor_ids=current_actor_ids,
+            )
+        outcomes = await asyncio.gather(
+            *(
+                self.search(
+                    branches=branches,
+                    memory_space_id=memory_space_id,
+                    final_k=final_k,
+                    context_session_id=context_session_id,
+                    visible_message_start_index=visible_message_start_index,
+                    visible_message_end_index=visible_message_end_index,
+                    current_actor_ids=current_actor_ids,
+                )
+                for memory_space_id in spaces
+            )
+        )
+        candidates: dict[str, TopicRecallResult] = {}
+        for outcome in outcomes:
+            for candidate in outcome.candidates:
+                previous = candidates.get(candidate.topic_uid)
+                if previous is None or candidate.final_score > previous.final_score:
+                    candidates[candidate.topic_uid] = candidate
+        ordered = sorted(candidates.values(), key=lambda item: item.final_score, reverse=True)
+        selected = ordered[:final_k]
+        selected_uids = {item.topic_uid for item in selected}
+        for candidate in ordered:
+            candidate.selected = candidate.topic_uid in selected_uids
+            if not candidate.selected and not candidate.filter_reason:
+                candidate.filter_reason = "diversity_or_result_limit"
+        return TopicRecallOutcome(
+            selected,
+            ordered,
+            min((item.applied_threshold for item in outcomes), default=0.0),
+            context_suppressed=sum(item.context_suppressed for item in outcomes),
+            selection_threshold=min(
+                (item.selection_threshold for item in outcomes), default=0.0
+            ),
+            query_vectors=outcomes[0].query_vectors if outcomes else None,
+        )
+
     async def record_topic_access(
         self, topic_results: list[TopicRecallResult]
     ) -> int:

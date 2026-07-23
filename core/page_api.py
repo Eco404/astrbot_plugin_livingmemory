@@ -78,6 +78,36 @@ class PluginPageApi:
             "LivingMemory Page session catalog",
         )
         register(
+            f"{PAGE_API_PREFIX}/sessions/audit",
+            self.audit_sessions,
+            ["GET"],
+            "LivingMemory Page session audit",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/preview",
+            self.preview_session_maintenance,
+            ["POST"],
+            "LivingMemory Page preview session maintenance",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/start",
+            self.start_session_maintenance,
+            ["POST"],
+            "LivingMemory Page start session maintenance",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/task",
+            self.get_session_maintenance_task,
+            ["GET"],
+            "LivingMemory Page session maintenance task",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/tasks",
+            self.list_session_maintenance_tasks,
+            ["GET"],
+            "LivingMemory Page session maintenance tasks",
+        )
+        register(
             f"{PAGE_API_PREFIX}/memories",
             self.list_memories,
             ["GET"],
@@ -323,6 +353,46 @@ class PluginPageApi:
             return error
         return await self.session_handler.list_sessions(
             ready["conversation_manager"],
+        )
+
+    async def audit_sessions(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.audit_sessions(
+            ready["session_maintenance_manager"]
+        )
+
+    async def preview_session_maintenance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.preview_maintenance(
+            ready["session_maintenance_manager"]
+        )
+
+    async def start_session_maintenance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.start_maintenance(
+            ready["session_maintenance_manager"]
+        )
+
+    async def get_session_maintenance_task(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.get_maintenance_task(
+            ready["session_maintenance_manager"]
+        )
+
+    async def list_session_maintenance_tasks(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.list_maintenance_tasks(
+            ready["session_maintenance_manager"]
         )
 
     async def list_memories(self):
@@ -647,5 +717,8 @@ class PluginPageApi:
             "index_validator": self.plugin.initializer.index_validator,
             "identity_profile_store": getattr(
                 self.plugin.initializer, "identity_profile_store", None
+            ),
+            "session_maintenance_manager": getattr(
+                self.plugin.initializer, "session_maintenance_manager", None
             ),
         }, None

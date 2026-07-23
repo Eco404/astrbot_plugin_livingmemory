@@ -8,6 +8,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
@@ -115,6 +116,18 @@ class ConversationStore:
             )
         """)
 
+            await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS session_aliases (
+                alias_session_id TEXT PRIMARY KEY,
+                canonical_session_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                CHECK(alias_session_id <> canonical_session_id)
+            )
+        """)
+
             await self.connection.commit()
 
     async def _create_indexes(self) -> None:
@@ -144,6 +157,10 @@ class ConversationStore:
             await self.connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_summary_jobs_status_retry "
                 "ON session_summary_jobs(status, next_retry_at)"
+            )
+            await self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_aliases_canonical "
+                "ON session_aliases(canonical_session_id, status)"
             )
 
             await self.connection.commit()
@@ -300,6 +317,152 @@ class ConversationStore:
             )
 
         return sessions
+
+    async def list_session_audit_rows(self, limit: int = 1000) -> list[dict[str, Any]]:
+        """Return compact raw-session facts used by the maintenance audit."""
+        if self.connection is None:
+            return []
+        rows = await (
+            await self.connection.execute(
+                """
+                SELECT s.*,
+                       COUNT(m.id) AS actual_message_count,
+                       MIN(m.id) AS first_message_id,
+                       MAX(m.id) AS last_message_id,
+                       MAX(j.status) AS summary_job_status
+                FROM sessions s
+                LEFT JOIN messages m ON m.session_id = s.session_id
+                LEFT JOIN session_summary_jobs j ON j.session_id = s.session_id
+                GROUP BY s.session_id
+                ORDER BY s.last_active_at DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 10000)),),
+            )
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def resolve_session_id(self, session_id: str) -> str:
+        """Resolve an alias chain to its canonical session without guessing."""
+        current = str(session_id or "").strip()
+        if not current or self.connection is None:
+            return current
+        visited: set[str] = set()
+        for _ in range(16):
+            if current in visited:
+                logger.error("[ConversationStore] 检测到会话别名循环: %s", current)
+                return str(session_id or "").strip()
+            visited.add(current)
+            row = await (
+                await self.connection.execute(
+                    """
+                    SELECT canonical_session_id FROM session_aliases
+                    WHERE alias_session_id = ? AND status = 'active'
+                    """,
+                    (current,),
+                )
+            ).fetchone()
+            if not row:
+                return current
+            current = str(row["canonical_session_id"] or "").strip()
+        logger.error("[ConversationStore] 会话别名链超过安全上限: %s", session_id)
+        return str(session_id or "").strip()
+
+    async def list_session_alias_group(self, session_id: str) -> list[str]:
+        """Return canonical ID first, followed by every active direct alias."""
+        canonical = await self.resolve_session_id(session_id)
+        if not canonical or self.connection is None:
+            return [canonical] if canonical else []
+        rows = await (
+            await self.connection.execute(
+                """
+                SELECT alias_session_id FROM session_aliases
+                WHERE canonical_session_id = ? AND status = 'active'
+                ORDER BY created_at ASC, alias_session_id ASC
+                """,
+                (canonical,),
+            )
+        ).fetchall()
+        return [canonical, *(str(row["alias_session_id"]) for row in rows)]
+
+    async def list_session_aliases(self) -> list[dict[str, Any]]:
+        if self.connection is None:
+            return []
+        rows = await (
+            await self.connection.execute(
+                "SELECT * FROM session_aliases ORDER BY updated_at DESC"
+            )
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def set_session_aliases(
+        self,
+        canonical_session_id: str,
+        alias_session_ids: list[str],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Persist an explicit logical merge; source rows remain recoverable."""
+        canonical = str(canonical_session_id or "").strip()
+        aliases = sorted(
+            {
+                str(item or "").strip()
+                for item in alias_session_ids
+                if str(item or "").strip() and str(item or "").strip() != canonical
+            }
+        )
+        if not canonical:
+            raise ValueError("规范会话 ID 不能为空")
+        if not aliases:
+            raise ValueError("至少需要一个不同于规范会话的别名")
+        if self.connection is None:
+            raise RuntimeError("数据库连接未初始化")
+        now = time.time()
+        payload = json.dumps(metadata or {}, ensure_ascii=False)
+        async with self._write_lock:
+            # Flatten existing chains before writing and reject a canonical ID that
+            # currently resolves into one of the requested aliases.
+            resolved_canonical = await self.resolve_session_id(canonical)
+            if resolved_canonical != canonical:
+                raise ValueError("所选规范会话本身是其他会话的别名")
+            for alias in aliases:
+                target = await self.resolve_session_id(alias)
+                if target == canonical:
+                    continue
+                if target != alias and target in aliases:
+                    raise ValueError("会话别名选择会形成循环")
+                await self.connection.execute(
+                    """
+                    INSERT INTO session_aliases (
+                        alias_session_id, canonical_session_id, status, metadata,
+                        created_at, updated_at
+                    ) VALUES (?, ?, 'active', ?, ?, ?)
+                    ON CONFLICT(alias_session_id) DO UPDATE SET
+                        canonical_session_id = excluded.canonical_session_id,
+                        status = 'active', metadata = excluded.metadata,
+                        updated_at = excluded.updated_at
+                    """,
+                    (alias, canonical, payload, now, now),
+                )
+            await self.connection.commit()
+        return [canonical, *aliases]
+
+    async def remove_session_aliases(self, session_ids: list[str]) -> int:
+        normalized = sorted({str(item).strip() for item in session_ids if str(item).strip()})
+        if not normalized or self.connection is None:
+            return 0
+        placeholders = ",".join("?" for _ in normalized)
+        async with self._write_lock:
+            cursor = await self.connection.execute(
+                f"""
+                DELETE FROM session_aliases
+                WHERE alias_session_id IN ({placeholders})
+                   OR canonical_session_id IN ({placeholders})
+                """,
+                [*normalized, *normalized],
+            )
+            await self.connection.commit()
+        return int(cursor.rowcount or 0)
 
     async def get_idle_sessions(
         self, *, last_active_before: float, limit: int = 50
@@ -908,6 +1071,71 @@ class ConversationStore:
             f"[ConversationStore] 删除会话消息: session={session_id}, count={deleted_count}"
         )
         return deleted_count
+
+    async def delete_raw_session(self, session_id: str) -> dict[str, int]:
+        """Delete one raw conversation row and its messages, not derived memory."""
+        if self.connection is None:
+            return {"messages": 0, "sessions": 0}
+        async with self._write_lock:
+            message_cursor = await self.connection.execute(
+                "DELETE FROM messages WHERE session_id = ?", (session_id,)
+            )
+            await self.connection.execute(
+                "DELETE FROM session_summary_jobs WHERE session_id = ?", (session_id,)
+            )
+            session_cursor = await self.connection.execute(
+                "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+            )
+            await self.connection.commit()
+        return {
+            "messages": int(message_cursor.rowcount or 0),
+            "sessions": int(session_cursor.rowcount or 0),
+        }
+
+    async def summarized_cleanup_preview(self, session_id: str) -> dict[str, int]:
+        """Describe the exact oldest summarized message range eligible for removal."""
+        if self.connection is None:
+            return {
+                "eligible_count": 0,
+                "first_message_id": 0,
+                "last_message_id": 0,
+            }
+        row = await (
+            await self.connection.execute(
+                "SELECT metadata FROM sessions WHERE session_id = ?", (session_id,)
+            )
+        ).fetchone()
+        if not row:
+            return {
+                "eligible_count": 0,
+                "first_message_id": 0,
+                "last_message_id": 0,
+            }
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+        try:
+            eligible = max(0, int(metadata.get("last_summarized_index", 0) or 0))
+        except (TypeError, ValueError):
+            eligible = 0
+        bounds = await (
+            await self.connection.execute(
+                """
+                SELECT MIN(id) AS first_message_id, MAX(id) AS last_message_id
+                FROM (
+                    SELECT id FROM messages WHERE session_id = ?
+                    ORDER BY timestamp ASC, id ASC LIMIT ?
+                )
+                """,
+                (session_id, eligible),
+            )
+        ).fetchone()
+        return {
+            "eligible_count": eligible,
+            "first_message_id": int(bounds["first_message_id"] or 0) if bounds else 0,
+            "last_message_id": int(bounds["last_message_id"] or 0) if bounds else 0,
+        }
 
     # ==================== 高级查询 ====================
 

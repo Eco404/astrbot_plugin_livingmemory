@@ -277,6 +277,7 @@
             <div class="maintenance-tabs" role="tablist">
               <button class="maintenance-tab active" type="button" data-maintenance-tab="topic" role="tab" aria-selected="true" data-i18n="maintenance.topicTab">Topic 维护</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="review" role="tab" aria-selected="false" data-i18n="maintenance.reviewTab">Topic 待审查</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="sessions" role="tab" aria-selected="false" data-i18n="maintenance.sessionsTab">会话审计</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="recall" role="tab" aria-selected="false" data-i18n="nav.recall">召回测试</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="models" role="tab" aria-selected="false" data-i18n="nav.models">模型测试</button>
             </div>
@@ -308,6 +309,25 @@
                   <select id="maintenance-topic-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
                   <button class="btn btn-primary" id="maintenance-open-topic" type="button" data-i18n="maintenance.openTopic">打开维护面板</button>
                 </div>
+              </div>
+            </div>
+            <div class="maintenance-panel" id="maintenance-panel-sessions">
+              <div class="maintenance-review-toolbar">
+                <div>
+                  <h2 data-i18n="maintenance.sessionsTitle">会话审计与清理</h2>
+                  <p class="text-secondary" data-i18n="maintenance.sessionsIntro">核对原始消息与派生记忆的引用关系，再执行分级清理或会话别名合并。</p>
+                </div>
+                <div class="maintenance-topic-controls">
+                  <input id="session-audit-filter" class="input input-sm" type="search" data-i18n-placeholder="maintenance.sessionsFilter" placeholder="筛选会话、账号或聊天对象">
+                  <button class="btn btn-secondary btn-sm" id="session-audit-refresh" type="button" data-i18n="common.refresh">刷新</button>
+                  <button class="btn btn-primary btn-sm" id="session-audit-action" type="button" data-i18n="maintenance.sessionAction">维护所选会话</button>
+                </div>
+              </div>
+              <div id="session-audit-summary" class="text-secondary"></div>
+              <div id="session-audit-list" class="session-audit-list"><div class="identity-state" data-i18n="common.loading">加载中...</div></div>
+              <div class="session-task-history">
+                <h3 data-i18n="maintenance.taskHistory">维护任务</h3>
+                <div id="session-task-list"></div>
               </div>
             </div>
             <div class="maintenance-panel" id="maintenance-panel-recall">
@@ -475,6 +495,34 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" id="topic-governance-cancel" type="button" data-i18n="common.cancel">取消</button>
           <button class="btn btn-primary" id="topic-governance-submit" type="button" data-i18n="maintenance.previewChanges">预览变更</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Session Maintenance Modal -->
+    <div class="modal-overlay" id="session-maintenance-overlay" aria-hidden="true">
+      <div class="modal session-maintenance-modal" role="dialog" aria-modal="true" aria-labelledby="session-maintenance-title">
+        <div class="modal-header">
+          <div class="modal-title" id="session-maintenance-title" data-i18n="maintenance.sessionAction">维护所选会话</div>
+          <button class="modal-close" id="session-maintenance-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <label class="identity-field"><span data-i18n="maintenance.operation">操作</span>
+            <select class="select input" id="session-maintenance-operation">
+              <option value="cleanup_summarized" data-i18n="maintenance.cleanupSummarized">清理已总结的旧消息</option>
+              <option value="delete_raw_keep_memory" data-i18n="maintenance.deleteRawKeepMemory">删除原始会话，保留 Timeline/Topic</option>
+              <option value="merge_aliases" data-i18n="maintenance.mergeAliases">合并会话别名</option>
+              <option value="delete_memory_chain" data-i18n="maintenance.deleteMemoryChain">完整删除会话记忆链</option>
+            </select>
+          </label>
+          <label class="identity-field hidden" id="session-canonical-field"><span data-i18n="maintenance.canonicalSession">规范会话</span><select class="select input" id="session-maintenance-canonical"></select></label>
+          <div id="session-maintenance-selection" class="session-maintenance-selection"></div>
+          <div id="session-maintenance-preview" class="session-maintenance-preview"></div>
+          <label class="session-force-confirm hidden" id="session-force-field"><input type="checkbox" id="session-maintenance-force"><span data-i18n="maintenance.forceConfirm">我了解阻止原因，仍要执行此高风险操作</span></label>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="session-maintenance-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-primary" id="session-maintenance-submit" type="button" data-i18n="maintenance.previewChanges">预览变更</button>
         </div>
       </div>
     </div>

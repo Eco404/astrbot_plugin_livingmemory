@@ -252,6 +252,41 @@ async def test_v9_13_migration_adds_review_governance_fields_idempotently(tmp_pa
     assert "idx_topic_actor_display_name" in indexes
 
 
+@pytest.mark.asyncio
+async def test_v9_14_migration_adds_session_maintenance_journal_idempotently(
+    tmp_path,
+):
+    db_path = str(tmp_path / "v9.13-session-maintenance.db")
+    migration = DBMigration(db_path)
+
+    await migration._migrate_v9_13_to_v9_14(None)
+    await migration._migrate_v9_13_to_v9_14(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+        indexes = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
+            ).fetchall()
+        }
+
+    assert {"session_maintenance_tasks", "session_maintenance_events"} <= tables
+    assert {
+        "idx_session_maintenance_task_status",
+        "idx_session_maintenance_event_task",
+    } <= indexes
+
+
 # ===========================================================================
 # 一、迁移正确性测试
 # ===========================================================================

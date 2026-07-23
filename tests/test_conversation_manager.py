@@ -192,3 +192,48 @@ async def test_conversation_manager_falls_back_to_sender_id_for_unknown_name(
     assert message.sender_name == "24680"
 
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_session_alias_routes_new_messages_to_canonical_session(tmp_path: Path):
+    store = ConversationStore(str(tmp_path / "aliases.db"))
+    await store.initialize()
+    manager = ConversationManager(store=store, max_cache_size=2)
+
+    canonical = "test:FriendMessage:current"
+    legacy = "test:private:legacy"
+    await manager.add_message(canonical, "user", "current message")
+    await manager.add_message(legacy, "user", "legacy message")
+    await store.set_session_aliases(canonical, [legacy])
+
+    assert await manager.resolve_session_id(legacy) == canonical
+    assert await manager.get_session_scope(legacy) == [canonical, legacy]
+
+    await manager.add_message(legacy, "user", "new message")
+    canonical_messages = await store.get_messages(canonical, limit=10)
+    legacy_messages = await store.get_messages(legacy, limit=10)
+
+    assert [item.content for item in canonical_messages] == [
+        "current message",
+        "new message",
+    ]
+    assert [item.content for item in legacy_messages] == ["legacy message"]
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_expired_sessions_only_evicts_memory_cache(tmp_path: Path):
+    store = ConversationStore(str(tmp_path / "cache-expiry.db"))
+    await store.initialize()
+    manager = ConversationManager(store=store, session_ttl=60)
+    session_id = "test:private:cache"
+    await manager.add_message(session_id, "user", "persist me")
+    await manager.get_messages(session_id, use_cache=True)
+
+    messages, _last_access = manager._cache[session_id]
+    manager._cache[session_id] = (messages, 0.0)
+    assert await manager.cleanup_expired_sessions() == 1
+    assert session_id not in manager._cache
+    assert await store.get_message_count(session_id) == 1
+    assert await store.get_session(session_id) is not None
+    await store.close()

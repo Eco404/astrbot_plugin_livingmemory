@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TIMELINE_SETTINGS_REVISION = 3
+TIMELINE_SETTINGS_REVISION = 4
 
 SHARED_QUERY_SETTING_KEYS = frozenset(
     {
@@ -41,6 +41,8 @@ TIMELINE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "session_manager.context_window_size": {"default": 50, "type": "int", "min": 1, "max": 1000, "category": "session", "label": "对话上下文窗口", "description": "插件读取近期对话时最多使用的消息条数。"},
     "session_manager.max_messages_per_session": {"default": 1000, "type": "int", "min": 100, "max": 10000, "category": "session", "label": "单会话消息上限", "description": "超过上限时只清理已经完成 Timeline 总结的最旧消息。"},
     "session_manager.cleanup_batch_size": {"default": 50, "type": "int", "min": 1, "max": 1000, "category": "session", "label": "历史消息清理批量", "description": "单会话超出消息上限时，每次至少尝试清理的旧消息数量。"},
+    "session_manager.raw_message_retention_days": {"default": 0, "type": "int", "min": 0, "max": 3650, "category": "session", "label": "原始消息保留天数", "description": "仅作为会话审计和自动清理的期限；0 表示无限期保留。不会影响 Timeline 或 Topic。"},
+    "session_manager.auto_delete_raw_sessions": {"default": False, "type": "bool", "category": "session", "label": "自动清理原始会话", "description": "默认关闭。开启后也只允许清理已总结且超过保留期的原始消息，不删除 Timeline 或 Topic。"},
     "recall_engine.injection_method": {"default": "extra_user_content", "type": "select", "options": ["extra_user_content", "user_message_before", "user_message_after", "fake_tool_call"], "category": "injection", "label": "记忆注入位置", "option_labels": {"extra_user_content": "附加到本轮用户内容", "user_message_before": "用户消息前", "user_message_after": "用户消息后", "fake_tool_call": "模拟工具调用"}, "description": "控制召回结果如何加入本轮 LLM 请求。"},
     "recall_engine.auto_remove_injected": {"default": True, "type": "bool", "category": "injection", "label": "清除旧注入片段", "description": "注入新记忆前清除历史中的旧注入标记，避免重复累积。"},
     "graph_memory.document_route_weight": {"default": 0.65, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "graph", "label": "文档路权重", "description": "Timeline 文档检索在图记忆双路融合中的基础权重。"},
