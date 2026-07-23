@@ -159,4 +159,62 @@ async def test_identity_handler_saves_profiles_and_blocks_during_topic_build(
     assert saved["status"] == "ok"
     assert saved["data"]["profiles"] == [_profile()]
     assert saved["data"]["topic_sync"]["queued"] is True
-    on_saved.assert_awaited_once_with([], [_profile()])
+    on_saved.assert_awaited_once_with([], [_profile()], sync_mode="queue")
+
+
+@pytest.mark.asyncio
+async def test_identity_deletion_requires_impact_confirmation_and_forwards_sync_mode(
+    tmp_path,
+) -> None:
+    store = AuthoritativeIdentityStore(tmp_path / "authoritative_identities.json")
+    store.replace_profiles([_profile()])
+    handler = IdentityHandler(PageApiUtils())
+    impact_resolver = AsyncMock(
+        return_value={
+            "topic_count": 2,
+            "timeline_uids": ["timeline-1"],
+        }
+    )
+    request = MagicMock()
+    request.get_json = AsyncMock(return_value={"profiles": []})
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.page_api_modules.identity_handler.request",
+        request,
+    ):
+        preview = await handler.preview_profile_changes(
+            store,
+            impact_resolver=impact_resolver,
+        )
+        rejected = await handler.save_profiles(store)
+
+    assert preview["status"] == "ok"
+    assert preview["data"]["topic_count"] == 2
+    assert rejected["status"] == "error"
+    assert store.payload()["profiles"] == [_profile()]
+    impact_resolver.assert_awaited_once_with([_profile()], [])
+
+    async def on_saved(previous, current, *, sync_mode):
+        return {
+            "previous": previous,
+            "current": current,
+            "sync_mode": sync_mode,
+            "queued": True,
+        }
+
+    request.get_json = AsyncMock(
+        return_value={
+            "profiles": [],
+            "confirm_identity_deletions": True,
+            "sync_mode": "immediate",
+        }
+    )
+    with patch(
+        "astrbot_plugin_livingmemory.core.page_api_modules.identity_handler.request",
+        request,
+    ):
+        saved = await handler.save_profiles(store, on_saved=on_saved)
+
+    assert saved["status"] == "ok"
+    assert saved["data"]["profiles"] == []
+    assert saved["data"]["topic_sync"]["sync_mode"] == "immediate"

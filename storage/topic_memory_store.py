@@ -485,6 +485,10 @@ class TopicMemoryStore:
                 timeline_uids TEXT NOT NULL DEFAULT '[]',
                 topic_uids TEXT NOT NULL DEFAULT '[]',
                 details TEXT NOT NULL DEFAULT '{}',
+                expected_topic_revisions TEXT NOT NULL DEFAULT '{}',
+                resolution_action TEXT NOT NULL DEFAULT '',
+                resolution_payload TEXT NOT NULL DEFAULT '{}',
+                resolved_at REAL,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             )
@@ -557,6 +561,12 @@ class TopicMemoryStore:
             """
             CREATE INDEX IF NOT EXISTS idx_topic_actor_actor
             ON topic_actor_links(actor_id, relation_type)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_actor_display_name
+            ON topic_actor_links(display_name_snapshot, topic_uid)
             """
         )
         await db.execute(
@@ -842,6 +852,7 @@ class TopicMemoryStore:
         affected_topic_uids: set[str] | None = None,
         reset_topics: bool = False,
         relation_scope_topic_uids: set[str] | None = None,
+        review_resolution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Publish one completed build as a single visible database change."""
         run_uid = str(run_uid or "").strip()
@@ -903,6 +914,43 @@ class TopicMemoryStore:
                 ).fetchone()
                 if run_row is None or str(run_row["memory_space_id"]) != memory_space_id:
                     raise ValueError("Topic build run is missing or belongs to another space")
+
+                review_row = None
+                if review_resolution:
+                    review_uid = str(review_resolution.get("review_uid") or "").strip()
+                    if not review_uid:
+                        raise ValueError("review_resolution requires review_uid")
+                    review_row = await (
+                        await db.execute(
+                            "SELECT status, memory_space_id, expected_topic_revisions "
+                            "FROM topic_maintenance_queue WHERE review_uid = ?",
+                            (review_uid,),
+                        )
+                    ).fetchone()
+                    if review_row is None:
+                        raise ValueError("Topic review no longer exists")
+                    if str(review_row["memory_space_id"]) != memory_space_id:
+                        raise ValueError("Topic review belongs to another memory space")
+                    if str(review_row["status"]) != "pending":
+                        raise TopicRevisionConflict(
+                            "Topic review has already been resolved"
+                        )
+                    expected_revisions = self._decode_json(
+                        review_row["expected_topic_revisions"], {}
+                    )
+                    for topic_uid, expected_revision in expected_revisions.items():
+                        current = await (
+                            await db.execute(
+                                "SELECT revision FROM topic_memories WHERE topic_uid = ?",
+                                (str(topic_uid),),
+                            )
+                        ).fetchone()
+                        if current is None or int(current["revision"]) != int(
+                            expected_revision
+                        ):
+                            raise TopicRevisionConflict(
+                                "Topic review preview is stale; refresh before applying it"
+                            )
 
                 if reset_topics:
                     topic_count = await (
@@ -982,6 +1030,23 @@ class TopicMemoryStore:
                     normalized_relations,
                     scope_topic_uids=relation_scope_topic_uids,
                 )
+                if review_resolution:
+                    review_uid = str(review_resolution["review_uid"])
+                    action = str(review_resolution.get("action") or "apply")
+                    payload = dict(review_resolution.get("payload") or {})
+                    cursor = await db.execute(
+                        """
+                        UPDATE topic_maintenance_queue
+                        SET status = 'resolved', resolution_action = ?,
+                            resolution_payload = ?, resolved_at = ?, updated_at = ?
+                        WHERE review_uid = ? AND status = 'pending'
+                        """,
+                        (action, self._to_json(payload), now, now, review_uid),
+                    )
+                    if not cursor.rowcount:
+                        raise TopicRevisionConflict(
+                            "Topic review changed while it was being published"
+                        )
                 created_topics = sum(1 for topic in saved_topics if topic.revision == 1)
                 updated_topics = len(saved_topics) - created_topics
                 await db.execute(
@@ -1195,12 +1260,21 @@ class TopicMemoryStore:
         status: TopicMemoryStatus | str | None = None,
         limit: int = 100,
         offset: int = 0,
+        actor_id: str | None = None,
     ) -> list[TopicMemory]:
         where = "memory_space_id = ?"
         params: list[Any] = [memory_space_id]
         if status is not None:
             where += " AND status = ?"
             params.append(self._enum_value(status))
+        normalized_actor_id = str(actor_id or "").strip()
+        if normalized_actor_id:
+            where += (
+                " AND EXISTS (SELECT 1 FROM topic_actor_links actor "
+                "WHERE actor.topic_uid = topic_memories.topic_uid "
+                "AND actor.actor_id = ?)"
+            )
+            params.append(normalized_actor_id)
         params.extend([max(1, min(int(limit), 1000)), max(0, int(offset))])
         async with self._connect() as db:
             cursor = await db.execute(
@@ -1214,6 +1288,40 @@ class TopicMemoryStore:
             )
             rows = await cursor.fetchall()
         return [self._row_to_topic(row) for row in rows]
+
+    async def list_topic_actors(
+        self, memory_space_id: str
+    ) -> list[dict[str, Any]]:
+        """Return a compact actor catalog for Topic filters and diagnostics."""
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT a.actor_id,
+                           MAX(COALESCE(NULLIF(a.display_name_snapshot, ''), a.actor_id))
+                               AS display_name,
+                           MAX(a.actor_type) AS actor_type,
+                           MAX(a.resolution_status) AS resolution_status,
+                           COUNT(DISTINCT a.topic_uid) AS topic_count
+                    FROM topic_actor_links a
+                    JOIN topic_memories t ON t.topic_uid = a.topic_uid
+                    WHERE t.memory_space_id = ? AND t.status = 'active'
+                    GROUP BY a.actor_id
+                    ORDER BY display_name COLLATE NOCASE, a.actor_id
+                    """,
+                    (memory_space_id,),
+                )
+            ).fetchall()
+        return [
+            {
+                "actor_id": str(row["actor_id"]),
+                "display_name": str(row["display_name"] or row["actor_id"]),
+                "actor_type": str(row["actor_type"] or "unknown"),
+                "resolution_status": str(row["resolution_status"] or "unresolved"),
+                "topic_count": int(row["topic_count"] or 0),
+            }
+            for row in rows
+        ]
 
     async def get_topics_by_uids(
         self,
@@ -1323,14 +1431,34 @@ class TopicMemoryStore:
         )
         now = time.time()
         async with self._connect() as db:
+            expected_revisions: dict[str, int] = {}
+            normalized_topic_uids = sorted(set(topic_uids))
+            if normalized_topic_uids:
+                placeholders = ",".join("?" * len(normalized_topic_uids))
+                rows = await (
+                    await db.execute(
+                        f"SELECT topic_uid, revision FROM topic_memories "
+                        f"WHERE topic_uid IN ({placeholders})",
+                        normalized_topic_uids,
+                    )
+                ).fetchall()
+                expected_revisions = {
+                    str(row["topic_uid"]): int(row["revision"])
+                    for row in rows
+                }
             await db.execute(
                 """
                 INSERT INTO topic_maintenance_queue (
                     review_uid, memory_space_id, review_type, status,
-                    timeline_uids, topic_uids, details, created_at, updated_at
-                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                    timeline_uids, topic_uids, details,
+                    expected_topic_revisions, resolution_action,
+                    resolution_payload, resolved_at, created_at, updated_at
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, '', '{}', NULL, ?, ?)
                 ON CONFLICT(review_uid) DO UPDATE SET
                     status = 'pending', details = excluded.details,
+                    expected_topic_revisions = excluded.expected_topic_revisions,
+                    resolution_action = '', resolution_payload = '{}',
+                    resolved_at = NULL,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -1338,8 +1466,9 @@ class TopicMemoryStore:
                     memory_space_id,
                     review_type,
                     self._to_json(sorted(set(timeline_uids))),
-                    self._to_json(sorted(set(topic_uids))),
+                    self._to_json(normalized_topic_uids),
                     self._to_json(details),
+                    self._to_json(expected_revisions),
                     now,
                     now,
                 ),
@@ -1373,7 +1502,9 @@ class TopicMemoryStore:
                 await db.execute(
                     f"""
                     SELECT review_uid, review_type, status, timeline_uids,
-                           topic_uids, details, created_at, updated_at
+                           topic_uids, details, expected_topic_revisions,
+                           resolution_action, resolution_payload, resolved_at,
+                           created_at, updated_at
                     FROM topic_maintenance_queue
                     WHERE {' AND '.join(where)}
                     ORDER BY updated_at DESC
@@ -1390,11 +1521,222 @@ class TopicMemoryStore:
                 "timeline_uids": self._decode_json(row["timeline_uids"], []),
                 "topic_uids": self._decode_json(row["topic_uids"], []),
                 "details": self._decode_json(row["details"], {}),
+                "expected_topic_revisions": self._decode_json(
+                    row["expected_topic_revisions"], {}
+                ),
+                "resolution_action": str(row["resolution_action"] or ""),
+                "resolution_payload": self._decode_json(
+                    row["resolution_payload"], {}
+                ),
+                "resolved_at": (
+                    float(row["resolved_at"])
+                    if row["resolved_at"] is not None
+                    else None
+                ),
                 "created_at": float(row["created_at"]),
                 "updated_at": float(row["updated_at"]),
             }
             for row in rows
         ]
+
+    async def get_maintenance_review(
+        self, review_uid: str
+    ) -> dict[str, Any] | None:
+        review_uid = str(review_uid or "").strip()
+        if not review_uid:
+            return None
+        async with self._connect() as db:
+            row = await (
+                await db.execute(
+                    """
+                    SELECT review_uid, memory_space_id, review_type, status,
+                           timeline_uids, topic_uids, details,
+                           expected_topic_revisions, resolution_action,
+                           resolution_payload, resolved_at, created_at, updated_at
+                    FROM topic_maintenance_queue
+                    WHERE review_uid = ?
+                    """,
+                    (review_uid,),
+                )
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "review_uid": str(row["review_uid"]),
+            "memory_space_id": str(row["memory_space_id"]),
+            "review_type": str(row["review_type"]),
+            "status": str(row["status"]),
+            "timeline_uids": self._decode_json(row["timeline_uids"], []),
+            "topic_uids": self._decode_json(row["topic_uids"], []),
+            "details": self._decode_json(row["details"], {}),
+            "expected_topic_revisions": self._decode_json(
+                row["expected_topic_revisions"], {}
+            ),
+            "resolution_action": str(row["resolution_action"] or ""),
+            "resolution_payload": self._decode_json(
+                row["resolution_payload"], {}
+            ),
+            "resolved_at": (
+                float(row["resolved_at"])
+                if row["resolved_at"] is not None
+                else None
+            ),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    async def set_maintenance_review_status(
+        self,
+        review_uid: str,
+        *,
+        status: str,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        expected_status: str = "pending",
+    ) -> bool:
+        allowed_statuses = {"pending", "resolved", "ignored"}
+        status = str(status or "").strip()
+        if status not in allowed_statuses:
+            raise ValueError(f"Unsupported Topic review status: {status}")
+        now = time.time()
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE topic_maintenance_queue
+                SET status = ?, resolution_action = ?, resolution_payload = ?,
+                    resolved_at = CASE WHEN ? = 'pending' THEN NULL ELSE ? END,
+                    updated_at = ?
+                WHERE review_uid = ? AND status = ?
+                """,
+                (
+                    status,
+                    str(action or ""),
+                    self._to_json(payload or {}),
+                    status,
+                    now,
+                    now,
+                    str(review_uid),
+                    expected_status,
+                ),
+            )
+            await db.commit()
+        return bool(cursor.rowcount)
+
+    async def get_maintenance_review_context(
+        self, review_uid: str
+    ) -> dict[str, Any] | None:
+        """Expand one review with reusable fragments and source previews."""
+        review = await self.get_maintenance_review(review_uid)
+        if review is None:
+            return None
+        details = dict(review.get("details") or {})
+        run_uid = str(details.get("run_uid") or "").strip()
+        fragments = await self.list_fragments(run_uid=run_uid) if run_uid else []
+        requested_fragment_uids = {
+            str(value)
+            for value in details.get("fragment_uids", [])
+            if str(value)
+        }
+        timeline_uids = {
+            str(value) for value in review.get("timeline_uids", []) if str(value)
+        }
+        if requested_fragment_uids:
+            fragments = [
+                fragment
+                for fragment in fragments
+                if fragment.fragment_uid in requested_fragment_uids
+            ]
+        else:
+            fragments = [
+                fragment
+                for fragment in fragments
+                if set(fragment.timeline_uids) & timeline_uids
+            ]
+        topics = await self.get_topics_by_uids(
+            str(review["memory_space_id"]),
+            list(review.get("topic_uids") or []),
+            status=None,
+        )
+        topic_items: list[dict[str, Any]] = []
+        score_map = {
+            str(item.get("topic_uid") or ""): float(item.get("score") or 0.0)
+            for item in details.get("scores", [])
+            if isinstance(item, dict)
+        }
+        for topic in topics:
+            provenance = await self.get_topic_provenance(topic.topic_uid)
+            actor_rows = list(provenance.get("actor_links") or [])
+            topic_items.append(
+                {
+                    "topic_uid": topic.topic_uid,
+                    "title": topic.title,
+                    "summary": topic.summary,
+                    "revision": topic.revision,
+                    "status": self._enum_value(topic.status),
+                    "score": score_map.get(topic.topic_uid, 0.0),
+                    "started_at": topic.started_at,
+                    "ended_at": topic.ended_at,
+                    "participants": [
+                        {
+                            "actor_id": str(item.get("actor_id") or ""),
+                            "display_name": str(
+                                item.get("display_name_snapshot")
+                                or item.get("actor_id")
+                                or ""
+                            ),
+                            "relation_type": str(
+                                item.get("relation_type") or "mentioned"
+                            ),
+                            "resolution_status": str(
+                                item.get("resolution_status") or "unresolved"
+                            ),
+                        }
+                        for item in actor_rows
+                    ],
+                    "facts": [
+                        {
+                            "atom_uid": str(atom.get("atom_uid") or ""),
+                            "content": str(atom.get("content") or ""),
+                            "atom_type": str(atom.get("atom_type") or "factual"),
+                        }
+                        for atom in provenance.get("atoms", [])
+                    ],
+                }
+            )
+        timeline_items: list[dict[str, Any]] = []
+        if timeline_uids:
+            placeholders = ",".join("?" * len(timeline_uids))
+            async with self._connect() as db:
+                rows = await (
+                    await db.execute(
+                        f"""
+                        SELECT r.memory_uid, r.document_id, r.revision,
+                               d.text, d.metadata, s.started_at, s.ended_at
+                        FROM memory_registry r
+                        LEFT JOIN documents d ON d.id = r.document_id
+                        LEFT JOIN memory_source_spans s ON s.memory_uid = r.memory_uid
+                        WHERE r.memory_uid IN ({placeholders})
+                        ORDER BY COALESCE(s.started_at, r.created_at), r.memory_uid
+                        """,
+                        sorted(timeline_uids),
+                    )
+                ).fetchall()
+            timeline_items = [
+                {
+                    "timeline_uid": str(row["memory_uid"]),
+                    "document_id": int(row["document_id"]),
+                    "revision": int(row["revision"]),
+                    "content": str(row["text"] or ""),
+                    "preview": str(row["text"] or "")[:220],
+                    "started_at": row["started_at"],
+                    "ended_at": row["ended_at"],
+                }
+                for row in rows
+            ]
+        review["fragments"] = [self._fragment_to_dict(item) for item in fragments]
+        review["candidate_topics"] = topic_items
+        review["timelines"] = timeline_items
+        return review
 
     async def resolve_maintenance_reviews(
         self,
@@ -1413,7 +1755,8 @@ class TopicMemoryStore:
             cursor = await db.execute(
                 """
                 UPDATE topic_maintenance_queue
-                SET status = 'resolved', updated_at = ?
+                SET status = 'resolved', resolution_action = 'automatic_publish',
+                    resolution_payload = '{}', resolved_at = ?, updated_at = ?
                 WHERE memory_space_id = ? AND status = 'pending'
                   AND json_array_length(timeline_uids) > 0
                   AND NOT EXISTS (
@@ -1424,7 +1767,7 @@ class TopicMemoryStore:
                       )
                   )
                 """,
-                (now, memory_space_id, self._to_json(normalized)),
+                (now, now, memory_space_id, self._to_json(normalized)),
             )
             await db.commit()
         return int(cursor.rowcount or 0)
@@ -1984,12 +2327,92 @@ class TopicMemoryStore:
         ]:
             if "metadata" in item:
                 item["metadata"] = self._from_json(item["metadata"])
+        atoms_by_uid = {
+            str(item.get("atom_uid") or ""): item for item in atom_items
+        }
+        actor_fact_groups: list[dict[str, Any]] = []
+        for actor in actor_items:
+            actor_id = str(actor.get("actor_id") or "")
+            relation_type = str(actor.get("relation_type") or "")
+            fact_links = [
+                item
+                for item in atom_actor_items
+                if str(item.get("actor_id") or "") == actor_id
+                and str(item.get("relation_type") or "") == relation_type
+            ]
+            atom_uids = sorted(
+                {
+                    str(item.get("topic_atom_uid") or "")
+                    for item in fact_links
+                    if item.get("topic_atom_uid")
+                }
+            )
+            facts = [
+                {
+                    "atom_uid": atom_uid,
+                    "content": str(atoms_by_uid[atom_uid].get("content") or ""),
+                    "atom_type": str(
+                        atoms_by_uid[atom_uid].get("atom_type") or "factual"
+                    ),
+                    "fragment_uids": sorted(
+                        {
+                            str(item.get("fragment_uid") or "")
+                            for item in fact_links
+                            if str(item.get("topic_atom_uid") or "") == atom_uid
+                            and item.get("fragment_uid")
+                        }
+                    ),
+                    "timeline_uids": sorted(
+                        {
+                            str(item.get("timeline_uid") or "")
+                            for item in fact_links
+                            if str(item.get("topic_atom_uid") or "") == atom_uid
+                            and item.get("timeline_uid")
+                        }
+                    ),
+                }
+                for atom_uid in atom_uids
+                if atom_uid in atoms_by_uid
+            ]
+            metadata = dict(actor.get("metadata") or {})
+            actor_fact_groups.append(
+                {
+                    "actor_id": actor_id,
+                    "display_name": str(
+                        actor.get("display_name_snapshot") or actor_id
+                    ),
+                    "relation_type": relation_type,
+                    "resolution_status": str(
+                        actor.get("resolution_status") or "unresolved"
+                    ),
+                    "confidence": float(actor.get("confidence") or 0.0),
+                    "identity_sources": sorted(
+                        {
+                            str(value)
+                            for value in (
+                                metadata.get("identity_sources")
+                                or metadata.get("resolution_sources")
+                                or []
+                            )
+                            if str(value)
+                        }
+                    ),
+                    "fragment_uids": sorted(
+                        set(metadata.get("fragment_uids") or [])
+                    ),
+                    "timeline_uids": sorted(
+                        set(metadata.get("timeline_uids") or [])
+                    ),
+                    "facts": facts,
+                }
+            )
         return {
             "links": link_items,
             "atoms": atom_items,
             "atom_sources": source_items,
             "actor_links": actor_items,
             "atom_actor_links": atom_actor_items,
+            "actor_fact_groups": actor_fact_groups,
             "fragments": [
                 self._fragment_to_dict(self._row_to_fragment(row))
                 for row in fragment_rows
@@ -2226,6 +2649,32 @@ class TopicMemoryStore:
                     params,
                 )
             ).fetchone()
+            review_where = "WHERE status = 'pending'"
+            review_params: list[Any] = []
+            if memory_space_id:
+                review_where += " AND memory_space_id = ?"
+                review_params.append(memory_space_id)
+            pending_review_count = await (
+                await db.execute(
+                    f"SELECT COUNT(*) FROM topic_maintenance_queue {review_where}",
+                    review_params,
+                )
+            ).fetchone()
+            identity_where = "WHERE status = 'active'"
+            identity_params: list[Any] = []
+            if memory_space_id:
+                identity_where += " AND memory_space_id = ?"
+                identity_params.append(memory_space_id)
+            identity_pending_count = await (
+                await db.execute(
+                    f"""
+                    SELECT COUNT(*) FROM topic_memories
+                    {identity_where}
+                      AND json_extract(metadata, '$.identity_sync_pending') = 1
+                    """,
+                    identity_params,
+                )
+            ).fetchone()
         counts = {str(row["status"]): int(row["count"]) for row in rows}
         return {
             "topic_count": sum(counts.values()),
@@ -2233,6 +2682,12 @@ class TopicMemoryStore:
             "atom_count": int(atom_count[0] if atom_count else 0),
             "timeline_link_count": int(link_count[0] if link_count else 0),
             "relation_count": int(relation_count[0] if relation_count else 0),
+            "pending_review_count": int(
+                pending_review_count[0] if pending_review_count else 0
+            ),
+            "identity_sync_pending_count": int(
+                identity_pending_count[0] if identity_pending_count else 0
+            ),
         }
 
     async def list_memory_spaces(self, *, limit: int = 200) -> list[dict[str, Any]]:
@@ -2431,6 +2886,106 @@ class TopicMemoryStore:
             space_id: sorted(set(timeline_uids))
             for space_id, timeline_uids in result.items()
             if timeline_uids
+        }
+
+    async def preview_identity_topic_impacts(
+        self,
+        *,
+        actor_ids: set[str],
+        actor_suffixes: set[str],
+        display_names: set[str],
+    ) -> dict[str, Any]:
+        """Describe identity-dependent Topics without mutating their snapshots."""
+        actor_ids = {str(value).strip() for value in actor_ids if str(value).strip()}
+        actor_suffixes = {
+            str(value).strip() for value in actor_suffixes if str(value).strip()
+        }
+        normalized_names = {
+            str(value).strip().casefold()
+            for value in display_names
+            if str(value).strip()
+        }
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT t.topic_uid, t.memory_space_id, t.title, t.revision,
+                           a.actor_id, a.display_name_snapshot,
+                           a.resolution_status
+                    FROM topic_memories t
+                    LEFT JOIN topic_actor_links a ON a.topic_uid = t.topic_uid
+                    WHERE t.status = 'active'
+                    ORDER BY t.topic_uid
+                    """
+                )
+            ).fetchall()
+            all_topics: dict[str, dict[str, Any]] = {}
+            topics_with_actors: set[str] = set()
+            matched: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                topic_uid = str(row["topic_uid"])
+                item = all_topics.setdefault(
+                    topic_uid,
+                    {
+                        "topic_uid": topic_uid,
+                        "memory_space_id": str(row["memory_space_id"]),
+                        "title": str(row["title"]),
+                        "revision": int(row["revision"]),
+                    },
+                )
+                actor_id = str(row["actor_id"] or "").strip()
+                if actor_id:
+                    topics_with_actors.add(topic_uid)
+                display_name = str(row["display_name_snapshot"] or "").strip()
+                suffix_match = any(
+                    actor_id.endswith(f":human:{suffix}")
+                    for suffix in actor_suffixes
+                )
+                unresolved_name_match = (
+                    str(row["resolution_status"] or "") == "unresolved"
+                    and display_name.casefold() in normalized_names
+                )
+                if actor_id in actor_ids or suffix_match or unresolved_name_match:
+                    matched[topic_uid] = item
+            for topic_uid, item in all_topics.items():
+                if topic_uid not in topics_with_actors:
+                    matched.setdefault(topic_uid, item)
+            timeline_rows: list[aiosqlite.Row] = []
+            if matched:
+                placeholders = ",".join("?" * len(matched))
+                timeline_rows = await (
+                    await db.execute(
+                        f"""
+                        SELECT topic_uid, timeline_uid
+                        FROM topic_timeline_links
+                        WHERE topic_uid IN ({placeholders}) AND status = 'active'
+                        ORDER BY topic_uid, timeline_uid
+                        """,
+                        sorted(matched),
+                    )
+                ).fetchall()
+        timelines_by_topic: dict[str, list[str]] = {}
+        for row in timeline_rows:
+            timelines_by_topic.setdefault(str(row["topic_uid"]), []).append(
+                str(row["timeline_uid"])
+            )
+        topics = [
+            {**item, "timeline_uids": timelines_by_topic.get(topic_uid, [])}
+            for topic_uid, item in sorted(matched.items())
+        ]
+        return {
+            "topics": topics,
+            "topic_count": len(topics),
+            "timeline_uids": sorted(
+                {
+                    uid
+                    for values in timelines_by_topic.values()
+                    for uid in values
+                }
+            ),
+            "memory_space_ids": sorted(
+                {str(item["memory_space_id"]) for item in topics}
+            ),
         }
 
     async def list_identity_sync_pending(self) -> dict[str, list[str]]:

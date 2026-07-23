@@ -165,6 +165,125 @@ def test_logical_fragment_uid_uses_source_identity_not_generated_wording():
 
 
 @pytest.mark.asyncio
+async def test_manual_merge_retains_selected_topic_and_reuses_formal_fragments():
+    main = TopicMemory(
+        memory_space_id="space-1",
+        topic_uid="topic-main",
+        title="Main",
+        summary="Main summary",
+        revision=3,
+    )
+    other = TopicMemory(
+        memory_space_id="space-1",
+        topic_uid="topic-other",
+        title="Other",
+        summary="Other summary",
+        revision=2,
+    )
+    fragments = [
+        TopicFragmentDraft(
+            run_uid="run-old",
+            candidate_group_uid="group-old",
+            memory_space_id="space-1",
+            fragment_uid=f"fragment-{index}",
+            label=f"Fragment {index}",
+            summary="Summary",
+            timeline_uids=[f"timeline-{index}"],
+            source_revisions={f"timeline-{index}": 1},
+            facts=[],
+        )
+        for index in (1, 2)
+    ]
+    store = SimpleNamespace(
+        get_topics_by_uids=AsyncMock(return_value=[main, other]),
+        list_active_fragments_for_topics=AsyncMock(
+            return_value=[
+                {"topic_uid": "topic-main", "fragment": fragments[0]},
+                {"topic_uid": "topic-other", "fragment": fragments[1]},
+            ]
+        ),
+    )
+    manager = TopicBuildManager(":memory:", store, SimpleNamespace())
+    manager._publish_governance_groups = AsyncMock(
+        return_value={"status": "completed"}
+    )
+
+    result = await manager.merge_topics(
+        "space-1",
+        topic_uids=["topic-main", "topic-other"],
+        main_topic_uid="topic-main",
+    )
+
+    assert result["status"] == "completed"
+    call = manager._publish_governance_groups.await_args
+    assert call.args[0] == "space-1"
+    assert {item.fragment_uid for item in call.args[1][0]} == {
+        "fragment-1",
+        "fragment-2",
+    }
+    assert call.kwargs["retained_topics"] == [main]
+    assert call.kwargs["affected_topic_uids"] == {"topic-main", "topic-other"}
+    assert call.kwargs["operation"] == "manual_merge"
+
+
+@pytest.mark.asyncio
+async def test_manual_split_requires_each_formal_fragment_exactly_once():
+    topic = TopicMemory(
+        memory_space_id="space-1",
+        topic_uid="topic-main",
+        title="Main",
+        summary="Summary",
+        revision=3,
+    )
+    fragments = [
+        TopicFragmentDraft(
+            run_uid="run-old",
+            candidate_group_uid="group-old",
+            memory_space_id="space-1",
+            fragment_uid=f"fragment-{index}",
+            label=f"Fragment {index}",
+            summary="Summary",
+            timeline_uids=[f"timeline-{index}"],
+            source_revisions={f"timeline-{index}": 1},
+            facts=[],
+        )
+        for index in (1, 2)
+    ]
+    store = SimpleNamespace(
+        get_topic=AsyncMock(return_value=topic),
+        list_active_fragments_for_topics=AsyncMock(
+            return_value=[
+                {"topic_uid": topic.topic_uid, "fragment": fragment}
+                for fragment in fragments
+            ]
+        ),
+    )
+    manager = TopicBuildManager(":memory:", store, SimpleNamespace())
+    manager._publish_governance_groups = AsyncMock(
+        return_value={"status": "completed"}
+    )
+
+    with pytest.raises(ValueError, match="cannot belong"):
+        await manager.split_topic(
+            "space-1",
+            topic_uid=topic.topic_uid,
+            fragment_groups=[["fragment-1"], ["fragment-1"]],
+        )
+
+    result = await manager.split_topic(
+        "space-1",
+        topic_uid=topic.topic_uid,
+        fragment_groups=[["fragment-1"], ["fragment-2"]],
+    )
+
+    assert result["status"] == "completed"
+    call = manager._publish_governance_groups.await_args
+    assert call.kwargs["retained_topics"] == [topic, None]
+    assert call.kwargs["affected_topic_uids"] == {topic.topic_uid}
+    assert call.kwargs["operation"] == "manual_split"
+
+
+@pytest.mark.asyncio
 async def test_automatic_incremental_build_is_split_into_bounded_batches():
     store = SimpleNamespace(
         list_topics=AsyncMock(return_value=[SimpleNamespace(topic_uid="existing")]),
