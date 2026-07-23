@@ -383,6 +383,7 @@ async def test_selected_unindexed_timelines_are_forwarded_without_time_window(
             "memory_space_id": "space-1",
             "mode": "incremental",
             "timeline_uids": ["timeline-2", "timeline-1", "timeline-2"],
+            "scope_confirmed": True,
         }
     )
     monkeypatch.setattr(

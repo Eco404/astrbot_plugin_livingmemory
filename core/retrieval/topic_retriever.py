@@ -16,6 +16,11 @@ from ..embedding_signature import (
     signature_mismatch_reason,
 )
 from ..models.topic_memory import TopicFragmentDraft, TopicMemory
+from ..topic_vector_index import (
+    TopicVectorIndex,
+    TopicVectorIndexCompatibilityError,
+)
+from ..topic_similarity import cosine_similarity
 
 
 class TopicEmbeddingCompatibilityError(RuntimeError):
@@ -244,12 +249,14 @@ class TopicRetriever:
         rerank_provider: Any = None,
         config: dict[str, Any] | None = None,
         provider_resolver: Callable[[], dict[str, Any]] | None = None,
+        vector_index: TopicVectorIndex | None = None,
     ):
         self.store = store
         self.embedding_provider = embedding_provider
         self.rerank_provider = rerank_provider
         self.config = config or {}
         self.provider_resolver = provider_resolver
+        self.vector_index = vector_index
 
     def refresh_providers(self) -> None:
         if self.provider_resolver is None:
@@ -274,19 +281,46 @@ class TopicRetriever:
         if not query or not memory_space_id or k <= 0:
             return []
         self.refresh_providers()
-        scan_limit = max(
-            100, min(5000, int(self.config.get("recall_scan_limit", 2000)))
-        )
-        if payloads is None:
-            payloads = await self.store.list_topic_recall_payloads(
-                memory_space_id,
-                limit=scan_limit,
-            )
-        if not payloads or self.embedding_provider is None:
+        if self.embedding_provider is None:
             return []
-
         if query_vector is None:
             query_vector = (await self._get_embeddings([query]))[0]
+        if payloads is None:
+            if self.vector_index is not None:
+                candidate_limit = max(
+                    k,
+                    min(
+                        512,
+                        k * max(4, int(self.config.get("recall_candidate_multiplier", 8))),
+                    ),
+                )
+                try:
+                    hits = await self.vector_index.search(
+                        memory_space_id=memory_space_id,
+                        artifact_type="topic",
+                        query_vector=query_vector,
+                        limit=candidate_limit,
+                        provider=self.embedding_provider,
+                        input_format_versions=SUPPORTED_TOPIC_EMBEDDING_FORMATS,
+                    )
+                except TopicVectorIndexCompatibilityError as exc:
+                    raise TopicEmbeddingCompatibilityError(
+                        "记忆", exc.reason, exc.incompatible_count
+                    ) from exc
+                payloads = await self.store.list_topic_recall_payloads(
+                    memory_space_id,
+                    topic_uids=[hit.artifact_uid for hit in hits],
+                )
+            else:
+                scan_limit = max(
+                    100, min(5000, int(self.config.get("recall_scan_limit", 2000)))
+                )
+                payloads = await self.store.list_topic_recall_payloads(
+                    memory_space_id,
+                    limit=scan_limit,
+                )
+        if not payloads:
+            return []
         self.validate_topic_payload_embeddings(payloads, query_vector)
         query_features = self._text_features(query)
         candidates: list[TopicRecallResult] = []
@@ -538,14 +572,7 @@ class TopicRetriever:
 
     @staticmethod
     def _cosine(left: list[float], right: list[float]) -> float:
-        if not left or len(left) != len(right):
-            return 0.0
-        dot = sum(float(a) * float(b) for a, b in zip(left, right, strict=True))
-        left_norm = math.sqrt(sum(float(value) ** 2 for value in left))
-        right_norm = math.sqrt(sum(float(value) ** 2 for value in right))
-        if left_norm <= 0 or right_norm <= 0:
-            return 0.0
-        return dot / (left_norm * right_norm)
+        return cosine_similarity(left, right)
 
     @staticmethod
     def _text_features(text: str) -> set[str]:

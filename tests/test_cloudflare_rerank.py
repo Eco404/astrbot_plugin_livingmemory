@@ -50,6 +50,37 @@ async def test_cloudflare_rerank_maps_ids_and_preserves_probability_scores():
 
 
 @pytest.mark.asyncio
+async def test_cloudflare_rerank_reuses_and_closes_the_http_client():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={"response": [{"id": 0, "score": 0.5}]},
+        )
+
+    client = CloudflareRerankClient(
+        account_id="account",
+        api_token="token",
+        transport=httpx.MockTransport(handler),
+    )
+    await client.rerank("first", ["document"])
+    first_http_client = client._client
+    await client.rerank("second", ["document"])
+
+    assert calls == 2
+    assert client._client is first_http_client
+    assert first_http_client is not None and not first_http_client.is_closed
+
+    await client.aclose()
+
+    assert first_http_client.is_closed
+    assert client._client is None
+
+
+@pytest.mark.asyncio
 async def test_cloudflare_rerank_retries_429_and_accepts_direct_worker_shape():
     attempts = 0
 

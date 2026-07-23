@@ -48,7 +48,7 @@ async def test_selected_incremental_scan_persists_uid_scope_without_since():
 
 
 @pytest.mark.asyncio
-async def test_incremental_scope_reuses_full_time_cluster_context():
+async def test_incremental_scope_stays_bounded_to_selected_timelines():
     from astrbot_plugin_livingmemory.core.models.topic_memory import (
         TimelineTopicCandidate,
     )
@@ -69,9 +69,7 @@ async def test_incremental_scope_reuses_full_time_cluster_context():
         for index, started in ((1, 1000.0), (2, 1200.0), (3, 50000.0))
     ]
     store = SimpleNamespace(
-        find_incremental_topic_scope=AsyncMock(
-            return_value={"topic_uids": [], "timeline_uids": []}
-        )
+        find_topics_linked_to_timelines=AsyncMock(return_value=[])
     )
     manager = TopicMaintenanceManager(":memory:", store)
     manager.load_candidates = AsyncMock(return_value=candidates)
@@ -81,20 +79,32 @@ async def test_incremental_scope_reuses_full_time_cluster_context():
         "space-1",
         seeds,
         time_gap_seconds=6 * 3600,
-        similarity_threshold=0.99,
         max_timelines=20,
     )
 
     assert scope["seed_timeline_uids"] == ["timeline-2"]
     assert scope["seed_topic_uids"] == []
-    assert set(scope["timeline_uids"]) == {
-        "timeline-1",
-        "timeline-2",
-    }
-    assert (
-        scope["time_cluster_keys"]["timeline-1"]
-        == scope["time_cluster_keys"]["timeline-2"]
+    assert scope["timeline_uids"] == ["timeline-2"]
+    assert set(scope["time_cluster_keys"]) == {"timeline-2"}
+    assert scope["pipeline"] == "delta_first"
+
+
+@pytest.mark.asyncio
+async def test_candidate_uid_scan_avoids_loading_timeline_documents(tmp_path: Path):
+    db_path, space_id = await _create_timeline_db(tmp_path)
+    store = TopicMemoryStore(db_path)
+    manager = TopicMaintenanceManager(db_path, store)
+
+    uids = await manager.list_candidate_uids(
+        space_id,
+        only_unindexed=True,
     )
+
+    assert uids == [
+        "timeline-travel-1",
+        "timeline-travel-2",
+        "timeline-code-1",
+    ]
 
 
 async def _create_timeline_db(tmp_path: Path) -> tuple[str, str]:

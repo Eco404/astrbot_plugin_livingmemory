@@ -90,15 +90,6 @@ class TopicRecallPipeline:
             return TopicRecallOutcome([], [], 0.0)
         multiplier = max(1, min(10, int(self.config.get("recall_candidate_multiplier", 4))))
         candidate_k = min(50, max(final_k, final_k * multiplier))
-        scan_limit = max(
-            100, min(5000, int(self.config.get("recall_scan_limit", 2000)))
-        )
-        payloads = await self.retriever.store.list_topic_recall_payloads(
-            memory_space_id,
-            limit=scan_limit,
-        )
-        if not payloads:
-            return TopicRecallOutcome([], [], 0.0)
         primary_branch = self._primary_branch(branches)
         query_vectors = await self.retriever._get_embeddings(
             [branch.text for branch in branches]
@@ -109,7 +100,6 @@ class TopicRecallPipeline:
                     branch.text,
                     memory_space_id=memory_space_id,
                     k=candidate_k,
-                    payloads=payloads,
                     query_vector=query_vector,
                     use_rerank=False,
                 )

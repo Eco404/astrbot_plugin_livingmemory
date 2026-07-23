@@ -17,6 +17,10 @@ from astrbot_plugin_livingmemory.core.managers.topic_build_manager import (
     TopicBuildManager,
     TopicBuildValidationError,
 )
+from astrbot_plugin_livingmemory.core.managers.topic_fragment_identity import (
+    logical_fragment_uid,
+)
+from astrbot_plugin_livingmemory.core.topic_vector_index import TopicVectorHit
 from astrbot_plugin_livingmemory.core.models.identity_profile import (
     AuthoritativeIdentityStore,
 )
@@ -135,6 +139,197 @@ class _LegacyRetryLLM:
         return _Response({"ok": True})
 
 
+def test_logical_fragment_uid_uses_source_identity_not_generated_wording():
+    first = logical_fragment_uid(
+        memory_space_id="space-1",
+        timeline_uids=["timeline-1"],
+        facts=[
+            {
+                "content": "第一次模型措辞",
+                "source_fact_keys": ["timeline-1:key_fact:stable"],
+            }
+        ],
+    )
+    second = logical_fragment_uid(
+        memory_space_id="space-1",
+        timeline_uids=["timeline-1"],
+        facts=[
+            {
+                "content": "第二次模型采用了完全不同的措辞",
+                "source_fact_keys": ["timeline-1:key_fact:stable"],
+            }
+        ],
+    )
+
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_automatic_incremental_build_is_split_into_bounded_batches():
+    store = SimpleNamespace(
+        list_topics=AsyncMock(return_value=[SimpleNamespace(topic_uid="existing")]),
+        resolve_maintenance_reviews=AsyncMock(return_value=0),
+    )
+    candidate_manager = SimpleNamespace(
+        list_candidate_uids=AsyncMock(
+            return_value=[f"timeline-{index}" for index in range(5)]
+        )
+    )
+    manager = TopicBuildManager(
+        ":memory:",
+        store,
+        candidate_manager,
+        config={"incremental_max_timelines": 2},
+    )
+    progress_events = []
+
+    async def progress(event):
+        progress_events.append(event)
+
+    async def build_batch(_space, **kwargs):
+        await kwargs["progress_callback"](
+            {"stage": "publication", "current": 1, "total": 1}
+        )
+        first_uid = kwargs["timeline_uids"][0]
+        return {
+            "status": "completed",
+            "run_uid": f"run-{first_uid}",
+            "timeline_count": len(kwargs["timeline_uids"]),
+            "fragment_count": 1,
+            "topic_count": 1,
+            "topics": [],
+        }
+
+    manager._build_space_locked = AsyncMock(side_effect=build_batch)
+
+    result = await manager.build_space(
+        "space-1",
+        mode=TopicMaintenanceMode.INCREMENTAL,
+        since=100.0,
+        progress_callback=progress,
+    )
+
+    assert result["batch_count"] == 3
+    assert result["timeline_count"] == 5
+    assert [
+        call.kwargs["timeline_uids"]
+        for call in manager._build_space_locked.await_args_list
+    ] == [
+        ["timeline-0", "timeline-1"],
+        ["timeline-2", "timeline-3"],
+        ["timeline-4"],
+    ]
+    assert [event["maintenance_batch_index"] for event in progress_events] == [
+        1,
+        2,
+        3,
+    ]
+    candidate_manager.list_candidate_uids.assert_awaited_once_with(
+        "space-1",
+        since=100.0,
+        only_unindexed=True,
+    )
+    store.resolve_maintenance_reviews.assert_awaited_once_with(
+        "space-1",
+        timeline_uids=[
+            "timeline-0",
+            "timeline-1",
+            "timeline-2",
+            "timeline-3",
+            "timeline-4",
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_automatic_incremental_scope_requires_confirmation_when_too_large():
+    store = SimpleNamespace(
+        list_topics=AsyncMock(return_value=[SimpleNamespace(topic_uid="existing")]),
+        enqueue_maintenance_review=AsyncMock(return_value="review-1"),
+    )
+    candidate_manager = SimpleNamespace(
+        list_candidate_uids=AsyncMock(
+            return_value=[f"timeline-{index}" for index in range(4)]
+        )
+    )
+    manager = TopicBuildManager(
+        ":memory:",
+        store,
+        candidate_manager,
+        config={
+            "incremental_max_timelines": 2,
+            "incremental_auto_max_timelines": 3,
+        },
+    )
+    manager._build_space_locked = AsyncMock()
+
+    result = await manager.build_space(
+        "space-1",
+        mode=TopicMaintenanceMode.INCREMENTAL,
+        automatic=True,
+    )
+
+    assert result["status"] == "pending_confirmation"
+    assert result["timeline_count"] == 4
+    manager._build_space_locked.assert_not_awaited()
+    store.enqueue_maintenance_review.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_incremental_vector_neighbors_are_loaded_as_match_candidates():
+    directly_affected = TopicMemory(
+        topic_uid="topic-direct",
+        memory_space_id="space-1",
+        title="Direct",
+        summary="Direct summary",
+    )
+    vector_neighbor = TopicMemory(
+        topic_uid="topic-neighbor",
+        memory_space_id="space-1",
+        title="Neighbor",
+        summary="Neighbor summary",
+    )
+    store = SimpleNamespace(
+        get_topics_by_uids=AsyncMock(return_value=[vector_neighbor])
+    )
+    vector_index = SimpleNamespace(
+        search=AsyncMock(return_value=[TopicVectorHit("topic-neighbor", 0.91)])
+    )
+    manager = TopicBuildManager(
+        ":memory:",
+        store,
+        SimpleNamespace(),
+        embedding_provider=SimpleNamespace(),
+        vector_index=vector_index,
+    )
+    fragment = TopicFragmentDraft(
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        label="Fragment",
+        summary="Summary",
+        timeline_uids=["timeline-new"],
+        source_revisions={"timeline-new": 1},
+        facts=[],
+        embedding=[1.0, 0.0],
+    )
+
+    candidates = await manager._incremental_existing_candidates(
+        "space-1",
+        [fragment],
+        [directly_affected],
+        {"topic-direct"},
+    )
+
+    assert {topic.topic_uid for topic in candidates} == {
+        "topic-direct",
+        "topic-neighbor",
+    }
+    store.get_topics_by_uids.assert_awaited_once_with(
+        "space-1", ["topic-neighbor"]
+    )
+
+
 @pytest.mark.asyncio
 async def test_selected_unindexed_build_does_not_expand_to_full_without_topics():
     store = SimpleNamespace(list_topics=AsyncMock(return_value=[]))
@@ -214,7 +409,7 @@ async def test_incremental_build_uses_expanded_scope_and_shared_scan_pipeline():
     assert kwargs["run_config"]["time_cluster_keys"] == scope["time_cluster_keys"]
     assert kwargs["run_config"]["topic_settings"] == manager.config
     assert kwargs["run_metadata"]["incremental_scope"] == scope
-    assert kwargs["run_metadata"]["pipeline"] == "shared_full_pipeline"
+    assert kwargs["run_metadata"]["pipeline"] == "bounded_delta_full_pipeline"
 
 
 @pytest.mark.asyncio
@@ -3243,8 +3438,8 @@ async def test_incremental_build_preserves_topic_uid_and_prior_sources(tmp_path:
         topic for topic in await store.list_topics(space_id) if topic.title == "Rust 学习"
     )
 
-    # Move the unrelated Rust source into the same local review window. It may
-    # be used as rebuild context but must not be republished.
+    # Move the unrelated Rust source into the same time window. Delta-first
+    # maintenance must still avoid reloading or republishing it.
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
             "UPDATE memory_source_spans SET started_at = ?, ended_at = ? "
@@ -3309,6 +3504,74 @@ async def test_incremental_build_preserves_topic_uid_and_prior_sources(tmp_path:
     unchanged_rust = await store.get_topic(rust.topic_uid)
     assert unchanged_rust is not None
     assert unchanged_rust.revision == rust.revision == 1
+
+
+@pytest.mark.asyncio
+async def test_incremental_edit_removes_old_topic_source_and_rehomes_new_revision(
+    tmp_path: Path,
+):
+    db_path, space_id = await _create_timeline_db(tmp_path)
+    store = TopicMemoryStore(db_path)
+    manager = TopicBuildManager(
+        db_path,
+        store,
+        TopicMaintenanceManager(db_path, store),
+        llm_provider=_GroundedLLM(),
+        embedding_provider=_Embedding(),
+    )
+    await manager.build_space(space_id)
+    travel = next(
+        topic for topic in await store.list_topics(space_id) if topic.title == "京都旅行"
+    )
+    rust = next(
+        topic for topic in await store.list_topics(space_id) if topic.title == "Rust 学习"
+    )
+
+    replacement = "用户改为讨论 Rust 异步编程。"
+    metadata = {
+        "session_id": "bot:FriendMessage:user-1",
+        "persona_id": "persona-1",
+        "canonical_summary": replacement,
+        "topics": ["Rust学习"],
+        "key_facts": ["用户正在学习 Rust 异步编程"],
+    }
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "UPDATE documents SET text = ?, metadata = ? WHERE id = 1",
+            (replacement, json.dumps(metadata)),
+        )
+        await db.commit()
+    identity = MemoryIdentityStore(db_path)
+    await identity.upsert_memory(
+        memory_uid="timeline-travel-1",
+        document_id=1,
+        memory_layer="timeline",
+        memory_space_id=space_id,
+        revision=2,
+        created_at=1000.0,
+        updated_at=60000.0,
+    )
+
+    result = await manager.build_space(
+        space_id,
+        mode=TopicMaintenanceMode.INCREMENTAL,
+        timeline_uids=["timeline-travel-1"],
+    )
+
+    assert result["topic_count"] == 2
+    travel_provenance = await store.get_topic_provenance(travel.topic_uid)
+    assert {row["timeline_uid"] for row in travel_provenance["links"]} == {
+        "timeline-travel-2"
+    }
+    rust_provenance = await store.get_topic_provenance(rust.topic_uid)
+    assert {row["timeline_uid"] for row in rust_provenance["links"]} == {
+        "timeline-code-1",
+        "timeline-travel-1",
+    }
+    assert next(
+        row for row in rust_provenance["links"]
+        if row["timeline_uid"] == "timeline-travel-1"
+    )["source_timeline_revision"] == 2
 
 
 @pytest.mark.asyncio

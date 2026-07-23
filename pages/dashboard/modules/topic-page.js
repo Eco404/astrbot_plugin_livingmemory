@@ -17,6 +17,7 @@ export class TopicPage {
     this.maintenanceTrigger = null;
     this.maintenanceRequestId = 0;
     this.maintenanceItems = [];
+    this.maintenancePreviewKey = null;
     this.discardBuildTrigger = null;
     this.discardRun = null;
     this.clearTopicsTrigger = null;
@@ -536,6 +537,7 @@ export class TopicPage {
     overlay?.setAttribute("aria-hidden", "true");
     this.maintenanceRequestId += 1;
     this.maintenanceItems = [];
+    this.resetMaintenancePreview();
     const trigger = this.maintenanceTrigger;
     this.maintenanceTrigger = null;
     if (restoreFocus && trigger?.isConnected) trigger.focus();
@@ -543,6 +545,7 @@ export class TopicPage {
 
   async detectUnindexedTimelines() {
     if (!this.maintenanceIsOpen()) return;
+    this.resetMaintenancePreview();
     const requestId = ++this.maintenanceRequestId;
     const detectButton = document.getElementById("topic-maintenance-detect");
     const submitButton = document.getElementById("topic-maintenance-submit");
@@ -586,6 +589,7 @@ export class TopicPage {
     } catch (e) {
       if (requestId !== this.maintenanceRequestId) return;
       this.maintenanceItems = [];
+      this.resetMaintenancePreview();
       status.textContent = e.message || window.t("topic.detectUnindexedFailed");
       list.innerHTML = "";
       this.showToast(e.message || window.t("topic.detectUnindexedFailed"), true);
@@ -692,6 +696,7 @@ export class TopicPage {
   }
 
   updateMaintenanceSelection() {
+    this.resetMaintenancePreview();
     const checkboxes = Array.from(document.querySelectorAll("#topic-maintenance-list .topic-maintenance-checkbox"));
     const selected = checkboxes.filter(input => input.checked).length;
     const selectAll = document.getElementById("topic-maintenance-select-all");
@@ -705,13 +710,56 @@ export class TopicPage {
     if (submit) submit.disabled = selected === 0 || Boolean(this.activeJobUid);
   }
 
-  startSelectedMaintenance() {
+  resetMaintenancePreview() {
+    this.maintenancePreviewKey = null;
+    const preview = document.getElementById("topic-maintenance-preview");
+    preview?.classList.add("hidden");
+    if (preview) preview.innerHTML = "";
+    const submit = document.getElementById("topic-maintenance-submit");
+    if (submit) submit.textContent = window.t("topic.maintenanceSubmit");
+  }
+
+  async startSelectedMaintenance() {
     const timelineUids = Array.from(
       document.querySelectorAll("#topic-maintenance-list .topic-maintenance-checkbox:checked")
     ).map(input => input.value);
     if (!timelineUids.length || this.activeJobUid) return;
+    const previewKey = [...timelineUids].sort().join("\n");
+    if (this.maintenancePreviewKey !== previewKey) {
+      const submit = document.getElementById("topic-maintenance-submit");
+      const preview = document.getElementById("topic-maintenance-preview");
+      if (submit) submit.disabled = true;
+      try {
+        const data = await this.api.post("topics/maintenance/preview", {
+          memory_space_id: this.currentSpace(),
+          timeline_uids: timelineUids,
+        });
+        this.maintenancePreviewKey = previewKey;
+        preview.innerHTML = `
+          <strong>${esc(window.t("topic.maintenancePreviewTitle"))}</strong>
+          <div>${esc(window.t(
+            "topic.maintenancePreviewSummary",
+            Number(data.eligible_count || 0),
+            Number(data.batch_count || 0),
+            Number(data.batch_limit || 0),
+            Number(data.directly_affected_topic_count || 0),
+            Number(data.estimated_fragment_extraction_calls || 0),
+          ))}</div>
+          ${data.missing_or_already_indexed?.length ? `<small>${esc(window.t("topic.maintenancePreviewSkipped", data.missing_or_already_indexed.length))}</small>` : ""}
+          ${Number(data.pending_review_count || 0) ? `<small class="topic-maintenance-review-warning">${esc(window.t("topic.maintenancePendingReviews", Number(data.pending_review_count || 0)))}</small>` : ""}`;
+        preview.classList.remove("hidden");
+        if (submit) {
+          submit.textContent = window.t("topic.maintenanceConfirmSubmit");
+          submit.disabled = Number(data.eligible_count || 0) === 0;
+        }
+      } catch (error) {
+        this.showToast(error.message || window.t("topic.maintenancePreviewFailed"), true);
+        if (submit) submit.disabled = false;
+      }
+      return;
+    }
     this.closeMaintenance({ restoreFocus: false });
-    this.startBuild("incremental", { timelineUids });
+    this.startBuild("incremental", { timelineUids, scopeConfirmed: true });
   }
 
   requestFullBuild(trigger) {
@@ -762,7 +810,7 @@ export class TopicPage {
     if (restoreFocus && trigger?.isConnected) trigger.focus();
   }
 
-  async startBuild(mode, { resetTopics = false, timelineUids = null } = {}) {
+  async startBuild(mode, { resetTopics = false, timelineUids = null, scopeConfirmed = false } = {}) {
     const memorySpaceId = this.currentSpace();
     if (!memorySpaceId) {
       this.showToast("请先选择记忆空间", true);
@@ -778,6 +826,7 @@ export class TopicPage {
         memory_space_id: memorySpaceId,
         mode,
         reset_topics: Boolean(resetTopics),
+        scope_confirmed: Boolean(scopeConfirmed),
         ...(Array.isArray(timelineUids) ? { timeline_uids: timelineUids } : {}),
       });
       this.renderProgress(job);

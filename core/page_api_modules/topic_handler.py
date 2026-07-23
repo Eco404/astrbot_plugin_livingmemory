@@ -52,6 +52,8 @@ class TopicHandler:
         "active_component_review_count",
         "component_review_concurrency",
         "review_output_groups",
+        "maintenance_batch_index",
+        "maintenance_batch_total",
     }
     _STAGE_RANGES: dict[str, tuple[float, float]] = {
         "pending": (0.0, 0.0),
@@ -295,6 +297,77 @@ class TopicHandler:
             logger.error("[PageAPI] 检测未索引 Timeline 失败", exc_info=True)
             return self.utils.error(str(exc))
 
+    async def preview_incremental_maintenance(self, memory_engine) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        memory_space_id = self.utils.optional_text(payload.get("memory_space_id"))
+        timeline_uids = payload.get("timeline_uids")
+        if not memory_space_id:
+            return self.utils.error("memory_space_id 不能为空")
+        if not isinstance(timeline_uids, list):
+            return self.utils.error("timeline_uids 必须是数组")
+        selected = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in timeline_uids
+                if str(value or "").strip()
+            )
+        )
+        if not selected:
+            return self.utils.error("请至少选择一条 Timeline")
+        try:
+            manager = memory_engine.topic_build_manager
+            candidates = await manager.candidate_manager.load_candidates(
+                memory_space_id,
+                timeline_uids=selected,
+                only_unindexed=True,
+            )
+            found = {item.memory_uid for item in candidates}
+            missing = [uid for uid in selected if uid not in found]
+            affected = await memory_engine.topic_memory_store.find_topics_linked_to_timelines(
+                memory_space_id,
+                sorted(found),
+            )
+            pending_reviews = await memory_engine.topic_memory_store.list_maintenance_reviews(
+                memory_space_id,
+                timeline_uids=sorted(found),
+            )
+            batch_limit = max(
+                1, int(manager.config.get("incremental_max_timelines", 120))
+            )
+            extraction_batch = max(
+                1, int(manager.config.get("fragment_extraction_batch_size", 12))
+            )
+            total = len(candidates)
+            batch_count = (total + batch_limit - 1) // batch_limit if total else 0
+            estimated_extraction_calls = (
+                (total + extraction_batch - 1) // extraction_batch if total else 0
+            )
+            return self.utils.ok(
+                {
+                    "memory_space_id": memory_space_id,
+                    "selected_count": len(selected),
+                    "eligible_count": total,
+                    "missing_or_already_indexed": missing,
+                    "batch_limit": batch_limit,
+                    "batch_count": batch_count,
+                    "directly_affected_topic_count": len(affected),
+                    "directly_affected_topic_uids": affected,
+                    "pending_review_count": len(pending_reviews),
+                    "pending_reviews": pending_reviews,
+                    "topic_candidate_k": int(
+                        manager.config.get("incremental_topic_candidate_k", 8)
+                    ),
+                    "estimated_fragment_extraction_calls": estimated_extraction_calls,
+                    "pipeline": "delta_first_bounded",
+                    "requires_confirmation": True,
+                }
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+        except Exception as exc:
+            logger.error("[PageAPI] 预估 Topic 增量范围失败", exc_info=True)
+            return self.utils.error(str(exc))
+
     async def recompute_relations(self, memory_engine) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}
         memory_space_id = self.utils.optional_text(payload.get("memory_space_id"))
@@ -431,8 +504,11 @@ class TopicHandler:
         resume_run_uid = self.utils.optional_text(payload.get("resume_run_uid"))
         memory_space_id = self.utils.optional_text(payload.get("memory_space_id"))
         reset_topics = payload.get("reset_topics", False)
+        scope_confirmed = payload.get("scope_confirmed", False)
         if not isinstance(reset_topics, bool):
             return self.utils.error("reset_topics 必须是布尔值")
+        if not isinstance(scope_confirmed, bool):
+            return self.utils.error("scope_confirmed 必须是布尔值")
         raw_timeline_uids = payload.get("timeline_uids")
         timeline_uids: list[str] | None = None
         if raw_timeline_uids is not None:
@@ -503,6 +579,8 @@ class TopicHandler:
             return self.utils.error("只有全量构建可以先清空 Topic")
         if timeline_uids is not None and mode is not TopicMaintenanceMode.INCREMENTAL:
             return self.utils.error("指定 Timeline 仅适用于增量补建")
+        if timeline_uids is not None and scope_confirmed is not True:
+            return self.utils.error("请先检查增量影响范围并确认")
 
         active_jobs = self._active_jobs()
         if active_jobs:
@@ -575,6 +653,24 @@ class TopicHandler:
                 int(job["current"]),
                 int(job["total"]),
             )
+            maintenance_batch_total = int(
+                event.get("maintenance_batch_total") or 1
+            )
+            maintenance_batch_index = int(
+                event.get("maintenance_batch_index") or 1
+            )
+            if maintenance_batch_total > 1:
+                maintenance_batch_index = max(
+                    1, min(maintenance_batch_index, maintenance_batch_total)
+                )
+                overall_percent = round(
+                    (
+                        (maintenance_batch_index - 1) * 100.0
+                        + overall_percent
+                    )
+                    / maintenance_batch_total,
+                    1,
+                )
             job["overall_percent"] = (
                 max(float(job.get("overall_percent") or 0.0), overall_percent)
                 if event_stage == previous_stage

@@ -54,6 +54,8 @@ class CloudflareRerankClient:
         self.retry_base_delay = max(0.0, float(retry_base_delay))
         self.score_domain = "[0,1]"
         self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
         if not self.account_id:
             raise ValueError("Cloudflare account_id is required")
         if not self.api_token:
@@ -67,6 +69,28 @@ class CloudflareRerankClient:
             "id": "cloudflare_workers_ai_rerank",
             "model": self.model,
         }
+
+    async def aclose(self) -> None:
+        """Close the reusable HTTP connection pool."""
+        async with self._client_lock:
+            client = self._client
+            self._client = None
+        if client is not None:
+            await client.aclose()
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        client = self._client
+        if client is not None and not client.is_closed:
+            return client
+        async with self._client_lock:
+            client = self._client
+            if client is None or client.is_closed:
+                client = httpx.AsyncClient(
+                    timeout=self.timeout_seconds,
+                    transport=self._transport,
+                )
+                self._client = client
+            return client
 
     @property
     def endpoint(self) -> str:
@@ -144,15 +168,12 @@ class CloudflareRerankClient:
         for attempt in range(self.max_retries + 1):
             retryable = False
             try:
-                async with httpx.AsyncClient(
-                    timeout=self.timeout_seconds,
-                    transport=self._transport,
-                ) as client:
-                    response = await client.post(
-                        self.endpoint,
-                        headers=headers,
-                        json=request_payload,
-                    )
+                client = await self._get_client()
+                response = await client.post(
+                    self.endpoint,
+                    headers=headers,
+                    json=request_payload,
+                )
                 retryable = response.status_code == 429 or response.status_code >= 500
                 if response.status_code >= 400:
                     last_error = self._http_error(response)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any
@@ -227,7 +228,7 @@ class TopicMemoryStore:
                 memory_space_id TEXT NOT NULL,
                 left_topic_uid TEXT NOT NULL,
                 right_topic_uid TEXT NOT NULL,
-                relation_type TEXT NOT NULL DEFAULT 'related_subtopic',
+                relation_type TEXT NOT NULL DEFAULT 'related',
                 confidence REAL NOT NULL DEFAULT 0.5,
                 semantic_similarity REAL NOT NULL DEFAULT 0.0,
                 status TEXT NOT NULL DEFAULT 'active',
@@ -394,6 +395,8 @@ class TopicMemoryStore:
                 time_cluster_keys TEXT NOT NULL DEFAULT '[]',
                 importance REAL NOT NULL DEFAULT 0.5,
                 confidence REAL NOT NULL DEFAULT 0.7,
+                logical_fragment_uid TEXT NOT NULL DEFAULT '',
+                fragment_revision INTEGER NOT NULL DEFAULT 1,
                 embedding TEXT NOT NULL DEFAULT '[]',
                 started_at REAL,
                 ended_at REAL,
@@ -441,6 +444,8 @@ class TopicMemoryStore:
                 time_cluster_keys TEXT NOT NULL DEFAULT '[]',
                 importance REAL NOT NULL DEFAULT 0.5,
                 confidence REAL NOT NULL DEFAULT 0.7,
+                logical_fragment_uid TEXT NOT NULL DEFAULT '',
+                fragment_revision INTEGER NOT NULL DEFAULT 1,
                 embedding TEXT NOT NULL DEFAULT '[]',
                 started_at REAL,
                 ended_at REAL,
@@ -460,6 +465,35 @@ class TopicMemoryStore:
             """
             CREATE INDEX IF NOT EXISTS idx_formal_topic_fragments_space
             ON topic_fragments(memory_space_id, status, updated_at DESC)
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_fragments_logical_revision
+            ON topic_fragments(
+                memory_space_id, logical_fragment_uid, fragment_revision DESC
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS topic_maintenance_queue (
+                review_uid TEXT PRIMARY KEY,
+                memory_space_id TEXT NOT NULL,
+                review_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                timeline_uids TEXT NOT NULL DEFAULT '[]',
+                topic_uids TEXT NOT NULL DEFAULT '[]',
+                details TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_topic_maintenance_queue_space_status
+            ON topic_maintenance_queue(memory_space_id, status, updated_at DESC)
             """
         )
         await db.execute(
@@ -807,6 +841,7 @@ class TopicMemoryStore:
         relations: list[TopicRelation],
         affected_topic_uids: set[str] | None = None,
         reset_topics: bool = False,
+        relation_scope_topic_uids: set[str] | None = None,
     ) -> dict[str, Any]:
         """Publish one completed build as a single visible database change."""
         run_uid = str(run_uid or "").strip()
@@ -942,7 +977,10 @@ class TopicMemoryStore:
                         db, memory_space_id, affected, active_uids, now
                     )
                 await self._replace_topic_relations_tx(
-                    db, memory_space_id, normalized_relations
+                    db,
+                    memory_space_id,
+                    normalized_relations,
+                    scope_topic_uids=relation_scope_topic_uids,
                 )
                 created_topics = sum(1 for topic in saved_topics if topic.revision == 1)
                 updated_topics = len(saved_topics) - created_topics
@@ -1177,26 +1215,258 @@ class TopicMemoryStore:
             rows = await cursor.fetchall()
         return [self._row_to_topic(row) for row in rows]
 
+    async def get_topics_by_uids(
+        self,
+        memory_space_id: str,
+        topic_uids: list[str],
+        *,
+        status: TopicMemoryStatus | str | None = TopicMemoryStatus.ACTIVE,
+    ) -> list[TopicMemory]:
+        normalized = sorted(
+            {str(uid).strip() for uid in topic_uids if str(uid).strip()}
+        )
+        if not normalized:
+            return []
+        placeholders = ",".join("?" * len(normalized))
+        params: list[Any] = [memory_space_id, *normalized]
+        status_clause = ""
+        if status is not None:
+            status_clause = " AND status = ?"
+            params.append(self._enum_value(status))
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT * FROM topic_memories
+                    WHERE memory_space_id = ?
+                      AND topic_uid IN ({placeholders}){status_clause}
+                    ORDER BY importance DESC, updated_at DESC
+                    """,
+                    params,
+                )
+            ).fetchall()
+        return [self._row_to_topic(row) for row in rows]
+
+    async def list_all_topics(
+        self,
+        memory_space_id: str,
+        *,
+        status: TopicMemoryStatus | str | None = None,
+        page_size: int = 500,
+    ) -> list[TopicMemory]:
+        """Page without a hidden total-row cap."""
+        result: list[TopicMemory] = []
+        offset = 0
+        safe_page = max(1, min(1000, int(page_size)))
+        while True:
+            page = await self.list_topics(
+                memory_space_id,
+                status=status,
+                limit=safe_page,
+                offset=offset,
+            )
+            result.extend(page)
+            if len(page) < safe_page:
+                return result
+            offset += len(page)
+
+    async def find_topics_linked_to_timelines(
+        self,
+        memory_space_id: str,
+        timeline_uids: list[str],
+    ) -> list[str]:
+        """Return only directly affected Topics; never expand their provenance."""
+        normalized = sorted(
+            {str(uid).strip() for uid in timeline_uids if str(uid).strip()}
+        )
+        if not normalized:
+            return []
+        placeholders = ",".join("?" * len(normalized))
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT DISTINCT l.topic_uid
+                    FROM topic_timeline_links l
+                    JOIN topic_memories t ON t.topic_uid = l.topic_uid
+                    WHERE t.memory_space_id = ? AND t.status = 'active'
+                      AND l.status = 'active'
+                      AND l.timeline_uid IN ({placeholders})
+                    ORDER BY l.topic_uid
+                    """,
+                    [memory_space_id, *normalized],
+                )
+            ).fetchall()
+        return [str(row["topic_uid"]) for row in rows]
+
+    async def enqueue_maintenance_review(
+        self,
+        *,
+        memory_space_id: str,
+        review_type: str,
+        timeline_uids: list[str],
+        topic_uids: list[str],
+        details: dict[str, Any],
+    ) -> str:
+        identity_payload = self._to_json(
+            {
+                "review_type": review_type,
+                "timelines": sorted(set(timeline_uids)),
+                "topics": sorted(set(topic_uids)),
+            }
+        )
+        review_uid = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"livingmemory:review:{memory_space_id}:{identity_payload}",
+            )
+        )
+        now = time.time()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO topic_maintenance_queue (
+                    review_uid, memory_space_id, review_type, status,
+                    timeline_uids, topic_uids, details, created_at, updated_at
+                ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+                ON CONFLICT(review_uid) DO UPDATE SET
+                    status = 'pending', details = excluded.details,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    review_uid,
+                    memory_space_id,
+                    review_type,
+                    self._to_json(sorted(set(timeline_uids))),
+                    self._to_json(sorted(set(topic_uids))),
+                    self._to_json(details),
+                    now,
+                    now,
+                ),
+            )
+            await db.commit()
+        return review_uid
+
+    async def list_maintenance_reviews(
+        self,
+        memory_space_id: str,
+        *,
+        status: str = "pending",
+        timeline_uids: list[str] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List bounded-maintenance decisions that still need user attention."""
+        where = ["memory_space_id = ?", "status = ?"]
+        params: list[Any] = [memory_space_id, status]
+        normalized = sorted(
+            {str(uid).strip() for uid in timeline_uids or [] if str(uid).strip()}
+        )
+        if normalized:
+            where.append(
+                "EXISTS (SELECT 1 FROM json_each(topic_maintenance_queue.timeline_uids) "
+                "WHERE value IN (SELECT value FROM json_each(?)))"
+            )
+            params.append(self._to_json(normalized))
+        params.append(max(1, min(500, int(limit))))
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT review_uid, review_type, status, timeline_uids,
+                           topic_uids, details, created_at, updated_at
+                    FROM topic_maintenance_queue
+                    WHERE {' AND '.join(where)}
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    params,
+                )
+            ).fetchall()
+        return [
+            {
+                "review_uid": str(row["review_uid"]),
+                "review_type": str(row["review_type"]),
+                "status": str(row["status"]),
+                "timeline_uids": self._decode_json(row["timeline_uids"], []),
+                "topic_uids": self._decode_json(row["topic_uids"], []),
+                "details": self._decode_json(row["details"], {}),
+                "created_at": float(row["created_at"]),
+                "updated_at": float(row["updated_at"]),
+            }
+            for row in rows
+        ]
+
+    async def resolve_maintenance_reviews(
+        self,
+        memory_space_id: str,
+        *,
+        timeline_uids: list[str],
+    ) -> int:
+        """Resolve pending reviews fully covered by a successful publication."""
+        normalized = sorted(
+            {str(uid).strip() for uid in timeline_uids if str(uid).strip()}
+        )
+        if not normalized:
+            return 0
+        now = time.time()
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE topic_maintenance_queue
+                SET status = 'resolved', updated_at = ?
+                WHERE memory_space_id = ? AND status = 'pending'
+                  AND json_array_length(timeline_uids) > 0
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM json_each(topic_maintenance_queue.timeline_uids) item
+                      WHERE item.value NOT IN (
+                          SELECT value FROM json_each(?)
+                      )
+                  )
+                """,
+                (now, memory_space_id, self._to_json(normalized)),
+            )
+            await db.commit()
+        return int(cursor.rowcount or 0)
+
     async def list_topic_recall_payloads(
         self,
         memory_space_id: str,
         *,
         limit: int = 1000,
+        topic_uids: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Load active Topics and their compact recall provenance in bulk."""
         safe_limit = max(1, min(int(limit), 5000))
+        selected_uids = sorted(
+            {str(uid).strip() for uid in (topic_uids or []) if str(uid).strip()}
+        )
         async with self._connect() as db:
-            topic_rows = await (
-                await db.execute(
-                    """
+            if selected_uids:
+                uid_placeholders = ",".join("?" * len(selected_uids))
+                topic_rows = await (
+                    await db.execute(
+                        f"""
+                    SELECT * FROM topic_memories
+                    WHERE memory_space_id = ? AND status = 'active'
+                      AND topic_uid IN ({uid_placeholders})
+                    ORDER BY importance DESC, updated_at DESC
+                    """,
+                        [memory_space_id, *selected_uids],
+                    )
+                ).fetchall()
+            else:
+                topic_rows = await (
+                    await db.execute(
+                        """
                     SELECT * FROM topic_memories
                     WHERE memory_space_id = ? AND status = 'active'
                     ORDER BY importance DESC, updated_at DESC
                     LIMIT ?
                     """,
-                    (memory_space_id, safe_limit),
-                )
-            ).fetchall()
+                        (memory_space_id, safe_limit),
+                    )
+                ).fetchall()
             topic_uids = [str(row["topic_uid"]) for row in topic_rows]
             if not topic_uids:
                 return []
@@ -1270,6 +1540,74 @@ class TopicMemoryStore:
             }
             for row in topic_rows
         ]
+
+    async def list_vector_artifacts(
+        self,
+        memory_space_id: str,
+        *,
+        artifact_type: str,
+        limit: int = 512,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Page authoritative vectors for a disposable derived index."""
+        safe_limit = max(1, min(int(limit), 2000))
+        safe_offset = max(0, int(offset))
+        async with self._connect() as db:
+            if artifact_type == "topic":
+                rows = await (
+                    await db.execute(
+                        """
+                        SELECT topic_uid AS artifact_uid, metadata,
+                               embedding_signature
+                        FROM topic_memories
+                        WHERE memory_space_id = ? AND status = 'active'
+                        ORDER BY topic_uid
+                        LIMIT ? OFFSET ?
+                        """,
+                        (memory_space_id, safe_limit, safe_offset),
+                    )
+                ).fetchall()
+                return [
+                    {
+                        "artifact_uid": str(row["artifact_uid"]),
+                        "embedding": self._from_json(row["metadata"]).get(
+                            "embedding", []
+                        ),
+                        "embedding_signature": self._from_json(
+                            row["embedding_signature"]
+                        ),
+                    }
+                    for row in rows
+                ]
+            if artifact_type == "fragment":
+                rows = await (
+                    await db.execute(
+                        """
+                        SELECT fragment_uid AS artifact_uid, embedding,
+                               embedding_signature
+                        FROM topic_fragments
+                        WHERE memory_space_id = ? AND status = 'active'
+                        ORDER BY fragment_uid
+                        LIMIT ? OFFSET ?
+                        """,
+                        (memory_space_id, safe_limit, safe_offset),
+                    )
+                ).fetchall()
+                return [
+                    {
+                        "artifact_uid": str(row["artifact_uid"]),
+                        "embedding": (
+                            json.loads(row["embedding"] or "[]")
+                            if isinstance(row["embedding"], str)
+                            else list(row["embedding"] or [])
+                        ),
+                        "embedding_signature": self._from_json(
+                            row["embedding_signature"]
+                        ),
+                    }
+                    for row in rows
+                ]
+        raise ValueError(f"Unsupported Topic vector artifact type: {artifact_type}")
 
     async def list_active_fragments_for_topics(
         self,
@@ -1498,81 +1836,6 @@ class TopicMemoryStore:
             )
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
-
-    async def find_incremental_topic_scope(
-        self,
-        memory_space_id: str,
-        context_timeline_uids: list[str],
-        seed_timeline_uids: list[str],
-    ) -> dict[str, list[str]]:
-        """Select focused existing Topics safe to reconstruct as one local scope."""
-        context = sorted({str(uid) for uid in context_timeline_uids if str(uid)})
-        seeds = sorted({str(uid) for uid in seed_timeline_uids if str(uid)})
-        if not context:
-            return {
-                "topic_uids": [],
-                "seed_topic_uids": [],
-                "timeline_uids": [],
-            }
-        context_json = self._to_json(context)
-        seed_json = self._to_json(seeds)
-        async with self._connect() as db:
-            rows = await (
-                await db.execute(
-                    """
-                    WITH support AS (
-                        SELECT t.topic_uid,
-                               COUNT(*) AS source_count,
-                               SUM(CASE WHEN l.timeline_uid IN
-                                   (SELECT value FROM json_each(?))
-                                   THEN 1 ELSE 0 END) AS context_count,
-                               SUM(CASE WHEN l.timeline_uid IN
-                                   (SELECT value FROM json_each(?))
-                                   THEN 1 ELSE 0 END) AS seed_count
-                        FROM topic_memories t
-                        JOIN topic_timeline_links l ON l.topic_uid = t.topic_uid
-                        WHERE t.memory_space_id = ?
-                          AND t.status = 'active' AND l.status = 'active'
-                        GROUP BY t.topic_uid
-                    )
-                    SELECT topic_uid, seed_count FROM support
-                    WHERE seed_count > 0
-                       OR (context_count > 0 AND (
-                           source_count <= 4 OR context_count >= 2
-                           OR CAST(context_count AS REAL) / source_count >= 0.25
-                       ))
-                    ORDER BY topic_uid
-                    """,
-                    (context_json, seed_json, memory_space_id),
-                )
-            ).fetchall()
-            topic_uids = [str(row["topic_uid"]) for row in rows]
-            seed_topic_uids = [
-                str(row["topic_uid"])
-                for row in rows
-                if int(row["seed_count"] or 0) > 0
-            ]
-            timeline_uids: list[str] = []
-            if topic_uids:
-                placeholders = ",".join("?" * len(topic_uids))
-                source_rows = await (
-                    await db.execute(
-                        f"""
-                        SELECT DISTINCT timeline_uid
-                        FROM topic_timeline_links
-                        WHERE status = 'active'
-                          AND topic_uid IN ({placeholders})
-                        ORDER BY timeline_uid
-                        """,
-                        topic_uids,
-                    )
-                ).fetchall()
-                timeline_uids = [str(row["timeline_uid"]) for row in source_rows]
-        return {
-            "topic_uids": topic_uids,
-            "seed_topic_uids": seed_topic_uids,
-            "timeline_uids": timeline_uids,
-        }
 
     async def get_topic_provenance(self, topic_uid: str) -> dict[str, Any]:
         async with self._connect() as db:
@@ -1821,6 +2084,8 @@ class TopicMemoryStore:
         db: aiosqlite.Connection,
         memory_space_id: str,
         relations: list[TopicRelation],
+        *,
+        scope_topic_uids: set[str] | None = None,
     ) -> None:
         topic_uids = {
             uid
@@ -1845,10 +2110,26 @@ class TopicMemoryStore:
                 raise TopicSourceValidationError(
                     "Topic relation crosses a memory-space boundary"
                 )
-        await db.execute(
-            "DELETE FROM topic_relations WHERE memory_space_id = ?",
-            (memory_space_id,),
+        normalized_scope = sorted(
+            {str(uid).strip() for uid in (scope_topic_uids or set()) if str(uid).strip()}
         )
+        if scope_topic_uids is not None:
+            if normalized_scope:
+                placeholders = ",".join("?" * len(normalized_scope))
+                await db.execute(
+                    f"""
+                    DELETE FROM topic_relations
+                    WHERE memory_space_id = ?
+                      AND (left_topic_uid IN ({placeholders})
+                           OR right_topic_uid IN ({placeholders}))
+                    """,
+                    [memory_space_id, *normalized_scope, *normalized_scope],
+                )
+        else:
+            await db.execute(
+                "DELETE FROM topic_relations WHERE memory_space_id = ?",
+                (memory_space_id,),
+            )
         for relation in relations:
             await db.execute(
                 """
@@ -2731,12 +3012,13 @@ class TopicMemoryStore:
                             fragment_uid, run_uid, candidate_group_uid,
                             memory_space_id, label, summary, timeline_uids,
                             source_revisions, facts, keywords, time_cluster_keys,
-                            importance, confidence, embedding, started_at, ended_at,
+                            importance, confidence, logical_fragment_uid,
+                            fragment_revision, embedding, started_at, ended_at,
                             status, prompt_hash, input_hash, provider_id, model_id,
                             embedding_signature,
                             created_at, updated_at, metadata
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                  ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             fragment.fragment_uid,
@@ -2752,6 +3034,8 @@ class TopicMemoryStore:
                             self._to_json(fragment.time_cluster_keys),
                             float(fragment.importance),
                             float(fragment.confidence),
+                            fragment.logical_fragment_uid or fragment.fragment_uid,
+                            max(1, int(fragment.fragment_revision)),
                             self._to_json(fragment.embedding),
                             fragment.started_at,
                             fragment.ended_at,
@@ -3251,18 +3535,44 @@ class TopicMemoryStore:
                 "Topic fragment belongs to another memory space"
             )
         for fragment in fragments:
+            logical_uid = fragment.logical_fragment_uid or fragment.fragment_uid
+            previous = await (
+                await db.execute(
+                    """
+                    SELECT fragment_revision, input_hash, summary, facts
+                    FROM topic_fragments
+                    WHERE memory_space_id = ? AND logical_fragment_uid = ?
+                    ORDER BY fragment_revision DESC, updated_at DESC
+                    LIMIT 1
+                    """,
+                    (fragment.memory_space_id, logical_uid),
+                )
+            ).fetchone()
+            if previous is None:
+                fragment.fragment_revision = max(1, int(fragment.fragment_revision))
+            elif (
+                str(previous["input_hash"] or "") == fragment.input_hash
+                and str(previous["summary"] or "") == fragment.summary
+                and str(previous["facts"] or "")
+                == TopicMemoryStore._to_json(fragment.facts)
+            ):
+                fragment.fragment_revision = int(previous["fragment_revision"])
+            else:
+                fragment.fragment_revision = int(previous["fragment_revision"]) + 1
+            fragment.logical_fragment_uid = logical_uid
             await db.execute(
                 """
                 INSERT INTO topic_fragments (
                     fragment_uid, run_uid, candidate_group_uid, memory_space_id,
                     label, summary, timeline_uids, source_revisions, facts,
                     keywords, time_cluster_keys, importance, confidence,
+                    logical_fragment_uid, fragment_revision,
                     embedding, started_at, ended_at, status, prompt_hash,
                     input_hash, provider_id, model_id, embedding_signature,
                     created_at, updated_at,
                     metadata
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          'active', ?, ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fragment_uid) DO UPDATE SET
                     run_uid = excluded.run_uid,
                     candidate_group_uid = excluded.candidate_group_uid,
@@ -3276,6 +3586,8 @@ class TopicMemoryStore:
                     time_cluster_keys = excluded.time_cluster_keys,
                     importance = excluded.importance,
                     confidence = excluded.confidence,
+                    logical_fragment_uid = excluded.logical_fragment_uid,
+                    fragment_revision = excluded.fragment_revision,
                     embedding = excluded.embedding,
                     started_at = excluded.started_at,
                     ended_at = excluded.ended_at,
@@ -3302,6 +3614,8 @@ class TopicMemoryStore:
                     TopicMemoryStore._to_json(fragment.time_cluster_keys),
                     float(fragment.importance),
                     float(fragment.confidence),
+                    fragment.logical_fragment_uid,
+                    int(fragment.fragment_revision),
                     TopicMemoryStore._to_json(fragment.embedding),
                     fragment.started_at,
                     fragment.ended_at,
@@ -3653,6 +3967,10 @@ class TopicMemoryStore:
 
         return TopicFragmentDraft(
             fragment_uid=str(row["fragment_uid"]),
+            logical_fragment_uid=str(
+                row["logical_fragment_uid"] or row["fragment_uid"]
+            ),
+            fragment_revision=max(1, int(row["fragment_revision"] or 1)),
             run_uid=str(row["run_uid"]),
             candidate_group_uid=str(row["candidate_group_uid"]),
             memory_space_id=str(row["memory_space_id"]),
@@ -3699,6 +4017,16 @@ class TopicMemoryStore:
         except (TypeError, json.JSONDecodeError):
             return {}
         return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _decode_json(value: Any, default: Any) -> Any:
+        if isinstance(value, type(default)):
+            return value
+        try:
+            parsed = json.loads(value or "null")
+        except (TypeError, json.JSONDecodeError):
+            return default
+        return parsed if isinstance(parsed, type(default)) else default
 
     @staticmethod
     def _enum_value(value: Any) -> str:

@@ -2821,6 +2821,20 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .topic-maintenance-item-meta small { flex: 0 0 auto; color: var(--text-tertiary); }
 .topic-maintenance-item-summary { color: var(--text-secondary); font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
 .topic-maintenance-empty { display: grid; min-height: 120px; place-items: center; text-align: center; }
+.topic-maintenance-preview {
+  display: grid;
+  gap: 6px;
+  margin: var(--space-3) 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--accent);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+.topic-maintenance-preview strong { color: var(--text-primary); }
+.topic-maintenance-preview small { color: var(--text-tertiary); }
+.topic-maintenance-preview .topic-maintenance-review-warning { color: var(--danger); }
 .topic-detail-title { min-width: 0; overflow-wrap: anywhere; }
 .topic-detail-readonly { font-size: 12px; font-weight: 400; white-space: nowrap; }
 .topic-detail-body { min-height: 0; }

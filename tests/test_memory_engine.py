@@ -409,9 +409,9 @@ async def test_rewrite_memory_in_place_preserves_document_id(tmp_path: Path):
     rewrite_call = engine.hybrid_retriever.replace_memory_in_place.call_args
     assert rewrite_call.args[0] == memory_id
     assert rewrite_call.args[1] == "新事实"
-    stale_topic = await engine.topic_memory_store.get_topic(topic.topic_uid)
-    assert stale_topic is not None
-    assert stale_topic.status is TopicMemoryStatus.STALE
+    retained_topic = await engine.topic_memory_store.get_topic(topic.topic_uid)
+    assert retained_topic is not None
+    assert retained_topic.status is TopicMemoryStatus.ACTIVE
     assert rewrite_call.args[2]["revision"] == 2
     assert rewrite_call.args[2]["memory_uid"]
     assert rewrite_call.args[2]["memory_uid"] == original_uid
@@ -421,6 +421,8 @@ async def test_rewrite_memory_in_place_preserves_document_id(tmp_path: Path):
     assert registry is not None
     assert registry.document_id == memory_id
     assert registry.revision == 2
+    provenance = await engine.topic_memory_store.get_topic_provenance(topic.topic_uid)
+    assert provenance["links"][0]["source_timeline_revision"] == 1
     await engine.close()
 
 

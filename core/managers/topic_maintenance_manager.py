@@ -401,16 +401,49 @@ class TopicMaintenanceManager:
             )
         return [self._row_to_candidate(row, atom_map) for row in rows]
 
+    async def list_candidate_uids(
+        self,
+        memory_space_id: str,
+        *,
+        since: float | None = None,
+        only_unindexed: bool = False,
+    ) -> list[str]:
+        """List candidate identities without loading documents or fact atoms."""
+        where = [
+            "r.memory_space_id = ?",
+            "r.memory_layer = 'timeline'",
+            "r.status = 'active'",
+        ]
+        params: list[Any] = [memory_space_id]
+        if since is not None:
+            where.append("r.updated_at >= ?")
+            params.append(float(since))
+        if only_unindexed:
+            where.append(self._unindexed_timeline_predicate())
+        async with aiosqlite.connect(self.db_path) as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT r.memory_uid
+                    FROM memory_registry r
+                    LEFT JOIN memory_source_spans s ON s.memory_uid = r.memory_uid
+                    WHERE {' AND '.join(where)}
+                    ORDER BY COALESCE(s.started_at, r.created_at), r.document_id
+                    """,
+                    params,
+                )
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     async def prepare_incremental_scope(
         self,
         memory_space_id: str,
         seeds: list[TimelineTopicCandidate],
         *,
         time_gap_seconds: float,
-        similarity_threshold: float,
         max_timelines: int,
     ) -> dict[str, Any]:
-        """Expand seeds into a bounded affected neighborhood for local rebuild."""
+        """Describe a delta-first incremental scope without reloading old sources."""
         if not seeds:
             return {
                 "seed_timeline_uids": [],
@@ -420,72 +453,32 @@ class TopicMaintenanceManager:
                 "time_cluster_keys": {},
                 "scope_limited": False,
             }
-        all_candidates = await self.load_candidates(memory_space_id)
-        clustered = self.assign_time_clusters(
-            all_candidates, gap_seconds=time_gap_seconds
-        )
+        clustered = self.assign_time_clusters(seeds, gap_seconds=time_gap_seconds)
         by_uid = {item.memory_uid: item for item in clustered}
         seed_uids = {item.memory_uid for item in seeds}
-        effective_seeds = [by_uid[uid] for uid in seed_uids if uid in by_uid]
-        seed_clusters = {
-            item.time_cluster_key for item in effective_seeds if item.time_cluster_key
-        }
-        selected_uids = set(seed_uids)
-        scored: list[tuple[float, str]] = []
-        for candidate in clustered:
-            if candidate.memory_uid in seed_uids:
-                continue
-            similarity = max(
-                (
-                    self.candidate_similarity(seed, candidate)
-                    for seed in effective_seeds
-                ),
-                default=0.0,
+        max_timelines = max(1, int(max_timelines))
+        if len(seed_uids) > max_timelines:
+            raise ValueError(
+                f"incremental batch contains {len(seed_uids)} Timeline items; "
+                f"the configured limit is {max_timelines}"
             )
-            same_cluster = bool(
-                candidate.time_cluster_key
-                and candidate.time_cluster_key in seed_clusters
-            )
-            if same_cluster or similarity >= similarity_threshold:
-                selected_uids.add(candidate.memory_uid)
-                scored.append((similarity + (1.0 if same_cluster else 0.0), candidate.memory_uid))
-
-        max_timelines = max(len(seed_uids), int(max_timelines))
-        scope_limited = len(selected_uids) > max_timelines
-        if scope_limited:
-            ranked = [uid for _, uid in sorted(scored, reverse=True)]
-            selected_uids = set(seed_uids)
-            selected_uids.update(ranked[: max(0, max_timelines - len(seed_uids))])
-
-        affected = await self.store.find_incremental_topic_scope(
+        affected_topic_uids = await self.store.find_topics_linked_to_timelines(
             memory_space_id,
-            sorted(selected_uids),
             sorted(seed_uids),
         )
-        affected_topic_uids = list(affected["topic_uids"])
-        seed_topic_uids = list(affected.get("seed_topic_uids", []))
-        expanded_uids = set(selected_uids)
-        expanded_uids.update(affected["timeline_uids"])
-        if len(expanded_uids) > max_timelines:
-            # Never truncate an existing Topic's provenance.  Fall back to an
-            # isolated safe build that may create duplicates but cannot corrupt
-            # broad existing Topics.
-            scope_limited = True
-            affected_topic_uids = []
-            seed_topic_uids = []
-            expanded_uids = set(selected_uids)
 
         return {
             "seed_timeline_uids": sorted(seed_uids),
-            "timeline_uids": sorted(expanded_uids),
+            "timeline_uids": sorted(seed_uids),
             "affected_topic_uids": sorted(affected_topic_uids),
-            "seed_topic_uids": sorted(seed_topic_uids),
+            "seed_topic_uids": sorted(affected_topic_uids),
             "time_cluster_keys": {
                 uid: by_uid[uid].time_cluster_key
-                for uid in expanded_uids
+                for uid in seed_uids
                 if uid in by_uid
             },
-            "scope_limited": scope_limited,
+            "scope_limited": False,
+            "pipeline": "delta_first",
         }
 
     async def list_unindexed_timelines(

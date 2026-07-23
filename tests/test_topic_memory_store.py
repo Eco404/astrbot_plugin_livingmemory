@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import aiosqlite
@@ -116,6 +117,140 @@ async def test_replace_group_fragments_reports_missing_parent(tmp_path: Path):
             "missing-group",
             [fragment],
         )
+
+
+@pytest.mark.asyncio
+async def test_formal_fragment_logical_identity_tracks_revisions(tmp_path: Path):
+    db_path = str(tmp_path / "fragment-logical-revisions.db")
+    space_id = await _register_timeline(
+        db_path,
+        memory_uid="timeline-1",
+        document_id=1,
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    topic = TopicMemory(
+        topic_uid="topic-1",
+        memory_space_id=space_id,
+        title="Topic",
+        summary="Topic summary",
+    )
+    link = TopicTimelineLink(
+        topic_uid=topic.topic_uid,
+        timeline_uid="timeline-1",
+        time_cluster_key="cluster-1",
+    )
+
+    def fragment(uid: str, *, summary: str, input_hash: str):
+        return TopicFragmentDraft(
+            fragment_uid=uid,
+            logical_fragment_uid="logical-fragment-1",
+            run_uid=f"run-{uid}",
+            candidate_group_uid=f"group-{uid}",
+            memory_space_id=space_id,
+            label="Fragment",
+            summary=summary,
+            timeline_uids=["timeline-1"],
+            source_revisions={"timeline-1": 1},
+            facts=[{"content": "stable fact"}],
+            input_hash=input_hash,
+        )
+
+    first = fragment("fragment-1", summary="same", input_hash="input-1")
+    saved = await store.save_topic_snapshot(
+        topic,
+        atoms=[],
+        links=[link],
+        atom_sources=[],
+        fragments=[first],
+    )
+    second = fragment("fragment-2", summary="same", input_hash="input-1")
+    saved = await store.save_topic_snapshot(
+        replace(topic, revision=saved.revision),
+        atoms=[],
+        links=[link],
+        atom_sources=[],
+        fragments=[second],
+        expected_revision=saved.revision,
+    )
+    third = fragment("fragment-3", summary="changed", input_hash="input-2")
+    await store.save_topic_snapshot(
+        replace(topic, revision=saved.revision),
+        atoms=[],
+        links=[link],
+        atom_sources=[],
+        fragments=[third],
+        expected_revision=saved.revision,
+    )
+
+    async with aiosqlite.connect(db_path) as db:
+        rows = await (
+            await db.execute(
+                "SELECT fragment_uid, logical_fragment_uid, fragment_revision "
+                "FROM topic_fragments ORDER BY fragment_uid"
+            )
+        ).fetchall()
+
+    assert rows == [
+        ("fragment-1", "logical-fragment-1", 1),
+        ("fragment-2", "logical-fragment-1", 1),
+        ("fragment-3", "logical-fragment-1", 2),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_maintenance_review_identity_ignores_volatile_run_details(tmp_path: Path):
+    db_path = str(tmp_path / "maintenance-review.db")
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+
+    first_uid = await store.enqueue_maintenance_review(
+        memory_space_id="space-1",
+        review_type="ambiguous_topic_match",
+        timeline_uids=["timeline-1"],
+        topic_uids=["topic-a", "topic-b"],
+        details={"run_uid": "run-1", "scores": [0.61, 0.60]},
+    )
+    second_uid = await store.enqueue_maintenance_review(
+        memory_space_id="space-1",
+        review_type="ambiguous_topic_match",
+        timeline_uids=["timeline-1"],
+        topic_uids=["topic-b", "topic-a"],
+        details={"run_uid": "run-2", "scores": [0.63, 0.62]},
+    )
+    reviews = await store.list_maintenance_reviews(
+        "space-1",
+        timeline_uids=["timeline-1"],
+    )
+
+    assert first_uid == second_uid
+    assert len(reviews) == 1
+    assert reviews[0]["timeline_uids"] == ["timeline-1"]
+    assert reviews[0]["topic_uids"] == ["topic-a", "topic-b"]
+    assert reviews[0]["details"]["run_uid"] == "run-2"
+
+
+@pytest.mark.asyncio
+async def test_maintenance_reviews_resolve_only_after_full_timeline_scope(tmp_path: Path):
+    store = TopicMemoryStore(str(tmp_path / "maintenance-review-resolution.db"))
+    await store.initialize()
+    review_uid = await store.enqueue_maintenance_review(
+        memory_space_id="space-1",
+        review_type="incremental_scope_too_large",
+        timeline_uids=["timeline-1", "timeline-2"],
+        topic_uids=[],
+        details={},
+    )
+
+    assert await store.resolve_maintenance_reviews(
+        "space-1", timeline_uids=["timeline-1"]
+    ) == 0
+    assert await store.resolve_maintenance_reviews(
+        "space-1", timeline_uids=["timeline-1", "timeline-2"]
+    ) == 1
+    assert await store.list_maintenance_reviews("space-1") == []
+    resolved = await store.list_maintenance_reviews("space-1", status="resolved")
+    assert [item["review_uid"] for item in resolved] == [review_uid]
 
 
 async def _register_timeline(

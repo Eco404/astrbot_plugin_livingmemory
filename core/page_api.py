@@ -198,6 +198,12 @@ class PluginPageApi:
             "LivingMemory Page unindexed Timeline list",
         )
         register(
+            f"{PAGE_API_PREFIX}/topics/maintenance/preview",
+            self.preview_topic_maintenance,
+            ["POST"],
+            "LivingMemory Page incremental Topic maintenance preview",
+        )
+        register(
             f"{PAGE_API_PREFIX}/topics/relations/recompute",
             self.recompute_topic_relations,
             ["POST"],
@@ -425,6 +431,14 @@ class PluginPageApi:
         if error:
             return error
         return await self.topic_handler.list_unindexed_timelines(
+            ready["memory_engine"]
+        )
+
+    async def preview_topic_maintenance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.preview_incremental_maintenance(
             ready["memory_engine"]
         )
 
