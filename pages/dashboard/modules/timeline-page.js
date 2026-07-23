@@ -65,7 +65,7 @@ export class TimelinePage {
     document.getElementById("timeline-settings-status").textContent = "";
     document.getElementById("timeline-settings-save").disabled = false;
     document.getElementById("timeline-settings-reset-all").disabled = false;
-    const categories = ["recall", "generation", "isolation", "lifecycle", "performance"];
+    const categories = ["recall", "injection", "generation", "session", "isolation", "graph", "lifecycle", "index", "model", "maintenance", "performance"];
     const content = document.getElementById("timeline-settings-content");
     content.innerHTML = categories.map(category => {
       const rows = Object.entries(definitions).filter(([, item]) => item.category === category).map(([key, definition]) => {

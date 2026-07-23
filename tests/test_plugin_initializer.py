@@ -10,6 +10,7 @@ import pytest
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.base.exceptions import InitializationError
 from astrbot_plugin_livingmemory.core.plugin_initializer import PluginInitializer
+from astrbot_plugin_livingmemory.storage.topic_memory_store import TopicMemoryStore
 
 
 @pytest.fixture
@@ -30,6 +31,30 @@ def test_initializer_default_state(initializer):
     assert initializer.is_initialized is False
     assert initializer.is_failed is False
     assert initializer.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_timeline_v3_import_preserves_newly_moved_legacy_settings(
+    mock_context, tmp_path
+):
+    db_path = tmp_path / "livingmemory.db"
+    store = TopicMemoryStore(str(db_path))
+    await store.initialize()
+    await store.update_timeline_setting_overrides(
+        {"__legacy_imported_v1__": True, "__legacy_imported_v2__": True},
+        settings_revision=2,
+    )
+    config = ConfigManager(
+        {"graph_memory": {"expansion_limit": 42}}
+    )
+    init = PluginInitializer(mock_context, config, str(tmp_path))
+
+    await init._initialize_timeline_runtime_settings(str(db_path))
+
+    assert config.get("graph_memory.expansion_limit") == 42
+    stored = await store.get_timeline_setting_overrides()
+    assert stored["graph_memory.expansion_limit"] == 42
+    assert stored["__legacy_imported_v3__"] is True
 
 
 @pytest.mark.asyncio

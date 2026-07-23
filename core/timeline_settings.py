@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TIMELINE_SETTINGS_REVISION = 2
+TIMELINE_SETTINGS_REVISION = 3
 
 SHARED_QUERY_SETTING_KEYS = frozenset(
     {
@@ -32,6 +32,42 @@ TIMELINE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "recall_engine.mmr_lambda": {"default": 0.72, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "相关性与多样性平衡", "description": "越接近 1 越重视相关性，越低越倾向减少重复内容。"},
     "recall_engine.context_overlap_suppression": {"default": True, "type": "bool", "category": "recall", "label": "抑制当前上下文重复", "description": "来源消息仍位于当前原始上下文中时，不重复注入整条 Timeline。"},
     "reflection_engine.summary_trigger_rounds": {"default": 10, "type": "int", "min": 1, "max": 100, "category": "generation", "label": "总结触发轮次", "description": "累计达到该对话轮次后生成一条 Timeline 记忆。"},
+    "reflection_engine.idle_summary_enabled": {"default": True, "type": "bool", "category": "generation", "label": "空闲后自动总结", "description": "对话长时间没有新消息时，自动总结尚未写入 Timeline 的内容。"},
+    "reflection_engine.idle_summary_delay_minutes": {"default": 30.0, "type": "float", "min": 1.0, "max": 10080.0, "step": 1.0, "category": "generation", "label": "空闲触发时间（分钟）", "description": "会话最后一条消息经过该时间后进入空闲总结检查。"},
+    "reflection_engine.idle_summary_min_rounds": {"default": 3, "type": "int", "min": 1, "max": 100, "category": "generation", "label": "空闲总结最少轮次", "description": "只有未总结对话达到该轮数时才执行空闲总结，避免插件刚启用时产生过碎的 Timeline。"},
+    "reflection_engine.idle_summary_scan_interval_seconds": {"default": 60, "type": "int", "min": 30, "max": 3600, "category": "performance", "label": "空闲会话扫描间隔（秒）", "description": "后台检查空闲会话的时间间隔；只执行本地数据库查询，命中后才调用 LLM。"},
+    "session_manager.max_sessions": {"default": 100, "type": "int", "min": 1, "max": 10000, "category": "session", "label": "最大缓存会话数", "description": "内存中最多缓存的会话数量；淘汰缓存不会删除数据库数据。"},
+    "session_manager.session_ttl": {"default": 3600, "type": "int", "min": 60, "max": 86400, "category": "session", "label": "会话缓存空闲时间（秒）", "description": "缓存超过该时间未被访问后失效；不会删除会话或原始消息。"},
+    "session_manager.context_window_size": {"default": 50, "type": "int", "min": 1, "max": 1000, "category": "session", "label": "对话上下文窗口", "description": "插件读取近期对话时最多使用的消息条数。"},
+    "session_manager.max_messages_per_session": {"default": 1000, "type": "int", "min": 100, "max": 10000, "category": "session", "label": "单会话消息上限", "description": "超过上限时只清理已经完成 Timeline 总结的最旧消息。"},
+    "session_manager.cleanup_batch_size": {"default": 50, "type": "int", "min": 1, "max": 1000, "category": "session", "label": "历史消息清理批量", "description": "单会话超出消息上限时，每次至少尝试清理的旧消息数量。"},
+    "recall_engine.injection_method": {"default": "extra_user_content", "type": "select", "options": ["extra_user_content", "user_message_before", "user_message_after", "fake_tool_call"], "category": "injection", "label": "记忆注入位置", "option_labels": {"extra_user_content": "附加到本轮用户内容", "user_message_before": "用户消息前", "user_message_after": "用户消息后", "fake_tool_call": "模拟工具调用"}, "description": "控制召回结果如何加入本轮 LLM 请求。"},
+    "recall_engine.auto_remove_injected": {"default": True, "type": "bool", "category": "injection", "label": "清除旧注入片段", "description": "注入新记忆前清除历史中的旧注入标记，避免重复累积。"},
+    "graph_memory.document_route_weight": {"default": 0.65, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "graph", "label": "文档路权重", "description": "Timeline 文档检索在图记忆双路融合中的基础权重。"},
+    "graph_memory.graph_route_weight": {"default": 0.35, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "graph", "label": "图路权重", "description": "知识图谱检索在双路融合中的基础权重；两路权重会在使用时归一化。"},
+    "graph_memory.cross_route_bonus": {"default": 0.08, "type": "float", "min": 0.0, "max": 0.5, "step": 0.01, "category": "graph", "label": "双路命中加分", "description": "同一记忆同时被文档路和图路命中时增加的分数。"},
+    "graph_memory.expansion_limit": {"default": 24, "type": "int", "min": 1, "max": 200, "category": "graph", "label": "图邻居扩展上限", "description": "从图命中节点扩展到邻居记忆的最大候选数。"},
+    "graph_memory.expansion_hops": {"default": 1, "type": "int", "min": 1, "max": 2, "category": "graph", "label": "图扩展跳数", "description": "一跳更精确，二跳可召回间接关系但会增加噪声和开销。"},
+    "graph_memory.second_hop_weight": {"default": 0.4, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "graph", "label": "二跳候选权重", "description": "仅在图扩展为二跳时控制间接候选的权重。"},
+    "graph_memory.dynamic_route_weighting": {"default": True, "type": "bool", "category": "graph", "label": "动态双路权重", "description": "根据查询中的关系、时间和定义意图自动微调双路占比。"},
+    "graph_memory.max_topics_per_memory": {"default": 6, "type": "int", "min": 1, "max": 20, "category": "graph", "label": "单记忆最大主题节点", "description": "从一条 Timeline 中最多写入图谱的主题数量。"},
+    "graph_memory.max_participants_per_memory": {"default": 8, "type": "int", "min": 1, "max": 30, "category": "graph", "label": "单记忆最大参与者节点", "description": "从一条 Timeline 中最多写入图谱的参与者数量。"},
+    "graph_memory.max_facts_per_memory": {"default": 8, "type": "int", "min": 1, "max": 30, "category": "graph", "label": "单记忆最大事实节点", "description": "从一条 Timeline 中最多写入图谱的关键事实数量。"},
+    "graph_memory.atom_maintenance_interval_hours": {"default": 24.0, "type": "float", "min": 1.0, "max": 168.0, "step": 1.0, "category": "lifecycle", "label": "原子维护间隔（小时）", "description": "记忆原子过期与遗忘状态的检查间隔。"},
+    "graph_memory.atom_forget_delay_days": {"default": 7.0, "type": "float", "min": 1.0, "max": 90.0, "step": 1.0, "category": "lifecycle", "label": "原子遗忘延迟（天）", "description": "原子过期后等待多久从检索索引移除。"},
+    "graph_memory.atom_purge_delay_days": {"default": 30.0, "type": "float", "min": 1.0, "max": 365.0, "step": 1.0, "category": "lifecycle", "label": "原子物理清理延迟（天）", "description": "原子进入遗忘状态后等待多久从数据库物理清理。"},
+    "index_rebuild_settings.batch_size": {"default": 50, "type": "int", "min": 1, "max": 500, "category": "index", "label": "索引读取批量", "description": "重建 Timeline 向量索引时每批读取的记忆数量。"},
+    "index_rebuild_settings.embedding_batch_size": {"default": 8, "type": "int", "min": 1, "max": 256, "category": "index", "label": "索引 Embedding 批量", "description": "一次 Embedding 请求包含的 Timeline 数量。"},
+    "index_rebuild_settings.tasks_limit": {"default": 1, "type": "int", "min": 1, "max": 8, "category": "index", "label": "索引 Embedding 并发", "description": "索引重建时并行 Embedding 请求上限。"},
+    "index_rebuild_settings.max_retries": {"default": 5, "type": "int", "min": 1, "max": 8, "category": "index", "label": "索引批次重试次数", "description": "单个索引 Embedding 批次失败后的最大尝试次数。"},
+    "index_rebuild_settings.retry_base_delay": {"default": 30.0, "type": "float", "min": 0.0, "max": 60.0, "step": 1.0, "category": "index", "label": "索引重试基础等待（秒）", "description": "失败批次执行指数退避时的基础等待时间。"},
+    "index_rebuild_settings.batch_delay": {"default": 5.0, "type": "float", "min": 0.0, "max": 10.0, "step": 0.5, "category": "index", "label": "索引读取批次间隔（秒）", "description": "两个数据库读取批次之间的额外等待。"},
+    "index_rebuild_settings.request_delay": {"default": 5.0, "type": "float", "min": 0.0, "max": 60.0, "step": 0.5, "category": "index", "label": "Embedding 请求间隔（秒）", "description": "索引重建时相邻 Embedding 请求之间的等待。"},
+    "index_rebuild_settings.max_failure_ratio": {"default": 0.02, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "index", "label": "索引允许失败比例", "description": "失败比例超过该值时不切换到新索引。"},
+    "cloudflare_rerank.timeout_seconds": {"default": 30.0, "type": "float", "min": 1.0, "max": 300.0, "step": 1.0, "category": "model", "label": "Cloudflare Rerank 超时（秒）", "description": "仅影响插件内置 Cloudflare Rerank 客户端。"},
+    "cloudflare_rerank.max_retries": {"default": 2, "type": "int", "min": 0, "max": 8, "category": "model", "label": "Cloudflare 临时错误重试", "description": "网络错误、HTTP 429 和 5xx 的自动重试次数。"},
+    "cloudflare_rerank.retry_base_delay": {"default": 1.0, "type": "float", "min": 0.0, "max": 60.0, "step": 0.5, "category": "model", "label": "Cloudflare 重试等待（秒）", "description": "插件内置 Rerank 客户端重试的基础退避时间。"},
+    "backup_settings.keep_days": {"default": 7, "type": "int", "min": 1, "max": 3650, "category": "maintenance", "label": "自动备份保留天数", "description": "超过该天数的自动备份会在维护时清理。"},
     "fusion_strategy.rrf_k": {"default": 60, "type": "int", "min": 1, "max": 1000, "category": "recall", "label": "RRF 融合参数", "description": "值越小越强调排名靠前的关键词或向量结果，值越大融合越平滑。"},
     "filtering_settings.use_persona_filtering": {"default": True, "type": "bool", "category": "isolation", "label": "按人格隔离", "description": "开启后只召回与当前人格对应的 Timeline。"},
     "filtering_settings.use_session_filtering": {"default": True, "type": "bool", "category": "isolation", "label": "按会话隔离", "description": "开启后只召回当前会话中的 Timeline。"},

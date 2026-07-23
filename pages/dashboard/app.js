@@ -8,9 +8,11 @@ import {
   IdentityPage,
   PeekPanel,
   MemoryPage,
+  MaintenancePage,
   ModelPage,
   RecallPage,
   SessionPicker,
+  SettingsPage,
   SystemPage,
   TopicPage,
   TimelinePage,
@@ -61,6 +63,8 @@ import {
   const sessionPicker = new SessionPicker(api, showToast);
   const topicPage = new TopicPage(api, showToast);
   const timelinePage = new TimelinePage(api, showToast);
+  const settingsPage = new SettingsPage(api, showToast);
+  const maintenancePage = new MaintenancePage(topicPage, recallPage, modelPage, showToast);
 
   /* ================================================================
      Theme Management
@@ -143,9 +147,9 @@ import {
     }
     if (name === "memory") memoryPage.fetch();
     if (name === "topic") topicPage.fetch();
-    if (name === "models") modelPage.fetch();
     if (name === "identities") identityPage.fetch();
-    if (name === "recall") recallPage.fetchSessions();
+    if (name === "settings") settingsPage.fetch();
+    if (name === "maintenance") maintenancePage.activate();
     if (name === "system") systemPage.fetch();
   }
 
@@ -222,14 +226,14 @@ import {
       memoryPage.renderVirtual();
       memoryPage.updatePagination();
     }
-    if (state.page === "recall" && state._recallCache) {
+    if (state.page === "maintenance" && state._recallCache) {
       recallPage.renderResults(state._recallCache.data, state._recallCache.elapsed);
     }
     if (state.page === "system" && state._systemCache) {
       systemPage.render(state._systemCache.data);
     }
     if (state.page === "topic") topicPage.fetch();
-    if (state.page === "models") modelPage.render();
+    if (state.page === "maintenance") modelPage.render();
     if (state.page === "identities") identityPage.render();
 
     const peekPanelEl = document.getElementById("peek-panel");
@@ -294,6 +298,8 @@ import {
     sessionPicker.init();
     topicPage.initEventListeners();
     timelinePage.initEventListeners();
+    settingsPage.initEventListeners();
+    maintenancePage.initEventListeners();
     modelPage.initEventListeners();
     identityPage.initEventListeners();
 

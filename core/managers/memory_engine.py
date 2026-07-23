@@ -756,6 +756,27 @@ class MemoryEngine:
             "forgetting_agent.cleanup_days_threshold": "cleanup_days_threshold",
             "forgetting_agent.cleanup_importance_threshold": "cleanup_importance_threshold",
             "forgetting_agent.auto_cleanup_enabled": "auto_cleanup_enabled",
+            "graph_memory.document_route_weight": "document_route_weight",
+            "graph_memory.graph_route_weight": "graph_route_weight",
+            "graph_memory.cross_route_bonus": "cross_route_bonus",
+            "graph_memory.expansion_limit": "graph_expansion_limit",
+            "graph_memory.expansion_hops": "graph_expansion_hops",
+            "graph_memory.second_hop_weight": "graph_second_hop_weight",
+            "graph_memory.dynamic_route_weighting": "dynamic_route_weighting",
+            "graph_memory.max_topics_per_memory": "graph_max_topics",
+            "graph_memory.max_participants_per_memory": "graph_max_participants",
+            "graph_memory.max_facts_per_memory": "graph_max_facts",
+            "graph_memory.atom_maintenance_interval_hours": "atom_maintenance_interval_hours",
+            "graph_memory.atom_forget_delay_days": "atom_forget_delay_days",
+            "graph_memory.atom_purge_delay_days": "atom_purge_delay_days",
+            "index_rebuild_settings.batch_size": "index_rebuild_batch_size",
+            "index_rebuild_settings.embedding_batch_size": "index_rebuild_embedding_batch_size",
+            "index_rebuild_settings.tasks_limit": "index_rebuild_tasks_limit",
+            "index_rebuild_settings.max_retries": "index_rebuild_max_retries",
+            "index_rebuild_settings.retry_base_delay": "index_rebuild_retry_base_delay",
+            "index_rebuild_settings.batch_delay": "index_rebuild_batch_delay",
+            "index_rebuild_settings.request_delay": "index_rebuild_request_delay",
+            "index_rebuild_settings.max_failure_ratio": "index_rebuild_max_failure_ratio",
         }
         for source, target in mapping.items():
             if source in effective:
@@ -779,6 +800,45 @@ class MemoryEngine:
             self.graph_retriever.decay_rate = float(
                 self.config.get("decay_rate", 0.01)
             )
+        if self.dual_route_retriever is not None:
+            document_weight = float(self.config.get("document_route_weight", 0.65))
+            graph_weight = float(self.config.get("graph_route_weight", 0.35))
+            total_weight = document_weight + graph_weight
+            if total_weight <= 0:
+                document_weight, graph_weight = 0.65, 0.35
+            else:
+                document_weight /= total_weight
+                graph_weight /= total_weight
+            self.dual_route_retriever.document_route_weight = document_weight
+            self.dual_route_retriever.graph_route_weight = graph_weight
+            self.dual_route_retriever.cross_route_bonus = float(
+                self.config.get("cross_route_bonus", 0.08)
+            )
+            self.dual_route_retriever.dynamic_route_weighting = bool(
+                self.config.get("dynamic_route_weighting", True)
+            )
+        if self.graph_keyword_retriever is not None:
+            self.graph_keyword_retriever.expansion_limit = int(
+                self.config.get("graph_expansion_limit", 24)
+            )
+            self.graph_keyword_retriever.expansion_hops = int(
+                self.config.get("graph_expansion_hops", 1)
+            )
+            self.graph_keyword_retriever.second_hop_weight = float(
+                self.config.get("graph_second_hop_weight", 0.4)
+            )
+        if self.graph_extractor is not None:
+            self.graph_extractor.max_topics = int(
+                self.config.get("graph_max_topics", 6)
+            )
+            self.graph_extractor.max_participants = int(
+                self.config.get("graph_max_participants", 8)
+            )
+            self.graph_extractor.max_facts = int(
+                self.config.get("graph_max_facts", 8)
+            )
+        if self.atom_lifecycle_manager is not None:
+            self.atom_lifecycle_manager.apply_runtime_settings(self.config)
         topic_config = dict(self.topic_recall_pipeline.config)
         topic_config["recall_decay_rate"] = float(
             self.config.get("decay_rate", 0.01)

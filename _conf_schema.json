@@ -94,22 +94,6 @@
                 "hint": "通常无需修改；保留此项以支持兼容代理或未来接口迁移。",
                 "type": "string",
                 "default": "https://api.cloudflare.com/client/v4"
-            },
-            "timeout_seconds": {
-                "description": "请求超时（秒）",
-                "type": "float",
-                "default": 30.0
-            },
-            "max_retries": {
-                "description": "临时错误重试次数",
-                "hint": "仅网络错误、HTTP 429 和 5xx 自动重试。",
-                "type": "int",
-                "default": 2
-            },
-            "retry_base_delay": {
-                "description": "重试基础等待（秒）",
-                "type": "float",
-                "default": 1.0
             }
         }
     },
@@ -121,63 +105,6 @@
             "enable_full_group_capture": {
                 "description": "捕获群聊所有消息",
                 "hint": "是否捕获群聊中的所有消息（包括非 @Bot 的消息）。开启后群聊中每条消息都会被记录，有助于构建更完整的群聊上下文。",
-                "type": "bool",
-                "default": true
-            },
-            "max_sessions": {
-                "description": "最大缓存会话数",
-                "hint": "内存中同时保留的最大会话数（LRU 淘汰）。超出后最久未使用的会话从缓存移除，但数据仍保存在数据库中。",
-                "type": "int",
-                "default": 100
-            },
-            "session_ttl": {
-                "description": "会话空闲超时（秒）",
-                "hint": "会话超过此时间无活动后从缓存移除。默认 3600（1 小时）。",
-                "type": "int",
-                "default": 3600
-            },
-            "context_window_size": {
-                "description": "上下文窗口大小（条）",
-                "hint": "传给 LLM 的最大历史消息条数。越大上下文越丰富，但消耗 token 越多。建议 20-100。",
-                "type": "int",
-                "default": 50
-            },
-            "max_messages_per_session": {
-                "description": "单会话最大历史消息数",
-                "hint": "数据库中每个会话保留的历史消息上限。超过后只会删除已经完成总结的最旧消息，避免丢失未总结上下文。",
-                "type": "int",
-                "default": 1000
-            },
-            "cleanup_batch_size": {
-                "description": "历史消息批量清理数量",
-                "hint": "会话历史超过上限后，每次至少尝试删除的旧已总结消息数量。值过小会导致超限后每轮只删少量消息。",
-                "type": "int",
-                "default": 50
-            }
-        }
-    },
-    "recall_engine": {
-        "description": "记忆召回",
-        "hint": "这里只保留请求注入行为。Timeline 召回、过滤、融合、缓存、生成和生命周期参数请在插件 WebUI 的 Timeline 记忆页面右上角“参数”中调整。",
-        "type": "object",
-        "items": {
-            "injection_method": {
-                "description": "记忆注入位置",
-                "hint": "记忆注入到 LLM 请求的位置。extra_user_content(推荐)：追加到用户消息末尾，不影响前缀缓存且不污染对话历史。user_message_before：作为用户消息前缀。user_message_after：作为用户消息后缀。fake_tool_call：伪造工具调用消息对注入到对话历史，使 LLM 自然地理解这是检索结果。fake_tool_call_deepseek_v4：⚠️已废弃，选择后自动回退至 fake_tool_call。Gemini 下若选择 fake_tool_call 会自动降级为 extra_user_content。system_prompt：⚠️已废弃，选择后自动回退至 extra_user_content。",
-                "type": "string",
-                "default": "extra_user_content",
-                "options": [
-                    "extra_user_content",
-                    "user_message_before",
-                    "user_message_after",
-                    "fake_tool_call",
-                    "fake_tool_call_deepseek_v4",
-                    "system_prompt"
-                ]
-            },
-            "auto_remove_injected": {
-                "description": "自动清除旧注入片段",
-                "hint": "注入新记忆前自动删除历史中已注入的旧记忆片段，避免重复累积和 token 浪费。建议开启。",
                 "type": "bool",
                 "default": true
             }
@@ -213,89 +140,11 @@
                 "type": "bool",
                 "default": true
             },
-            "document_route_weight": {
-                "description": "文档路权重",
-                "hint": "文档路融合分数在最终双路排序中的占比。",
-                "type": "float",
-                "default": 0.65
-            },
-            "graph_route_weight": {
-                "description": "图路权重",
-                "hint": "图路融合分数在最终双路排序中的占比。",
-                "type": "float",
-                "default": 0.35
-            },
-            "cross_route_bonus": {
-                "description": "双路命中加分",
-                "hint": "同一记忆同时被文档路和图路命中时增加的额外分数。",
-                "type": "float",
-                "default": 0.08
-            },
-            "expansion_limit": {
-                "description": "图邻居扩展上限",
-                "hint": "图关键词检索时从命中节点扩展到邻居条目的最大候选数。",
-                "type": "int",
-                "default": 24
-            },
-            "expansion_hops": {
-                "description": "图扩展跳数",
-                "hint": "图关键词检索从命中节点向外扩展的跳数。默认 1；设为 2 可召回间接关联，但会增加少量查询开销。",
-                "type": "int",
-                "default": 1
-            },
-            "second_hop_weight": {
-                "description": "二跳扩展权重",
-                "hint": "二跳图候选的分数权重。值越高，间接关系越容易进入最终召回。",
-                "type": "float",
-                "default": 0.4
-            },
-            "dynamic_route_weighting": {
-                "description": "动态路由权重",
-                "hint": "根据查询中的关系、时间、定义类意图，自动调整文档路和图路权重。",
-                "type": "bool",
-                "default": true
-            },
-            "max_topics_per_memory": {
-                "description": "单记忆最大主题数",
-                "hint": "从一条记忆中最多提取多少个 topics 节点。",
-                "type": "int",
-                "default": 6
-            },
-            "max_participants_per_memory": {
-                "description": "单记忆最大参与者数",
-                "hint": "从一条记忆中最多提取多少个 participants 节点。",
-                "type": "int",
-                "default": 8
-            },
-            "max_facts_per_memory": {
-                "description": "单记忆最大事实数",
-                "hint": "从一条记忆中最多提取多少条 key_facts 进入图索引。",
-                "type": "int",
-                "default": 8
-            },
             "atom_enabled": {
                 "description": "启用记忆原子化",
                 "hint": "开启后每条 key_fact 独立为一个记忆原子，拥有自己的存活时间和衰减曲线。关闭则完全回退到原来的粗粒度行为。",
                 "type": "bool",
                 "default": true
-            },
-            "atom_maintenance_interval_hours": {
-                "description": "原子维护间隔(小时)",
-                "hint": "生命周期管理器每隔多少小时执行一次过期/遗忘检查。",
-                "type": "float",
-                "default": 24.0
-            },
-            "atom_forget_delay_days": {
-                "description": "原子遗忘延迟(天)",
-                "hint": "过期原子在多少天后从检索索引中彻底移除。",
-                "type": "float",
-                "default": 7.0
-            },
-            "atom_purge_delay_days": {
-                "description": "遗忘原子物理清理延迟(天)",
-                "hint": "已从检索索引移除的遗忘原子，在多少天后从数据库物理删除以回收存储空间。",
-                "type": "float",
-                "default": 30.0
             }
         }
     },
@@ -318,61 +167,6 @@
             }
         }
     },
-    "index_rebuild_settings": {
-        "description": "索引重建",
-        "hint": "控制 /lmem rebuild-index 的分批大小、Embedding 请求速率和失败容忍度。低配云服务器建议保持较小并发。",
-        "type": "object",
-        "items": {
-            "batch_size": {
-                "description": "读取批量",
-                "hint": "每批从 documents 表读取的记忆条数。越大内存峰值越高、失败时影响的条数越多，建议 25-100。",
-                "type": "int",
-                "default": 50
-            },
-            "embedding_batch_size": {
-                "description": "Embedding 批量",
-                "hint": "单次 Embedding API 请求包含的文本数量。服务商 TPM 限流严格时继续调小。",
-                "type": "int",
-                "default": 8
-            },
-            "tasks_limit": {
-                "description": "Embedding 并发",
-                "hint": "批量 Embedding 内部并发上限。为避免触发 API 限流，默认 1。",
-                "type": "int",
-                "default": 1
-            },
-            "max_retries": {
-                "description": "批次重试次数",
-                "hint": "单个 Embedding 批次失败后的最大重试次数。",
-                "type": "int",
-                "default": 5
-            },
-            "retry_base_delay": {
-                "description": "重试等待秒数",
-                "hint": "批次失败后的指数退避基础等待时间。遇到 429/TPM 限流时会至少等待 30 秒。",
-                "type": "float",
-                "default": 30.0
-            },
-            "batch_delay": {
-                "description": "读取批次间隔秒数",
-                "hint": "每个 documents 读取批次之间的额外等待时间，用于主动降低整体重建速率。",
-                "type": "float",
-                "default": 5.0
-            },
-            "request_delay": {
-                "description": "Embedding 请求间隔秒数",
-                "hint": "每个 Embedding API 子请求之间的等待时间。频繁触发 429/TPM 时优先增大此项。",
-                "type": "float",
-                "default": 5.0
-            },
-            "max_failure_ratio": {
-                "description": "允许失败比例",
-                "hint": "全量向量重建时，失败比例不超过该值才允许切换新索引。0.02 表示最多允许 2% 失败。",
-                "type": "float",
-                "default": 0.02
-            }
-        }
-    },
     "backup_settings": {
         "description": "定期备份",
         "hint": "每日自动备份记忆数据库，防止数据意外丢失",
@@ -383,12 +177,6 @@
                 "hint": "每日衰减任务执行后自动备份数据库。建议开启。",
                 "type": "bool",
                 "default": true
-            },
-            "keep_days": {
-                "description": "备份保留天数",
-                "hint": "超过该天数的旧备份文件将被自动删除。默认保留 7 天。",
-                "type": "int",
-                "default": 7
             }
         }
     }

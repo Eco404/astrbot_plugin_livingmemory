@@ -66,6 +66,16 @@
     "nav.recall":         { zh: "召回测试", en: "Recall Test", ru: "Тест поиска" },
     "nav.models":         { zh: "模型测试", en: "Model Test", ru: "Тест моделей" },
     "nav.identities":     { zh: "人物资料", en: "Identity Profiles", ru: "Профили людей" },
+    "nav.settings":       { zh: "设置", en: "Settings", ru: "Настройки" },
+    "nav.maintenance":    { zh: "维护", en: "Maintenance", ru: "Обслуживание" },
+
+    /* ---- Settings and maintenance workspace ---- */
+    "settings.saved": { zh: "设置已保存并立即应用", en: "Settings saved and applied", ru: "Настройки сохранены" },
+    "settings.loadFailed": { zh: "设置加载失败", en: "Failed to load settings", ru: "Не удалось загрузить настройки" },
+    "settings.saveFailed": { zh: "设置保存失败", en: "Failed to save settings", ru: "Не удалось сохранить настройки" },
+    "maintenance.topicTab": { zh: "Topic 维护", en: "Topic maintenance", ru: "Обслуживание Topic" },
+    "maintenance.topicIntro": { zh: "选择记忆空间后打开维护面板，执行增量补建、重新向量化、关系重算或清空 Topic。", en: "Choose a memory space to run incremental repair, revectorization, relation recomputation, or Topic cleanup.", ru: "Выберите пространство памяти для обслуживания Topic." },
+    "maintenance.openTopic": { zh: "打开维护面板", en: "Open maintenance panel", ru: "Открыть обслуживание" },
 
     /* ---- Authoritative identities ---- */
     "identity.introTitle": { zh: "权威人物资料", en: "Authoritative identity profiles", ru: "Авторитетные профили людей" },
@@ -663,9 +673,15 @@
     "timeline.settings": { zh: "参数", en: "Settings", ru: "Параметры" },
     "timeline.settingsTitle": { zh: "Timeline 参数", en: "Timeline settings", ru: "Параметры Timeline" },
     "timeline.settingsCategory.recall": { zh: "召回与融合", en: "Recall and fusion", ru: "Поиск и объединение" },
+    "timeline.settingsCategory.injection": { zh: "请求注入", en: "Request injection", ru: "Внедрение в запрос" },
     "timeline.settingsCategory.generation": { zh: "记忆生成", en: "Memory generation", ru: "Создание памяти" },
+    "timeline.settingsCategory.session": { zh: "会话与原始消息", en: "Sessions and source messages", ru: "Сессии и сообщения" },
     "timeline.settingsCategory.isolation": { zh: "数据隔离", en: "Data isolation", ru: "Изоляция данных" },
+    "timeline.settingsCategory.graph": { zh: "知识图谱", en: "Knowledge graph", ru: "Граф знаний" },
     "timeline.settingsCategory.lifecycle": { zh: "衰减与清理", en: "Decay and cleanup", ru: "Угасание и очистка" },
+    "timeline.settingsCategory.index": { zh: "Timeline 索引重建", en: "Timeline index rebuild", ru: "Перестроение индекса" },
+    "timeline.settingsCategory.model": { zh: "模型请求", en: "Model requests", ru: "Запросы моделей" },
+    "timeline.settingsCategory.maintenance": { zh: "备份与维护", en: "Backup and maintenance", ru: "Резервные копии" },
     "timeline.settingsCategory.performance": { zh: "性能与缓存", en: "Performance and cache", ru: "Производительность и кэш" },
     "timeline.settingsSaved": { zh: "Timeline 参数已保存并立即应用", en: "Timeline settings saved and applied", ru: "Параметры Timeline сохранены" },
     "timeline.settingsLoadFailed": { zh: "Timeline 参数加载失败", en: "Failed to load Timeline settings", ru: "Не удалось загрузить параметры Timeline" },

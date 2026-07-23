@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from ..managers.conversation_manager import ConversationManager
     from ..managers.memory_engine import MemoryEngine
     from ..processors.memory_processor import MemoryProcessor
+    from ..managers.timeline_summary_service import TimelineSummaryService
     from .message_utils import MessageUtils
 
 
@@ -35,6 +37,7 @@ class MemoryReflection:
         storage_tasks: set[asyncio.Task],
         storage_sessions_inflight: set[str],
         storage_state_lock: asyncio.Lock,
+        summary_service: "TimelineSummaryService | None" = None,
     ):
         """
         初始化记忆反思模块
@@ -60,6 +63,7 @@ class MemoryReflection:
         self._storage_sessions_inflight = storage_sessions_inflight
         self._storage_state_lock = storage_state_lock
         self._shutting_down = False
+        self.summary_service = summary_service
 
     async def handle_memory_reflection(
         self, event: AstrMessageEvent, resp: LLMResponse
@@ -161,6 +165,28 @@ class MemoryReflection:
 
             # 使用实际消息数量
             total_messages = actual_message_count
+
+            if self.summary_service is not None:
+                persona_id = await get_persona_id(self.context, event)
+                await self.conversation_manager.update_session_metadata_values(
+                    session_id,
+                    {
+                        "last_persona_id": str(persona_id or "default"),
+                        "last_persona_observed_at": time.time(),
+                    },
+                )
+                trigger_rounds = int(
+                    self.config_manager.get(
+                        "reflection_engine.summary_trigger_rounds", 10
+                    )
+                )
+                self.summary_service.schedule_if_needed(
+                    session_id,
+                    persona_id=str(persona_id or "default"),
+                    trigger_type="round_limit",
+                    min_rounds=trigger_rounds,
+                )
+                return
 
             # 检查是否满足总结条件
             trigger_rounds = self.config_manager.get(

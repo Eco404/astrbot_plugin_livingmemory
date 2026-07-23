@@ -14,6 +14,7 @@ from .base.config_manager import ConfigManager
 from .i18n_backend import t, t_list
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
+from .managers.timeline_summary_service import TimelineSummaryService
 from .validators.index_validator import IndexValidator
 
 
@@ -29,6 +30,7 @@ class CommandHandler:
         index_validator: IndexValidator | None,
         memory_processor=None,
         initialization_status_callback=None,
+        timeline_summary_service: TimelineSummaryService | None = None,
     ):
         """
         初始化命令处理器
@@ -49,6 +51,7 @@ class CommandHandler:
         self.index_validator = index_validator
         self._memory_processor = memory_processor
         self.get_initialization_status = initialization_status_callback
+        self.timeline_summary_service = timeline_summary_service
 
     @staticmethod
     def _format_error_message(
@@ -341,6 +344,39 @@ class CommandHandler:
 
         session_id = event.unified_msg_origin
         try:
+            if self.timeline_summary_service is not None:
+                from .utils import get_persona_id
+
+                persona_id = await get_persona_id(self.context, event)
+                result = await self.timeline_summary_service.summarize_if_needed(
+                    session_id,
+                    persona_id=str(persona_id or "default"),
+                    trigger_type="manual",
+                    min_rounds=1,
+                    force=True,
+                )
+                if result.status == "insufficient":
+                    yield event.plain_result(
+                        t(
+                            "summarize.no_new",
+                            total=result.end_index,
+                            index=result.start_index,
+                        )
+                    )
+                    return
+                if result.status != "created":
+                    raise RuntimeError(result.error or f"总结未完成: {result.status}")
+                topics = ", ".join(result.topics or []) or t("common.none")
+                yield event.plain_result(
+                    t(
+                        "summarize.success",
+                        importance=float(result.importance or 0.0),
+                        topics=topics,
+                        count=result.message_count,
+                    )
+                )
+                return
+
             # 获取当前消息数和总结进度
             actual_count = await self.conversation_manager.store.get_message_count(
                 session_id
