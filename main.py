@@ -205,6 +205,7 @@ class LivingMemoryPlugin(Star):
                     memory_engine=self.initializer.memory_engine,  # type: ignore[arg-type]
                     memory_processor=self.initializer.memory_processor,  # type: ignore[arg-type]
                     conversation_manager=self.initializer.conversation_manager,  # type: ignore[arg-type]
+                    timeline_summary_service=self.initializer.timeline_summary_service,
                 )
 
             # 创建命令处理器（幂等）
@@ -217,6 +218,7 @@ class LivingMemoryPlugin(Star):
                     index_validator=self.initializer.index_validator,
                     memory_processor=self.initializer.memory_processor,
                     initialization_status_callback=self._get_initialization_status_message,
+                    timeline_summary_service=self.initializer.timeline_summary_service,
                 )
 
             self._register_agent_tools_if_needed()

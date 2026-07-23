@@ -6,6 +6,7 @@
 import asyncio
 import json
 import time
+import uuid
 from pathlib import Path
 
 import aiosqlite
@@ -46,6 +47,7 @@ class ConversationStore:
             self.connection.row_factory = aiosqlite.Row
             await self.connection.execute("PRAGMA journal_mode = WAL")
             await self.connection.execute("PRAGMA busy_timeout = 10000")
+            await self.connection.execute("PRAGMA foreign_keys = ON")
 
         await self._create_tables()
         await self._create_indexes()
@@ -93,6 +95,26 @@ class ConversationStore:
             )
         """)
 
+            await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS session_summary_jobs (
+                session_id TEXT PRIMARY KEY,
+                job_uid TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trigger_type TEXT NOT NULL,
+                start_index INTEGER NOT NULL,
+                end_index INTEGER NOT NULL,
+                persona_id TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at REAL,
+                error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                completed_at REAL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE
+            )
+        """)
+
             await self.connection.commit()
 
     async def _create_indexes(self) -> None:
@@ -118,6 +140,10 @@ class ConversationStore:
             )
             await self.connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_msg_session_id ON messages(session_id, id)"
+            )
+            await self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_summary_jobs_status_retry "
+                "ON session_summary_jobs(status, next_retry_at)"
             )
 
             await self.connection.commit()
@@ -274,6 +300,169 @@ class ConversationStore:
             )
 
         return sessions
+
+    async def get_idle_sessions(
+        self, *, last_active_before: float, limit: int = 50
+    ) -> list[Session]:
+        """Return least-recently active sessions eligible for idle work."""
+        if self.connection is None:
+            return []
+        async with self.connection.execute(
+            """
+            SELECT id, session_id, platform, created_at, last_active_at,
+                   message_count, participants, metadata
+            FROM sessions
+            WHERE last_active_at <= ? AND message_count > 0
+            ORDER BY last_active_at ASC
+            LIMIT ?
+            """,
+            (float(last_active_before), max(1, min(int(limit), 500))),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [Session.from_dict(dict(row)) for row in rows]
+
+    async def update_session_metadata_values(
+        self, session_id: str, changes: dict[str, object]
+    ) -> bool:
+        """Atomically patch session metadata without losing concurrent keys."""
+        if self.connection is None:
+            return False
+        async with self._write_lock:
+            row = await (
+                await self.connection.execute(
+                    "SELECT metadata FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+            ).fetchone()
+            if not row:
+                return False
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            for key, value in changes.items():
+                if value is None:
+                    metadata.pop(str(key), None)
+                else:
+                    metadata[str(key)] = value
+            await self.connection.execute(
+                "UPDATE sessions SET metadata = ? WHERE session_id = ?",
+                (json.dumps(metadata, ensure_ascii=False), session_id),
+            )
+            await self.connection.commit()
+        return True
+
+    async def start_summary_job(
+        self,
+        session_id: str,
+        *,
+        trigger_type: str,
+        start_index: int,
+        end_index: int,
+        persona_id: str | None,
+        retry_count: int,
+    ) -> dict[str, object]:
+        """Persist the exact Timeline-summary window before calling the LLM."""
+        if self.connection is None:
+            raise RuntimeError("数据库连接未初始化")
+        now = time.time()
+        job_uid = str(uuid.uuid4())
+        async with self._write_lock:
+            await self.connection.execute(
+                """
+                INSERT INTO session_summary_jobs (
+                    session_id, job_uid, status, trigger_type, start_index,
+                    end_index, persona_id, retry_count, next_retry_at, error,
+                    created_at, updated_at, completed_at
+                ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    job_uid = excluded.job_uid,
+                    status = 'running',
+                    trigger_type = excluded.trigger_type,
+                    start_index = excluded.start_index,
+                    end_index = excluded.end_index,
+                    persona_id = excluded.persona_id,
+                    retry_count = excluded.retry_count,
+                    next_retry_at = NULL,
+                    error = NULL,
+                    updated_at = excluded.updated_at,
+                    completed_at = NULL
+                """,
+                (
+                    session_id,
+                    job_uid,
+                    str(trigger_type),
+                    int(start_index),
+                    int(end_index),
+                    persona_id,
+                    max(0, int(retry_count)),
+                    now,
+                    now,
+                ),
+            )
+            await self.connection.commit()
+        return {
+            "session_id": session_id,
+            "job_uid": job_uid,
+            "status": "running",
+            "start_index": int(start_index),
+            "end_index": int(end_index),
+        }
+
+    async def finish_summary_job(self, session_id: str) -> None:
+        if self.connection is None:
+            return
+        now = time.time()
+        async with self._write_lock:
+            await self.connection.execute(
+                """
+                UPDATE session_summary_jobs
+                SET status = 'completed', updated_at = ?, completed_at = ?,
+                    next_retry_at = NULL, error = NULL
+                WHERE session_id = ?
+                """,
+                (now, now, session_id),
+            )
+            await self.connection.commit()
+
+    async def fail_summary_job(
+        self,
+        session_id: str,
+        *,
+        retry_count: int,
+        next_retry_at: float | None,
+        error: str,
+    ) -> None:
+        if self.connection is None:
+            return
+        async with self._write_lock:
+            await self.connection.execute(
+                """
+                UPDATE session_summary_jobs
+                SET status = 'failed', retry_count = ?, next_retry_at = ?,
+                    error = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    max(0, int(retry_count)),
+                    next_retry_at,
+                    str(error)[:2000],
+                    time.time(),
+                    session_id,
+                ),
+            )
+            await self.connection.commit()
+
+    async def get_summary_job(self, session_id: str) -> dict[str, object] | None:
+        if self.connection is None:
+            return None
+        row = await (
+            await self.connection.execute(
+                "SELECT * FROM session_summary_jobs WHERE session_id = ?",
+                (session_id,),
+            )
+        ).fetchone()
+        return dict(row) if row else None
 
     async def delete_old_sessions(
         self, days: int = 30, ttl_seconds: int | None = None

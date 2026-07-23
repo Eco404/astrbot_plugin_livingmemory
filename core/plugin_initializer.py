@@ -29,10 +29,12 @@ from .base.config_manager import ConfigManager
 from .base.exceptions import InitializationError, ProviderNotReadyError
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
+from .managers.timeline_summary_service import TimelineSummaryService
 from .models.identity_profile import AuthoritativeIdentityStore
 from .processors.memory_processor import MemoryProcessor
 from .providers.cloudflare_rerank import CloudflareRerankClient
 from .schedulers.decay_scheduler import DecayScheduler
+from .schedulers.idle_summary_scheduler import IdleSummaryScheduler
 from .topic_settings import topic_setting_defaults
 from .timeline_settings import (
     TIMELINE_SETTING_DEFINITIONS,
@@ -124,6 +126,8 @@ class PluginInitializer:
         self.conversation_manager: ConversationManager | None = None
         self.index_validator: IndexValidator | None = None
         self.decay_scheduler: DecayScheduler | None = None
+        self.timeline_summary_service: TimelineSummaryService | None = None
+        self.idle_summary_scheduler: IdleSummaryScheduler | None = None
 
         # 初始化状态
         self._initialization_complete = False
@@ -777,6 +781,13 @@ class PluginInitializer:
                 context_window_size=session_config.get("context_window_size", 50),
                 session_ttl=session_config.get("session_ttl", 3600),
             )
+            apply_runtime_settings = getattr(
+                self.conversation_manager, "apply_runtime_settings", None
+            )
+            if callable(apply_runtime_settings):
+                await apply_runtime_settings(
+                    self.config_manager.get_runtime_overrides()
+                )
             # Topic construction keeps Timeline as its primary source and consults
             # raw messages only for identity backfill or ambiguous attribution.
             topic_build_manager = getattr(
@@ -804,6 +815,19 @@ class PluginInitializer:
                 identity_profile_store=self.identity_profile_store,
             )
             logger.info("MemoryProcessor 已初始化")
+
+            self.timeline_summary_service = TimelineSummaryService(
+                config_manager=self.config_manager,
+                conversation_manager=self.conversation_manager,
+                memory_engine=self.memory_engine,
+                memory_processor=self.memory_processor,
+            )
+            self.idle_summary_scheduler = IdleSummaryScheduler(
+                config_manager=self.config_manager,
+                conversation_manager=self.conversation_manager,
+                summary_service=self.timeline_summary_service,
+            )
+            await self.idle_summary_scheduler.start()
 
             # 初始化索引验证器并自动重建索引
             self.index_validator = IndexValidator(str(db_path), self.db)
@@ -856,7 +880,7 @@ class PluginInitializer:
         store = TopicMemoryStore(db_path)
         await store.initialize()
         stored = await store.get_timeline_setting_overrides()
-        if not stored.get("__legacy_imported_v1__"):
+        if not stored.get("__legacy_imported_v3__"):
             defaults = timeline_setting_defaults()
             imported: dict[str, Any] = {}
             for key in TIMELINE_SETTING_DEFINITIONS:
@@ -871,6 +895,8 @@ class PluginInitializer:
                 if value != defaults[key]:
                     imported[key] = value
             imported["__legacy_imported_v1__"] = True
+            imported["__legacy_imported_v2__"] = True
+            imported["__legacy_imported_v3__"] = True
             stored = await store.update_timeline_setting_overrides(
                 imported,
                 settings_revision=TIMELINE_SETTINGS_REVISION,
@@ -880,9 +906,9 @@ class PluginInitializer:
             for key, value in stored.items()
             if key in TIMELINE_SETTING_DEFINITIONS
         }
-        self.config_manager.apply_runtime_overrides(
-            effective_timeline_settings(public)
-        )
+        effective = effective_timeline_settings(public)
+        self.config_manager.apply_runtime_overrides(effective)
+        await self._apply_cloudflare_runtime_settings(effective)
 
     async def get_timeline_runtime_settings(self) -> dict[str, Any]:
         if not self.memory_engine:
@@ -930,8 +956,41 @@ class PluginInitializer:
         effective = effective_timeline_settings(public)
         self.config_manager.apply_runtime_overrides(effective)
         self.memory_engine.apply_timeline_runtime_settings(effective)
+        if self.conversation_manager is not None:
+            await self.conversation_manager.apply_runtime_settings(effective)
         await self._apply_decay_scheduler_settings(effective)
+        if self.idle_summary_scheduler is not None:
+            self.idle_summary_scheduler.notify_settings_changed()
+        await self._apply_cloudflare_runtime_settings(effective)
         return await self.get_timeline_runtime_settings()
+
+    async def _apply_cloudflare_runtime_settings(
+        self, effective: dict[str, Any]
+    ) -> None:
+        """Apply WebUI-managed transport tuning to an existing client."""
+        if not isinstance(self.rerank_provider, CloudflareRerankClient):
+            return
+        timeout = float(
+            effective.get(
+                "cloudflare_rerank.timeout_seconds",
+                self.rerank_provider.timeout_seconds,
+            )
+        )
+        if timeout != self.rerank_provider.timeout_seconds:
+            await self.rerank_provider.aclose()
+            self.rerank_provider.timeout_seconds = timeout
+        self.rerank_provider.max_retries = int(
+            effective.get(
+                "cloudflare_rerank.max_retries",
+                self.rerank_provider.max_retries,
+            )
+        )
+        self.rerank_provider.retry_base_delay = float(
+            effective.get(
+                "cloudflare_rerank.retry_base_delay",
+                self.rerank_provider.retry_base_delay,
+            )
+        )
 
     async def _apply_decay_scheduler_settings(
         self, effective: dict[str, Any]
@@ -942,6 +1001,12 @@ class PluginInitializer:
         )
         if self.decay_scheduler is not None:
             self.decay_scheduler.decay_rate = decay_rate
+            self.decay_scheduler.backup_keep_days = int(
+                effective.get(
+                    "backup_settings.keep_days",
+                    self.decay_scheduler.backup_keep_days,
+                )
+            )
             if decay_rate <= 0 and not cleanup_enabled:
                 await self.decay_scheduler.stop()
                 self.decay_scheduler = None
@@ -1193,7 +1258,13 @@ class PluginInitializer:
                     pass
 
     async def stop_scheduler(self) -> None:
-        """停止衰减调度器"""
+        """Stop all runtime schedulers and drain summary work."""
+        if self.idle_summary_scheduler:
+            await self.idle_summary_scheduler.stop()
+            self.idle_summary_scheduler = None
+        if self.timeline_summary_service:
+            await self.timeline_summary_service.shutdown()
+            self.timeline_summary_service = None
         if self.decay_scheduler:
             await self.decay_scheduler.stop()
             self.decay_scheduler = None

@@ -28,6 +28,7 @@ from .event_handler_modules import (
 )
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
+from .managers.timeline_summary_service import TimelineSummaryService
 from .processors.memory_processor import MemoryProcessor
 from .utils import get_persona_id
 from .utils.injection_adapter import InjectionAdapter
@@ -49,6 +50,7 @@ class EventHandler:
         memory_engine: MemoryEngine,
         memory_processor: MemoryProcessor,
         conversation_manager: ConversationManager,
+        timeline_summary_service: TimelineSummaryService | None = None,
     ):
         """
         初始化事件处理器
@@ -98,6 +100,7 @@ class EventHandler:
             self._storage_tasks,
             self._storage_sessions_inflight,
             self._storage_state_lock,
+            summary_service=timeline_summary_service,
         )
 
     async def handle_all_group_messages(self, event: AstrMessageEvent):

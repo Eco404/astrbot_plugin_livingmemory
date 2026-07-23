@@ -32,6 +32,24 @@ class AtomLifecycleManager:
         )
         self._running = False
         self._task: asyncio.Task | None = None
+        self._settings_changed = asyncio.Event()
+
+    def apply_runtime_settings(self, config: dict[str, Any]) -> None:
+        """Apply WebUI-owned lifecycle values and wake the current wait."""
+        self.config = config
+        self._maintenance_interval_hours = float(
+            config.get("atom_maintenance_interval_hours", 24.0)
+        )
+        self._forget_delay_days = float(
+            config.get("atom_forget_delay_days", 7.0)
+        )
+        self._purge_delay_days = float(
+            config.get(
+                "atom_purge_delay_days",
+                max(self._forget_delay_days * 4.0, 30.0),
+            )
+        )
+        self._settings_changed.set()
 
     async def start(self) -> None:
         """Begin periodic maintenance in the background."""
@@ -60,7 +78,14 @@ class AtomLifecycleManager:
                 logger.error("[AtomLifecycle] 维护任务异常", exc_info=True)
                 await asyncio.sleep(60.0)
                 continue
-            await asyncio.sleep(self._maintenance_interval_hours * 3600.0)
+            try:
+                await asyncio.wait_for(
+                    self._settings_changed.wait(),
+                    timeout=self._maintenance_interval_hours * 3600.0,
+                )
+                self._settings_changed.clear()
+            except TimeoutError:
+                pass
 
     async def run_maintenance(self) -> dict[str, int]:
         """Execute one full maintenance pass. Returns counts per action."""

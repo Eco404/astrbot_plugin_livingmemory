@@ -575,7 +575,10 @@ class ConversationManager:
         """
         async with self._cache_lock:
             if session_id in self._cache:
-                messages, _ = self._cache[session_id]
+                messages, cached_at = self._cache[session_id]
+                if time.time() - cached_at > max(60, int(self.session_ttl)):
+                    del self._cache[session_id]
+                    return None
                 # 移到末尾(标记为最新访问)
                 self._cache.move_to_end(session_id)
                 # 更新访问时间
@@ -716,34 +719,41 @@ class ConversationManager:
             key: 元数据键
             value: 元数据值
         """
-        session = await self.store.get_session(session_id)
-        if not session:
+        updated = await self.store.update_session_metadata_values(
+            session_id, {key: value}
+        )
+        if not updated:
             logger.warning(
                 f"[ConversationManager] 会话 {session_id} 不存在，无法更新元数据"
             )
             return
 
-        # 更新元数据
-        session.metadata[key] = value
-
-        # 保存到数据库
-        if self.store.connection is not None:
-            try:
-                await self.store.connection.execute(
-                    """
-                    UPDATE sessions
-                    SET metadata = ?
-                    WHERE session_id = ?
-                """,
-                    (json.dumps(session.metadata, ensure_ascii=False), session_id),
-                )
-                await self.store.connection.commit()
-            except Exception as e:
-                logger.error(f"更新会话元数据失败: {e}", exc_info=True)
-
         logger.debug(
             f"[ConversationManager] 更新会话元数据: {session_id}, {key}={value}"
         )
+
+    async def update_session_metadata_values(
+        self, session_id: str, changes: dict[str, Any]
+    ) -> bool:
+        """Atomically update multiple metadata keys."""
+        return await self.store.update_session_metadata_values(session_id, changes)
+
+    async def apply_runtime_settings(self, effective: dict[str, Any]) -> None:
+        """Apply WebUI-owned session settings to the live cache manager."""
+        self.max_cache_size = int(
+            effective.get("session_manager.max_sessions", self.max_cache_size)
+        )
+        self.context_window_size = int(
+            effective.get(
+                "session_manager.context_window_size", self.context_window_size
+            )
+        )
+        self.session_ttl = int(
+            effective.get("session_manager.session_ttl", self.session_ttl)
+        )
+        async with self._cache_lock:
+            while len(self._cache) > self.max_cache_size:
+                self._cache.popitem(last=False)
 
     async def get_session_metadata(
         self, session_id: str, key: str, default: Any = None
