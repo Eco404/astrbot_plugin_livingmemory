@@ -298,6 +298,9 @@ async def test_complete_initialization_wires_graph_db_and_engine_config(
         async def initialize(self):
             return None
 
+        def set_session_scope_resolver(self, resolver):
+            self.session_scope_resolver = resolver
+
     class FakeConversationStore:
         def __init__(self, db_path):
             self.db_path = db_path
@@ -311,6 +314,9 @@ async def test_complete_initialization_wires_graph_db_and_engine_config(
     class FakeConversationManager:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+
+        async def get_session_scope(self, session_id):
+            return None
 
     class FakeMemoryProcessor:
         def __init__(self, context=None, llm_provider=None, **kwargs):
@@ -471,6 +477,9 @@ async def test_complete_initialization_skips_graph_db_when_disabled(
         async def initialize(self):
             return None
 
+        def set_session_scope_resolver(self, resolver):
+            self.session_scope_resolver = resolver
+
     class FakeConversationStore:
         def __init__(self, db_path):
             self.db_path = db_path
@@ -484,6 +493,9 @@ async def test_complete_initialization_skips_graph_db_when_disabled(
     class FakeConversationManager:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+
+        async def get_session_scope(self, session_id):
+            return None
 
     class FakeMemoryProcessor:
         def __init__(self, context=None, llm_provider=None, **kwargs):

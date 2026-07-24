@@ -32,7 +32,7 @@ from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
 from .managers.session_maintenance_manager import SessionMaintenanceManager
 from .managers.timeline_summary_service import TimelineSummaryService
-from .models.identity_profile import AuthoritativeIdentityStore
+from .models.identity_profile import SupplementalIdentityStore
 from .processors.memory_processor import MemoryProcessor
 from .providers.cloudflare_rerank import CloudflareRerankClient
 from .schedulers.decay_scheduler import DecayScheduler
@@ -123,7 +123,7 @@ class PluginInitializer:
         self.graph_db: Any | None = None
         self.memory_engine: MemoryEngine | None = None
         self.memory_processor: MemoryProcessor | None = None
-        self.identity_profile_store: AuthoritativeIdentityStore | None = None
+        self.identity_profile_store: SupplementalIdentityStore | None = None
         self.db_migration: DBMigration | None = None
         self.conversation_manager: ConversationManager | None = None
         self.index_validator: IndexValidator | None = None
@@ -580,7 +580,8 @@ class PluginInitializer:
             graph_doc_path = data_dir_path / "livingmemory_graph_documents.db"
             graph_index_path = data_dir_path / "livingmemory_graph.index"
             graph_memory_enabled = self.config_manager.get("graph_memory.enabled", True)
-            self.identity_profile_store = AuthoritativeIdentityStore(
+            # Keep the legacy filename so existing installations load in place.
+            self.identity_profile_store = SupplementalIdentityStore(
                 data_dir_path / "authoritative_identities.json"
             )
 

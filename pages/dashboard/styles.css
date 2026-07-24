@@ -2083,7 +2083,7 @@ body {
   margin-bottom: var(--space-1);
 }
 
-/* Authoritative identity profiles */
+/* Supplemental identity profiles */
 .identity-page-body {
   padding: var(--space-5);
   overflow-y: auto;
@@ -3363,28 +3363,6 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .governance-preview-fragments details { margin-top: 5px; }
 .governance-preview-fact { margin-top: 4px; color: var(--text-secondary); }
 .governance-actor-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
-.modal.identity-impact-modal { width: min(720px, calc(100vw - 48px)); }
-.identity-impact-warning {
-  padding: 10px 12px;
-  border-left: 3px solid var(--danger);
-  background: var(--danger-light);
-  color: var(--danger);
-  line-height: 1.55;
-}
-.identity-impact-stats { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-4) 0; }
-.identity-impact-stats > div { display: flex; align-items: baseline; gap: 6px; padding: 6px 9px; border: 1px solid var(--border-normal); border-radius: var(--radius-full); font-size: 12px; }
-.identity-impact-stats dt { color: var(--text-secondary); }
-.identity-impact-stats dd { margin: 0; color: var(--text-primary); font-weight: 600; }
-.identity-impact-names { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: var(--space-3); }
-.identity-impact-topic-list { display: grid; gap: 4px; margin: var(--space-2) 0 var(--space-4); }
-.identity-impact-topic-list > div { display: flex; justify-content: space-between; gap: var(--space-3); padding: 7px 0; border-bottom: 1px solid var(--border-light); }
-.identity-impact-topic-list small { color: var(--text-secondary); overflow-wrap: anywhere; }
-.identity-impact-sync { display: grid; gap: 7px; margin: var(--space-4) 0 0; padding: 0; border: 0; }
-.identity-impact-sync legend { margin-bottom: var(--space-2); font-weight: 600; }
-.identity-impact-sync label { display: grid; grid-template-columns: auto 1fr; gap: 8px; align-items: start; cursor: pointer; }
-.identity-impact-sync input { margin-top: 3px; accent-color: var(--accent); }
-.identity-impact-sync span { display: grid; gap: 3px; }
-.identity-impact-sync small { color: var(--text-secondary); line-height: 1.45; }
 @media (max-width: 900px) {
   .settings-page-row { grid-template-columns: 1fr; gap: var(--space-3); }
   .maintenance-tool-band { align-items: stretch; flex-direction: column; }
@@ -3905,12 +3883,10 @@ select.timeline-setting-input { width: min(220px, 100%); }
     max-height: calc(100dvh - 24px);
   }
   .topic-governance-overlay,
-  .identity-impact-overlay { padding: var(--space-3); }
   .modal.topic-governance-modal {
     width: calc(100vw - 24px);
     height: calc(100dvh - 24px);
   }
-  .modal.identity-impact-modal { width: calc(100vw - 24px); }
   .governance-fragment-list > label { grid-template-columns: 1fr; }
 
   .peek-panel {

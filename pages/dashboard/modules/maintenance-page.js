@@ -29,9 +29,6 @@ export class MaintenancePage {
       const button = event.target.closest("[data-review-action]");
       if (button) this.resolveReview(button.dataset.reviewAction);
     });
-    document.getElementById("maintenance-identity-pending")?.addEventListener("click", event => {
-      if (event.target.closest("[data-review-sync-identities]")) this.syncIdentityTopics();
-    });
     document.getElementById("maintenance-open-governance")?.addEventListener("click", () => this.openGovernance());
     document.getElementById("session-audit-refresh")?.addEventListener("click", () => this.loadSessionAudit());
     document.getElementById("session-audit-filter")?.addEventListener("input", () => this.renderSessionAudit());
@@ -380,10 +377,7 @@ export class MaintenancePage {
     }
     list.innerHTML = `<div class="identity-state">${esc(window.t("common.loading"))}</div>`;
     try {
-      const [data, overview] = await Promise.all([
-        this.topicPage.api.get("topics/reviews", { memory_space_id: space }),
-        this.topicPage.api.get("topics/overview", { memory_space_id: space }),
-      ]);
+      const data = await this.topicPage.api.get("topics/reviews", { memory_space_id: space });
       const items = data.items || [];
       list.innerHTML = items.length ? items.map(item => {
         const details = item.details || {};
@@ -393,10 +387,6 @@ export class MaintenancePage {
           <small>Timeline ${(item.timeline_uids || []).length} · Topic ${(item.topic_uids || []).length}</small>
         </button>`;
       }).join("") : `<div class="identity-state">${esc(window.t("maintenance.reviewEmpty"))}</div>`;
-      const pending = Number(overview.identity_sync_pending_count || 0);
-      const pendingBox = document.getElementById("maintenance-identity-pending");
-      pendingBox.classList.toggle("hidden", pending === 0);
-      pendingBox.innerHTML = pending ? `<span>${esc(window.t("maintenance.identityPending", pending))}</span><button class="btn btn-secondary btn-sm" type="button" data-review-sync-identities>${esc(window.t("identity.syncNow"))}</button>` : "";
       if (this.reviewUid && items.some(item => item.review_uid === this.reviewUid)) {
         await this.loadReviewDetail(this.reviewUid);
       } else {
@@ -457,16 +447,6 @@ export class MaintenancePage {
       await this.loadReviews();
     } catch (error) {
       this.showToast(error.message || window.t("maintenance.reviewFailed"), true);
-    }
-  }
-
-  async syncIdentityTopics() {
-    try {
-      const result = await this.topicPage.api.post("identities/topics/sync", {});
-      this.showToast(result.scheduled ? window.t("identity.syncQueued", result.affected_spaces || 0, result.affected_timelines || 0) : window.t("identity.syncNone"));
-      await this.loadReviews();
-    } catch (error) {
-      this.showToast(error.message, true);
     }
   }
 

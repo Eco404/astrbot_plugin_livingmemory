@@ -36,7 +36,7 @@ from astrbot_plugin_livingmemory.core.managers.topic_maintenance_manager import 
     TopicMaintenanceManager,
 )
 from astrbot_plugin_livingmemory.core.models.identity_profile import (
-    AuthoritativeIdentityStore,
+    SupplementalIdentityStore,
 )
 from astrbot_plugin_livingmemory.core.models.topic_memory import TopicMaintenanceMode
 from astrbot_plugin_livingmemory.core.providers.cloudflare_rerank import (
@@ -479,7 +479,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         embedding_provider=embedding,
         rerank_provider=reranker,
         config=settings,
-        identity_profile_store=AuthoritativeIdentityStore(identities_path),
+        identity_profile_store=SupplementalIdentityStore(identities_path),
         conversation_store=conversations,
     )
     spaces = {

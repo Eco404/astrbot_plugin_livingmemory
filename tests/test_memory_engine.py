@@ -21,65 +21,6 @@ from astrbot_plugin_livingmemory.core.models.topic_memory import (
 from astrbot_plugin_livingmemory.storage.atom_store import AtomStore
 
 
-@pytest.mark.asyncio
-async def test_identity_profile_change_marks_and_queues_only_affected_timelines():
-    engine = MemoryEngine.__new__(MemoryEngine)
-    engine.topic_memory_store = Mock()
-    engine.topic_memory_store.mark_identity_topics_pending = AsyncMock(
-        return_value={"space-1": ["timeline-1", "timeline-2"]}
-    )
-    engine.topic_memory_enabled = True
-    engine.topic_auto_maintenance = True
-    engine.topic_build_manager = Mock()
-
-    result = await engine.handle_identity_profiles_changed(
-        [],
-        [
-            {
-                "platform": "aiocqhttp",
-                "user_id": "u1",
-                "display_name": "小明",
-                "aliases": ["明明"],
-            }
-        ],
-    )
-
-    call = engine.topic_memory_store.mark_identity_topics_pending.await_args
-    assert call.kwargs["actor_ids"] == {"qq:human:u1"}
-    assert call.kwargs["actor_suffixes"] == {"u1"}
-    assert call.kwargs["display_names"] == {"小明", "明明"}
-    engine.topic_build_manager.schedule_space.assert_called_once_with(
-        "space-1",
-        timeline_uids=["timeline-1", "timeline-2"],
-        immediate=False,
-    )
-    assert result["queued"] is True
-
-
-@pytest.mark.asyncio
-async def test_immediate_identity_sync_uses_pending_timeline_sources():
-    engine = MemoryEngine.__new__(MemoryEngine)
-    engine.topic_memory_enabled = True
-    engine.topic_memory_store = Mock()
-    engine.topic_memory_store.list_identity_sync_pending = AsyncMock(
-        return_value={"space-1": ["timeline-2"]}
-    )
-    engine.topic_build_manager = Mock()
-
-    result = await engine.sync_identity_topics_now()
-
-    engine.topic_build_manager.schedule_space.assert_called_once_with(
-        "space-1",
-        timeline_uids=["timeline-2"],
-        immediate=True,
-    )
-    assert result == {
-        "affected_spaces": 1,
-        "affected_timelines": 1,
-        "scheduled": True,
-    }
-
-
 @dataclass
 class _FakeRetrieveResult:
     similarity: float

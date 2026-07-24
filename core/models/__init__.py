@@ -14,8 +14,11 @@ from .graph_models import ExtractedGraph, GraphEdge, GraphEntry, GraphNode
 from .identity_profile import (
     AuthoritativeIdentityProfile,
     AuthoritativeIdentityStore,
+    SupplementalIdentityProfile,
+    SupplementalIdentityStore,
     identity_prompt_payload,
     parse_authoritative_identity_profiles,
+    parse_supplemental_identity_profiles,
 )
 from .memory_identity import MemorySpace, resolve_memory_space
 from .topic_memory import (
@@ -48,8 +51,11 @@ __all__ = [
     "ExtractedGraph",
     "AuthoritativeIdentityProfile",
     "AuthoritativeIdentityStore",
+    "SupplementalIdentityProfile",
+    "SupplementalIdentityStore",
     "identity_prompt_payload",
     "parse_authoritative_identity_profiles",
+    "parse_supplemental_identity_profiles",
     "MemorySpace",
     "resolve_memory_space",
     "TopicAtomSource",

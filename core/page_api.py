@@ -371,25 +371,13 @@ class PluginPageApi:
             f"{PAGE_API_PREFIX}/identities",
             self.list_identity_profiles,
             ["GET"],
-            "LivingMemory Page authoritative identity profiles",
+            "LivingMemory Page supplemental identity profiles",
         )
         register(
             f"{PAGE_API_PREFIX}/identities/save",
             self.save_identity_profiles,
             ["POST"],
-            "LivingMemory Page save authoritative identity profiles",
-        )
-        register(
-            f"{PAGE_API_PREFIX}/identities/impact",
-            self.preview_identity_profile_impact,
-            ["POST"],
-            "LivingMemory Page preview identity profile impact",
-        )
-        register(
-            f"{PAGE_API_PREFIX}/identities/topics/sync",
-            self.sync_identity_topics,
-            ["POST"],
-            "LivingMemory Page synchronize Topics affected by identity profiles",
+            "LivingMemory Page save supplemental identity profiles",
         )
 
     # ==================== 路由处理方法 ====================
@@ -737,7 +725,7 @@ class PluginPageApi:
             return error
         store = ready.get("identity_profile_store")
         if store is None:
-            return self.utils.error("人物资料存储尚未初始化")
+            return self.utils.error("补充人物资料存储尚未初始化")
         return await self.identity_handler.list_profiles(
             store,
             platform_manager=getattr(self.plugin.context, "platform_manager", None),
@@ -764,47 +752,12 @@ class PluginPageApi:
             return error
         store = ready.get("identity_profile_store")
         if store is None:
-            return self.utils.error("人物资料存储尚未初始化")
-        manager = ready["memory_engine"].topic_build_manager
-        topic_build_active = bool(
-            self.topic_handler.has_active_jobs() or manager.has_active_builds()
-        )
+            return self.utils.error("补充人物资料存储尚未初始化")
         return await self.identity_handler.save_profiles(
             store,
-            topic_build_active=topic_build_active,
             platform_manager=getattr(self.plugin.context, "platform_manager", None),
             conversation_manager=ready.get("conversation_manager"),
-            on_saved=ready["memory_engine"].handle_identity_profiles_changed,
         )
-
-    async def preview_identity_profile_impact(self):
-        ready, error = await self._ensure_plugin_ready()
-        if error:
-            return error
-        store = ready.get("identity_profile_store")
-        if store is None:
-            return self.utils.error("人物资料存储尚未初始化")
-        return await self.identity_handler.preview_profile_changes(
-            store,
-            impact_resolver=ready["memory_engine"].preview_identity_profiles_changed,
-        )
-
-    async def sync_identity_topics(self):
-        """Immediately queue pending identity-aware Topic rebuilds."""
-        ready, error = await self._ensure_plugin_ready()
-        if error:
-            return error
-        memory_engine = ready["memory_engine"]
-        manager = memory_engine.topic_build_manager
-        if self.topic_handler.has_active_jobs() or manager.has_active_builds():
-            return self.utils.error(
-                "Topic 构建正在运行，请在当前任务完成后再同步人物资料"
-            )
-        try:
-            result = await memory_engine.sync_identity_topics_now()
-            return self.utils.ok(result)
-        except (RuntimeError, ValueError) as exc:
-            return self.utils.error(str(exc))
 
     async def shutdown(self) -> None:
         """Stop page-owned background work before runtime components are closed."""

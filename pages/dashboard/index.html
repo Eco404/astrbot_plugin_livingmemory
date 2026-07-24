@@ -33,7 +33,7 @@
           </button>
           <button class="nav-item" data-page="identities">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/><path d="m17 11 2 2 3-3"/></svg>
-            <span data-i18n="nav.identities">人物资料</span>
+            <span data-i18n="nav.identities">补充人物资料</span>
           </button>
           <button class="nav-item" data-page="system">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -310,7 +310,6 @@
                   <button class="btn btn-primary btn-sm" id="maintenance-open-governance" type="button" data-i18n="maintenance.governance">合并 / 拆分</button>
                 </div>
               </div>
-              <div id="maintenance-identity-pending" class="maintenance-pending-sync hidden"></div>
               <div class="maintenance-review-layout">
                 <div class="maintenance-review-list" id="maintenance-review-list"><div class="identity-state" data-i18n="maintenance.chooseReviewSpace">请选择记忆空间</div></div>
                 <div class="maintenance-review-detail" id="maintenance-review-detail"><div class="identity-state" data-i18n="maintenance.chooseReview">请选择待审查项</div></div>
@@ -426,24 +425,23 @@
           </div>
         </section>
 
-        <!-- Page: Authoritative identities -->
+        <!-- Page: Supplemental identities -->
         <section class="page" id="page-identities">
           <header class="page-header">
-            <span class="page-title" data-i18n="nav.identities">人物资料</span>
+            <span class="page-title" data-i18n="nav.identities">补充人物资料</span>
             <div class="page-actions">
               <span class="identity-dirty hidden" id="identity-dirty" data-i18n="identity.unsaved">有未保存的修改</span>
               <button class="btn btn-secondary btn-sm" id="identity-refresh" data-i18n="common.refresh">刷新</button>
-              <button class="btn btn-secondary btn-sm" id="identity-sync-topics" data-i18n="identity.syncNow">立即同步重建</button>
               <button class="btn btn-secondary btn-sm" id="identity-add" data-i18n="identity.add">添加人物</button>
               <button class="btn btn-primary btn-sm" id="identity-save" data-i18n="common.save" disabled>保存</button>
             </div>
           </header>
           <div class="page-body identity-page-body">
             <div class="model-page-intro">
-              <div class="model-page-intro-title" data-i18n="identity.introTitle">权威人物资料</div>
-              <p data-i18n="identity.intro">使用平台与稳定账号 ID 约束 Timeline 和 Topic 生成中的人物身份与代词。保存后立即生效。</p>
+              <div class="model-page-intro-title" data-i18n="identity.introTitle">补充人物资料</div>
+              <p data-i18n="identity.intro">使用稳定账号补充来源中含糊的人物信息，仅影响之后的新建或重建。</p>
             </div>
-            <div class="identity-warning" data-i18n="identity.warning">资料只用于校正人物指代，不会自动新增为记忆事实。Topic 构建期间不能保存，以免同一任务使用两版资料。</div>
+            <div class="identity-warning" data-i18n="identity.warning">来源事实始终优先。新增、修改或删除资料不会重写已有 Timeline 或 Topic。</div>
             <div class="identity-list" id="identity-list">
               <div class="identity-state" data-i18n="common.loading">加载中...</div>
             </div>
@@ -611,23 +609,6 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" id="session-maintenance-cancel" type="button" data-i18n="common.cancel">取消</button>
           <button class="btn btn-primary" id="session-maintenance-submit" type="button" data-i18n="maintenance.previewChanges">预览变更</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Identity Deletion Impact Modal -->
-    <div class="modal-overlay identity-impact-overlay" id="identity-impact-overlay" aria-hidden="true">
-      <div class="modal identity-impact-modal" role="dialog" aria-modal="true" aria-labelledby="identity-impact-title">
-        <div class="modal-header">
-          <div class="modal-title" id="identity-impact-title" data-i18n="identity.deleteImpactTitle">删除人物资料影响</div>
-          <button class="modal-close" id="identity-impact-close" type="button" data-i18n-aria="common.close" aria-label="Close">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
-          </button>
-        </div>
-        <div class="modal-body" id="identity-impact-body"></div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" id="identity-impact-cancel" type="button" data-i18n="common.cancel">取消</button>
-          <button class="btn btn-danger" id="identity-impact-confirm" type="button" data-i18n="identity.confirmDeleteSave">确认删除并保存</button>
         </div>
       </div>
     </div>

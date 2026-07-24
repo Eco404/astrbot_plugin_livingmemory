@@ -62,13 +62,14 @@
 
 如果 AstrBot 暂无可用 Rerank Provider，可开启 `cloudflare_rerank.enabled`，填写 Cloudflare `account_id` 与 `api_token`（或设置环境变量 `CLOUDFLARE_AUTH_TOKEN`）。默认模型为 `@cf/baai/bge-reranker-base`；Cloudflare 返回的相关度按 `[0, 1]` 原样使用，临时调用失败时回退到 Embedding 匹配。
 
-**权威人物资料**:
-- 在插件 WebUI 的“人物资料”页面管理已知参与者的稳定身份事实，不占用 AstrBot 插件配置。这些资料保存在插件数据目录的 `authoritative_identities.json`，会注入 Timeline 总结和 Topic 片段提取/合成提示词。
+**补充人物资料**:
+- 在插件 WebUI 的“补充人物资料”页面管理来源中可能含糊的人物信息，不占用 AstrBot 插件配置。为兼容已有安装，资料仍保存在插件数据目录的 `authoritative_identities.json`；文件名不代表它们能覆盖来源证据。
 - 平台字段会列出当前 AstrBot 平台实例、历史会话平台和已有资料，并把 `aiocqhttp`、`qq_official` 等适配器别名规范为 `qq`。旧资料中的空平台继续按跨平台通配兼容，但可能把不同平台上的同号账号误认为同一人，新建资料应优先选择明确平台。
-- `user_id` 必填并应使用平台稳定账号 ID；`platform` 用于区分平台，`display_name` 和 `aliases` 只用于识别/展示。可选字段还有 `gender`、`pronouns` 和 `notes`。
+- `user_id` 必填并应使用平台稳定账号 ID；只有稳定 ID 与平台命中时才会注入该条资料，不按昵称、别名或文本相似度匹配。`display_name` 和 `aliases` 只用于展示，可选字段还有 `gender`、`pronouns` 和 `notes`。
 - 例如空雨可填写平台 `qq`、稳定账号 ID `1141337347`、显示名 `空雨`、性别 `男性`、代词 `他, 他的`。
-- 保存后对新生成的 Timeline 和 Topic 立即生效，无需重启插件。Topic 构建运行期间暂时禁止保存，避免同一构建任务混用两版资料。
-- 未匹配资料且来源没有明确代词时，提示词要求模型重复昵称，不根据昵称、人格或表达习惯推断性别。本阶段仅做资料注入与提示词约束，不做生成结果的确定性身份校验。
+- 消息发送者、Timeline `role_bindings`、原始消息证据和已有事实始终优先。补充资料不能证明某人参与过对话，不能单独生成事实，也不能覆盖来源中的显式身份或代词。
+- 新增、修改或删除资料不会主动重构现有 Timeline/Topic。它们对之后新建的 Timeline 和新启动的全量或增量 Topic 构建生效；每个 Topic 构建任务会固定一份资料快照，运行期间可继续编辑而不会混用两版资料。
+- 未命中资料且来源没有明确代词时，提示词要求模型重复显示名，不根据昵称、人格或表达习惯推断性别。
 
 **实验性 Topic 记忆**:
 - 开启 `topic_memory.enabled` 后，在 Topic 记忆页面执行一次全量构建；`topic_memory.auto_maintenance` 控制后续自动维护。
