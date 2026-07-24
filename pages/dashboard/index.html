@@ -49,7 +49,7 @@
             <span data-i18n="nav.settings">设置</span>
           </button>
           <button class="nav-item" data-page="maintenance">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5-5L12 3.6 9.6 6 7.3 3.7a4 4 0 0 0 5 5L20 16.4a2.1 2.1 0 0 1-3 3l-7.7-7.7a4 4 0 0 1-5-5L6.6 9 9 6.6"/></svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.6 5.6L3 18a2.1 2.1 0 0 0 3 3l6.1-6.1a4 4 0 0 0 5.6-5.6l-2.4 2.4-3-3 2.4-2.4Z"/></svg>
             <span data-i18n="nav.maintenance">维护</span>
           </button>
           <button class="nav-item" id="theme-toggle">
@@ -383,10 +383,11 @@
                     <span class="slider-value" id="recall-k-value">5</span>
                   </div>
                 </div>
-                <div class="recall-form-field" style="max-width:280px">
+                <div class="recall-form-field recall-session-field is-missing" style="max-width:280px">
                   <label class="recall-form-label" data-i18n="recall.sessionLabel">Session ID (optional)</label>
-                  <input type="text" id="recall-session" class="input input-sm" list="recall-session-options" autocomplete="off" data-i18n-placeholder="recall.sessionPh" placeholder="Filter by session..." />
+                  <input type="text" id="recall-session" class="input input-sm" list="recall-session-options" autocomplete="off" aria-describedby="recall-session-reminder" data-i18n-placeholder="recall.sessionPh" placeholder="Filter by session..." />
                   <datalist id="recall-session-options"></datalist>
+                  <small class="recall-session-reminder" id="recall-session-reminder" data-i18n="recall.sessionReminder">请选择会话，以便准确定位记忆空间</small>
                 </div>
                 <button class="btn btn-primary" id="recall-search-btn" data-i18n="recall.searchBtn">Run Recall</button>
               </div>
@@ -456,30 +457,55 @@
           </header>
           <div class="page-body">
             <div class="stat-cards" id="system-stat-cards">
-              <div class="stat-card"><div class="stat-card-value" id="ss-total">--</div><div class="stat-card-label" data-i18n="stats.total">Total Memories</div></div>
-              <div class="stat-card"><div class="stat-card-value" id="ss-active">--</div><div class="stat-card-label" data-i18n="stats.active">Active</div></div>
-              <div class="stat-card"><div class="stat-card-value" id="ss-archived">--</div><div class="stat-card-label" data-i18n="stats.archived">Archived</div></div>
-              <div class="stat-card"><div class="stat-card-value" id="ss-deleted">--</div><div class="stat-card-label" data-i18n="stats.deleted">Deleted</div></div>
+              <div class="stat-card"><div class="stat-card-value" id="ss-total">--</div><div class="stat-card-label" data-i18n="system.timelineTotal">Timeline 总数</div></div>
+              <div class="stat-card"><div class="stat-card-value" id="ss-active">--</div><div class="stat-card-label" data-i18n="system.timelineActive">活跃 Timeline</div></div>
+              <div class="stat-card"><div class="stat-card-value" id="ss-topics">--</div><div class="stat-card-label" data-i18n="system.topicActive">活跃 Topic</div></div>
+              <div class="stat-card"><div class="stat-card-value" id="ss-fragments">--</div><div class="stat-card-label" data-i18n="system.formalFragments">正式片段</div></div>
+              <div class="stat-card"><div class="stat-card-value" id="ss-spaces">--</div><div class="stat-card-label" data-i18n="system.memorySpaces">记忆空间</div></div>
               <div class="stat-card"><div class="stat-card-value" id="ss-nodes">--</div><div class="stat-card-label" data-i18n="stats.graphNodes">Graph Nodes</div></div>
-              <div class="stat-card"><div class="stat-card-value" id="ss-atoms">--</div><div class="stat-card-label" data-i18n="stats.atoms">Atoms</div></div>
+            </div>
+            <div class="system-panel system-layer-panel">
+              <div class="system-panel-title" data-i18n="system.memoryLayers">记忆层与索引</div>
+              <div class="system-layer-list">
+                <div class="system-layer-row">
+                  <div class="system-layer-heading"><span class="system-layer-dot timeline"></span><strong>Timeline</strong></div>
+                  <div class="system-layer-metrics">
+                    <span><b id="ss-archived">--</b> <span data-i18n="stats.archived">已归档</span></span>
+                    <span><b id="ss-deleted">--</b> <span data-i18n="stats.deleted">已删除</span></span>
+                    <span><b id="ss-atoms">--</b> <span data-i18n="system.timelineAtoms">事实原子</span></span>
+                  </div>
+                </div>
+                <div class="system-layer-row">
+                  <div class="system-layer-heading"><span class="system-layer-dot topic"></span><strong>Topic</strong><span class="system-state-badge" id="ss-topic-state">--</span></div>
+                  <div class="system-layer-metrics">
+                    <span><b id="ss-topic-atoms">--</b> <span data-i18n="system.topicAtoms">Topic 原子</span></span>
+                    <span><b id="ss-topic-links">--</b> <span data-i18n="system.timelineLinks">Timeline 索引</span></span>
+                    <span><b id="ss-topic-relations">--</b> <span data-i18n="system.topicRelations">相关话题</span></span>
+                    <span><b id="ss-actor-links">--</b> <span data-i18n="system.actorLinks">人物关系</span></span>
+                    <span><b id="ss-pending-review">--</b> <span data-i18n="system.pendingReview">待审查</span></span>
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="system-grid">
               <div class="system-panel">
-                <div class="system-panel-title" data-i18n="system.importanceDistribution">Importance Distribution</div>
+                <div class="system-panel-title" data-i18n="system.importanceDistribution">Timeline 重要性分布</div>
                 <div class="bar-chart" id="importance-chart"></div>
               </div>
               <div class="system-panel">
-                <div class="system-panel-title" data-i18n="system.atomTypes">Atom Types</div>
+                <div class="system-panel-title" data-i18n="system.atomTypes">Timeline 原子类型</div>
                 <div class="bar-chart" id="atom-chart"></div>
               </div>
             </div>
-            <div class="system-panel mb-6" style="margin-top:0">
-              <div class="system-panel-title" data-i18n="system.activeSessions">Active Sessions</div>
-              <div class="session-list" id="session-list"></div>
-            </div>
-            <div class="system-panel">
-              <div class="system-panel-title" data-i18n="system.versionBackups">Version Backups</div>
-              <div class="backup-list" id="backup-list"></div>
+            <div class="system-grid system-support-grid">
+              <div class="system-panel">
+                <div class="system-panel-title" data-i18n="system.activeSessions">Timeline 会话分布</div>
+                <div class="session-list" id="session-list"></div>
+              </div>
+              <div class="system-panel">
+                <div class="system-panel-title" data-i18n="system.versionBackups">Version Backups</div>
+                <div class="backup-list" id="backup-list"></div>
+              </div>
             </div>
           </div>
         </section>

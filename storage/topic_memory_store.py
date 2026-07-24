@@ -2803,6 +2803,33 @@ class TopicMemoryStore:
                     params,
                 )
             ).fetchone()
+            fragment_where = "WHERE status = 'active'"
+            fragment_params: list[Any] = []
+            if memory_space_id:
+                fragment_where += " AND memory_space_id = ?"
+                fragment_params.append(memory_space_id)
+            fragment_count = await (
+                await db.execute(
+                    f"SELECT COUNT(*) FROM topic_fragments {fragment_where}",
+                    fragment_params,
+                )
+            ).fetchone()
+            actor_where = "WHERE t.status = 'active'"
+            actor_params: list[Any] = []
+            if memory_space_id:
+                actor_where += " AND t.memory_space_id = ?"
+                actor_params.append(memory_space_id)
+            actor_link_count = await (
+                await db.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM topic_actor_links a
+                    JOIN topic_memories t ON t.topic_uid = a.topic_uid
+                    {actor_where}
+                    """,
+                    actor_params,
+                )
+            ).fetchone()
             review_where = "WHERE status = 'pending'"
             review_params: list[Any] = []
             if memory_space_id:
@@ -2834,6 +2861,8 @@ class TopicMemoryStore:
             "topic_count": sum(counts.values()),
             "status_counts": counts,
             "atom_count": int(atom_count[0] if atom_count else 0),
+            "fragment_count": int(fragment_count[0] if fragment_count else 0),
+            "actor_link_count": int(actor_link_count[0] if actor_link_count else 0),
             "timeline_link_count": int(link_count[0] if link_count else 0),
             "relation_count": int(relation_count[0] if relation_count else 0),
             "pending_review_count": int(

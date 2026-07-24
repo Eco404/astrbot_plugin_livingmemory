@@ -2357,6 +2357,7 @@ body {
   grid-template-columns: 1fr 1fr;
   gap: var(--space-6);
   margin-bottom: var(--space-6);
+  min-width: 0;
 }
 
 .system-panel {
@@ -2365,6 +2366,7 @@ body {
   border-radius: var(--radius-lg);
   padding: var(--space-5);
   box-shadow: var(--shadow-xs);
+  min-width: 0;
 }
 
 .system-panel-title {
@@ -2453,7 +2455,11 @@ body {
   max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
+
+.session-item-id { flex: 1; }
+.session-item-count { white-space: nowrap; }
 
 .session-meta,
 .session-item-meta,
@@ -2919,6 +2925,7 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .maintenance-page-body {
   overflow: auto;
   padding: var(--space-5);
+  padding-top: 0;
 }
 .settings-category-tabs,
 .maintenance-tabs {
@@ -2929,7 +2936,8 @@ select.timeline-setting-input { width: min(220px, 100%); }
   border-bottom: 1px solid var(--border-normal);
   margin-bottom: var(--space-5);
 }
-.settings-category-tabs {
+.settings-category-tabs,
+.maintenance-tabs {
   overflow-x: auto;
   scrollbar-width: thin;
   position: sticky;
@@ -2939,6 +2947,105 @@ select.timeline-setting-input { width: min(220px, 100%); }
   margin-left: calc(-1 * var(--space-5));
   padding: var(--space-3) var(--space-5) 0;
   background: var(--bg-app);
+}
+
+.recall-session-field .recall-session-reminder {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.recall-session-field {
+  position: relative;
+}
+
+.recall-session-field.is-missing .recall-session-reminder {
+  display: block;
+}
+
+.recall-session-field.is-missing #recall-session {
+  border-color: color-mix(in srgb, var(--warning) 70%, var(--border-normal));
+  background: color-mix(in srgb, var(--warning) 9%, var(--bg-card));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 14%, transparent);
+}
+
+.system-layer-panel {
+  margin-bottom: var(--space-6);
+}
+
+.system-layer-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.system-layer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-5);
+  min-height: 48px;
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border-light);
+}
+
+.system-layer-row:first-child {
+  border-top: 0;
+}
+
+.system-layer-heading,
+.system-layer-metrics {
+  display: flex;
+  align-items: center;
+}
+
+.system-layer-heading {
+  gap: var(--space-2);
+  min-width: 150px;
+}
+
+.system-layer-metrics {
+  justify-content: flex-end;
+  gap: var(--space-5);
+  color: var(--text-secondary);
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.system-layer-metrics b {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.system-layer-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.system-layer-dot.timeline { background: var(--accent); }
+.system-layer-dot.topic { background: var(--success); }
+
+.system-state-badge {
+  border-radius: var(--radius-full);
+  padding: 2px 7px;
+  color: var(--text-tertiary);
+  background: var(--bg-hover);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.system-state-badge.is-enabled {
+  color: var(--success);
+  background: var(--success-light);
+}
+
+.system-support-grid {
+  align-items: start;
 }
 .settings-category-tab,
 .maintenance-tab {
@@ -2950,7 +3057,8 @@ select.timeline-setting-input { width: min(220px, 100%); }
   font: inherit;
   cursor: pointer;
 }
-.settings-category-tab {
+.settings-category-tab,
+.maintenance-tab {
   flex: 0 0 auto;
   white-space: nowrap;
 }
@@ -3582,6 +3690,30 @@ select.timeline-setting-input { width: min(220px, 100%); }
   .recall-history-row .recall-history-open {
     grid-column: 1 / -1;
   }
+
+  .settings-page-body,
+  .maintenance-page-body {
+    padding-top: 0;
+  }
+
+  .settings-category-tabs,
+  .maintenance-tabs {
+    margin-right: calc(-1 * var(--space-4));
+    margin-left: calc(-1 * var(--space-4));
+    padding-right: var(--space-4);
+    padding-left: var(--space-4);
+  }
+
+  .system-layer-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .system-layer-metrics {
+    justify-content: flex-start;
+    gap: var(--space-3) var(--space-5);
+  }
 }
 .topic-timeline-identifiers { margin-top: 0; }
 .modal.topic-full-build-confirm-modal { width: min(620px, calc(100vw - 48px)); }
@@ -3693,6 +3825,11 @@ select.timeline-setting-input { width: min(220px, 100%); }
 
   .page-body {
     padding: var(--space-4);
+  }
+
+  .settings-page-body,
+  .maintenance-page-body {
+    padding-top: 0;
   }
 
   .page-header {
