@@ -24,9 +24,7 @@ from ..managers.atom_lifecycle_manager import AtomLifecycleManager
 from ..managers.graph_memory_manager import GraphMemoryManager
 from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
 from ..models.memory_identity import resolve_memory_space
-from ..models.identity_profile import AuthoritativeIdentityStore
-from ..models.conversation_models import stable_actor_id
-from ..models.platform_identity import canonical_platform
+from ..models.identity_profile import SupplementalIdentityStore
 from ..processors.graph_extractor import GraphExtractor
 from ..processors.text_processor import TextProcessor
 from ..retrieval.atom_retriever import AtomRetriever
@@ -104,7 +102,7 @@ class MemoryEngine:
         llm_provider=None,
         rerank_provider=None,
         config: dict[str, Any] | None = None,
-        identity_profile_store: AuthoritativeIdentityStore | None = None,
+        identity_profile_store: SupplementalIdentityStore | None = None,
         topic_provider_resolver: Callable[[], dict[str, Any]] | None = None,
     ):
         """
@@ -129,7 +127,7 @@ class MemoryEngine:
         self.llm_provider = llm_provider
         self.rerank_provider = rerank_provider
         self.identity_profile_store = (
-            identity_profile_store or AuthoritativeIdentityStore()
+            identity_profile_store or SupplementalIdentityStore()
         )
         self.topic_provider_resolver = topic_provider_resolver
         self.recall_trace_store = None
@@ -641,133 +639,6 @@ class MemoryEngine:
             since=since,
             timeline_uids=timeline_uids,
         )
-
-    async def handle_identity_profiles_changed(
-        self,
-        previous_profiles: list[dict[str, Any]],
-        current_profiles: list[dict[str, Any]],
-        *,
-        sync_mode: str = "queue",
-    ) -> dict[str, Any]:
-        """Queue focused rebuilds for Topics affected by identity profile changes."""
-        previous_json = json.dumps(previous_profiles, ensure_ascii=False, sort_keys=True)
-        current_json = json.dumps(current_profiles, ensure_ascii=False, sort_keys=True)
-        if previous_json == current_json:
-            return {"affected_spaces": 0, "affected_timelines": 0, "queued": False}
-        actor_ids, actor_suffixes, display_names = self._identity_change_signals(
-            previous_profiles, current_profiles
-        )
-        affected = await self.topic_memory_store.mark_identity_topics_pending(
-            actor_ids=actor_ids,
-            actor_suffixes=actor_suffixes,
-            display_names=display_names,
-        )
-        sync_mode = str(sync_mode or "queue").strip().lower()
-        if sync_mode not in {"queue", "immediate"}:
-            raise ValueError("sync_mode must be queue or immediate")
-        scheduled = bool(
-            affected
-            and self.topic_memory_enabled
-            and (self.topic_auto_maintenance or sync_mode == "immediate")
-        )
-        if scheduled:
-            for memory_space_id, timeline_uids in affected.items():
-                self.topic_build_manager.schedule_space(
-                    memory_space_id,
-                    timeline_uids=timeline_uids,
-                    immediate=sync_mode == "immediate",
-                )
-        return {
-            "affected_spaces": len(affected),
-            "affected_timelines": sum(len(value) for value in affected.values()),
-            "queued": scheduled,
-            "pending": bool(affected),
-            "sync_mode": sync_mode,
-            "auto_maintenance": bool(self.topic_auto_maintenance),
-        }
-
-    async def preview_identity_profiles_changed(
-        self,
-        previous_profiles: list[dict[str, Any]],
-        current_profiles: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Return the rebuild impact and deleted profiles without changing data."""
-        actor_ids, actor_suffixes, display_names = self._identity_change_signals(
-            previous_profiles, current_profiles
-        )
-        impact = await self.topic_memory_store.preview_identity_topic_impacts(
-            actor_ids=actor_ids,
-            actor_suffixes=actor_suffixes,
-            display_names=display_names,
-        )
-        current_keys = {
-            (
-                canonical_platform(profile.get("platform")),
-                str(profile.get("user_id") or "").strip().casefold(),
-            )
-            for profile in current_profiles
-            if isinstance(profile, dict) and str(profile.get("user_id") or "").strip()
-        }
-        deleted_profiles = [
-            profile
-            for profile in previous_profiles
-            if isinstance(profile, dict)
-            and (
-                canonical_platform(profile.get("platform")),
-                str(profile.get("user_id") or "").strip().casefold(),
-            )
-            not in current_keys
-        ]
-        return {
-            **impact,
-            "deleted_profiles": deleted_profiles,
-            "deleted_profile_count": len(deleted_profiles),
-            "timeline_content_changed": False,
-            "requires_confirmation": bool(deleted_profiles),
-        }
-
-    @staticmethod
-    def _identity_change_signals(
-        previous_profiles: list[dict[str, Any]],
-        current_profiles: list[dict[str, Any]],
-    ) -> tuple[set[str], set[str], set[str]]:
-        actor_ids: set[str] = set()
-        actor_suffixes: set[str] = set()
-        display_names: set[str] = set()
-        for profile in [*previous_profiles, *current_profiles]:
-            if not isinstance(profile, dict):
-                continue
-            user_id = str(profile.get("user_id") or "").strip()
-            platform = canonical_platform(profile.get("platform"))
-            if user_id:
-                actor_suffixes.add(user_id)
-                if platform:
-                    actor_ids.add(stable_actor_id(platform, user_id, "human"))
-            for value in (
-                profile.get("display_name"),
-                *(profile.get("aliases") or []),
-            ):
-                value = str(value or "").strip()
-                if value:
-                    display_names.add(value)
-        return actor_ids, actor_suffixes, display_names
-
-    async def sync_identity_topics_now(self) -> dict[str, Any]:
-        """Wake all pending identity rebuilds immediately without blocking WebUI."""
-        if not self.topic_memory_enabled:
-            raise RuntimeError("Topic 记忆功能未启用")
-        pending = await self.topic_memory_store.list_identity_sync_pending()
-        for memory_space_id, timeline_uids in pending.items():
-            self.topic_build_manager.schedule_space(
-                memory_space_id,
-                timeline_uids=timeline_uids,
-                immediate=True,
-            )
-        return {
-            "affected_spaces": len(pending),
-            "affected_timelines": sum(len(value) for value in pending.values()),
-            "scheduled": bool(pending),
-        }
 
     async def _initialize_topic_runtime_settings(self) -> None:
         """Load sparse overrides and import only genuinely customized legacy values."""

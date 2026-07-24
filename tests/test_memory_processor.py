@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from astrbot_plugin_livingmemory.core.models.conversation_models import Message
 from astrbot_plugin_livingmemory.core.models.identity_profile import (
-    AuthoritativeIdentityStore,
+    SupplementalIdentityStore,
 )
 from astrbot_plugin_livingmemory.core.processors.memory_processor import MemoryProcessor
 
@@ -115,7 +115,7 @@ async def test_persona_prompt_is_included_when_available():
 
 
 @pytest.mark.asyncio
-async def test_authoritative_identity_is_injected_by_stable_sender_id():
+async def test_supplemental_identity_is_injected_by_stable_sender_id():
     llm = _DummyLLMProvider(
         """{
             "summary":"我记录了示例甲的安排",
@@ -132,7 +132,7 @@ async def test_authoritative_identity_is_injected_by_stable_sender_id():
     processor = MemoryProcessor(
         llm_provider=llm,
         context=None,
-        identity_profile_store=AuthoritativeIdentityStore(
+        identity_profile_store=SupplementalIdentityStore(
             profiles=[
                 {
                     "platform": "qq",
@@ -149,7 +149,7 @@ async def test_authoritative_identity_is_injected_by_stable_sender_id():
 
     prompt = llm.text_chat.await_args.kwargs["prompt"]
     system_prompt = llm.text_chat.await_args.kwargs["system_prompt"]
-    assert prompt.startswith("# 权威人物资料（必须严格遵守）")
+    assert prompt.startswith("# 补充人物资料（仅用于消歧）")
     assert '"user_id":"10000001"' in prompt
     assert '"gender":"男性"' in prompt
     assert '"pronouns":["他","他的"]' in prompt
@@ -157,7 +157,7 @@ async def test_authoritative_identity_is_injected_by_stable_sender_id():
 
 
 @pytest.mark.asyncio
-async def test_authoritative_identity_does_not_match_same_name_with_other_id():
+async def test_supplemental_identity_does_not_match_same_name_with_other_id():
     llm = _DummyLLMProvider(
         """{
             "summary":"我记录了示例甲的安排",
@@ -174,7 +174,7 @@ async def test_authoritative_identity_does_not_match_same_name_with_other_id():
     processor = MemoryProcessor(
         llm_provider=llm,
         context=None,
-        identity_profile_store=AuthoritativeIdentityStore(
+        identity_profile_store=SupplementalIdentityStore(
             profiles=[
                 {
                     "platform": "qq",
@@ -189,7 +189,7 @@ async def test_authoritative_identity_does_not_match_same_name_with_other_id():
     await processor.process_conversation(messages, is_group_chat=False)
 
     prompt = llm.text_chat.await_args.kwargs["prompt"]
-    assert not prompt.startswith("# 权威人物资料（必须严格遵守）")
+    assert not prompt.startswith("# 补充人物资料（仅用于消歧）")
 
 
 # ── New tests for dual-channel summary and quality validator ──────────────────

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
+import json
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -43,6 +45,8 @@ class TopicBuildRunContext:
     llm_signature: TopicProviderSignature
     embedding_signature: TopicProviderSignature
     rerank_signature: TopicProviderSignature
+    supplemental_identity_profiles: tuple[Any, ...]
+    supplemental_identity_hash: str
     llm_concurrency: int
     rerank_concurrency: int
     llm_semaphore: asyncio.Semaphore
@@ -58,8 +62,22 @@ class TopicBuildRunContext:
         llm_provider: Any,
         embedding_provider: Any,
         rerank_provider: Any,
+        supplemental_identity_profiles: list[Any] | tuple[Any, ...] = (),
     ) -> "TopicBuildRunContext":
         snapshot = MappingProxyType(copy.deepcopy(config))
+        identity_snapshot = tuple(copy.deepcopy(supplemental_identity_profiles))
+        identity_payload = [
+            item.to_storage_dict() if hasattr(item, "to_storage_dict") else item
+            for item in identity_snapshot
+        ]
+        identity_hash = hashlib.sha256(
+            json.dumps(
+                identity_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         llm_concurrency = max(1, min(64, int(snapshot.get("llm_concurrency", 1))))
         rerank_concurrency = max(
             1, min(32, int(snapshot.get("rerank_concurrency", 1)))
@@ -77,6 +95,8 @@ class TopicBuildRunContext:
                 include_dimension=True,
             ),
             rerank_signature=TopicProviderSignature.from_provider(rerank_provider),
+            supplemental_identity_profiles=identity_snapshot,
+            supplemental_identity_hash=identity_hash,
             llm_concurrency=llm_concurrency,
             rerank_concurrency=rerank_concurrency,
             llm_semaphore=asyncio.Semaphore(llm_concurrency),

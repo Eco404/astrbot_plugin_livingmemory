@@ -22,7 +22,7 @@ from astrbot_plugin_livingmemory.core.managers.topic_fragment_identity import (
 )
 from astrbot_plugin_livingmemory.core.topic_vector_index import TopicVectorHit
 from astrbot_plugin_livingmemory.core.models.identity_profile import (
-    AuthoritativeIdentityStore,
+    SupplementalIdentityStore,
 )
 from astrbot_plugin_livingmemory.core.models.conversation_models import Message
 from astrbot_plugin_livingmemory.core.managers.topic_maintenance_manager import (
@@ -529,6 +529,7 @@ async def test_incremental_build_uses_expanded_scope_and_shared_scan_pipeline():
     assert kwargs["only_unindexed"] is False
     assert kwargs["run_config"]["time_cluster_keys"] == scope["time_cluster_keys"]
     assert kwargs["run_config"]["topic_settings"] == manager.config
+    assert kwargs["run_config"]["supplemental_identity_profiles"] == []
     assert kwargs["run_metadata"]["incremental_scope"] == scope
     assert kwargs["run_metadata"]["pipeline"] == "bounded_delta_full_pipeline"
 
@@ -1143,6 +1144,7 @@ def test_validation_drops_unknown_atom_fingerprint_without_losing_fact_source():
     assert fact["source_atom_fingerprints"] == []
     assert fragment.metadata["validation_repairs"] == [
         {
+            "type": "normalized_fact_atom_fingerprints",
             "fact_index": 0,
             "dropped_unknown_atom_fingerprints": 1,
             "inferred_exact_atom_fingerprints": 0,
@@ -1455,6 +1457,68 @@ def test_build_run_context_captures_provider_model_signatures():
     ) == ("fake-rerank", "test")
 
 
+def test_build_run_context_captures_an_immutable_supplemental_profile_snapshot():
+    store = SupplementalIdentityStore(
+        profiles=[
+            {
+                "platform": "qq",
+                "user_id": "10000001",
+                "display_name": "示例甲",
+                "gender": "男性",
+            }
+        ]
+    )
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        identity_profile_store=store,
+    )
+
+    context = manager._make_run_context(
+        memory_space_id="space-1",
+        run_uid="run-identity-snapshot",
+        config={"llm_concurrency": 1},
+    )
+    original_hash = context.supplemental_identity_hash
+    store.replace_profiles(
+        [
+            {
+                "platform": "qq",
+                "user_id": "10000001",
+                "display_name": "新昵称",
+            }
+        ],
+        persist=False,
+    )
+
+    assert context.supplemental_identity_profiles[0].display_name == "示例甲"
+    assert context.supplemental_identity_hash == original_hash
+    assert context.supplemental_identity_hash
+
+
+def test_source_provenance_normalization_does_not_reduce_topic_quality():
+    audit = TopicBuildManager._repair_audit(
+        [
+            {
+                "type": "normalized_fact_atom_fingerprints",
+                "dropped_unknown_atom_fingerprints": 1,
+                "inferred_exact_atom_fingerprints": 1,
+            }
+        ]
+    )
+
+    assert audit["normalization"] == 1
+    assert audit["repair"] == 0
+    assert audit["fallback"] == 0
+    assert audit["weighted_units"] == 0.0
+
+
+def test_confidence_mapping_no_longer_creates_profile_inferred_status():
+    assert TopicBuildManager._actor_resolution_status(0.85) == "inferred"
+    assert TopicBuildManager._actor_resolution_status(0.95) == "timeline_bound"
+
+
 @pytest.mark.asyncio
 async def test_llm_retry_budget_is_delegated_to_compatible_provider_once():
     llm = _RetryAwareLLM()
@@ -1485,17 +1549,21 @@ async def test_llm_retry_stays_local_for_legacy_provider(monkeypatch):
     sleep.assert_awaited_once()
 
 
-def test_fragment_tool_schema_enforces_actor_role_containers():
+def test_fragment_tool_schema_keeps_actor_roles_at_fact_level():
     schema = TopicBuildManager._fragment_output_schema()
     fragment = schema["properties"]["fragments"]["items"]
-    participant = fragment["properties"]["participant_refs"]["items"]
-    mentioned = fragment["properties"]["mentioned_actor_refs"]["items"]
+    fact_actor = fragment["properties"]["facts"]["items"]["properties"][
+        "actor_refs"
+    ]["items"]
 
-    assert participant["properties"]["relation_type"]["enum"] == [
-        "speaker", "narrator", "responder"
+    assert "participant_refs" not in fragment["properties"]
+    assert "mentioned_actor_refs" not in fragment["properties"]
+    assert fact_actor["properties"]["relation_type"]["enum"] == [
+        "speaker", "narrator", "responder", "subject", "mentioned",
+        "executor", "requester",
     ]
-    assert mentioned["properties"]["relation_type"]["enum"] == [
-        "subject", "mentioned", "executor", "requester"
+    assert "actor_links" not in TopicBuildManager._synthesis_output_schema()[
+        "properties"
     ]
     assert "omitted_source_refs" in schema["required"]
     omission = schema["properties"]["omitted_source_refs"]["items"]
@@ -2695,21 +2763,6 @@ def test_fragment_actor_refs_are_constrained_and_unresolved_ids_are_fragment_loc
                     "label": "朋友近况",
                     "summary": "示例甲提到了朋友小林",
                     "timeline_refs": ["T1"],
-                    "participant_refs": [
-                        {
-                            "actor_ref": human_ref,
-                            "relation_type": "speaker",
-                            "confidence": 1.0,
-                        }
-                    ],
-                    "mentioned_actor_refs": [
-                        {
-                            "actor_ref": "unresolved",
-                            "display_name_snapshot": "小林",
-                            "relation_type": "subject",
-                            "confidence": 0.6,
-                        }
-                    ],
                     "facts": [
                         {
                             "content": "示例甲提到了朋友小林",
@@ -2804,18 +2857,6 @@ def test_fragment_participation_uses_timeline_bindings_instead_of_model_roles():
                     "label": "回复",
                     "summary": "我回复了示例甲",
                     "timeline_uids": [candidate.memory_uid],
-                    "participant_refs": [
-                        {
-                            "actor_id": "qq:human:u1",
-                            "actor_type": "human",
-                            "relation_type": "responder",
-                        },
-                        {
-                            "actor_id": "qq:assistant:bot-1",
-                            "actor_type": "assistant",
-                            "relation_type": "speaker",
-                        },
-                    ],
                     "facts": [
                         {
                             "content": "示例甲收到了回复",
@@ -2843,10 +2884,8 @@ def test_fragment_participation_uses_timeline_bindings_instead_of_model_roles():
         ("assistant-persona:测试助手", "narrator"),
         ("assistant-persona:测试助手", "responder"),
     }
-    assert any(
-        repair["type"] == "participant_roles_replaced_by_timeline_bindings"
-        for repair in fragment.metadata["validation_repairs"]
-    )
+    assert fragment.metadata["validation_repairs"] == []
+    assert fragment.metadata["repair_audit"]["weighted_units"] == 0.0
 
 
 @pytest.mark.parametrize(
@@ -2880,7 +2919,7 @@ def test_actor_relation_aliases_are_normalized(raw_role: str, expected: str):
     assert decoded[0]["relation_type"] == expected
 
 
-def test_fragment_actor_relations_are_moved_to_the_correct_container():
+def test_fragment_fact_actor_relation_alias_is_normalized():
     manager = TopicBuildManager(":memory:", None, None)
     candidate = TimelineTopicCandidate(
         memory_uid="timeline-actor-container",
@@ -2913,16 +2952,16 @@ def test_fragment_actor_relations_are_moved_to_the_correct_container():
                     "label": "求助",
                     "summary": "示例甲请求帮助",
                     "timeline_refs": ["T1"],
-                    "participant_refs": [
-                        {"actor_ref": actor_ref, "relation_type": "recipient"}
-                    ],
-                    "mentioned_actor_refs": [
-                        {"actor_ref": actor_ref, "relation_type": "speaker"}
-                    ],
                     "facts": [
                         {
                             "content": "示例甲请求帮助",
                             "source_refs": ["T1.K1"],
+                            "actor_refs": [
+                                {
+                                    "actor_ref": actor_ref,
+                                    "relation_type": "recipient",
+                                }
+                            ],
                         }
                     ],
                 }
@@ -2933,10 +2972,9 @@ def test_fragment_actor_relations_are_moved_to_the_correct_container():
         actor_refs,
     )["fragments"][0]
 
-    assert [item["relation_type"] for item in decoded["participant_refs"]] == [
-        "speaker"
-    ]
-    assert [item["relation_type"] for item in decoded["mentioned_actor_refs"]] == [
+    assert [
+        item["relation_type"] for item in decoded["facts"][0]["actor_refs"]
+    ] == [
         "subject"
     ]
 
@@ -2947,8 +2985,8 @@ def test_fragment_prompt_defines_one_future_retrieval_intent_per_fragment():
     assert "one plausible future retrieval query" in prompt
     assert "Repeating its ref is preferable" in prompt
     assert "mixed fragment" in prompt
-    assert "relation_type is a closed enum" in prompt
-    assert "participant_refs accepts only" in prompt
+    assert "seven exact relation types" in prompt
+    assert "participant or mentioned-person arrays at fragment level" in prompt
 
 
 def test_synthesis_prompt_strips_nested_provenance_and_derives_fragment_scope():
@@ -3060,12 +3098,12 @@ def test_synthesis_ignores_model_actor_roles_and_uses_grounded_fragment_roles():
     } == {("qq:human:u1", "speaker")}
 
 
-def test_topic_prompts_include_only_matching_authoritative_identity_profiles():
+def test_topic_prompts_include_only_stable_id_matched_supplemental_profiles():
     manager = TopicBuildManager(
         ":memory:",
         None,
         None,
-        identity_profile_store=AuthoritativeIdentityStore(
+        identity_profile_store=SupplementalIdentityStore(
             profiles=[
                 {
                     "platform": "qq",
@@ -3094,11 +3132,22 @@ def test_topic_prompts_include_only_matching_authoritative_identity_profiles():
         key_facts=["示例甲是测试负责人"],
         atom_contents=["示例甲会完成测试"],
         atom_fingerprints=["c" * 64],
+        role_bindings={
+            "actors": [
+                {
+                    "actor_id": "qq:human:10000001",
+                    "actor_type": "human",
+                    "platform": "qq",
+                    "sender_id": "10000001",
+                    "observed_names": ["示例甲"],
+                }
+            ]
+        },
     )
 
     fragment_payload, _, _, _ = manager._fragment_llm_context([candidate])
 
-    assert fragment_payload["authoritative_identities"] == [
+    assert fragment_payload["supplemental_identity_hints"] == [
         {
             "platform": "qq",
             "user_id": "10000001",
@@ -3111,13 +3160,20 @@ def test_topic_prompts_include_only_matching_authoritative_identity_profiles():
     fragment = _topic_fragment(1)
     fragment.summary = "示例甲说他会完成测试"
     fragment.facts[0]["content"] = "示例甲是测试负责人"
+    fragment.metadata["participant_refs"] = [
+        {
+            "actor_id": "qq:human:10000001",
+            "actor_type": "human",
+            "relation_type": "speaker",
+        }
+    ]
     synthesis_payload, _, _ = manager._synthesis_llm_context([fragment])
 
-    assert synthesis_payload["authoritative_identities"] == [
-        fragment_payload["authoritative_identities"][0]
+    assert synthesis_payload["supplemental_identity_hints"] == [
+        fragment_payload["supplemental_identity_hints"][0]
     ]
-    assert "authoritative_identities" in manager._fragment_prompt("{}")
-    assert "authoritative_identities" in manager._synthesis_prompt("{}")
+    assert "supplemental_identity_hints" in manager._fragment_prompt("{}")
+    assert "supplemental_identity_hints" in manager._synthesis_prompt("{}")
 
 
 def test_fragment_role_map_preserves_bot_first_person_with_actor_anchor():
@@ -3125,7 +3181,7 @@ def test_fragment_role_map_preserves_bot_first_person_with_actor_anchor():
         ":memory:",
         None,
         None,
-        identity_profile_store=AuthoritativeIdentityStore(
+        identity_profile_store=SupplementalIdentityStore(
             profiles=[
                 {
                     "user_id": "10000001",
@@ -3345,12 +3401,12 @@ def test_fragment_validation_repairs_unambiguous_generic_human_role_in_place():
     )
 
 
-def test_role_payload_merges_qq_adapter_alias_with_authoritative_profile():
+def test_role_payload_enriches_exact_actor_with_supplemental_profile():
     manager = TopicBuildManager(
         ":memory:",
         None,
         None,
-        identity_profile_store=AuthoritativeIdentityStore(
+        identity_profile_store=SupplementalIdentityStore(
             profiles=[
                 {
                     "platform": "qq",
@@ -3398,10 +3454,9 @@ def test_role_payload_merges_qq_adapter_alias_with_authoritative_profile():
     assert len(roles["human_participants"]) == 1
     human = roles["human_participants"][0]
     assert human["actor_id"] == "qq:human:10000001"
-    assert human["resolution_sources"] == [
-        "timeline_role_bindings",
-        "authoritative_profile_fallback",
-    ]
+    assert human["resolution_sources"] == ["timeline_role_bindings"]
+    assert human["identity_confidence"] == 0.95
+    assert human["supplemental_identity_hint"]["display_name"] == "示例甲"
 
 
 @pytest.mark.asyncio

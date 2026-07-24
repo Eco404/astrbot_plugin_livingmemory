@@ -314,6 +314,57 @@ async def test_v9_15_migration_adds_recall_trace_tables_idempotently(tmp_path):
     assert enabled == (0,)
 
 
+@pytest.mark.asyncio
+async def test_v9_16_migration_only_clears_obsolete_identity_sync_flags(tmp_path):
+    db_path = str(tmp_path / "v9.15-supplemental-identities.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE topic_memories (
+                topic_uid TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        await db.execute(
+            "INSERT INTO topic_memories(topic_uid, title, metadata) VALUES (?, ?, ?)",
+            (
+                "topic-1",
+                "保持原样",
+                json.dumps(
+                    {
+                        "identity_sync_pending": True,
+                        "identity_sync_requested_at": 123.0,
+                        "source_timeline_uids": ["timeline-1"],
+                        "stable_value": "unchanged",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_15_to_v9_16(None)
+    await migration._migrate_v9_15_to_v9_16(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        row = await (
+            await db.execute(
+                "SELECT title, metadata FROM topic_memories WHERE topic_uid = ?",
+                ("topic-1",),
+            )
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == "保持原样"
+    assert json.loads(row[1]) == {
+        "source_timeline_uids": ["timeline-1"],
+        "stable_value": "unchanged",
+    }
+
+
 # ===========================================================================
 # 一、迁移正确性测试
 # ===========================================================================

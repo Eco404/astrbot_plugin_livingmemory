@@ -42,7 +42,7 @@ def canonical_platform(value: Any) -> str:
     """Return a stable social-platform key for known AstrBot adapters.
 
     Unknown third-party adapter names remain usable instead of being guessed.
-    Empty values deliberately stay empty because authoritative profiles use that
+    Empty values deliberately stay empty because supplemental profiles use that
     value as the backwards-compatible cross-platform wildcard.
     """
     token = normalize_platform_token(value)

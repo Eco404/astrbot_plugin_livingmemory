@@ -56,13 +56,14 @@ Configure the plugin from the AstrBot plugin configuration page.
 
 If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank.enabled` and configure the Cloudflare `account_id` and `api_token` (or the `CLOUDFLARE_AUTH_TOKEN` environment variable). The default model is `@cf/baai/bge-reranker-base`. Cloudflare relevance scores are consumed directly in their documented `[0, 1]` range; temporary failures fall back to Embedding matching.
 
-**Authoritative identity profiles**:
-- Manage known participant facts from the **Identity Profiles** page in the plugin WebUI rather than AstrBot plugin settings. Profiles are stored in `authoritative_identities.json` under the plugin data directory and injected into Timeline summarization and both Topic extraction/synthesis prompts.
+**Supplemental identity profiles**:
+- Manage optional hints for ambiguous source identities from **Supplemental Profiles** in the plugin WebUI. The legacy `authoritative_identities.json` filename is retained so existing installations load in place; the filename does not grant profiles authority over source evidence.
 - The platform selector combines live AstrBot instances, recorded conversations, and existing profiles. Adapter aliases such as `aiocqhttp` and `qq_official` are canonicalized to `qq`. Blank platforms remain a backwards-compatible cross-platform wildcard but can collide with the same account ID on another service.
-- `user_id` is required and should be the stable platform account ID. `platform` scopes that ID; `display_name` and `aliases` are recognition/display aids. Optional fields include `gender`, `pronouns`, and `notes`.
+- `user_id` must be the stable platform account ID. A profile is injected only after an exact stable platform/account match; names, aliases, and text similarity are never identity anchors. Optional fields include `gender`, `pronouns`, and `notes`.
 - For 示例甲, enter platform `qq`, stable account ID `10000001`, display name `示例甲`, gender `男性`, and pronouns `他, 他的`.
-- Saves take effect immediately without restarting. Saving is blocked while a Topic build is active so one build cannot mix two profile versions.
-- When neither a matching profile nor an explicit source pronoun exists, prompts require the model to repeat the display name. This stage intentionally does not add deterministic post-generation identity validation.
+- Messages, Timeline role bindings, raw-message evidence, and existing facts always win. A supplemental profile cannot prove conversation participation, create a fact by itself, or override an explicit identity or pronoun in the source.
+- Adding, changing, or deleting a profile never triggers a rebuild of existing Timeline or Topic memory. Changes apply to future Timeline generation and newly started full or incremental Topic builds. Each Topic build captures one profile snapshot, so profiles may be edited while it runs without mixing versions.
+- When neither an exact stable-ID profile nor an explicit source pronoun exists, prompts require the model to repeat the display name instead of inferring gender from a name, persona, or writing style.
 
 **Experimental Topic memory**:
 - Enable `topic_memory.enabled`, then run one full build from the Topic Memory page. Automatic maintenance can be controlled by `topic_memory.auto_maintenance`.

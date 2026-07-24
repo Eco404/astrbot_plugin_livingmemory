@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.15"
+    CURRENT_VERSION = "9.16"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -52,6 +52,7 @@ class DBMigration:
         "9.13": "Topic review decisions and identity governance",
         "9.14": "Session audit, raw-message maintenance, and canonical aliases",
         "9.15": "Recall audit history and source Timeline access reinforcement",
+        "9.16": "Supplemental identity hints and source-owned actor relations",
     }
 
     def __init__(self, db_path: str):
@@ -356,6 +357,9 @@ class DBMigration:
                     migration_steps.append(self._migrate_v9_13_to_v9_14)
                 if current_key <= self.version_key("9.14"):
                     migration_steps.append(self._migrate_v9_14_to_v9_15)
+
+                if current_key <= self.version_key("9.15"):
+                    migration_steps.append(self._migrate_v9_15_to_v9_16)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1451,6 +1455,46 @@ class DBMigration:
         if progress_callback:
             progress_callback("创建召回记录与测试历史", 1, 1)
         logger.info("v9.14 -> v9.15 迁移完成")
+
+    async def _migrate_v9_15_to_v9_16(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Clear obsolete profile-triggered rebuild flags without touching memory."""
+        logger.info("执行迁移步骤: v9.15 -> v9.16 (supplemental identity hints)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            if await self._table_exists(db, "topic_memories"):
+                rows = await (
+                    await db.execute("SELECT topic_uid, metadata FROM topic_memories")
+                ).fetchall()
+                for topic_uid, raw_metadata in rows:
+                    try:
+                        metadata = json.loads(raw_metadata or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(metadata, dict):
+                        continue
+                    changed = False
+                    for key in (
+                        "identity_sync_pending",
+                        "identity_sync_requested_at",
+                    ):
+                        if key in metadata:
+                            metadata.pop(key, None)
+                            changed = True
+                    if changed:
+                        await db.execute(
+                            "UPDATE topic_memories SET metadata = ? WHERE topic_uid = ?",
+                            (
+                                json.dumps(metadata, ensure_ascii=False),
+                                str(topic_uid),
+                            ),
+                        )
+            await db.commit()
+        if progress_callback:
+            progress_callback("清理旧人物资料同步标记", 1, 1)
+        logger.info("v9.15 -> v9.16 迁移完成")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

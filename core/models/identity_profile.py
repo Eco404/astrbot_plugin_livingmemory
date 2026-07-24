@@ -1,10 +1,9 @@
-"""Authoritative participant identity profiles used by memory-generation prompts."""
+"""Optional participant hints used to disambiguate memory-generation prompts."""
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,8 +13,8 @@ from .platform_identity import canonical_platform, normalize_platform_token
 
 
 @dataclass(frozen=True, slots=True)
-class AuthoritativeIdentityProfile:
-    """User-supplied identity facts; never inferred from conversation style."""
+class SupplementalIdentityProfile:
+    """User-supplied hints that may supplement, but never override, source evidence."""
 
     user_id: str
     platform: str = ""
@@ -28,10 +27,10 @@ class AuthoritativeIdentityProfile:
     platform_instances: tuple[str, ...] = ()
 
     @classmethod
-    def from_mapping(cls, value: dict[str, Any]) -> "AuthoritativeIdentityProfile":
+    def from_mapping(cls, value: dict[str, Any]) -> "SupplementalIdentityProfile":
         user_id = str(value.get("user_id") or "").strip()
         if not user_id:
-            raise ValueError("authoritative identity profile requires user_id")
+            raise ValueError("supplemental identity profile requires user_id")
         raw_platform = str(value.get("platform") or "").strip()
         canonical = canonical_platform(raw_platform)
         aliases = list(cls._strings(value.get("platform_aliases")))
@@ -80,29 +79,29 @@ class AuthoritativeIdentityProfile:
         platform: str | None,
         sender_name: str | None,
     ) -> bool:
+        # Kept in the signature for callers that already supply display names.
+        # Display names never participate in identity matching.
+        _ = sender_name
         sender_id = str(sender_id or "").strip()
-        if sender_id:
-            return (
-                sender_id.casefold() == self.user_id.casefold()
-                and self._platform_matches(platform)
-            )
-        sender_name = str(sender_name or "").strip().casefold()
         return bool(
-            sender_name
-            and sender_name in {name.casefold() for name in self.names}
+            sender_id
+            and sender_id.casefold() == self.user_id.casefold()
+            and self._platform_matches(platform)
         )
 
-    def matches_context(self, values: Iterable[Any]) -> bool:
-        context = "\n".join(str(value or "") for value in values).casefold()
-        if not context:
+    def matches_actor_id(self, actor_id: Any) -> bool:
+        """Match only a stable actor ID; display names are never identity anchors."""
+        raw_actor_id = str(actor_id or "").strip()
+        if not raw_actor_id or raw_actor_id.casefold().startswith("unresolved:"):
             return False
-        user_id = self.user_id.casefold()
-        if re.search(
-            rf"(?<![a-z0-9]){re.escape(user_id)}(?![a-z0-9])",
-            context,
-        ):
-            return True
-        return any(name.casefold() in context for name in self.names)
+        parts = raw_actor_id.split(":", 2)
+        if len(parts) != 3 or parts[1].casefold() != "human":
+            return False
+        platform, _, user_id = parts
+        if user_id.casefold() != self.user_id.casefold():
+            return False
+        expected_platform = canonical_platform(self.platform)
+        return not expected_platform or canonical_platform(platform) == expected_platform
 
     def to_prompt_dict(self) -> dict[str, Any]:
         return {
@@ -138,22 +137,22 @@ class AuthoritativeIdentityProfile:
         for field_name, (value, limit) in limits.items():
             if len(value) > limit:
                 raise ValueError(
-                    f"authoritative identity {field_name} exceeds {limit} characters"
+                    f"supplemental identity {field_name} exceeds {limit} characters"
                 )
         if len(self.aliases) > 20 or any(len(value) > 200 for value in self.aliases):
-            raise ValueError("authoritative identity aliases exceed allowed limits")
+            raise ValueError("supplemental identity aliases exceed allowed limits")
         if len(self.pronouns) > 10 or any(
             len(value) > 100 for value in self.pronouns
         ):
-            raise ValueError("authoritative identity pronouns exceed allowed limits")
+            raise ValueError("supplemental identity pronouns exceed allowed limits")
         if len(self.platform_aliases) > 30 or any(
             len(value) > 100 for value in self.platform_aliases
         ):
-            raise ValueError("authoritative identity platform aliases exceed limits")
+            raise ValueError("supplemental identity platform aliases exceed limits")
         if len(self.platform_instances) > 30 or any(
             len(value) > 256 for value in self.platform_instances
         ):
-            raise ValueError("authoritative identity platform instances exceed limits")
+            raise ValueError("supplemental identity platform instances exceed limits")
 
     def _platform_matches(self, platform: str | None) -> bool:
         expected = canonical_platform(self.platform)
@@ -167,39 +166,39 @@ class AuthoritativeIdentityProfile:
         return normalize_platform_token(value).replace("_", "")
 
 
-def parse_authoritative_identity_profiles(
+def parse_supplemental_identity_profiles(
     raw: Any,
-) -> list[AuthoritativeIdentityProfile]:
+) -> list[SupplementalIdentityProfile]:
     """Validate serialized or in-memory profile records."""
     if isinstance(raw, dict):
         raw = raw.get("profiles", [])
     if isinstance(raw, str):
         raw = json.loads(raw or "[]")
     if not isinstance(raw, list):
-        raise ValueError("authoritative identity profiles must be an array")
+        raise ValueError("supplemental identity profiles must be an array")
     profiles = [
-        AuthoritativeIdentityProfile.from_mapping(item)
+        SupplementalIdentityProfile.from_mapping(item)
         for item in raw
         if isinstance(item, dict)
     ]
     if len(profiles) != len(raw):
-        raise ValueError("each authoritative identity profile must be a JSON object")
+        raise ValueError("each supplemental identity profile must be a JSON object")
     for index, profile in enumerate(profiles):
         for other in profiles[:index]:
             if profile.user_id.casefold() != other.user_id.casefold():
                 continue
             if profile._platform_matches(other.platform):
                 raise ValueError(
-                    "authoritative identity profiles contain overlapping "
+                    "supplemental identity profiles contain overlapping "
                     "platform/user_id entries"
                 )
     return profiles
 
 
-class AuthoritativeIdentityStore:
+class SupplementalIdentityStore:
     """Small atomic JSON store shared by WebUI and generation pipelines."""
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(
         self,
@@ -208,7 +207,7 @@ class AuthoritativeIdentityStore:
         profiles: Iterable[dict[str, Any]] | None = None,
     ) -> None:
         self.path = Path(path) if path is not None else None
-        self._profiles: tuple[AuthoritativeIdentityProfile, ...] = ()
+        self._profiles: tuple[SupplementalIdentityProfile, ...] = ()
         self.updated_at: float | None = None
         self.load_error = ""
         if profiles is not None:
@@ -217,10 +216,10 @@ class AuthoritativeIdentityStore:
             self.load()
 
     @property
-    def profiles(self) -> list[AuthoritativeIdentityProfile]:
+    def profiles(self) -> list[SupplementalIdentityProfile]:
         return list(self._profiles)
 
-    def load(self) -> list[AuthoritativeIdentityProfile]:
+    def load(self) -> list[SupplementalIdentityProfile]:
         self.load_error = ""
         if self.path is None or not self.path.exists():
             self._profiles = ()
@@ -231,7 +230,7 @@ class AuthoritativeIdentityStore:
             raw_profiles = (
                 payload.get("profiles", []) if isinstance(payload, dict) else payload
             )
-            profiles = parse_authoritative_identity_profiles(raw_profiles)
+            profiles = parse_supplemental_identity_profiles(raw_profiles)
             self._profiles = tuple(profiles)
             self.updated_at = (
                 float(payload.get("updated_at"))
@@ -249,10 +248,10 @@ class AuthoritativeIdentityStore:
         raw_profiles: list[dict[str, Any]],
         *,
         persist: bool = True,
-    ) -> list[AuthoritativeIdentityProfile]:
+    ) -> list[SupplementalIdentityProfile]:
         if len(raw_profiles) > 200:
-            raise ValueError("authoritative identity profiles cannot exceed 200 items")
-        profiles = parse_authoritative_identity_profiles(raw_profiles)
+            raise ValueError("supplemental identity profiles cannot exceed 200 items")
+        profiles = parse_supplemental_identity_profiles(raw_profiles)
         updated_at = time.time()
         if persist and self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -282,12 +281,21 @@ class AuthoritativeIdentityStore:
 
 
 def identity_prompt_payload(
-    profiles: Iterable[AuthoritativeIdentityProfile],
+    profiles: Iterable[SupplementalIdentityProfile],
 ) -> list[dict[str, Any]]:
     return [profile.to_prompt_dict() for profile in profiles]
 
 
+AuthoritativeIdentityProfile = SupplementalIdentityProfile
+AuthoritativeIdentityStore = SupplementalIdentityStore
+parse_authoritative_identity_profiles = parse_supplemental_identity_profiles
+
+
 __all__ = [
+    "SupplementalIdentityProfile",
+    "SupplementalIdentityStore",
+    "parse_supplemental_identity_profiles",
+    # Compatibility aliases for existing imports and the legacy JSON filename.
     "AuthoritativeIdentityProfile",
     "AuthoritativeIdentityStore",
     "identity_prompt_payload",
