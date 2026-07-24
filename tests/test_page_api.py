@@ -744,6 +744,135 @@ class TestListMemories:
         assert [item["id"] for item in result["data"]["items"]] == [2, 1]
 
     @pytest.mark.asyncio
+    async def test_includes_batch_topic_counts(self, api, tmp_path):
+        db_path = tmp_path / "memory-topic-counts.db"
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                """
+                CREATE TABLE documents (
+                    id INTEGER PRIMARY KEY,
+                    doc_id TEXT,
+                    text TEXT,
+                    metadata TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            await db.execute(
+                """
+                INSERT INTO documents
+                    (id, doc_id, text, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    1,
+                    "1",
+                    "Timeline content",
+                    json.dumps({"memory_uid": "timeline-1"}),
+                    "created",
+                    "updated",
+                ),
+            )
+            await db.commit()
+
+        topic_store = SimpleNamespace(
+            get_topic_counts_for_timelines=AsyncMock(
+                return_value={"timeline-1": 3}
+            )
+        )
+        engine = api.plugin.initializer.memory_engine
+        engine.db_path = str(db_path)
+        engine.topic_memory_store = topic_store
+        req = _mock_page_request(args={"page": "1", "page_size": "20"})
+
+        with _patch_page_request(req):
+            result = await api.list_memories()
+
+        assert result["status"] == "ok"
+        assert result["data"]["items"][0]["topic_count"] == 3
+        topic_store.get_topic_counts_for_timelines.assert_awaited_once_with(
+            ["timeline-1"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_memory_detail_includes_only_active_related_topics(
+        self, api, tmp_path
+    ):
+        db_path = tmp_path / "memory-topic-detail.db"
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                """
+                CREATE TABLE documents (
+                    id INTEGER PRIMARY KEY,
+                    doc_id TEXT,
+                    text TEXT,
+                    metadata TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            await db.execute(
+                """
+                INSERT INTO documents
+                    (id, doc_id, text, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    7,
+                    "7",
+                    "Timeline detail",
+                    json.dumps({"memory_uid": "timeline-7"}),
+                    "created",
+                    "updated",
+                ),
+            )
+            await db.commit()
+
+        topic_store = SimpleNamespace(
+            get_topics_for_timeline=AsyncMock(
+                return_value=[
+                    {
+                        "topic_uid": "topic-active",
+                        "title": "Active Topic",
+                        "summary": "Active summary",
+                        "status": "active",
+                        "link_status": "active",
+                        "importance": 0.8,
+                        "revision": 2,
+                    },
+                    {
+                        "topic_uid": "topic-archived",
+                        "title": "Archived Topic",
+                        "status": "archived",
+                        "link_status": "active",
+                    },
+                    {
+                        "topic_uid": "topic-stale-link",
+                        "title": "Stale link",
+                        "status": "active",
+                        "link_status": "archived",
+                    },
+                ]
+            )
+        )
+        engine = api.plugin.initializer.memory_engine
+        engine.db_path = str(db_path)
+        engine.topic_memory_store = topic_store
+        req = _mock_page_request(args={"memory_id": "7"})
+
+        with _patch_page_request(req):
+            result = await api.get_memory_detail()
+
+        assert result["status"] == "ok"
+        assert result["data"]["topic_count"] == 1
+        assert [item["topic_uid"] for item in result["data"]["related_topics"]] == [
+            "topic-active"
+        ]
+        topic_store.get_topics_for_timeline.assert_awaited_once_with("timeline-7")
+
+    @pytest.mark.asyncio
     async def test_plugin_not_ready(self, api_not_ready):
         req = _mock_page_request()
         with _patch_page_request(req):

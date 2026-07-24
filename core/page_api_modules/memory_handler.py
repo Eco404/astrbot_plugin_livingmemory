@@ -219,16 +219,37 @@ class MemoryHandler:
 
         items: list[dict[str, Any]] = []
         for row in rows:
+            metadata = self.utils.normalize_metadata(row["metadata"])
             items.append(
                 {
                     "id": row["id"],
                     "doc_id": row["doc_id"],
                     "text": row["text"],
-                    "metadata": self.utils.normalize_metadata(row["metadata"]),
+                    "metadata": metadata,
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
+                    "topic_count": 0,
                 }
             )
+
+        topic_store = getattr(memory_engine, "topic_memory_store", None)
+        timeline_uids = [
+            str(item["metadata"].get("memory_uid") or "").strip()
+            for item in items
+            if item["metadata"].get("memory_uid")
+        ]
+        if topic_store is not None and timeline_uids:
+            try:
+                topic_counts = await topic_store.get_topic_counts_for_timelines(
+                    timeline_uids
+                )
+                for item in items:
+                    timeline_uid = str(
+                        item["metadata"].get("memory_uid") or ""
+                    ).strip()
+                    item["topic_count"] = int(topic_counts.get(timeline_uid, 0))
+            except Exception as exc:
+                logger.warning(f"[PageAPI] 获取 Timeline 关联 Topic 数量失败: {exc}")
 
         return self.utils.ok(
             {
@@ -295,7 +316,39 @@ class MemoryHandler:
             "create_time": metadata.get("create_time"),
             "last_access_time": metadata.get("last_access_time"),
             "update_history": metadata.get("update_history", []),
+            "topic_count": 0,
+            "related_topics": [],
         }
+
+        topic_store = getattr(memory_engine, "topic_memory_store", None)
+        memory_uid = str(metadata.get("memory_uid") or "").strip()
+        if topic_store is not None and memory_uid:
+            try:
+                topic_rows = await topic_store.get_topics_for_timeline(memory_uid)
+                detail["related_topics"] = [
+                    {
+                        "topic_uid": str(row.get("topic_uid") or ""),
+                        "title": str(row.get("title") or ""),
+                        "summary": str(row.get("summary") or ""),
+                        "status": str(row.get("status") or "active"),
+                        "importance": float(row.get("importance") or 0.0),
+                        "revision": int(row.get("revision") or 1),
+                        "time_cluster_key": str(row.get("time_cluster_key") or ""),
+                        "contribution_weight": float(
+                            row.get("contribution_weight") or 0.0
+                        ),
+                        "semantic_similarity": float(
+                            row.get("semantic_similarity") or 0.0
+                        ),
+                    }
+                    for row in topic_rows
+                    if str(row.get("status") or "active") == "active"
+                    and str(row.get("link_status") or "active") == "active"
+                    and row.get("topic_uid")
+                ]
+                detail["topic_count"] = len(detail["related_topics"])
+            except Exception as exc:
+                logger.warning(f"[PageAPI] 获取 Timeline 关联 Topic 详情失败: {exc}")
 
         # 附加相关的图谱子图
         graph_store = self.utils.get_graph_store(memory_engine)

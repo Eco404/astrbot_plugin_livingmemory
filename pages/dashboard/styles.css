@@ -632,6 +632,7 @@ body {
 
 .data-table .cell-id { width: 64px; }
 .data-table .cell-summary { width: auto; min-width: 320px; }
+.data-table .cell-topics { width: 92px; text-align: center; }
 .data-table .cell-type { width: 100px; }
 .data-table .cell-importance { width: 140px; }
 .data-table .cell-status { width: 90px; }
@@ -649,6 +650,38 @@ body {
   font-size: 11px;
   color: var(--text-tertiary);
 }
+
+.timeline-topic-count {
+  display: inline-flex;
+  min-width: 28px;
+  min-height: 24px;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 8px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-full);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.memory-page-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  overflow: hidden;
+}
+
+.memory-page-body .filter-bar { flex: 0 0 auto; margin-bottom: 0; }
+.memory-page-body .table-container {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
+.memory-page-body .table-scroll { flex: 1 1 auto; min-height: 0; max-height: none; }
+.memory-page-body .pagination { flex: 0 0 auto; }
 
 .data-table .cell-mono {
   font-family: "SF Mono", "JetBrains Mono", "Cascadia Code", Consolas, monospace;
@@ -1281,6 +1314,40 @@ body {
   word-break: break-word;
   margin-bottom: var(--space-4);
 }
+
+.memory-related-topic-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.memory-related-topic {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.memory-related-topic:hover,
+.memory-related-topic:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-light);
+}
+
+.memory-related-topic > span:first-child { min-width: 0; }
+.memory-related-topic strong,
+.memory-related-topic small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-related-topic strong { font-size: 13px; font-weight: 500; }
+.memory-related-topic small { margin-top: 3px; color: var(--text-tertiary); font-size: 11px; }
+.memory-related-topic-meta { color: var(--text-tertiary); font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 11px; }
 
 .memory-detail-edit-area {
   width: 100%;
@@ -2783,7 +2850,7 @@ body {
   -webkit-line-clamp: 2;
   line-clamp: 2;
 }
-.topic-detail-overlay { padding: var(--space-6); }
+.topic-detail-overlay { z-index: 110; padding: var(--space-6); }
 .modal.topic-detail-modal {
   width: calc(100vw - 48px);
   max-width: none;
@@ -3367,7 +3434,7 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .topic-timeline-preview small { color: var(--accent); }
 .topic-timeline-preview:hover span { color: var(--accent); }
 .topic-timeline-preview:disabled { color: var(--text-tertiary); cursor: default; }
-.topic-timeline-detail-overlay { z-index: 90; padding: var(--space-6); }
+.topic-timeline-detail-overlay { z-index: 120; padding: var(--space-6); }
 .modal.topic-timeline-detail-modal {
   width: min(920px, calc(100vw - 64px));
   max-height: calc(100vh - 80px);

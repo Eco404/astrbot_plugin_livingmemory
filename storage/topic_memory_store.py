@@ -2304,6 +2304,36 @@ class TopicMemoryStore:
             rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def get_topic_counts_for_timelines(
+        self, timeline_uids: list[str]
+    ) -> dict[str, int]:
+        """Return active Topic counts for a page of Timeline memories."""
+        normalized = list(
+            dict.fromkeys(str(uid).strip() for uid in timeline_uids if str(uid).strip())
+        )
+        if not normalized:
+            return {}
+
+        placeholders = ",".join("?" for _ in normalized)
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT l.timeline_uid, COUNT(DISTINCT l.topic_uid) AS topic_count
+                    FROM topic_timeline_links l
+                    JOIN topic_memories t ON t.topic_uid = l.topic_uid
+                    WHERE l.timeline_uid IN ({placeholders})
+                      AND l.status = 'active'
+                      AND t.status = 'active'
+                    GROUP BY l.timeline_uid
+                    """,
+                    normalized,
+                )
+            ).fetchall()
+        return {
+            str(row["timeline_uid"]): int(row["topic_count"] or 0) for row in rows
+        }
+
     async def get_topic_provenance(self, topic_uid: str) -> dict[str, Any]:
         async with self._connect() as db:
             topic_row = await (

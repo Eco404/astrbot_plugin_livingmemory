@@ -1937,6 +1937,116 @@ def test_related_topic_graph_uses_reciprocal_neighbors_without_merging_topics():
     assert relations[0].metadata["evidence_kind"] == "shared_distinctive_identifier"
 
 
+@pytest.mark.asyncio
+async def test_incremental_marginal_tie_creates_topic_without_manual_review():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "incremental_topic_match_threshold": 0.55,
+            "incremental_topic_review_threshold": 0.72,
+            "incremental_topic_match_margin": 0.04,
+        },
+    )
+    fragment = TopicFragmentDraft(
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        fragment_uid="fragment-1",
+        label="New event",
+        summary="A distinct event in a related broad category",
+        timeline_uids=["timeline-new"],
+        source_revisions={"timeline-new": 1},
+        facts=[],
+        embedding=[1.0, 0.0],
+    )
+    existing = [
+        TopicMemory(
+            topic_uid="topic-a",
+            memory_space_id="space-1",
+            title="Broad sibling A",
+            summary="Summary A",
+            metadata={"embedding": [0.70, 0.71414284]},
+        ),
+        TopicMemory(
+            topic_uid="topic-b",
+            memory_space_id="space-1",
+            title="Broad sibling B",
+            summary="Summary B",
+            metadata={"embedding": [0.68, 0.73321211]},
+        ),
+    ]
+
+    matched, ranked, requires_review = await manager._match_existing_topic_decision(
+        {"title": "New event"},
+        [fragment],
+        existing,
+        set(),
+        incremental=True,
+    )
+
+    assert ranked[0][0] >= 0.55
+    assert ranked[0][0] - ranked[1][0] < 0.04
+    assert matched is None
+    assert requires_review is False
+
+
+@pytest.mark.asyncio
+async def test_incremental_strong_tie_still_requires_manual_review():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "incremental_topic_match_threshold": 0.55,
+            "incremental_topic_review_threshold": 0.72,
+            "incremental_topic_match_margin": 0.04,
+        },
+    )
+    fragment = TopicFragmentDraft(
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        fragment_uid="fragment-1",
+        label="Duplicate-like event",
+        summary="Strongly overlaps two existing Topics",
+        timeline_uids=["timeline-new"],
+        source_revisions={"timeline-new": 1},
+        facts=[],
+        embedding=[1.0, 0.0],
+    )
+    existing = [
+        TopicMemory(
+            topic_uid="topic-a",
+            memory_space_id="space-1",
+            title="Strong candidate A",
+            summary="Summary A",
+            metadata={"embedding": [1.0, 0.0]},
+        ),
+        TopicMemory(
+            topic_uid="topic-b",
+            memory_space_id="space-1",
+            title="Strong candidate B",
+            summary="Summary B",
+            metadata={"embedding": [0.99, 0.14106736]},
+        ),
+    ]
+
+    matched, ranked, requires_review = await manager._match_existing_topic_decision(
+        {"title": "Duplicate-like event"},
+        [fragment],
+        existing,
+        set(),
+        incremental=True,
+    )
+
+    assert ranked[1][0] >= 0.72
+    assert ranked[0][0] - ranked[1][0] < 0.04
+    assert matched is None
+    assert requires_review is True
+
+
 def test_related_topic_graph_rejects_one_generic_keyword_without_semantic_support():
     manager = TopicBuildManager(
         ":memory:",
@@ -2648,6 +2758,97 @@ def test_fragment_actor_refs_are_constrained_and_unresolved_ids_are_fragment_loc
     assert fragment.facts[0]["actor_refs"][0]["actor_id"] == unresolved["actor_id"]
 
 
+def test_fragment_participation_uses_timeline_bindings_instead_of_model_roles():
+    manager = TopicBuildManager(":memory:", None, None)
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-role-authority",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:u1",
+        persona_id="唯",
+        content="我回复了空雨",
+        summary="我回复了空雨",
+        key_facts=["空雨收到了回复"],
+        role_bindings={
+            "narrator_actor_id": "qq:assistant:bot-1",
+            "actors": [
+                {
+                    "actor_id": "qq:human:u1",
+                    "actor_type": "human",
+                    "observed_names": ["空雨"],
+                },
+                {
+                    "actor_id": "qq:assistant:bot-1",
+                    "actor_type": "assistant",
+                    "observed_names": ["唯"],
+                },
+            ],
+        },
+    )
+    group = TopicCandidateGroup(
+        run_uid="run-role-authority",
+        group_index=0,
+        memory_space_id="space-1",
+        label="回复",
+        timeline_uids=[candidate.memory_uid],
+        time_cluster_keys=[],
+        cohesion=1.0,
+        group_uid="group-role-authority",
+    )
+
+    fragment = manager._validate_fragments(
+        {
+            "fragments": [
+                {
+                    "label": "回复",
+                    "summary": "我回复了空雨",
+                    "timeline_uids": [candidate.memory_uid],
+                    "participant_refs": [
+                        {
+                            "actor_id": "qq:human:u1",
+                            "actor_type": "human",
+                            "relation_type": "responder",
+                        },
+                        {
+                            "actor_id": "qq:assistant:bot-1",
+                            "actor_type": "assistant",
+                            "relation_type": "speaker",
+                        },
+                    ],
+                    "facts": [
+                        {
+                            "content": "空雨收到了回复",
+                            "source_timeline_uids": [candidate.memory_uid],
+                        }
+                    ],
+                }
+            ]
+        },
+        "run-role-authority",
+        group,
+        [candidate],
+        "prompt-hash",
+        "input-hash",
+        "provider-1",
+        "model-1",
+    )[0]
+
+    roles = {
+        (value["actor_id"], value["relation_type"])
+        for value in fragment.metadata["participant_refs"]
+    }
+    assert roles == {
+        ("qq:human:u1", "speaker"),
+        ("assistant-persona:唯", "narrator"),
+        ("assistant-persona:唯", "responder"),
+    }
+    assert any(
+        repair["type"] == "participant_roles_replaced_by_timeline_bindings"
+        for repair in fragment.metadata["validation_repairs"]
+    )
+
+
 @pytest.mark.parametrize(
     ("raw_role", "expected"),
     [
@@ -2790,6 +2991,73 @@ def test_synthesis_prompt_strips_nested_provenance_and_derives_fragment_scope():
         "fragment-2",
     ]
     assert decoded["atoms"][0]["source_fact_uids"] == ["fact-1", "fact-2"]
+
+
+def test_synthesis_actor_context_replaces_stale_fragment_local_refs():
+    manager = TopicBuildManager(":memory:", None, None)
+    fragment = _topic_fragment(1)
+    fragment.metadata["participant_refs"] = [
+        {
+            "actor_id": "qq:human:u1",
+            "actor_type": "human",
+            "actor_ref": "A9",
+            "relation_type": "speaker",
+            "display_name_snapshot": "空雨",
+        }
+    ]
+    fragment.facts[0]["actor_refs"] = [
+        {
+            "actor_id": "qq:assistant:bot-1",
+            "actor_type": "assistant",
+            "actor_ref": "A1",
+            "relation_type": "narrator",
+            "display_name_snapshot": "唯",
+        }
+    ]
+
+    payload, _, actor_refs = manager._synthesis_llm_context([fragment])
+
+    assert [value["actor_ref"] for value in payload["actor_refs"]] == ["A1", "A2"]
+    assert all("ref" not in value for value in payload["actor_refs"])
+    assert actor_refs["A1"]["actor_id"] == "qq:human:u1"
+    assert actor_refs["A2"]["actor_id"] == "qq:assistant:bot-1"
+
+
+def test_synthesis_ignores_model_actor_roles_and_uses_grounded_fragment_roles():
+    manager = TopicBuildManager(":memory:", None, None)
+    fragment = _topic_fragment(1)
+    fragment.metadata["participant_refs"] = [
+        {
+            "actor_id": "qq:human:u1",
+            "actor_type": "human",
+            "relation_type": "speaker",
+            "display_name_snapshot": "空雨",
+            "confidence": 1.0,
+        },
+        {
+            "actor_id": "qq:human:u1",
+            "actor_type": "human",
+            "relation_type": "responder",
+            "display_name_snapshot": "空雨",
+            "confidence": 0.9,
+        },
+    ]
+    parsed = manager._single_fragment_synthesis(fragment)
+    parsed["actor_links"] = [
+        {
+            "actor_id": "qq:human:u1",
+            "actor_type": "human",
+            "relation_type": "responder",
+            "source_fact_uids": [fragment.facts[0]["fact_uid"]],
+        }
+    ]
+
+    synthesis = manager._validate_synthesis(parsed, [fragment])
+
+    assert {
+        (value["actor_id"], value["relation_type"])
+        for value in synthesis["actor_links"]
+    } == {("qq:human:u1", "speaker")}
 
 
 def test_topic_prompts_include_only_matching_authoritative_identity_profiles():

@@ -56,6 +56,7 @@ TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "incremental_auto_max_timelines": {"default": 240, "type": "int", "min": 1, "max": 5000, "category": "performance", "label": "自动增量总量上限", "effect": "next_build"},
     "incremental_topic_candidate_k": {"default": 8, "type": "int", "min": 2, "max": 64, "category": "build", "label": "增量匹配 Topic 候选数", "effect": "next_build"},
     "incremental_topic_match_threshold": {"default": 0.55, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "增量 Topic 延续阈值", "effect": "next_build"},
+    "incremental_topic_review_threshold": {"default": 0.72, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "增量人工审查阈值", "effect": "next_build"},
     "incremental_topic_match_margin": {"default": 0.04, "type": "float", "min": 0.0, "max": 0.5, "step": 0.01, "category": "build", "label": "增量匹配歧义间隔", "effect": "next_build"},
 }
 
@@ -108,7 +109,8 @@ TOPIC_SETTING_DESCRIPTIONS: dict[str, str] = {
     "incremental_auto_max_timelines": "自动维护一次允许处理的 Timeline 总数；超过时不调用模型并等待用户在维护面板确认，手动确认的任务仍按单批上限拆分。",
     "incremental_topic_candidate_k": "每个新增组件只与向量最接近的若干已有 Topic 比较，并额外包含直接受影响的 Topic。",
     "incremental_topic_match_threshold": "新增组件更新已有 Topic 所需的最低综合得分；低于该值时创建新 Topic。",
-    "incremental_topic_match_margin": "最佳与次佳已有 Topic 的分差低于该值时视为有歧义，不自动合并并加入维护队列。",
+    "incremental_topic_review_threshold": "只有两个以上候选均达到该强相关阈值且仍难区分时才进入人工审查；普通的相邻大类会直接新建 Topic。",
+    "incremental_topic_match_margin": "最佳与次佳已有 Topic 的分差低于该值时不自动合并；强候选进入人工审查，边缘候选直接新建 Topic。",
 }
 
 for _setting_key, _description in TOPIC_SETTING_DESCRIPTIONS.items():

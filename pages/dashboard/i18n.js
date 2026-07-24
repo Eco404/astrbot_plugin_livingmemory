@@ -540,6 +540,7 @@
     /* ---- Table ---- */
     "table.id":           { zh: "记忆 ID", en: "Memory ID", ru: "ID памяти" },
     "table.summary":      { zh: "摘要", en: "Summary", ru: "Сводка" },
+    "table.topicLinks":   { zh: "关联 Topic", en: "Topics", ru: "Topic" },
     "table.type":         { zh: "类型", en: "Type", ru: "Тип" },
     "table.importance":   { zh: "重要性", en: "Importance", ru: "Важность" },
     "table.status":       { zh: "状态", en: "Status", ru: "Статус" },
@@ -905,6 +906,9 @@
     "detail.graphContext":{ zh: "知识图谱关联", en: "Knowledge Graph Context", ru: "Контекст графа знаний" },
     "detail.keyFacts":    { zh: "关键事实", en: "Key Facts", ru: "Ключевые факты" },
     "detail.topics":      { zh: "主题", en: "Topics", ru: "Темы" },
+    "detail.relatedTopics": { zh: "关联 Topic", en: "Related Topics", ru: "Связанные Topic" },
+    "detail.noRelatedTopics": { zh: "暂无关联 Topic", en: "No related Topics", ru: "Нет связанных Topic" },
+    "detail.openTopic":   { zh: "查看 Topic 详情", en: "Open Topic details", ru: "Открыть Topic" },
     "detail.participants":{ zh: "参与者", en: "Participants", ru: "Участники" },
     "detail.sentiment":   { zh: "情感", en: "Sentiment", ru: "Тональность" },
     "detail.sentiment.positive": { zh: "正面", en: "Positive", ru: "Позитивная" },

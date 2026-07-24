@@ -56,13 +56,13 @@ import {
      ================================================================ */
   const api = new ApiClient();
   const confirmDialog = new ConfirmDialog();
-  const peekPanel = new PeekPanel(state, api);
+  const topicPage = new TopicPage(api, showToast);
+  const peekPanel = new PeekPanel(state, api, topicPage);
   const memoryPage = new MemoryPage(state, api, peekPanel);
   const identityPage = new IdentityPage(api, showToast);
   const modelPage = new ModelPage(api, showToast);
   const systemPage = new SystemPage(state, api);
   const sessionPicker = new SessionPicker(api, showToast);
-  const topicPage = new TopicPage(api, showToast);
   const recallPage = new RecallPage(state, api, topicPage, confirmDialog, showToast);
   const timelinePage = new TimelinePage(api, showToast);
   const settingsPage = new SettingsPage(api, showToast);
