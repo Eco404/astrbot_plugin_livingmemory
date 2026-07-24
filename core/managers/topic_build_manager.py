@@ -4479,16 +4479,30 @@ class TopicBuildManager:
         if not ranked or ranked[0][0] < threshold:
             return None, ranked, False
         if incremental and ranked[0][1].topic_uid in used:
-            return None, ranked, True
+            review_threshold = max(
+                threshold,
+                float(self.config.get("incremental_topic_review_threshold", 0.72)),
+            )
+            return None, ranked, ranked[0][0] >= review_threshold
         margin = float(self.config.get("incremental_topic_match_margin", 0.04))
-        ambiguous = bool(
+        close_candidates = bool(
             incremental
             and len(ranked) > 1
             and ranked[1][0] >= threshold
             and ranked[0][0] - ranked[1][0] < margin
         )
-        if ambiguous:
-            return None, ranked, True
+        if close_candidates:
+            # Dense embedding spaces commonly put several broad sibling Topics just
+            # above the continuation threshold. Merging one arbitrarily is unsafe,
+            # while blocking every such delta behind manual review leaves its source
+            # Timeline permanently unindexed. Only genuinely strong competing
+            # candidates require a person; marginal ties become a new Topic and can
+            # still be connected by the related-Topic graph.
+            review_threshold = max(
+                threshold,
+                float(self.config.get("incremental_topic_review_threshold", 0.72)),
+            )
+            return None, ranked, ranked[1][0] >= review_threshold
         return ranked[0][1], ranked, False
 
     async def _match_existing_topic(
@@ -4604,7 +4618,11 @@ class TopicBuildManager:
                             if row.get("source_atom_fingerprint")
                         }
                     },
-                    "actor_refs": actor_links_by_atom.get(atom_uid, []),
+                    "actor_refs": [
+                        value
+                        for value in actor_links_by_atom.get(atom_uid, [])
+                        if self._valid_actor_relation_for_type(value)
+                    ],
                 }
             )
         if not facts:
@@ -4652,6 +4670,7 @@ class TopicBuildManager:
                     for value in existing_actor_links
                     if value.get("relation_type")
                     in {"speaker", "narrator", "responder"}
+                    and self._valid_actor_relation_for_type(value)
                 ],
                 "mentioned_actor_refs": [
                     value
@@ -5672,7 +5691,7 @@ class TopicBuildManager:
                     + ":".join(timeline_uids),
                 )
             )
-            participant_refs = [
+            model_participant_refs = [
                 dict(value)
                 for value in raw.get("participant_refs", [])
                 if isinstance(value, dict)
@@ -5685,22 +5704,36 @@ class TopicBuildManager:
             deterministic_participants = self._deterministic_fragment_participants(
                 source_items
             )
-            participant_keys = {
+            model_participant_keys = {
                 (
                     str(value.get("actor_id") or ""),
                     str(value.get("relation_type") or ""),
                 )
-                for value in participant_refs
+                for value in model_participant_refs
             }
-            participant_refs.extend(
-                value
-                for value in deterministic_participants
-                if (
+            deterministic_participant_keys = {
+                (
                     str(value.get("actor_id") or ""),
                     str(value.get("relation_type") or ""),
                 )
-                not in participant_keys
-            )
+                for value in deterministic_participants
+            }
+            participant_refs = deterministic_participants
+            if (
+                model_participant_keys
+                and model_participant_keys != deterministic_participant_keys
+            ):
+                validation_repairs.append(
+                    {
+                        "type": "participant_roles_replaced_by_timeline_bindings",
+                        "discarded": sorted(
+                            [list(value) for value in model_participant_keys]
+                        ),
+                        "authoritative": sorted(
+                            [list(value) for value in deterministic_participant_keys]
+                        ),
+                    }
+                )
             self._scope_unresolved_actor_ids(
                 fragment_uid,
                 participant_refs,
@@ -5801,8 +5834,8 @@ class TopicBuildManager:
             )
             if validation_repairs:
                 logger.warning(
-                    "[TopicMemory] 已修复 LLM 片段中的无效原子指纹 "
-                    "(group_uid=%s, fragment_index=%s, facts=%s)",
+                    "[TopicMemory] LLM 片段输出已经确定性校正 "
+                    "(group_uid=%s, fragment_index=%s, repairs=%s)",
                     group.group_uid,
                     index,
                     len(validation_repairs),
@@ -6185,6 +6218,8 @@ class TopicBuildManager:
         actor_links_by_key: dict[tuple[str, str], dict[str, Any]] = {}
 
         def merge_actor_link(raw_link: dict[str, Any], fact_uids: Iterable[str]) -> None:
+            if not self._valid_actor_relation_for_type(raw_link):
+                return
             actor_id = str(raw_link.get("actor_id") or "").strip()
             relation_type = str(raw_link.get("relation_type") or "").strip()
             if not actor_id or not relation_type:
@@ -6214,12 +6249,9 @@ class TopicBuildManager:
                 self._score(raw_link.get("confidence"), 0.7),
             )
 
-        for raw_link in parsed.get("actor_links", []):
-            if isinstance(raw_link, dict):
-                merge_actor_link(
-                    raw_link,
-                    self._unique_strings(raw_link.get("source_fact_uids")),
-                )
+        # The synthesis model may reorganize facts, but it must not decide identity
+        # participation a second time. Stable participation and semantic actor roles
+        # are already grounded and validated on the formal fragments below.
         for fragment in fragments:
             for key in ("participant_refs", "mentioned_actor_refs"):
                 for raw_link in fragment.metadata.get(key, []):
@@ -7506,6 +7538,17 @@ INPUT:
             result.append(value)
         return result
 
+    @staticmethod
+    def _valid_actor_relation_for_type(value: dict[str, Any]) -> bool:
+        """Reject impossible stable participation roles while preserving semantics."""
+        relation = str(value.get("relation_type") or "").strip()
+        actor_type = str(value.get("actor_type") or "unknown").strip()
+        if relation in {"narrator", "responder"}:
+            return actor_type == "assistant"
+        if relation == "speaker":
+            return actor_type != "assistant"
+        return True
+
     def _synthesis_llm_context(
         self, fragments: list[TopicFragmentDraft]
     ) -> tuple[dict[str, Any], dict[str, str], dict[str, dict[str, Any]]]:
@@ -7534,7 +7577,23 @@ INPUT:
         for actor_id, actor in actors_by_id.items():
             actor_ref = f"A{len(actor_payload) + 1}"
             actor_id_to_ref[actor_id] = actor_ref
-            normalized = {**actor, "ref": actor_ref, "actor_id": actor_id}
+            normalized = {
+                key: value
+                for key, value in actor.items()
+                if key
+                not in {
+                    "ref",
+                    "actor_ref",
+                    "relation_type",
+                    "confidence",
+                    "source",
+                    "source_fact_uids",
+                    "fragment_uids",
+                    "timeline_uids",
+                    "atom_uids",
+                }
+            }
+            normalized.update({"actor_ref": actor_ref, "actor_id": actor_id})
             actor_refs[actor_ref] = normalized
             actor_payload.append(normalized)
         next_fact = 1

@@ -672,6 +672,49 @@ async def test_topic_snapshot_has_independent_atoms_and_cluster_metrics(
 
 
 @pytest.mark.asyncio
+async def test_get_topic_counts_for_timelines_only_counts_active_links(
+    tmp_path: Path,
+):
+    db_path = str(tmp_path / "topic-counts.db")
+    space_id = await _register_timeline(
+        db_path, memory_uid="timeline-counted", document_id=1
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    topic = TopicMemory(
+        topic_uid="topic-counted",
+        memory_space_id=space_id,
+        title="Counted Topic",
+        summary="This Topic is linked to one Timeline.",
+    )
+    await store.save_topic_snapshot(
+        topic,
+        atoms=[],
+        links=[
+            TopicTimelineLink(
+                topic_uid=topic.topic_uid,
+                timeline_uid="timeline-counted",
+                time_cluster_key="cluster-1",
+            )
+        ],
+        atom_sources=[],
+    )
+
+    assert await store.get_topic_counts_for_timelines(
+        ["timeline-counted", "timeline-counted", "missing"]
+    ) == {"timeline-counted": 1}
+
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "UPDATE topic_timeline_links SET status = 'archived' WHERE topic_uid = ?",
+            (topic.topic_uid,),
+        )
+        await db.commit()
+
+    assert await store.get_topic_counts_for_timelines(["timeline-counted"]) == {}
+
+
+@pytest.mark.asyncio
 async def test_clear_space_removes_only_topic_derivatives_and_build_history(
     tmp_path: Path,
 ):

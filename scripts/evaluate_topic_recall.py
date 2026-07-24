@@ -73,7 +73,9 @@ class CloudflareEmbeddingProvider(EmbeddingProvider):
     def __init__(self, config: dict[str, str]):
         super().__init__(
             {
-                "id": "cloudflare_workers_ai_embedding_eval",
+                # Match the stable provider identity used by real Topic artifacts so
+                # evaluation scripts can query production-built vector indexes.
+                "id": "cloudflare_bge-m3",
                 "type": "evaluation",
                 "model": config["model"],
             },
