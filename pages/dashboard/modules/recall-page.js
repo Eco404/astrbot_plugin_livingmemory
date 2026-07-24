@@ -44,6 +44,7 @@ export class RecallPage {
     const searchBtn = document.getElementById("recall-search-btn");
     const kSlider = document.getElementById("recall-k");
     const kValue = document.getElementById("recall-k-value");
+    const sessionInput = document.getElementById("recall-session");
 
     // k 值滑块
     if (kSlider && kValue) {
@@ -65,10 +66,25 @@ export class RecallPage {
         }
       });
     }
+    if (sessionInput) {
+      const updateReminder = () => this.updateSessionReminder();
+      sessionInput.addEventListener("input", updateReminder);
+      sessionInput.addEventListener("change", updateReminder);
+      this.updateSessionReminder();
+    }
     document.getElementById("recall-export-current")?.addEventListener("click", () => this.exportJson(this.currentExport));
     document.getElementById("recall-history-refresh")?.addEventListener("click", () => this.loadHistory());
     document.getElementById("recall-history-clear")?.addEventListener("click", () => this.clearHistory());
     document.getElementById("recall-history-list")?.addEventListener("click", event => this.handleHistoryClick(event));
+  }
+
+  updateSessionReminder() {
+    const input = document.getElementById("recall-session");
+    const field = input?.closest(".recall-session-field");
+    if (!input || !field) return;
+    const missing = !input.value.trim();
+    field.classList.toggle("is-missing", missing);
+    input.setAttribute("aria-invalid", missing ? "true" : "false");
   }
 
   /**

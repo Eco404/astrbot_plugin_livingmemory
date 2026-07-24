@@ -73,6 +73,40 @@ class StatsHandler:
                 except Exception:
                     pass
 
+            # Topic 是独立于 Timeline 的派生记忆层，系统概览需要单独展示。
+            stats["topic_memory"] = {
+                "enabled": bool(getattr(memory_engine, "topic_memory_enabled", False)),
+                "auto_maintenance": bool(
+                    getattr(memory_engine, "topic_auto_maintenance", False)
+                ),
+                "topic_count": 0,
+                "status_counts": {},
+                "fragment_count": 0,
+                "atom_count": 0,
+                "timeline_link_count": 0,
+                "relation_count": 0,
+                "actor_link_count": 0,
+                "pending_review_count": 0,
+                "memory_space_count": 0,
+                "registered_timeline_count": 0,
+            }
+            topic_store = getattr(memory_engine, "topic_memory_store", None)
+            if topic_store is not None:
+                try:
+                    topic_overview = await topic_store.get_overview()
+                    memory_spaces = await topic_store.list_memory_spaces(limit=1000)
+                    stats["topic_memory"].update(topic_overview)
+                    stats["topic_memory"]["memory_space_count"] = len(memory_spaces)
+                    stats["topic_memory"]["registered_timeline_count"] = sum(
+                        int(item.get("timeline_count", 0) or 0)
+                        for item in memory_spaces
+                    )
+                except Exception:
+                    logger.warning(
+                        "[PageAPI] 获取 Topic 系统统计失败",
+                        exc_info=True,
+                    )
+
             # 重要性分布 — 兜底默认值（get_statistics 已计算，此处仅容错）
             if "importance_distribution" not in stats:
                 stats["importance_distribution"] = {
