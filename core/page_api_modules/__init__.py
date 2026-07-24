@@ -9,6 +9,7 @@ from .memory_handler import MemoryHandler
 from .model_handler import ModelHandler
 from .recall_handler import RecallHandler
 from .session_handler import SessionHandler
+from .settings_handler import SettingsHandler
 from .stats_handler import StatsHandler
 from .topic_handler import TopicHandler
 from .timeline_handler import TimelineHandler
@@ -20,6 +21,7 @@ __all__ = [
     "ModelHandler",
     "RecallHandler",
     "SessionHandler",
+    "SettingsHandler",
     "GraphHandler",
     "IdentityHandler",
     "BackupHandler",

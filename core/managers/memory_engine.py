@@ -132,6 +132,7 @@ class MemoryEngine:
             identity_profile_store or AuthoritativeIdentityStore()
         )
         self.topic_provider_resolver = topic_provider_resolver
+        self.recall_trace_store = None
         self._session_scope_resolver: Callable[[str], Any] | None = None
         self.config = config or {}
         self.graph_enabled = bool(self.config.get("graph_memory_enabled", False))
@@ -2953,11 +2954,15 @@ class MemoryEngine:
                     metadata = doc["metadata"]
 
                     create_time = safe_float(metadata.get("create_time"), time.time())
+                    last_access_time = safe_float(
+                        metadata.get("last_access_time"), 0.0
+                    )
+                    age_anchor = max(create_time, last_access_time)
                     doc_importance = clamp_float(
                         metadata.get("importance"), default=0.5
                     )
 
-                    if create_time < cutoff_time and doc_importance < importance:
+                    if age_anchor < cutoff_time and doc_importance < importance:
                         to_delete_ids.append(doc["id"])
 
                 offset += len(batch_docs)

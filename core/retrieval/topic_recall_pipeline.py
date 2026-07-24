@@ -342,6 +342,38 @@ class TopicRecallPipeline:
             return 0
         return await self.retriever.store.record_topic_access(topic_uids)
 
+    async def source_timeline_document_ids(
+        self,
+        topic_results: list[TopicRecallResult],
+        fragment_results: list[TopicFragmentRecallResult],
+        *,
+        limit_per_result: int = 3,
+    ) -> list[int]:
+        """Resolve a bounded set of source Timelines for consumed Topic output."""
+        limit = max(1, min(int(limit_per_result), 10))
+        timeline_uids: list[str] = []
+        for result in fragment_results:
+            timeline_uids.extend(
+                str(uid) for uid in result.fragment.timeline_uids[:limit] if str(uid)
+            )
+        for result in topic_results:
+            ordered = sorted(
+                result.sources,
+                key=lambda item: (
+                    float(item.get("contribution_weight") or 0.0),
+                    float(item.get("semantic_similarity") or 0.0),
+                ),
+                reverse=True,
+            )
+            timeline_uids.extend(
+                str(item.get("timeline_uid") or "")
+                for item in ordered[:limit]
+                if item.get("timeline_uid")
+            )
+        return await self.retriever.store.timeline_document_ids(
+            list(dict.fromkeys(timeline_uids))
+        )
+
     def _topic_ranking_score(self, candidate: TopicRecallResult) -> float:
         current = float(candidate.current_relevance or 0.0)
         base = self.retriever._rank_score(candidate.topic, current)

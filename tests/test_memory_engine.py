@@ -1522,6 +1522,33 @@ async def test_cleanup_old_memories_uses_batch_delete(tmp_path: Path):
     await engine.close()
 
 
+@pytest.mark.asyncio
+async def test_cleanup_old_memories_preserves_recently_accessed_old_memory(tmp_path: Path):
+    db_path = tmp_path / "cleanup_recent_access.db"
+    faiss = _FakeFaissDB()
+    engine = MemoryEngine(db_path=str(db_path), faiss_db=faiss, config={})
+    await engine.initialize()
+    mid = faiss._next_id
+    faiss._next_id += 1
+    faiss.docs[mid] = {
+        "id": mid,
+        "doc_id": f"uuid-{mid}",
+        "text": "经常通过 Topic 访问的旧 Timeline",
+        "metadata": {
+            "importance": 0.1,
+            "create_time": time.time() - 86400 * 60,
+            "last_access_time": time.time(),
+        },
+    }
+
+    deleted = await engine.cleanup_old_memories(
+        days_threshold=30, importance_threshold=0.3
+    )
+    assert deleted == 0
+    assert mid in faiss.docs
+    await engine.close()
+
+
 # ==================== 更新回滚测试 ====================
 
 

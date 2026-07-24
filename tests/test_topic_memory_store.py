@@ -66,6 +66,44 @@ def test_topic_actor_schema_is_valid_without_aiosqlite_runtime():
     connection.close()
 
 
+def test_actor_provenance_rejects_fragment_outside_publish_snapshot():
+    atom = TopicMemoryAtom(
+        atom_uid="atom-1",
+        topic_uid="topic-1",
+        atom_type="factual",
+        content="事实",
+    )
+    actor = TopicActorLink(
+        topic_uid="topic-1",
+        actor_id="qq:human:u1",
+        actor_type="human",
+        relation_type="subject",
+    )
+    atom_actor = TopicAtomActorLink(
+        topic_atom_uid="atom-1",
+        actor_id=actor.actor_id,
+        relation_type=actor.relation_type,
+        fragment_uid="existing:topic-1:r1",
+        timeline_uid="timeline-1",
+    )
+    fragment = TopicFragmentDraft(
+        fragment_uid="formal-fragment",
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        label="正式片段",
+        summary="正式片段",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[],
+    )
+
+    with pytest.raises(ValueError, match="outside the snapshot"):
+        TopicMemoryStore._validate_actor_links(
+            "topic-1", [atom], [actor], [atom_actor], fragments=[fragment]
+        )
+
+
 def test_candidate_checkpoint_preserves_actor_and_source_provenance():
     candidate = TimelineTopicCandidate(
         memory_uid="timeline-1",
@@ -205,6 +243,20 @@ async def test_maintenance_review_identity_ignores_volatile_run_details(tmp_path
     db_path = str(tmp_path / "maintenance-review.db")
     store = TopicMemoryStore(db_path)
     await store.initialize()
+    await store.create_maintenance_run(
+        TopicMaintenanceRun(
+            run_uid="run-1",
+            memory_space_id="space-1",
+            mode=TopicMaintenanceMode.INCREMENTAL,
+        )
+    )
+    await store.create_maintenance_run(
+        TopicMaintenanceRun(
+            run_uid="run-2",
+            memory_space_id="space-1",
+            mode=TopicMaintenanceMode.INCREMENTAL,
+        )
+    )
 
     first_uid = await store.enqueue_maintenance_review(
         memory_space_id="space-1",
@@ -447,6 +499,45 @@ async def test_actor_filter_and_fact_groups_expose_concrete_provenance(tmp_path:
     catalog = await store.list_topic_actors(space_id)
     assert catalog[0]["display_name"] == "空雨"
     assert catalog[0]["topic_count"] == 1
+    for index in (1, 2):
+        unresolved_topic = TopicMemory(
+            topic_uid=f"topic-unresolved-{index}",
+            memory_space_id=space_id,
+            title=f"HR {index}",
+            summary="一个无法稳定解析的提及。",
+        )
+        await store.save_topic_snapshot(
+            unresolved_topic,
+            atoms=[],
+            links=[
+                TopicTimelineLink(
+                    topic_uid=unresolved_topic.topic_uid,
+                    timeline_uid="timeline-1",
+                    time_cluster_key="cluster-1",
+                )
+            ],
+            atom_sources=[],
+            actor_links=[
+                TopicActorLink(
+                    topic_uid=unresolved_topic.topic_uid,
+                    actor_id=f"unresolved:fragment-{index}:hr",
+                    actor_type="human",
+                    relation_type="mentioned",
+                    display_name_snapshot="HR",
+                    resolution_status="unresolved",
+                )
+            ],
+        )
+    catalog = await store.list_topic_actors(space_id)
+    hr = next(item for item in catalog if item["display_name"] == "HR")
+    assert hr["catalog_group"] == "unresolved"
+    assert len(hr["actor_ids"]) == 2
+    assert hr["topic_count"] == 2
+    grouped = await store.list_topics(space_id, actor_id=hr["actor_id"])
+    assert {item.topic_uid for item in grouped} == {
+        "topic-unresolved-1",
+        "topic-unresolved-2",
+    }
     provenance = await store.get_topic_provenance(topic.topic_uid)
     group = provenance["actor_fact_groups"][0]
     assert group["resolution_status"] == "profile_inferred"
@@ -1054,6 +1145,13 @@ async def test_discard_maintenance_run_clears_progress_but_preserves_topics(
         input_hash="hash-1",
         payload={"title": "未完成"},
     )
+    review_uid = await store.enqueue_maintenance_review(
+        memory_space_id=space_id,
+        review_type="ambiguous_topic_match",
+        timeline_uids=["timeline-1"],
+        topic_uids=[topic.topic_uid],
+        details={"run_uid": run.run_uid},
+    )
 
     result = await store.discard_maintenance_run(
         run.run_uid,
@@ -1061,11 +1159,36 @@ async def test_discard_maintenance_run_clears_progress_but_preserves_topics(
     )
 
     assert result["deleted_run"] == 1
-    assert result["deleted_intermediate_items"] == 1
+    assert result["deleted_intermediate_items"] == 2
     assert result["deleted_by_table"]["topic_build_checkpoints"] == 1
+    assert result["deleted_by_table"]["topic_maintenance_queue"] == 1
     assert await store.get_maintenance_run(run.run_uid) is None
     assert await store.get_build_checkpoint(run.run_uid, "topic_synthesis:abc") is None
+    assert not any(
+        item["review_uid"] == review_uid
+        for item in await store.list_maintenance_reviews(space_id)
+    )
     assert await store.get_topic(topic.topic_uid) is not None
+
+
+@pytest.mark.asyncio
+async def test_list_reviews_cleans_legacy_orphans_from_discarded_runs(
+    tmp_path: Path,
+) -> None:
+    store = TopicMemoryStore(tmp_path / "topic.db")
+    await store.initialize()
+
+    review_uid = await store.enqueue_maintenance_review(
+        memory_space_id="space-orphan",
+        review_type="topic_match_ambiguity",
+        timeline_uids=["timeline-1"],
+        topic_uids=[],
+        details={"run_uid": "discarded-run", "reason": "legacy residue"},
+    )
+
+    assert await store.get_maintenance_review(review_uid) is not None
+    assert await store.list_maintenance_reviews("space-orphan") == []
+    assert await store.get_maintenance_review(review_uid) is None
 
 
 @pytest.mark.asyncio

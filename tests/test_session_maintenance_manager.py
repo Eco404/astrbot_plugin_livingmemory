@@ -383,3 +383,63 @@ async def test_running_maintenance_task_resumes_after_manager_restart(tmp_path: 
 
     await resumed.shutdown()
     await conversation_store.close()
+
+
+@pytest.mark.asyncio
+async def test_finished_task_history_can_be_deleted_without_touching_running_tasks(
+    tmp_path: Path,
+):
+    conversation_store = ConversationStore(str(tmp_path / "conversations.db"))
+    await conversation_store.initialize()
+    conversation_manager = ConversationManager(store=conversation_store)
+    living_db = tmp_path / "livingmemory.db"
+    await _create_living_db(living_db)
+    manager = SessionMaintenanceManager(
+        str(living_db), conversation_manager, _FakeMemoryEngine()
+    )
+    await manager.initialize()
+
+    now = time.time()
+    async with aiosqlite.connect(living_db) as db:
+        for task_uid, status in (
+            ("completed-task", "completed"),
+            ("failed-task", "failed"),
+            ("running-task", "running"),
+        ):
+            await db.execute(
+                """
+                INSERT INTO session_maintenance_tasks (
+                    task_uid, operation, status, source_session_ids,
+                    current_step, payload, result, created_at, updated_at
+                ) VALUES (?, 'cleanup_summarized', ?, '[]', 'test', '{}', '{}', ?, ?)
+                """,
+                (task_uid, status, now, now),
+            )
+            await db.execute(
+                """
+                INSERT INTO session_maintenance_events (
+                    task_uid, step, status, details, created_at
+                ) VALUES (?, 'test', ?, '{}', ?)
+                """,
+                (task_uid, status, now),
+            )
+        await db.commit()
+
+    assert await manager.delete_task("completed-task") is True
+    assert await manager.get_task("completed-task") is None
+    with pytest.raises(ValueError, match="只能删除"):
+        await manager.delete_task("running-task")
+
+    assert await manager.clear_finished_tasks() == 1
+    tasks = await manager.list_tasks()
+    assert [item["task_uid"] for item in tasks] == ["running-task"]
+    async with aiosqlite.connect(living_db) as db:
+        remaining_events = await (
+            await db.execute(
+                "SELECT task_uid FROM session_maintenance_events ORDER BY task_uid"
+            )
+        ).fetchall()
+    assert remaining_events == [("running-task",)]
+
+    await manager.shutdown()
+    await conversation_store.close()

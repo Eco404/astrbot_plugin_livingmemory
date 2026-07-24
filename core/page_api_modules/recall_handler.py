@@ -32,6 +32,7 @@ class RecallHandler:
         memory_engine,
         config_manager=None,
         conversation_manager=None,
+        trace_store=None,
     ) -> dict[str, Any]:
         """
         测试记忆召回功能
@@ -177,6 +178,22 @@ class RecallHandler:
             elapsed_time = (time.time() - start_time) * 1000
         except Exception as exc:
             logger.error(f"[PageAPI] 召回测试失败: {exc}", exc_info=True)
+            if trace_store is not None:
+                try:
+                    await trace_store.record(
+                        trace_type="test",
+                        status="failed",
+                        query_text=query_text,
+                        mode=mode,
+                        session_id=session_id,
+                        elapsed_ms=(time.time() - start_time) * 1000
+                        if "start_time" in locals()
+                        else 0,
+                        request_data=payload,
+                        error=str(exc),
+                    )
+                except Exception:
+                    logger.warning("[PageAPI] 保存失败的召回测试历史时出错", exc_info=True)
             return self.utils.error(str(exc))
 
         formatted_results = []
@@ -395,8 +412,7 @@ class RecallHandler:
                 }
             )
 
-        return self.utils.ok(
-            {
+        response_data = {
                 "results": formatted_results,
                 "total": len(formatted_results),
                 "query": query_text,
@@ -416,7 +432,84 @@ class RecallHandler:
                     else None,
                 },
             }
+        if trace_store is not None:
+            try:
+                response_data["trace_uid"] = await trace_store.record(
+                    trace_type="test",
+                    status="completed",
+                    query_text=query_text,
+                    mode=mode,
+                    session_id=session_id,
+                    result_count=len(formatted_results),
+                    elapsed_ms=elapsed_time,
+                    request_data=payload,
+                    result_data=response_data,
+                    diagnostics=response_data["diagnostics"],
+                )
+            except Exception:
+                logger.warning("[PageAPI] 保存召回测试历史时出错", exc_info=True)
+        return self.utils.ok(response_data)
+
+    async def list_traces(self, trace_store) -> dict[str, Any]:
+        if trace_store is None:
+            return self.utils.error("召回记录存储尚未初始化")
+        trace_type = str(request.args.get("type", "production")).strip().lower()
+        try:
+            limit = max(1, min(int(request.args.get("limit", 50)), 200))
+            items = await trace_store.list_records(trace_type, limit=limit)
+            enabled = await trace_store.production_enabled()
+            return self.utils.ok(
+                {"items": items, "production_enabled": enabled, "type": trace_type}
+            )
+        except (TypeError, ValueError) as exc:
+            return self.utils.error(str(exc))
+
+    async def get_trace(self, trace_store) -> dict[str, Any]:
+        if trace_store is None:
+            return self.utils.error("召回记录存储尚未初始化")
+        trace_uid = self.utils.optional_text(request.args.get("trace_uid"))
+        if not trace_uid:
+            return self.utils.error("缺少 trace_uid")
+        item = await trace_store.get_record(trace_uid)
+        return self.utils.ok(item) if item else self.utils.error("召回记录不存在")
+
+    async def update_trace_settings(self, trace_store) -> dict[str, Any]:
+        if trace_store is None:
+            return self.utils.error("召回记录存储尚未初始化")
+        payload = await request.get_json(silent=True) or {}
+        if "production_enabled" not in payload:
+            return self.utils.error("缺少 production_enabled")
+        enabled = await trace_store.set_production_enabled(
+            bool(payload.get("production_enabled"))
         )
+        return self.utils.ok({"production_enabled": enabled})
+
+    async def delete_trace(self, trace_store) -> dict[str, Any]:
+        if trace_store is None:
+            return self.utils.error("召回记录存储尚未初始化")
+        payload = await request.get_json(silent=True) or {}
+        trace_uid = self.utils.optional_text(payload.get("trace_uid"))
+        trace_type = self.utils.optional_text(payload.get("type"))
+        if not trace_uid:
+            return self.utils.error("缺少 trace_uid")
+        try:
+            deleted = await trace_store.delete_record(
+                trace_uid, trace_type=trace_type
+            )
+            return self.utils.ok({"deleted": deleted, "trace_uid": trace_uid})
+        except ValueError as exc:
+            return self.utils.error(str(exc))
+
+    async def clear_traces(self, trace_store) -> dict[str, Any]:
+        if trace_store is None:
+            return self.utils.error("召回记录存储尚未初始化")
+        payload = await request.get_json(silent=True) or {}
+        trace_type = str(payload.get("type", "production")).strip().lower()
+        try:
+            count = await trace_store.clear_records(trace_type)
+            return self.utils.ok({"deleted_count": count, "type": trace_type})
+        except ValueError as exc:
+            return self.utils.error(str(exc))
 
     @staticmethod
     def _config_value(config_manager, key: str, default: Any) -> Any:

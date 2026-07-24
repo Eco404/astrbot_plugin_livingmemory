@@ -26,6 +26,7 @@ export class TopicPage {
     this.settingsResetKeys = new Set();
     this.settingsResetAll = false;
     this.actorFilter = "";
+    this.actorCatalog = [];
   }
 
   initEventListeners() {
@@ -34,10 +35,20 @@ export class TopicPage {
       this.actorFilter = "";
       this.fetch();
     });
-    document.getElementById("topic-actor-filter")?.addEventListener("change", event => {
-      this.actorFilter = event.currentTarget.value || "";
-      this.fetchTopics();
+    document.getElementById("topic-actor-filter")?.addEventListener("click", event => {
+      event.stopPropagation();
+      this.toggleActorFilter();
     });
+    document.getElementById("topic-actor-filter-search")?.addEventListener("input", event => {
+      this.renderActorFilterOptions(event.currentTarget.value || "");
+    });
+    document.getElementById("topic-actor-filter-menu")?.addEventListener("click", event => {
+      event.stopPropagation();
+      const option = event.target.closest("[data-actor-filter-value]");
+      if (!option) return;
+      this.selectActorFilter(option.dataset.actorFilterValue || "");
+    });
+    document.addEventListener("click", () => this.closeActorFilter());
     document.getElementById("topic-build-full")?.addEventListener("click", event => this.requestFullBuild(event.currentTarget));
     document.getElementById("topic-maintenance")?.addEventListener("click", event => this.openMaintenance(event.currentTarget));
     document.getElementById("topic-settings")?.addEventListener("click", event => this.openSettings(event.currentTarget));
@@ -99,7 +110,8 @@ export class TopicPage {
     });
     document.addEventListener("keydown", event => {
       if (event.key !== "Escape") return;
-      if (this.timelineDetailIsOpen()) this.closeTimelineDetail();
+      if (this.actorFilterIsOpen()) this.closeActorFilter();
+      else if (this.timelineDetailIsOpen()) this.closeTimelineDetail();
       else if (this.clearTopicsConfirmIsOpen()) this.closeClearTopicsConfirm();
       else if (this.discardBuildConfirmIsOpen()) this.closeDiscardBuildConfirm();
       else if (this.fullBuildConfirmIsOpen()) this.closeFullBuildConfirm();
@@ -111,6 +123,63 @@ export class TopicPage {
 
   currentSpace() {
     return document.getElementById("topic-space")?.value || "";
+  }
+
+  actorFilterIsOpen() {
+    return !document.getElementById("topic-actor-filter-menu")?.classList.contains("hidden");
+  }
+
+  toggleActorFilter() {
+    if (this.actorFilterIsOpen()) {
+      this.closeActorFilter();
+      return;
+    }
+    const menu = document.getElementById("topic-actor-filter-menu");
+    const button = document.getElementById("topic-actor-filter");
+    menu?.classList.remove("hidden");
+    button?.setAttribute("aria-expanded", "true");
+    const search = document.getElementById("topic-actor-filter-search");
+    if (search) {
+      search.value = "";
+      this.renderActorFilterOptions();
+      search.focus();
+    }
+  }
+
+  closeActorFilter() {
+    document.getElementById("topic-actor-filter-menu")?.classList.add("hidden");
+    document.getElementById("topic-actor-filter")?.setAttribute("aria-expanded", "false");
+  }
+
+  selectActorFilter(value) {
+    this.actorFilter = value;
+    this.updateActorFilterLabel();
+    this.closeActorFilter();
+    this.fetchTopics();
+  }
+
+  updateActorFilterLabel() {
+    const label = document.getElementById("topic-actor-filter-label");
+    if (!label) return;
+    const selected = this.actorCatalog.find(item => item.actor_id === this.actorFilter);
+    label.textContent = selected
+      ? `${selected.display_name} (${Number(selected.topic_count || 0)})`
+      : window.t("topic.actorFilterAll");
+  }
+
+  renderActorFilterOptions(query = "") {
+    const container = document.getElementById("topic-actor-filter-options");
+    if (!container) return;
+    const needle = query.trim().toLocaleLowerCase();
+    const matches = item => !needle || String(item.display_name || "").toLocaleLowerCase().includes(needle);
+    const resolved = this.actorCatalog.filter(item => item.catalog_group === "resolved" && matches(item));
+    const unresolved = this.actorCatalog.filter(item => item.catalog_group !== "resolved" && matches(item));
+    const renderOption = item => `<button class="topic-actor-filter-option ${item.actor_id === this.actorFilter ? "is-selected" : ""}" type="button" role="option" aria-selected="${item.actor_id === this.actorFilter ? "true" : "false"}" data-actor-filter-value="${esc(item.actor_id)}"><span title="${esc(item.display_name)}">${esc(item.display_name)}</span><small>${Number(item.topic_count || 0)}</small></button>`;
+    const empty = `<div class="topic-actor-filter-empty text-tertiary">${esc(window.t("topic.actorFilterEmpty"))}</div>`;
+    container.innerHTML = `
+      <button class="topic-actor-filter-option ${this.actorFilter ? "" : "is-selected"}" type="button" role="option" aria-selected="${this.actorFilter ? "false" : "true"}" data-actor-filter-value=""><span>${esc(window.t("topic.actorFilterAll"))}</span></button>
+      <div class="topic-actor-filter-group"><strong>${esc(window.t("topic.actorFilterResolved"))}</strong>${resolved.length ? resolved.map(renderOption).join("") : empty}</div>
+      ${unresolved.length ? `<details class="topic-actor-filter-unresolved" ${needle ? "open" : ""}><summary>${esc(window.t("topic.actorFilterUnresolved"))} (${unresolved.length})</summary>${unresolved.map(renderOption).join("")}</details>` : ""}`;
   }
 
   async fetch() {
@@ -203,14 +272,10 @@ export class TopicPage {
         limit: 200,
       });
       const items = data.items || [];
-      const actorFilter = document.getElementById("topic-actor-filter");
-      if (actorFilter) {
-        const selectedActor = this.actorFilter;
-        actorFilter.innerHTML = `<option value="">${esc(window.t("topic.actorFilterAll"))}</option>`
-          + (data.actors || []).map(actor => `<option value="${esc(actor.actor_id)}">${esc(actor.display_name)} (${Number(actor.topic_count || 0)})</option>`).join("");
-        actorFilter.value = Array.from(actorFilter.options).some(option => option.value === selectedActor) ? selectedActor : "";
-        this.actorFilter = actorFilter.value;
-      }
+      this.actorCatalog = data.actors || [];
+      if (this.actorFilter && !this.actorCatalog.some(actor => actor.actor_id === this.actorFilter)) this.actorFilter = "";
+      this.updateActorFilterLabel();
+      this.renderActorFilterOptions();
       body.innerHTML = items.length ? items.map(item => `
         <tr class="topic-row" data-topic-uid="${esc(item.topic_uid)}" tabindex="0" role="button" aria-label="${esc(`${window.t("topic.viewDetails")}: ${item.title}`)}">
           <td class="text-mono">${esc(item.topic_uid.slice(0, 12))}</td>
@@ -359,17 +424,31 @@ export class TopicPage {
   showTimelineDetail(index, trigger) {
     const source = this.timelineSources[index];
     if (!source?.timeline_content) return;
+    this.showReadonlyRecord({
+      title: window.t("topic.timelineDetailTitle"),
+      content: source.timeline_content,
+      identifiers: [source.timeline_uid, source.time_cluster_key].filter(Boolean),
+    }, trigger);
+  }
+
+  showReadonlyRecord(record, trigger) {
+    if (!record?.content) return;
     this.timelineDetailTrigger = trigger || null;
     const overlay = document.getElementById("topic-timeline-detail-overlay");
     const body = document.getElementById("topic-timeline-detail-body");
+    const title = document.getElementById("topic-timeline-detail-title");
+    if (title) title.textContent = record.title || window.t("topic.timelineDetailTitle");
+    const identifiers = (record.identifiers || []).filter(Boolean);
+    const metadata = (record.metadata || []).filter(item => item?.label && item?.value);
     body.innerHTML = `
       <section class="topic-timeline-content-section">
-        <strong>${esc(window.t("topic.timelineContent"))}</strong>
-        <div class="topic-timeline-full-content">${esc(source.timeline_content)}</div>
+        <strong>${esc(record.contentLabel || window.t("topic.timelineContent"))}</strong>
+        <div class="topic-timeline-full-content">${esc(record.content)}</div>
       </section>
-      <details class="topic-compact-details topic-timeline-identifiers"><summary>${esc(window.t("topic.identifierDetails"))}</summary>
-        <div class="topic-identifier-list"><code>${esc(source.timeline_uid)}</code><code>${esc(source.time_cluster_key)}</code></div>
-      </details>`;
+      ${metadata.length ? `<div class="topic-readonly-metadata">${metadata.map(item => `<span><strong>${esc(item.label)}</strong> ${esc(item.value)}</span>`).join("")}</div>` : ""}
+      ${identifiers.length ? `<details class="topic-compact-details topic-timeline-identifiers"><summary>${esc(window.t("topic.identifierDetails"))}</summary>
+        <div class="topic-identifier-list">${identifiers.map(value => `<code>${esc(value)}</code>`).join("")}</div>
+      </details>` : ""}`;
     overlay?.classList.add("visible");
     overlay?.setAttribute("aria-hidden", "false");
     document.getElementById("topic-timeline-detail-close")?.focus();
@@ -383,6 +462,8 @@ export class TopicPage {
     if (!this.timelineDetailIsOpen() && !this.timelineDetailTrigger) return;
     document.getElementById("topic-timeline-detail-overlay")?.classList.remove("visible");
     document.getElementById("topic-timeline-detail-overlay")?.setAttribute("aria-hidden", "true");
+    const title = document.getElementById("topic-timeline-detail-title");
+    if (title) title.textContent = window.t("topic.timelineDetailTitle");
     const trigger = this.timelineDetailTrigger;
     this.timelineDetailTrigger = null;
     if (restoreFocus && trigger?.isConnected) trigger.focus();
@@ -421,7 +502,7 @@ export class TopicPage {
     status.textContent = window.t("common.loading");
     content.innerHTML = "";
     try {
-      this.settingsData = await this.api.get("topics/settings");
+      this.settingsData = await this.api.get("settings", { view: "topic" });
       this.renderSettings();
       document.getElementById("topic-settings-close")?.focus();
     } catch (e) {
@@ -520,7 +601,8 @@ export class TopicPage {
       });
       const save = document.getElementById("topic-settings-save");
       save.disabled = true;
-      const result = await this.api.post("topics/settings/update", {
+      const result = await this.api.post("settings/update", {
+        view: "topic",
         changes,
         reset_keys: Array.from(this.settingsResetKeys),
         reset_all: this.settingsResetAll,

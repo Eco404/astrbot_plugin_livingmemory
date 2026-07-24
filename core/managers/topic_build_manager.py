@@ -1648,6 +1648,13 @@ class TopicBuildManager:
                         for fragment in formal_fragments
                     }.values()
                 )
+                actor_links, atom_actor_links = (
+                    self._normalize_published_actor_provenance(
+                        actor_links,
+                        atom_actor_links,
+                        formal_fragments,
+                    )
+                )
                 topic.metadata["fragment_uids"] = [
                     item.fragment_uid for item in formal_fragments
                 ]
@@ -5143,6 +5150,98 @@ class TopicBuildManager:
             actor_links
         )
         return topic, atoms, links, sources, actor_links, atom_actor_links
+
+    @staticmethod
+    def _normalize_published_actor_provenance(
+        actor_links: list[TopicActorLink],
+        atom_actor_links: list[TopicAtomActorLink],
+        formal_fragments: list[TopicFragmentDraft],
+    ) -> tuple[list[TopicActorLink], list[TopicAtomActorLink]]:
+        """Replace transient incremental projection IDs with formal fragments."""
+        fragments_by_uid = {
+            fragment.fragment_uid: fragment for fragment in formal_fragments
+        }
+        timeline_to_fragments: dict[str, list[str]] = {}
+        for fragment in formal_fragments:
+            for timeline_uid in fragment.timeline_uids:
+                timeline_to_fragments.setdefault(str(timeline_uid), []).append(
+                    fragment.fragment_uid
+                )
+
+        normalized_actor_links: list[TopicActorLink] = []
+        for link in actor_links:
+            metadata = dict(link.metadata or {})
+            referenced = [
+                str(value)
+                for value in metadata.get("fragment_uids", [])
+                if str(value)
+            ]
+            invalid = [uid for uid in referenced if uid not in fragments_by_uid]
+            if invalid:
+                replacements = {
+                    fragment_uid
+                    for timeline_uid in metadata.get("timeline_uids", [])
+                    for fragment_uid in timeline_to_fragments.get(str(timeline_uid), [])
+                }
+                metadata["fragment_uids"] = sorted(
+                    {uid for uid in referenced if uid in fragments_by_uid}
+                    | replacements
+                )
+                metadata["provenance_fragment_remapped_from"] = sorted(set(invalid))
+            normalized_actor_links.append(
+                TopicActorLink(
+                    topic_uid=link.topic_uid,
+                    actor_id=link.actor_id,
+                    actor_type=link.actor_type,
+                    relation_type=link.relation_type,
+                    display_name_snapshot=link.display_name_snapshot,
+                    confidence=link.confidence,
+                    resolution_status=link.resolution_status,
+                    created_at=link.created_at,
+                    updated_at=link.updated_at,
+                    metadata=metadata,
+                )
+            )
+
+        normalized_atom_links: list[TopicAtomActorLink] = []
+        seen: set[tuple[str, str, str, str, str]] = set()
+        for link in atom_actor_links:
+            target_uids = [link.fragment_uid]
+            if link.fragment_uid not in fragments_by_uid:
+                target_uids = list(
+                    timeline_to_fragments.get(str(link.timeline_uid or ""), [])
+                )
+                if not target_uids:
+                    raise ValueError(
+                        "Topic 人物事实来源无法映射到正式片段："
+                        f"{link.fragment_uid} / {link.timeline_uid or '--'}"
+                    )
+            for fragment_uid in target_uids:
+                key = (
+                    link.topic_atom_uid,
+                    link.actor_id,
+                    link.relation_type,
+                    fragment_uid,
+                    str(link.timeline_uid or ""),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                metadata = dict(link.metadata or {})
+                if fragment_uid != link.fragment_uid:
+                    metadata["provenance_fragment_remapped_from"] = link.fragment_uid
+                normalized_atom_links.append(
+                    TopicAtomActorLink(
+                        topic_atom_uid=link.topic_atom_uid,
+                        actor_id=link.actor_id,
+                        relation_type=link.relation_type,
+                        fragment_uid=fragment_uid,
+                        timeline_uid=link.timeline_uid,
+                        confidence=link.confidence,
+                        metadata=metadata,
+                    )
+                )
+        return normalized_actor_links, normalized_atom_links
 
     def _fallback_fragments(
         self,

@@ -20,6 +20,7 @@ from .page_api_modules import (
     PageApiUtils,
     RecallHandler,
     SessionHandler,
+    SettingsHandler,
     StatsHandler,
     TopicHandler,
     TimelineHandler,
@@ -44,6 +45,7 @@ class PluginPageApi:
         self.model_handler = ModelHandler(self.utils)
         self.recall_handler = RecallHandler(self.utils)
         self.session_handler = SessionHandler(self.utils)
+        self.settings_handler = SettingsHandler(self.utils)
         self.graph_handler = GraphHandler(self.utils)
         self.identity_handler = IdentityHandler(self.utils)
         self.topic_handler = TopicHandler(self.utils)
@@ -108,6 +110,18 @@ class PluginPageApi:
             "LivingMemory Page session maintenance tasks",
         )
         register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/tasks/delete",
+            self.delete_session_maintenance_task,
+            ["POST"],
+            "LivingMemory Page delete session maintenance task",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/tasks/clear",
+            self.clear_session_maintenance_tasks,
+            ["POST"],
+            "LivingMemory Page clear finished session maintenance tasks",
+        )
+        register(
             f"{PAGE_API_PREFIX}/memories",
             self.list_memories,
             ["GET"],
@@ -168,10 +182,52 @@ class PluginPageApi:
             "LivingMemory Page update Timeline settings",
         )
         register(
+            f"{PAGE_API_PREFIX}/settings",
+            self.get_settings,
+            ["GET"],
+            "LivingMemory Page unified settings",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/settings/update",
+            self.update_settings,
+            ["POST"],
+            "LivingMemory Page update unified settings",
+        )
+        register(
             f"{PAGE_API_PREFIX}/recall/test",
             self.test_recall,
             ["POST"],
             "LivingMemory Page recall test",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/recall/traces",
+            self.list_recall_traces,
+            ["GET"],
+            "LivingMemory Page recall trace list",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/recall/traces/detail",
+            self.get_recall_trace,
+            ["GET"],
+            "LivingMemory Page recall trace detail",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/recall/traces/settings",
+            self.update_recall_trace_settings,
+            ["POST"],
+            "LivingMemory Page recall trace settings",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/recall/traces/delete",
+            self.delete_recall_trace,
+            ["POST"],
+            "LivingMemory Page delete recall trace",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/recall/traces/clear",
+            self.clear_recall_traces,
+            ["POST"],
+            "LivingMemory Page clear recall traces",
         )
         register(
             f"{PAGE_API_PREFIX}/graph/overview",
@@ -395,6 +451,22 @@ class PluginPageApi:
             ready["session_maintenance_manager"]
         )
 
+    async def delete_session_maintenance_task(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.delete_maintenance_task(
+            ready["session_maintenance_manager"]
+        )
+
+    async def clear_session_maintenance_tasks(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.clear_maintenance_tasks(
+            ready["session_maintenance_manager"]
+        )
+
     async def list_memories(self):
         """获取记忆列表（带分页和过滤）"""
         ready, error = await self._ensure_plugin_ready()
@@ -469,6 +541,22 @@ class PluginPageApi:
             return error
         return await self.timeline_handler.update_settings(self.plugin.initializer)
 
+    async def get_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.settings_handler.get_settings(
+            ready["memory_engine"], self.plugin.initializer
+        )
+
+    async def update_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.settings_handler.update_settings(
+            ready["memory_engine"], self.plugin.initializer
+        )
+
     async def test_recall(self):
         """测试记忆召回功能"""
         ready, error = await self._ensure_plugin_ready()
@@ -478,7 +566,40 @@ class PluginPageApi:
             ready["memory_engine"],
             getattr(self.plugin.initializer, "config_manager", None),
             ready.get("conversation_manager"),
+            ready.get("recall_trace_store"),
         )
+
+    async def list_recall_traces(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.recall_handler.list_traces(ready.get("recall_trace_store"))
+
+    async def get_recall_trace(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.recall_handler.get_trace(ready.get("recall_trace_store"))
+
+    async def update_recall_trace_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.recall_handler.update_trace_settings(
+            ready.get("recall_trace_store")
+        )
+
+    async def delete_recall_trace(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.recall_handler.delete_trace(ready.get("recall_trace_store"))
+
+    async def clear_recall_traces(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.recall_handler.clear_traces(ready.get("recall_trace_store"))
 
     async def get_graph_overview(self):
         """获取图谱概览"""
@@ -720,5 +841,8 @@ class PluginPageApi:
             ),
             "session_maintenance_manager": getattr(
                 self.plugin.initializer, "session_maintenance_manager", None
+            ),
+            "recall_trace_store": getattr(
+                self.plugin.initializer, "recall_trace_store", None
             ),
         }, None

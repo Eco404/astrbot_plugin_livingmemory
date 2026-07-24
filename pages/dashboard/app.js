@@ -5,6 +5,7 @@
 
 import {
   ApiClient,
+  ConfirmDialog,
   IdentityPage,
   PeekPanel,
   MemoryPage,
@@ -54,17 +55,18 @@ import {
      Initialize Modules
      ================================================================ */
   const api = new ApiClient();
+  const confirmDialog = new ConfirmDialog();
   const peekPanel = new PeekPanel(state, api);
   const memoryPage = new MemoryPage(state, api, peekPanel);
   const identityPage = new IdentityPage(api, showToast);
   const modelPage = new ModelPage(api, showToast);
-  const recallPage = new RecallPage(state, api, peekPanel);
   const systemPage = new SystemPage(state, api);
   const sessionPicker = new SessionPicker(api, showToast);
   const topicPage = new TopicPage(api, showToast);
+  const recallPage = new RecallPage(state, api, topicPage, confirmDialog, showToast);
   const timelinePage = new TimelinePage(api, showToast);
   const settingsPage = new SettingsPage(api, showToast);
-  const maintenancePage = new MaintenancePage(topicPage, recallPage, modelPage, showToast);
+  const maintenancePage = new MaintenancePage(topicPage, recallPage, modelPage, showToast, confirmDialog);
 
   /* ================================================================
      Theme Management
@@ -233,6 +235,7 @@ import {
       systemPage.render(state._systemCache.data);
     }
     if (state.page === "topic") topicPage.fetch();
+    if (state.page === "settings" && settingsPage.data) settingsPage.render();
     if (state.page === "maintenance") modelPage.render();
     if (state.page === "identities") identityPage.render();
 
@@ -292,6 +295,7 @@ import {
     applyTheme(initialTheme);
 
     initSidebar();
+    confirmDialog.initEventListeners();
 
     memoryPage.initEventListeners();
     recallPage.initEventListeners();

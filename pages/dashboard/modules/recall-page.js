@@ -6,12 +6,15 @@
 import { esc, statusPill, normalizeImportance } from "./utils.js";
 
 export class RecallPage {
-  constructor(state, apiClient, peekPanel) {
+  constructor(state, apiClient, readonlyViewer, confirmDialog, showToast) {
     this.state = state;
     this.api = apiClient;
-    this.peek = peekPanel;
+    this.viewer = readonlyViewer;
+    this.confirmDialog = confirmDialog;
+    this.notify = showToast;
     this.sessionsLoaded = false;
     this.sessionsLoading = null;
+    this.currentExport = null;
   }
 
   async fetchSessions(force = false) {
@@ -62,6 +65,10 @@ export class RecallPage {
         }
       });
     }
+    document.getElementById("recall-export-current")?.addEventListener("click", () => this.exportJson(this.currentExport));
+    document.getElementById("recall-history-refresh")?.addEventListener("click", () => this.loadHistory());
+    document.getElementById("recall-history-clear")?.addEventListener("click", () => this.clearHistory());
+    document.getElementById("recall-history-list")?.addEventListener("click", event => this.handleHistoryClick(event));
   }
 
   /**
@@ -91,13 +98,18 @@ export class RecallPage {
       const elapsed = Date.now() - startTime;
 
       this.state._recallCache = { data, elapsed };
+      this.currentExport = data;
+      document.getElementById("recall-export-current")?.classList.remove("hidden");
       this.renderResults(data, elapsed);
+      await this.loadHistory();
     } catch (e) {
       this.showToast(e.message || window.t("recall.fail"), true);
       document.getElementById("recall-results").innerHTML = "";
       document.getElementById("recall-stats").classList.add("hidden");
       document.getElementById("recall-diagnostics")?.classList.add("hidden");
       this.state._recallCache = null;
+      this.currentExport = null;
+      document.getElementById("recall-export-current")?.classList.add("hidden");
     } finally {
       if (searchBtn) searchBtn.disabled = false;
     }
@@ -185,25 +197,131 @@ export class RecallPage {
 
     // 绑定点击事件
     resultsEl.querySelectorAll(".recall-result-item").forEach(item => {
-      item.addEventListener("click", () => {
+      item.addEventListener("click", async () => {
         const memoryId = item.dataset.memoryId;
         const memory = memories.find(m => String(m.memory_id || m.id) === memoryId);
         if (memory) {
-          this.peek.renderMemory({
-            memory_id: memory.memory_id || memory.id,
-            summary: memory.content || memory.text || memory.summary,
-            content: memory.content || memory.text,
-            memory_type: memory.metadata?.memory_type,
-            importance: memory.metadata?.importance,
-            status: memory.metadata?.status,
-            created_at: memory.metadata?.create_time
-              ? new Date(memory.metadata.create_time * 1000).toLocaleString()
-              : "--",
-            raw: memory
-          });
+          await this.openReadonlyResult(memory, item);
         }
       });
     });
+  }
+
+  async openReadonlyResult(memory, trigger) {
+    const layer = memory.metadata?.memory_layer || "timeline";
+    let content = memory.content || memory.text || memory.summary || "";
+    const identifiers = [String(memory.memory_id || memory.id || "")];
+    if ((layer === "timeline" || layer === "timeline_supplement") && /^\d+$/.test(identifiers[0])) {
+      try {
+        const detail = await this.api.get("memories/detail", { memory_id: identifiers[0] });
+        content = detail.content || detail.text || detail.summary || content;
+        if (detail.session_id || detail.metadata?.session_id) identifiers.push(String(detail.session_id || detail.metadata.session_id));
+      } catch (error) {
+        console.warn("[LM] Failed to load read-only Timeline detail:", error);
+      }
+    }
+    this.viewer?.showReadonlyRecord({
+      title: layer === "topic" ? "Topic 记忆" : layer === "topic_fragment" ? "Topic 正式片段" : "Timeline 记忆",
+      content,
+      contentLabel: "只读内容",
+      identifiers,
+      metadata: [
+        { label: "层", value: layer },
+        { label: "得分", value: String(memory.similarity_score ?? "--") },
+      ],
+    }, trigger);
+  }
+
+  async loadHistory() {
+    const target = document.getElementById("recall-history-list");
+    if (!target) return;
+    try {
+      const data = await this.api.get("recall/traces", { type: "test", limit: 50 });
+      const items = data.items || [];
+      target.innerHTML = items.length ? items.map(item => `
+        <div class="recall-history-row" data-trace-uid="${esc(item.trace_uid)}">
+          <button type="button" class="recall-history-open" data-history-open="${esc(item.trace_uid)}">
+            <span><strong>${esc(item.query_text || "--")}</strong><small>${esc(item.mode)} · ${Number(item.result_count || 0)} 条 · ${new Date(Number(item.created_at || 0) * 1000).toLocaleString()}</small></span>
+            <span class="status-badge status-${esc(item.status)}">${esc(item.status)}</span>
+          </button>
+          <button class="btn btn-secondary btn-sm" type="button" data-history-export="${esc(item.trace_uid)}">导出</button>
+          <button class="btn btn-danger btn-sm" type="button" data-history-delete="${esc(item.trace_uid)}">删除</button>
+        </div>`).join("") : `<span class="text-tertiary">暂无测试历史</span>`;
+    } catch (error) {
+      target.innerHTML = `<span class="text-tertiary">${esc(error.message || "加载失败")}</span>`;
+    }
+  }
+
+  async handleHistoryClick(event) {
+    const open = event.target.closest("[data-history-open]");
+    const exportButton = event.target.closest("[data-history-export]");
+    const deleteButton = event.target.closest("[data-history-delete]");
+    const uid = open?.dataset.historyOpen || exportButton?.dataset.historyExport || deleteButton?.dataset.historyDelete;
+    if (!uid) return;
+    if (deleteButton) {
+      if (deleteButton.disabled) return;
+      deleteButton.disabled = true;
+      try {
+        await this.api.post("recall/traces/delete", { trace_uid: uid, type: "test" });
+        await this.loadHistory();
+        this.showToast(window.t("recall.historyDeleted"));
+      } catch (error) {
+        this.showToast(error.message || window.t("recall.historyDeleteFailed"), true);
+        deleteButton.disabled = false;
+      }
+      return;
+    }
+    try {
+      const record = await this.api.get("recall/traces/detail", { trace_uid: uid });
+      const payload = record.result || {};
+      if (exportButton) {
+        await this.exportJson(record);
+        return;
+      }
+      this.currentExport = record;
+      document.getElementById("recall-export-current")?.classList.remove("hidden");
+      this.renderResults(payload, Number(record.elapsed_ms || 0));
+    } catch (error) {
+      this.showToast(error.message || window.t("recall.historyLoadFailed"), true);
+    }
+  }
+
+  async clearHistory() {
+    const confirmed = await this.confirmDialog.show({
+      title: window.t("recall.clearHistoryTitle"),
+      message: window.t("recall.clearHistoryMessage"),
+      confirmLabel: window.t("common.clear"),
+    });
+    if (!confirmed) return;
+    const button = document.getElementById("recall-history-clear");
+    button.disabled = true;
+    try {
+      await this.api.post("recall/traces/clear", { type: "test" });
+      await this.loadHistory();
+      this.showToast(window.t("recall.historyCleared"));
+    } catch (error) {
+      this.showToast(error.message || window.t("recall.historyClearFailed"), true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async exportJson(value) {
+    if (!value) return;
+    const text = JSON.stringify(value, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (_) {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+    this.showToast("JSON 已复制到剪贴板");
   }
 
   renderDiagnostics(diagnostics) {
@@ -335,8 +453,7 @@ export class RecallPage {
    * @param {boolean} isError - 是否为错误
    */
   showToast(message, isError = false) {
-    if (window.lmShowToast) {
-      window.lmShowToast(message, isError);
-    }
+    if (this.notify) this.notify(message, isError);
+    else if (window.lmShowToast) window.lmShowToast(message, isError);
   }
 }

@@ -248,5 +248,27 @@ class SessionHandler:
             return self.utils.error("limit 无效")
         return self.utils.ok({"items": await manager.list_tasks(limit=limit)})
 
+    async def delete_maintenance_task(
+        self, manager: "SessionMaintenanceManager | None"
+    ) -> dict[str, Any]:
+        if manager is None:
+            return self.utils.error("会话维护组件尚未初始化")
+        payload = await request.get_json(silent=True) or {}
+        task_uid = self.utils.optional_text(payload.get("task_uid"))
+        if not task_uid:
+            return self.utils.error("缺少 task_uid")
+        try:
+            deleted = await manager.delete_task(task_uid)
+            return self.utils.ok({"deleted": deleted, "task_uid": task_uid})
+        except ValueError as exc:
+            return self.utils.error(str(exc))
+
+    async def clear_maintenance_tasks(
+        self, manager: "SessionMaintenanceManager | None"
+    ) -> dict[str, Any]:
+        if manager is None:
+            return self.utils.error("会话维护组件尚未初始化")
+        return self.utils.ok({"deleted_count": await manager.clear_finished_tasks()})
+
 
 __all__ = ["SessionHandler"]

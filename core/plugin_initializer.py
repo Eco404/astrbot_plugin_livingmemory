@@ -24,6 +24,7 @@ except ImportError:  # AstrBot versions without the optional rerank interface
 
 from ..storage.conversation_store import ConversationStore
 from ..storage.db_migration import DBMigration
+from ..storage.recall_trace_store import RecallTraceStore
 from ..storage.topic_memory_store import TopicMemoryStore
 from .base.config_manager import ConfigManager
 from .base.exceptions import InitializationError, ProviderNotReadyError
@@ -130,6 +131,7 @@ class PluginInitializer:
         self.timeline_summary_service: TimelineSummaryService | None = None
         self.idle_summary_scheduler: IdleSummaryScheduler | None = None
         self.session_maintenance_manager: SessionMaintenanceManager | None = None
+        self.recall_trace_store: RecallTraceStore | None = None
 
         # 初始化状态
         self._initialization_complete = False
@@ -769,6 +771,9 @@ class PluginInitializer:
                 topic_provider_resolver=self.resolve_topic_providers,
             )
             await self.memory_engine.initialize()
+            self.recall_trace_store = RecallTraceStore(str(db_path))
+            await self.recall_trace_store.initialize()
+            self.memory_engine.recall_trace_store = self.recall_trace_store
             logger.info("MemoryEngine 已初始化")
 
             # 初始化 ConversationManager

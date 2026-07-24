@@ -17,6 +17,9 @@ def memory_engine():
     engine = Mock()
     engine.search_memories = AsyncMock(return_value=[])
     engine.add_memory = AsyncMock(return_value=1)
+    engine.resolve_session_scope = AsyncMock(side_effect=lambda session_id: [session_id])
+    engine.record_memory_access = Mock()
+    engine.recall_trace_store = None
     return engine
 
 
@@ -996,13 +999,14 @@ async def test_topic_access_is_recorded_only_after_successful_injection(
 
     topic_pipeline = Mock()
     topic_pipeline.config = {"recall_top_k": 1, "timeline_supplement_k": 0}
-    topic_pipeline.search = AsyncMock(return_value=topic_outcome)
+    topic_pipeline.search_spaces = AsyncMock(return_value=topic_outcome)
     topic_pipeline.search_fragment_supplements = AsyncMock(
         return_value=fragment_outcome
     )
     topic_pipeline.record_topic_access = AsyncMock(
         side_effect=record_after_injection
     )
+    topic_pipeline.source_timeline_document_ids = AsyncMock(return_value=[77])
     memory_engine.topic_memory_enabled = True
     memory_engine.topic_recall_pipeline = topic_pipeline
     memory_engine.search_memories = AsyncMock(return_value=[])
@@ -1015,6 +1019,10 @@ async def test_topic_access_is_recorded_only_after_successful_injection(
         await handler.handle_memory_recall(event, req)
 
     topic_pipeline.record_topic_access.assert_awaited_once_with([topic_result])
+    topic_pipeline.source_timeline_document_ids.assert_awaited_once_with(
+        [topic_result], []
+    )
+    memory_engine.record_memory_access.assert_called_once_with([77])
 
 
 @pytest.mark.asyncio
