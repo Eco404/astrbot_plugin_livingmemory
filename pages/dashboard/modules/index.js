@@ -3,6 +3,7 @@
  */
 
 export { ApiClient } from "./api-client.js";
+export { ConfirmDialog } from "./confirm-dialog.js";
 export { PeekPanel } from "./peek-panel.js";
 export { MemoryPage } from "./memory-page.js";
 export { ModelPage } from "./model-page.js";

@@ -38,7 +38,7 @@ export class TimelinePage {
     document.getElementById("timeline-settings-status").textContent = window.t("common.loading");
     document.getElementById("timeline-settings-content").innerHTML = "";
     try {
-      this.data = await this.api.get("timeline/settings");
+      this.data = await this.api.get("settings", { view: "timeline" });
       this.render();
       document.getElementById("timeline-settings-close")?.focus();
     } catch (error) {
@@ -126,7 +126,7 @@ export class TimelinePage {
         else changes[key] = value;
       });
       document.getElementById("timeline-settings-save").disabled = true;
-      await this.api.post("timeline/settings/update", { changes, reset_keys: Array.from(this.resetKeys), reset_all: this.resetAll });
+      await this.api.post("settings/update", { view: "timeline", changes, reset_keys: Array.from(this.resetKeys), reset_all: this.resetAll });
       this.close();
       this.showToast(window.t("timeline.settingsSaved"));
     } catch (error) {

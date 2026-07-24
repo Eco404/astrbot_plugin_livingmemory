@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.14"
+    CURRENT_VERSION = "9.15"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -51,6 +51,7 @@ class DBMigration:
         "9.12": "Unified runtime settings and resumable idle Timeline summaries",
         "9.13": "Topic review decisions and identity governance",
         "9.14": "Session audit, raw-message maintenance, and canonical aliases",
+        "9.15": "Recall audit history and source Timeline access reinforcement",
     }
 
     def __init__(self, db_path: str):
@@ -353,6 +354,8 @@ class DBMigration:
                     migration_steps.append(self._migrate_v9_12_to_v9_13)
                 if current_key <= self.version_key("9.13"):
                     migration_steps.append(self._migrate_v9_13_to_v9_14)
+                if current_key <= self.version_key("9.14"):
+                    migration_steps.append(self._migrate_v9_14_to_v9_15)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1432,6 +1435,22 @@ class DBMigration:
         if progress_callback:
             progress_callback("创建会话审计与可恢复维护任务", 1, 1)
         logger.info("v9.13 -> v9.14 迁移完成")
+
+    async def _migrate_v9_14_to_v9_15(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Add bounded production/test recall audit storage."""
+        from .recall_trace_store import RecallTraceStore
+
+        logger.info("执行迁移步骤: v9.14 -> v9.15 (recall trace history)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await RecallTraceStore.create_schema(db)
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建召回记录与测试历史", 1, 1)
+        logger.info("v9.14 -> v9.15 迁移完成")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

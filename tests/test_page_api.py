@@ -150,6 +150,7 @@ def _patch_page_request(req: MagicMock):
     import astrbot_plugin_livingmemory.core.page_api_modules.memory_handler as memory_mod
     import astrbot_plugin_livingmemory.core.page_api_modules.recall_handler as recall_mod
     import astrbot_plugin_livingmemory.core.page_api_modules.session_handler as session_mod
+    import astrbot_plugin_livingmemory.core.page_api_modules.settings_handler as settings_mod
     import astrbot_plugin_livingmemory.core.page_api_modules.timeline_handler as timeline_mod
     import astrbot_plugin_livingmemory.core.page_api_modules.topic_handler as topic_mod
 
@@ -160,6 +161,7 @@ def _patch_page_request(req: MagicMock):
         recall_mod,
         graph_mod,
         session_mod,
+        settings_mod,
         timeline_mod,
         topic_mod,
     ]
@@ -1566,6 +1568,28 @@ class TestTestRecall:
         assert result["data"]["total"] == 0
 
     @pytest.mark.asyncio
+    async def test_completed_recall_is_saved_to_test_history(self, api):
+        trace_store = SimpleNamespace(
+            record=AsyncMock(return_value="trace-test-1")
+        )
+        api.plugin.initializer.recall_trace_store = trace_store
+        req = _mock_page_request(
+            get_json={"query": "六月工资", "k": 3, "mode": "timeline"}
+        )
+
+        with _patch_page_request(req):
+            result = await api.test_recall()
+
+        assert result["status"] == "ok"
+        assert result["data"]["trace_uid"] == "trace-test-1"
+        saved = trace_store.record.await_args.kwargs
+        assert saved["trace_type"] == "test"
+        assert saved["status"] == "completed"
+        assert saved["query_text"] == "六月工资"
+        assert saved["request_data"]["mode"] == "timeline"
+        assert saved["result_data"]["diagnostics"]["mode"] == "timeline"
+
+    @pytest.mark.asyncio
     async def test_timeline_mode_ignores_disabled_production_top_k(self, api):
         engine = api.plugin.initializer.memory_engine
         engine.search_memories = AsyncMock(return_value=[])
@@ -1708,6 +1732,84 @@ class TestSharedTopicQuerySettings:
 
         with _patch_page_request(req):
             result = await api.update_topic_settings()
+
+        assert result["status"] == "ok"
+        engine.update_topic_runtime_settings.assert_awaited_once_with(
+            {"recall_top_k": 4}, reset_keys=[], reset_all=False
+        )
+        initializer.update_timeline_runtime_settings.assert_awaited_once_with(
+            {"recall_engine.recent_user_weight": 0.25},
+            reset_keys=["recall_engine.assistant_context_mode"],
+            reset_all=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_unified_settings_are_classified_by_backend(self, api):
+        from astrbot_plugin_livingmemory.core.topic_settings import (
+            TOPIC_SETTING_DEFINITIONS,
+            effective_topic_settings,
+        )
+
+        engine = api.plugin.initializer.memory_engine
+        engine.get_topic_runtime_settings = AsyncMock(
+            return_value={
+                "definitions": TOPIC_SETTING_DEFINITIONS,
+                "overrides": {},
+                "effective": effective_topic_settings({}),
+            }
+        )
+        engine.topic_build_manager = SimpleNamespace(has_active_builds=lambda: False)
+        api.plugin.initializer.get_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+        req = _mock_page_request(args={})
+
+        with _patch_page_request(req):
+            result = await api.get_settings()
+
+        assert result["status"] == "ok"
+        data = result["data"]
+        assert data["schema_revision"] == 1
+        assert data["definitions"]["recall_top_k"]["settings_category"] == "recall"
+        assert data["definitions"]["related_topic_top_n"]["settings_group"] == "topic_relations"
+        assert data["definitions"]["recall_engine.recent_user_weight"]["views"] == ["timeline", "topic"]
+        assert {item["id"] for item in data["categories"]} >= {"recall", "timeline", "topic"}
+
+    @pytest.mark.asyncio
+    async def test_unified_settings_update_splits_internal_owners(self, api):
+        from astrbot_plugin_livingmemory.core.topic_settings import (
+            TOPIC_SETTING_DEFINITIONS,
+            effective_topic_settings,
+        )
+
+        engine = api.plugin.initializer.memory_engine
+        topic_payload = {
+            "definitions": TOPIC_SETTING_DEFINITIONS,
+            "overrides": {},
+            "effective": effective_topic_settings({}),
+        }
+        engine.get_topic_runtime_settings = AsyncMock(return_value=topic_payload)
+        engine.update_topic_runtime_settings = AsyncMock(return_value=topic_payload)
+        engine.topic_build_manager = SimpleNamespace(has_active_builds=lambda: False)
+        initializer = api.plugin.initializer
+        initializer.get_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+        initializer.update_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+        req = _mock_page_request(
+            get_json={
+                "changes": {
+                    "recall_top_k": 4,
+                    "recall_engine.recent_user_weight": 0.25,
+                },
+                "reset_keys": ["recall_engine.assistant_context_mode"],
+            }
+        )
+
+        with _patch_page_request(req):
+            result = await api.update_settings()
 
         assert result["status"] == "ok"
         engine.update_topic_runtime_settings.assert_awaited_once_with(
@@ -1944,7 +2046,7 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 45
+        assert len(plugin._api_routes) == 54
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
@@ -1955,6 +2057,8 @@ class TestRouteRegistration:
         assert f"{prefix}/sessions/maintenance/start" in paths
         assert f"{prefix}/sessions/maintenance/task" in paths
         assert f"{prefix}/sessions/maintenance/tasks" in paths
+        assert f"{prefix}/sessions/maintenance/tasks/delete" in paths
+        assert f"{prefix}/sessions/maintenance/tasks/clear" in paths
         assert f"{prefix}/memories" in paths
         assert f"{prefix}/memories/update" in paths
         assert f"{prefix}/memories/related" in paths
@@ -1963,7 +2067,14 @@ class TestRouteRegistration:
         assert f"{prefix}/memories/batch-delete" in paths
         assert f"{prefix}/timeline/settings" in paths
         assert f"{prefix}/timeline/settings/update" in paths
+        assert f"{prefix}/settings" in paths
+        assert f"{prefix}/settings/update" in paths
         assert f"{prefix}/recall/test" in paths
+        assert f"{prefix}/recall/traces" in paths
+        assert f"{prefix}/recall/traces/detail" in paths
+        assert f"{prefix}/recall/traces/settings" in paths
+        assert f"{prefix}/recall/traces/delete" in paths
+        assert f"{prefix}/recall/traces/clear" in paths
         assert f"{prefix}/graph/overview" in paths
         assert f"{prefix}/graph/query" in paths
         assert f"{prefix}/backups" in paths

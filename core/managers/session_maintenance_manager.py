@@ -467,6 +467,52 @@ class SessionMaintenanceManager:
             result.append(item)
         return result
 
+    async def delete_task(self, task_uid: str) -> bool:
+        """Delete one finished journal entry; running work is never removed."""
+        async with self._write_lock, aiosqlite.connect(self.db_path) as db:
+            row = await (
+                await db.execute(
+                    "SELECT status FROM session_maintenance_tasks WHERE task_uid = ?",
+                    (task_uid,),
+                )
+            ).fetchone()
+            if not row:
+                return False
+            if str(row[0]) not in {"completed", "failed", "cancelled"}:
+                raise ValueError("只能删除已完成、失败或已取消的维护任务")
+            await db.execute(
+                "DELETE FROM session_maintenance_events WHERE task_uid = ?",
+                (task_uid,),
+            )
+            cursor = await db.execute(
+                "DELETE FROM session_maintenance_tasks WHERE task_uid = ?",
+                (task_uid,),
+            )
+            await db.commit()
+        return bool(cursor.rowcount)
+
+    async def clear_finished_tasks(self) -> int:
+        """Clear terminal task history while preserving resumable/running tasks."""
+        terminal = ("completed", "failed", "cancelled")
+        async with self._write_lock, aiosqlite.connect(self.db_path) as db:
+            placeholders = ",".join("?" for _ in terminal)
+            await db.execute(
+                f"""
+                DELETE FROM session_maintenance_events
+                WHERE task_uid IN (
+                    SELECT task_uid FROM session_maintenance_tasks
+                    WHERE status IN ({placeholders})
+                )
+                """,
+                terminal,
+            )
+            cursor = await db.execute(
+                f"DELETE FROM session_maintenance_tasks WHERE status IN ({placeholders})",
+                terminal,
+            )
+            await db.commit()
+        return max(0, int(cursor.rowcount or 0))
+
     async def _checkpoint(
         self,
         task_uid: str,

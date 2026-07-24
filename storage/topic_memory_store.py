@@ -820,7 +820,13 @@ class TopicMemoryStore:
         self._validate_snapshot_members(topic.topic_uid, atoms, links, atom_sources)
         actor_links = list(actor_links or [])
         atom_actor_links = list(atom_actor_links or [])
-        self._validate_actor_links(topic.topic_uid, atoms, actor_links, atom_actor_links)
+        self._validate_actor_links(
+            topic.topic_uid,
+            atoms,
+            actor_links,
+            atom_actor_links,
+            fragments=fragments,
+        )
         async with self._connect() as db:
             try:
                 await db.execute("BEGIN IMMEDIATE")
@@ -877,7 +883,11 @@ class TopicMemoryStore:
                 topic.topic_uid, atoms, links, atom_sources
             )
             self._validate_actor_links(
-                topic.topic_uid, atoms, actor_links, atom_actor_links
+                topic.topic_uid,
+                atoms,
+                actor_links,
+                atom_actor_links,
+                fragments=list(snapshot.get("fragments") or []),
             )
             normalized_snapshots.append(
                 {
@@ -1267,14 +1277,21 @@ class TopicMemoryStore:
         if status is not None:
             where += " AND status = ?"
             params.append(self._enum_value(status))
-        normalized_actor_id = str(actor_id or "").strip()
-        if normalized_actor_id:
+        normalized_actor_ids = sorted(
+            {
+                value.strip()
+                for value in str(actor_id or "").split(",")
+                if value.strip()
+            }
+        )
+        if normalized_actor_ids:
+            actor_placeholders = ",".join("?" * len(normalized_actor_ids))
             where += (
                 " AND EXISTS (SELECT 1 FROM topic_actor_links actor "
                 "WHERE actor.topic_uid = topic_memories.topic_uid "
-                "AND actor.actor_id = ?)"
+                f"AND actor.actor_id IN ({actor_placeholders}))"
             )
-            params.append(normalized_actor_id)
+            params.extend(normalized_actor_ids)
         params.extend([max(1, min(int(limit), 1000)), max(0, int(offset))])
         async with self._connect() as db:
             cursor = await db.execute(
@@ -1292,36 +1309,88 @@ class TopicMemoryStore:
     async def list_topic_actors(
         self, memory_space_id: str
     ) -> list[dict[str, Any]]:
-        """Return a compact actor catalog for Topic filters and diagnostics."""
+        """Return stable actors and display-only groups of unresolved mentions."""
         async with self._connect() as db:
             rows = await (
                 await db.execute(
                     """
                     SELECT a.actor_id,
-                           MAX(COALESCE(NULLIF(a.display_name_snapshot, ''), a.actor_id))
+                           COALESCE(NULLIF(a.display_name_snapshot, ''), a.actor_id)
                                AS display_name,
-                           MAX(a.actor_type) AS actor_type,
-                           MAX(a.resolution_status) AS resolution_status,
-                           COUNT(DISTINCT a.topic_uid) AS topic_count
+                           a.actor_type,
+                           a.resolution_status,
+                           a.topic_uid
                     FROM topic_actor_links a
                     JOIN topic_memories t ON t.topic_uid = a.topic_uid
                     WHERE t.memory_space_id = ? AND t.status = 'active'
-                    GROUP BY a.actor_id
-                    ORDER BY display_name COLLATE NOCASE, a.actor_id
+                    ORDER BY display_name COLLATE NOCASE, a.actor_id, a.topic_uid
                     """,
                     (memory_space_id,),
                 )
             ).fetchall()
-        return [
-            {
-                "actor_id": str(row["actor_id"]),
-                "display_name": str(row["display_name"] or row["actor_id"]),
-                "actor_type": str(row["actor_type"] or "unknown"),
-                "resolution_status": str(row["resolution_status"] or "unresolved"),
-                "topic_count": int(row["topic_count"] or 0),
-            }
-            for row in rows
-        ]
+        actors: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            actor_id = str(row["actor_id"])
+            item = actors.setdefault(
+                actor_id,
+                {
+                    "actor_ids": [actor_id],
+                    "display_name": str(row["display_name"] or actor_id),
+                    "actor_type": str(row["actor_type"] or "unknown"),
+                    "resolution_status": str(
+                        row["resolution_status"] or "unresolved"
+                    ),
+                    "topic_uids": set(),
+                },
+            )
+            item["topic_uids"].add(str(row["topic_uid"]))
+
+        resolved: list[dict[str, Any]] = []
+        unresolved: dict[str, dict[str, Any]] = {}
+        for actor_id, item in actors.items():
+            is_unresolved = (
+                item["resolution_status"] == "unresolved"
+                or actor_id.startswith("unresolved:")
+            )
+            if not is_unresolved:
+                resolved.append(item)
+                continue
+            normalized_name = " ".join(item["display_name"].casefold().split())
+            group = unresolved.setdefault(
+                normalized_name,
+                {
+                    "actor_ids": [],
+                    "display_name": item["display_name"],
+                    "actor_type": item["actor_type"],
+                    "resolution_status": "unresolved",
+                    "topic_uids": set(),
+                },
+            )
+            group["actor_ids"].extend(item["actor_ids"])
+            group["topic_uids"].update(item["topic_uids"])
+
+        result = []
+        for kind, items in (("resolved", resolved), ("unresolved", unresolved.values())):
+            for item in items:
+                actor_ids = sorted(set(item.pop("actor_ids")))
+                topic_uids = set(item.pop("topic_uids"))
+                result.append(
+                    {
+                        **item,
+                        "actor_id": ",".join(actor_ids),
+                        "actor_ids": actor_ids,
+                        "topic_count": len(topic_uids),
+                        "catalog_group": kind,
+                    }
+                )
+        return sorted(
+            result,
+            key=lambda item: (
+                item["catalog_group"] != "resolved",
+                str(item["display_name"]).casefold(),
+                item["actor_id"],
+            ),
+        )
 
     async def get_topics_by_uids(
         self,
@@ -1485,6 +1554,7 @@ class TopicMemoryStore:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """List bounded-maintenance decisions that still need user attention."""
+        await self.cleanup_orphaned_maintenance_reviews(memory_space_id)
         where = ["memory_space_id = ?", "status = ?"]
         params: list[Any] = [memory_space_id, status]
         normalized = sorted(
@@ -1538,6 +1608,37 @@ class TopicMemoryStore:
             }
             for row in rows
         ]
+
+    async def cleanup_orphaned_maintenance_reviews(
+        self,
+        memory_space_id: str | None = None,
+    ) -> int:
+        """Remove pending reviews owned by build runs that were already discarded.
+
+        Older versions deleted the run checkpoint without deleting its pending
+        review rows. A review without ``details.run_uid`` is standalone and is
+        therefore intentionally preserved.
+        """
+        normalized_space = str(memory_space_id or "").strip()
+        where = [
+            "status = 'pending'",
+            "COALESCE(json_extract(details, '$.run_uid'), '') <> ''",
+            "NOT EXISTS ("
+            "SELECT 1 FROM topic_maintenance_runs run "
+            "WHERE run.run_uid = json_extract(topic_maintenance_queue.details, '$.run_uid')"
+            ")",
+        ]
+        params: list[Any] = []
+        if normalized_space:
+            where.append("memory_space_id = ?")
+            params.append(normalized_space)
+        async with self._connect() as db:
+            cursor = await db.execute(
+                f"DELETE FROM topic_maintenance_queue WHERE {' AND '.join(where)}",
+                params,
+            )
+            await db.commit()
+            return max(0, int(cursor.rowcount or 0))
 
     async def get_maintenance_review(
         self, review_uid: str
@@ -2161,6 +2262,29 @@ class TopicMemoryStore:
             )
             await db.commit()
             return int(cursor.rowcount or 0)
+
+    async def timeline_document_ids(self, timeline_uids: list[str]) -> list[int]:
+        """Resolve active Timeline logical IDs to their document IDs."""
+        normalized = list(
+            dict.fromkeys(str(uid).strip() for uid in timeline_uids if str(uid).strip())
+        )
+        if not normalized:
+            return []
+        placeholders = ",".join("?" * len(normalized))
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT memory_uid, document_id
+                    FROM memory_registry
+                    WHERE memory_uid IN ({placeholders})
+                      AND memory_layer = 'timeline' AND status = 'active'
+                    """,
+                    normalized,
+                )
+            ).fetchall()
+        by_uid = {str(row["memory_uid"]): int(row["document_id"]) for row in rows}
+        return [by_uid[uid] for uid in normalized if uid in by_uid]
 
     async def get_topics_for_timeline(self, timeline_uid: str) -> list[dict[str, Any]]:
         async with self._connect() as db:
@@ -3232,6 +3356,28 @@ class TopicMemoryStore:
                     ).fetchone()
                     deleted[table] = int(count_row[0] if count_row else 0)
 
+                review_count_row = await (
+                    await db.execute(
+                        """
+                        SELECT COUNT(*) FROM topic_maintenance_queue
+                        WHERE status = 'pending'
+                          AND json_extract(details, '$.run_uid') = ?
+                        """,
+                        (run_uid,),
+                    )
+                ).fetchone()
+                deleted["topic_maintenance_queue"] = int(
+                    review_count_row[0] if review_count_row else 0
+                )
+                await db.execute(
+                    """
+                    DELETE FROM topic_maintenance_queue
+                    WHERE status = 'pending'
+                      AND json_extract(details, '$.run_uid') = ?
+                    """,
+                    (run_uid,),
+                )
+
                 cursor = await db.execute(
                     """
                     DELETE FROM topic_maintenance_runs
@@ -3963,8 +4109,19 @@ class TopicMemoryStore:
         atoms: list[TopicMemoryAtom],
         actor_links: list[TopicActorLink],
         atom_actor_links: list[TopicAtomActorLink],
+        *,
+        fragments: list[TopicFragmentDraft] | None = None,
     ) -> None:
         atom_uids = {atom.atom_uid for atom in atoms}
+        fragment_uids = (
+            {fragment.fragment_uid for fragment in fragments}
+            if fragments is not None
+            else None
+        )
+        fragment_timelines = {
+            fragment.fragment_uid: set(fragment.timeline_uids)
+            for fragment in (fragments or [])
+        }
         actor_keys: set[tuple[str, str]] = set()
         allowed_relations = {
             "speaker", "narrator", "responder", "subject",
@@ -3992,6 +4149,19 @@ class TopicMemoryStore:
                 raise ValueError("Atom actor relation requires a matching Topic actor link")
             if not link.fragment_uid.strip():
                 raise ValueError("Topic atom actor link needs fragment provenance")
+            if fragment_uids is not None and link.fragment_uid not in fragment_uids:
+                raise ValueError(
+                    "Topic atom actor link references a fragment outside the snapshot"
+                )
+            if (
+                link.timeline_uid
+                and fragment_uids is not None
+                and link.timeline_uid
+                not in fragment_timelines.get(link.fragment_uid, set())
+            ):
+                raise ValueError(
+                    "Topic atom actor link Timeline is not owned by its fragment"
+                )
             key = (
                 link.topic_atom_uid,
                 link.actor_id,

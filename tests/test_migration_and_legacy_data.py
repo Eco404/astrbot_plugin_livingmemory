@@ -287,6 +287,33 @@ async def test_v9_14_migration_adds_session_maintenance_journal_idempotently(
     } <= indexes
 
 
+@pytest.mark.asyncio
+async def test_v9_15_migration_adds_recall_trace_tables_idempotently(tmp_path):
+    db_path = str(tmp_path / "v9.14-recall-traces.db")
+    migration = DBMigration(db_path)
+
+    await migration._migrate_v9_14_to_v9_15(None)
+    await migration._migrate_v9_14_to_v9_15(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+        enabled = await (
+            await db.execute(
+                "SELECT production_enabled FROM recall_trace_settings WHERE id = 1"
+            )
+        ).fetchone()
+
+    assert {"recall_trace_records", "recall_trace_settings"} <= tables
+    assert enabled == (0,)
+
+
 # ===========================================================================
 # 一、迁移正确性测试
 # ===========================================================================

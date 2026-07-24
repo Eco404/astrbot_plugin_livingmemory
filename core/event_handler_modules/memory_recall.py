@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import time
 from typing import TYPE_CHECKING
 
 from astrbot.api import logger
@@ -67,6 +68,7 @@ class MemoryRecall:
         self, event: AstrMessageEvent, req: ProviderRequest
     ):
         """Query and inject long-term memory before LLM request"""
+        trace_started = time.time()
         try:
             raw_session_id = event.unified_msg_origin
             session_scope = await self.memory_engine.resolve_session_scope(raw_session_id)
@@ -392,6 +394,7 @@ class MemoryRecall:
 
                     memory_str = format_memories_for_injection(memory_list)
                     injection_succeeded = False
+                    injected_messages = None
 
                     if injection_method == "user_message_before":
                         req.prompt = memory_str + "\n\n" + (req.prompt or "")
@@ -415,6 +418,7 @@ class MemoryRecall:
                         )
                         if fake_messages:
                             req.contexts.extend(fake_messages)
+                            injected_messages = fake_messages
                             injection_succeeded = True
                             logger.info(
                                 f"[{session_id}] 成功以伪造工具调用方式注入 "
@@ -437,22 +441,116 @@ class MemoryRecall:
                                 await self.memory_engine.topic_recall_pipeline.record_topic_access(
                                     topic_results
                                 )
-                            if recalled_memories:
-                                self.memory_engine.record_memory_access(
+                            source_document_ids = (
+                                await self.memory_engine.topic_recall_pipeline.source_timeline_document_ids(
+                                    topic_results,
+                                    fragment_results,
+                                )
+                                if topic_results or fragment_results
+                                else []
+                            )
+                            accessed_document_ids = list(
+                                dict.fromkeys(
                                     [item.doc_id for item in recalled_memories]
+                                    + source_document_ids
+                                )
+                            )
+                            if accessed_document_ids:
+                                self.memory_engine.record_memory_access(
+                                    accessed_document_ids
                                 )
                         except Exception:
                             logger.warning(
                                 f"[{session_id}] 记忆注入已成功，但访问统计更新失败",
                                 exc_info=True,
                             )
+                        await self._record_production_trace(
+                            status="injected",
+                            query_text=actual_query,
+                            session_id=session_id,
+                            persona_id=persona_id,
+                            elapsed_ms=(time.time() - trace_started) * 1000,
+                            request_data={
+                                "query_text": actual_query,
+                                "top_k": top_k,
+                                "session_filter": recall_session_id,
+                                "persona_filter": recall_persona_id,
+                                "query_branches": [
+                                    {
+                                        "name": item.name,
+                                        "role": item.role,
+                                        "weight": item.weight,
+                                        "text": item.text,
+                                    }
+                                    for item in recall_outcome.branches
+                                ],
+                            },
+                            result_data={"items": memory_list},
+                            diagnostics={
+                                "timeline": recall_outcome.diagnostics(),
+                                "topic": topic_outcome.diagnostics()
+                                if topic_outcome is not None
+                                else None,
+                                "topic_fragments": fragment_outcome.diagnostics()
+                                if fragment_outcome is not None
+                                else None,
+                            },
+                            injection={
+                                "configured_method": configured_method,
+                                "actual_method": injection_method,
+                                "fallback_reason": fallback_reason,
+                                "content": memory_str,
+                                "messages": injected_messages,
+                            },
+                        )
                 else:
                     logger.info(f"[{session_id}] 未找到相关记忆")
+                    await self._record_production_trace(
+                        status="no_match",
+                        query_text=actual_query,
+                        session_id=session_id,
+                        persona_id=persona_id,
+                        elapsed_ms=(time.time() - trace_started) * 1000,
+                        request_data={"query_text": actual_query, "top_k": top_k},
+                        diagnostics={
+                            "timeline": recall_outcome.diagnostics(),
+                            "topic": topic_outcome.diagnostics()
+                            if topic_outcome is not None
+                            else None,
+                        },
+                    )
 
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"处理 on_llm_request 钩子时发生错误: {e}", exc_info=True)
+            await self._record_production_trace(
+                status="failed",
+                query_text=str(locals().get("actual_query") or ""),
+                session_id=str(locals().get("session_id") or "") or None,
+                persona_id=str(locals().get("persona_id") or "") or None,
+                elapsed_ms=(time.time() - trace_started) * 1000,
+                error=str(e),
+            )
+
+    async def _record_production_trace(self, **payload) -> None:
+        """Best-effort diagnostics: recording must never affect a chat request."""
+        store = getattr(self.memory_engine, "recall_trace_store", None)
+        if store is None:
+            return
+        try:
+            if not await store.production_enabled():
+                return
+            result_data = payload.get("result_data") or {}
+            items = result_data.get("items", []) if isinstance(result_data, dict) else []
+            await store.record(
+                trace_type="production",
+                mode="current",
+                result_count=len(items) if isinstance(items, list) else 0,
+                **payload,
+            )
+        except Exception:
+            logger.warning("保存实际召回记录失败，已忽略", exc_info=True)
 
     @staticmethod
     async def _safe_topic_recall(search_coro, session_id: str):

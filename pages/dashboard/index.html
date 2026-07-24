@@ -225,10 +225,18 @@
             </div>
             <div id="topic-progress" class="system-panel hidden mb-4"></div>
             <div class="topic-list-toolbar">
-              <label for="topic-actor-filter" data-i18n="topic.actorFilter">按人物筛选</label>
-              <select id="topic-actor-filter" class="select input input-sm">
-                <option value="" data-i18n="topic.actorFilterAll">全部人物</option>
-              </select>
+              <div class="topic-list-filter">
+                <span data-i18n="topic.actorFilter">按人物筛选</span>
+                <div class="topic-actor-filter-control">
+                  <button id="topic-actor-filter" class="btn btn-ghost btn-sm topic-actor-filter-button" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <span id="topic-actor-filter-label" data-i18n="topic.actorFilterAll">全部人物</span><span class="topic-actor-filter-caret" aria-hidden="true"></span>
+                  </button>
+                  <div id="topic-actor-filter-menu" class="topic-actor-filter-menu hidden" role="listbox">
+                    <input id="topic-actor-filter-search" class="input input-sm" type="search" autocomplete="off" data-i18n-placeholder="topic.actorFilterSearch" placeholder="搜索人物">
+                    <div id="topic-actor-filter-options" class="topic-actor-filter-options"></div>
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="table-container topic-table-container">
               <div class="table-scroll topic-table-scroll">
@@ -259,9 +267,16 @@
             </div>
           </header>
           <div class="page-body settings-page-body">
-            <div class="settings-scope-tabs" role="tablist">
-              <button class="settings-scope-tab active" type="button" data-settings-scope="timeline" role="tab" aria-selected="true">Timeline</button>
-              <button class="settings-scope-tab" type="button" data-settings-scope="topic" role="tab" aria-selected="false">Topic</button>
+            <div class="settings-category-tabs" role="tablist" aria-label="Settings categories" data-i18n-aria="settings.categories">
+              <button class="settings-category-tab active" type="button" data-settings-category="recall" role="tab" aria-selected="true" data-i18n="settings.category.recall">召回</button>
+              <button class="settings-category-tab" type="button" data-settings-category="timeline" role="tab" aria-selected="false" data-i18n="settings.category.timeline">Timeline</button>
+              <button class="settings-category-tab" type="button" data-settings-category="topic" role="tab" aria-selected="false" data-i18n="settings.category.topic">Topic</button>
+              <button class="settings-category-tab" type="button" data-settings-category="session" role="tab" aria-selected="false" data-i18n="settings.category.session">会话</button>
+              <button class="settings-category-tab" type="button" data-settings-category="graph" role="tab" aria-selected="false" data-i18n="settings.category.graph">图谱</button>
+              <button class="settings-category-tab" type="button" data-settings-category="lifecycle" role="tab" aria-selected="false" data-i18n="settings.category.lifecycle">生命周期</button>
+              <button class="settings-category-tab" type="button" data-settings-category="model" role="tab" aria-selected="false" data-i18n="settings.category.model">模型</button>
+              <button class="settings-category-tab" type="button" data-settings-category="index" role="tab" aria-selected="false" data-i18n="settings.category.index">索引</button>
+              <button class="settings-category-tab" type="button" data-settings-category="maintenance" role="tab" aria-selected="false" data-i18n="settings.category.maintenance">维护</button>
             </div>
             <div id="settings-page-status" class="text-secondary" aria-live="polite"></div>
             <div id="settings-page-content" class="settings-page-content"></div>
@@ -278,6 +293,7 @@
               <button class="maintenance-tab active" type="button" data-maintenance-tab="topic" role="tab" aria-selected="true" data-i18n="maintenance.topicTab">Topic 维护</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="review" role="tab" aria-selected="false" data-i18n="maintenance.reviewTab">Topic 待审查</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="sessions" role="tab" aria-selected="false" data-i18n="maintenance.sessionsTab">会话审计</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="recent-recall" role="tab" aria-selected="false" data-i18n="maintenance.recentRecallTab">最近召回</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="recall" role="tab" aria-selected="false" data-i18n="nav.recall">召回测试</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="models" role="tab" aria-selected="false" data-i18n="nav.models">模型测试</button>
             </div>
@@ -326,9 +342,26 @@
               <div id="session-audit-summary" class="text-secondary"></div>
               <div id="session-audit-list" class="session-audit-list"><div class="identity-state" data-i18n="common.loading">加载中...</div></div>
               <div class="session-task-history">
-                <h3 data-i18n="maintenance.taskHistory">维护任务</h3>
+                <div class="maintenance-history-heading">
+                  <h3 data-i18n="maintenance.taskHistory">维护任务</h3>
+                  <button class="btn btn-secondary btn-sm" id="session-task-clear" type="button" data-i18n="common.clear">清空</button>
+                </div>
                 <div id="session-task-list"></div>
               </div>
+            </div>
+            <div class="maintenance-panel" id="maintenance-panel-recent-recall">
+              <div class="maintenance-review-toolbar">
+                <div>
+                  <h2 data-i18n="maintenance.recentRecallTitle">最近实际召回</h2>
+                  <p class="text-secondary" data-i18n="maintenance.recentRecallIntro">记录原始触发、真实注入内容和诊断快照。默认关闭，记录失败不会影响聊天。</p>
+                </div>
+                <div class="maintenance-topic-controls">
+                  <label class="recall-trace-toggle"><input id="recall-trace-enabled" type="checkbox"><span data-i18n="maintenance.recordRecall">记录实际召回</span></label>
+                  <button class="btn btn-secondary btn-sm" id="recent-recall-refresh" type="button" data-i18n="common.refresh">刷新</button>
+                  <button class="btn btn-secondary btn-sm" id="recent-recall-clear" type="button" data-i18n="common.clear">清空</button>
+                </div>
+              </div>
+              <div id="recent-recall-list" class="recall-history-list"></div>
             </div>
             <div class="maintenance-panel" id="maintenance-panel-recall">
             <div class="recall-form-section">
@@ -360,9 +393,20 @@
             <div class="recall-results-header hidden" id="recall-stats">
               <span id="recall-count-text">0 results</span>
               <span class="text-tertiary" id="recall-time-text"></span>
+              <button class="btn btn-secondary btn-sm hidden" id="recall-export-current" type="button" data-i18n="recall.exportCurrent">导出本次 JSON</button>
             </div>
             <div class="recall-diagnostics hidden" id="recall-diagnostics"></div>
             <div id="recall-results"></div>
+            <div class="recall-history-section">
+              <div class="maintenance-history-heading">
+                <h3 data-i18n="recall.history">测试历史</h3>
+                <div>
+                  <button class="btn btn-secondary btn-sm" id="recall-history-refresh" type="button" data-i18n="common.refresh">刷新</button>
+                  <button class="btn btn-secondary btn-sm" id="recall-history-clear" type="button" data-i18n="common.clear">清空</button>
+                </div>
+              </div>
+              <div id="recall-history-list" class="recall-history-list"></div>
+            </div>
             </div>
 
             <div class="maintenance-panel" id="maintenance-panel-models">
@@ -455,6 +499,23 @@
       </div>
       <div class="peek-body" id="peek-body"></div>
     </aside>
+
+    <!-- Shared destructive-action confirmation -->
+    <div class="modal-overlay" id="action-confirm-overlay" aria-hidden="true">
+      <div class="modal action-confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="action-confirm-title" aria-describedby="action-confirm-message">
+        <div class="modal-header">
+          <div class="modal-title" id="action-confirm-title"></div>
+          <button class="modal-close" id="action-confirm-close" type="button" data-i18n-aria="common.close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body"><p class="action-confirm-message" id="action-confirm-message"></p></div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="action-confirm-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-danger" id="action-confirm-submit" type="button" data-i18n="common.confirm">确定</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Topic Detail Modal -->
     <div class="modal-overlay topic-detail-overlay" id="topic-detail-overlay" aria-hidden="true">

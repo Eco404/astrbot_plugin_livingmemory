@@ -32,6 +32,8 @@ from astrbot_plugin_livingmemory.storage.topic_memory_store import TopicMemorySt
 from astrbot_plugin_livingmemory.storage.memory_identity_store import MemoryIdentityStore
 from astrbot_plugin_livingmemory.core.models.topic_memory import (
     TimelineTopicCandidate,
+    TopicActorLink,
+    TopicAtomActorLink,
     TopicCandidateGroup,
     TopicFragmentDraft,
     TopicMaintenanceMode,
@@ -3455,6 +3457,39 @@ def test_materialization_builds_topic_and_fact_actor_links():
     assert {item.fragment_uid for item in atom_actor_links} == {
         fragment.fragment_uid
     }
+
+
+def test_incremental_projection_actor_provenance_maps_to_formal_fragment():
+    manager = TopicBuildManager(":memory:", None, None)
+    formal = _topic_fragment(1)
+    formal.fragment_uid = "formal-fragment"
+    actor = TopicActorLink(
+        topic_uid="topic-1",
+        actor_id="qq:human:u1",
+        actor_type="human",
+        relation_type="subject",
+        metadata={
+            "fragment_uids": ["existing:topic-1:r1"],
+            "timeline_uids": ["timeline-1"],
+        },
+    )
+    atom_actor = TopicAtomActorLink(
+        topic_atom_uid="atom-1",
+        actor_id=actor.actor_id,
+        relation_type=actor.relation_type,
+        fragment_uid="existing:topic-1:r1",
+        timeline_uid="timeline-1",
+    )
+
+    actors, atom_actors = manager._normalize_published_actor_provenance(
+        [actor], [atom_actor], [formal]
+    )
+
+    assert actors[0].metadata["fragment_uids"] == ["formal-fragment"]
+    assert atom_actors[0].fragment_uid == "formal-fragment"
+    assert atom_actors[0].metadata["provenance_fragment_remapped_from"] == (
+        "existing:topic-1:r1"
+    )
 
 
 def test_synthesis_drops_unknown_fact_and_restores_grounded_fact():

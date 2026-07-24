@@ -1,11 +1,12 @@
 import { esc } from "./utils.js";
 
 export class MaintenancePage {
-  constructor(topicPage, recallPage, modelPage, showToast) {
+  constructor(topicPage, recallPage, modelPage, showToast, confirmDialog) {
     this.topicPage = topicPage;
     this.recallPage = recallPage;
     this.modelPage = modelPage;
     this.showToast = showToast;
+    this.confirmDialog = confirmDialog;
     this.tab = "topic";
     this.reviewUid = null;
     this.governance = null;
@@ -35,6 +36,18 @@ export class MaintenancePage {
     document.getElementById("session-audit-refresh")?.addEventListener("click", () => this.loadSessionAudit());
     document.getElementById("session-audit-filter")?.addEventListener("input", () => this.renderSessionAudit());
     document.getElementById("session-audit-action")?.addEventListener("click", () => this.openSessionMaintenance());
+    document.getElementById("session-task-clear")?.addEventListener("click", () => this.clearSessionTasks());
+    document.getElementById("session-task-list")?.addEventListener("click", event => {
+      const button = event.target.closest("[data-session-task-delete]");
+      if (button) this.deleteSessionTask(button.dataset.sessionTaskDelete, button);
+    });
+    document.getElementById("recall-trace-enabled")?.addEventListener("change", event => this.setRecallTraceEnabled(event.target.checked));
+    document.getElementById("recent-recall-refresh")?.addEventListener("click", () => this.loadRecentRecalls());
+    document.getElementById("recent-recall-clear")?.addEventListener("click", () => this.clearRecentRecalls());
+    document.getElementById("recent-recall-list")?.addEventListener("toggle", event => {
+      const details = event.target.closest("details[data-recall-trace-uid]");
+      if (details?.open) this.loadRecentRecallDetail(details);
+    }, true);
     document.getElementById("session-maintenance-operation")?.addEventListener("change", () => this.resetSessionPreview());
     document.getElementById("session-maintenance-close")?.addEventListener("click", () => this.closeSessionMaintenance());
     document.getElementById("session-maintenance-cancel")?.addEventListener("click", () => this.closeSessionMaintenance());
@@ -61,6 +74,7 @@ export class MaintenancePage {
     if (this.tab === "recall") this.recallPage.fetchSessions();
     if (this.tab === "review") this.loadReviews();
     if (this.tab === "sessions") this.loadSessionAudit();
+    if (this.tab === "recent-recall") this.loadRecentRecalls();
   }
 
   selectTab(tab) {
@@ -73,9 +87,13 @@ export class MaintenancePage {
     });
     document.querySelectorAll(".maintenance-panel").forEach(panel => panel.classList.toggle("active", panel.id === `maintenance-panel-${tab}`));
     if (tab === "models") this.modelPage.fetch();
-    if (tab === "recall") this.recallPage.fetchSessions();
+    if (tab === "recall") {
+      this.recallPage.fetchSessions();
+      this.recallPage.loadHistory();
+    }
     if (tab === "review") this.loadReviews();
     if (tab === "sessions") this.loadSessionAudit();
+    if (tab === "recent-recall") this.loadRecentRecalls();
   }
 
   syncTopicSpaces() {
@@ -147,7 +165,115 @@ export class MaintenancePage {
   renderSessionTasks(tasks) {
     const target = document.getElementById("session-task-list");
     if (!target) return;
-    target.innerHTML = tasks.length ? tasks.map(task => `<div class="session-task-row"><span><strong>${esc(window.t(`maintenance.operation.${task.operation}`))}</strong><small>${(task.source_session_ids || []).map(esc).join(" · ")}</small></span><span class="status-badge status-${esc(task.status)}">${esc(task.status)}</span><small>${esc(task.current_step || "")}${task.error ? ` · ${esc(task.error)}` : ""}</small></div>`).join("") : `<span class="text-tertiary">${esc(window.t("maintenance.noTasks"))}</span>`;
+    target.innerHTML = tasks.length ? tasks.map(task => `<div class="session-task-row">
+      <span class="session-task-main"><strong>${esc(window.t(`maintenance.operation.${task.operation}`))}</strong><small>${(task.source_session_ids || []).map(esc).join(" · ")}</small></span>
+      <span class="status-badge status-${esc(task.status)}">${esc(task.status)}</span>
+      <small class="session-task-detail">${esc(task.current_step || "")}${task.error ? ` · ${esc(task.error)}` : ""}</small>
+      <span class="session-task-actions">${["completed", "failed", "cancelled"].includes(task.status) ? `<button class="session-task-delete" type="button" data-session-task-delete="${esc(task.task_uid)}" title="${esc(window.t("common.delete"))}" aria-label="${esc(window.t("common.delete"))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 10v6m4-6v6"/></svg></button>` : ""}</span>
+    </div>`).join("") : `<span class="text-tertiary">${esc(window.t("maintenance.noTasks"))}</span>`;
+  }
+
+  async deleteSessionTask(taskUid, button) {
+    if (!taskUid || button?.disabled) return;
+    if (button) button.disabled = true;
+    try {
+      await this.topicPage.api.post("sessions/maintenance/tasks/delete", { task_uid: taskUid });
+      await this.loadSessionAudit();
+      this.showToast(window.t("maintenance.taskDeleted"));
+    } catch (error) {
+      this.showToast(error.message || window.t("maintenance.taskDeleteFailed"), true);
+      if (button) button.disabled = false;
+    }
+  }
+
+  async clearSessionTasks() {
+    const confirmed = await this.confirmDialog.show({
+      title: window.t("maintenance.clearTasksTitle"),
+      message: window.t("maintenance.clearTasksMessage"),
+      confirmLabel: window.t("common.clear"),
+    });
+    if (!confirmed) return;
+    const button = document.getElementById("session-task-clear");
+    button.disabled = true;
+    try {
+      await this.topicPage.api.post("sessions/maintenance/tasks/clear", {});
+      await this.loadSessionAudit();
+      this.showToast(window.t("maintenance.tasksCleared"));
+    } catch (error) {
+      this.showToast(error.message || window.t("maintenance.tasksClearFailed"), true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async loadRecentRecalls() {
+    const target = document.getElementById("recent-recall-list");
+    if (!target) return;
+    try {
+      const data = await this.topicPage.api.get("recall/traces", { type: "production", limit: 100 });
+      const toggle = document.getElementById("recall-trace-enabled");
+      if (toggle) toggle.checked = Boolean(data.production_enabled);
+      const items = data.items || [];
+      target.innerHTML = items.length ? items.map(item => `
+        <details class="recall-trace-record" data-recall-trace-uid="${esc(item.trace_uid)}">
+          <summary><span><strong>${esc(item.query_text || "--")}</strong><small>${esc(item.session_id || "--")} · ${Number(item.result_count || 0)} 条 · ${new Date(Number(item.created_at || 0) * 1000).toLocaleString()}</small></span><span class="status-badge status-${esc(item.status)}">${esc(item.status)}</span></summary>
+          <div class="recall-trace-detail text-tertiary">展开后加载详情...</div>
+        </details>`).join("") : `<span class="text-tertiary">暂无实际召回记录</span>`;
+    } catch (error) {
+      target.innerHTML = `<span class="text-tertiary">${esc(error.message || "加载失败")}</span>`;
+    }
+  }
+
+  async loadRecentRecallDetail(details) {
+    const target = details.querySelector(".recall-trace-detail");
+    if (!target || target.dataset.loaded === "true") return;
+    try {
+      const record = await this.topicPage.api.get("recall/traces/detail", { trace_uid: details.dataset.recallTraceUid });
+      const injection = record.injection || {};
+      const exactInjection = Array.isArray(injection.messages) && injection.messages.length
+        ? JSON.stringify(injection.messages, null, 2)
+        : injection.content || "无注入内容";
+      target.innerHTML = `
+        <div class="recall-trace-summary"><span>模式：${esc(injection.actual_method || record.mode || "--")}</span><span>耗时：${Number(record.elapsed_ms || 0).toFixed(0)} ms</span>${record.error ? `<span class="text-danger">${esc(record.error)}</span>` : ""}</div>
+        <details class="recall-trace-section"><summary>真实注入内容</summary><pre>${esc(exactInjection)}</pre></details>
+        <details class="recall-trace-section"><summary>原始触发</summary><pre>${esc(JSON.stringify(record.request || {}, null, 2))}</pre></details>
+        <details class="recall-trace-section"><summary>入选记忆</summary><pre>${esc(JSON.stringify(record.result || {}, null, 2))}</pre></details>
+        <details class="recall-trace-section"><summary>完整诊断</summary><pre>${esc(JSON.stringify(record.diagnostics || {}, null, 2))}</pre></details>`;
+      target.dataset.loaded = "true";
+    } catch (error) {
+      target.textContent = error.message || "加载失败";
+    }
+  }
+
+  async setRecallTraceEnabled(enabled) {
+    try {
+      await this.topicPage.api.post("recall/traces/settings", { production_enabled: enabled });
+      this.showToast(enabled ? "已开启实际召回记录" : "已关闭实际召回记录");
+    } catch (error) {
+      const toggle = document.getElementById("recall-trace-enabled");
+      if (toggle) toggle.checked = !enabled;
+      this.showToast(error.message || "保存失败", true);
+    }
+  }
+
+  async clearRecentRecalls() {
+    const confirmed = await this.confirmDialog.show({
+      title: window.t("maintenance.clearRecallsTitle"),
+      message: window.t("maintenance.clearRecallsMessage"),
+      confirmLabel: window.t("common.clear"),
+    });
+    if (!confirmed) return;
+    const button = document.getElementById("recent-recall-clear");
+    button.disabled = true;
+    try {
+      await this.topicPage.api.post("recall/traces/clear", { type: "production" });
+      await this.loadRecentRecalls();
+      this.showToast(window.t("maintenance.recallsCleared"));
+    } catch (error) {
+      this.showToast(error.message || window.t("maintenance.recallsClearFailed"), true);
+    } finally {
+      button.disabled = false;
+    }
   }
 
   openSessionMaintenance() {

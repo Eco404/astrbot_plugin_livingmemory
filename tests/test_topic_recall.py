@@ -54,6 +54,9 @@ class _Store:
             item for item in self.fragments if item["topic_uid"] in topic_uids
         ]
 
+    async def timeline_document_ids(self, timeline_uids):
+        return [int(uid.removeprefix("timeline-")) for uid in timeline_uids]
+
 
 class _FixedScoreRetriever(TopicRetriever):
     def __init__(self, store, candidates, *, rerank_provider=None):
@@ -865,3 +868,52 @@ async def test_fragment_skips_parent_duplicate_body_only_when_it_has_no_facts():
         fragment_outcome.candidates[0].filter_reason
         == "duplicate_parent_without_facts"
     )
+
+
+@pytest.mark.asyncio
+async def test_source_timeline_access_is_bounded_per_consumed_topic_and_deduplicated():
+    first = _payload(
+        "first",
+        "第一个话题",
+        [1.0, 0.0],
+        sources=[
+            {
+                "timeline_uid": f"timeline-{index}",
+                "contribution_weight": float(10 - index),
+                "semantic_similarity": 0.5,
+            }
+            for index in range(1, 6)
+        ],
+    )
+    second = _payload(
+        "second",
+        "第二个话题",
+        [0.9, 0.1],
+        sources=[
+            {"timeline_uid": "timeline-2", "contribution_weight": 1.0},
+            {"timeline_uid": "timeline-6", "contribution_weight": 0.9},
+            {"timeline_uid": "timeline-7", "contribution_weight": 0.8},
+            {"timeline_uid": "timeline-8", "contribution_weight": 0.7},
+        ],
+    )
+    store = _Store([first, second])
+    pipeline = TopicRecallPipeline(
+        _FixedScoreRetriever(store, []), {"recall_use_rerank": False}
+    )
+    results = [
+        TopicRecallResult(
+            topic=payload["topic"],
+            relevance_score=0.8,
+            final_score=0.8,
+            embedding_score=0.8,
+            keyword_score=0.0,
+            sources=payload["sources"],
+        )
+        for payload in (first, second)
+    ]
+
+    document_ids = await pipeline.source_timeline_document_ids(results, [])
+
+    # Each Topic contributes at most three sources. The repeated timeline-2 is
+    # refreshed once, so one broad Topic cannot keep its entire history alive.
+    assert document_ids == [1, 2, 3, 6, 7]
