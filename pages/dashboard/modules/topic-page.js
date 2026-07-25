@@ -329,12 +329,28 @@ export class TopicPage {
       this.timelineSources = provenance.links || [];
       const participantRoles = new Set(["speaker", "narrator", "responder"]);
       const groupActors = links => {
+        const displayNamesByActorId = new Map();
+        links.forEach(link => {
+          const actorId = String(link.actor_id || "").trim();
+          const displayName = String(link.display_name_snapshot || "").trim();
+          if (actorId && displayName && !displayNamesByActorId.has(actorId)) {
+            displayNamesByActorId.set(actorId, displayName);
+          }
+        });
         const grouped = new Map();
         links.forEach(link => {
-          const key = link.actor_id || link.display_name_snapshot || "unknown";
+          const actorId = String(link.actor_id || "").trim();
+          const snapshotName = String(link.display_name_snapshot || "").trim();
+          const displayName = snapshotName || displayNamesByActorId.get(actorId) || actorId || "--";
+          const actorType = String(link.actor_type || "unknown").trim().toLocaleLowerCase();
+          const normalizedName = displayName.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ");
+          // Chips are a compact presentation summary. The expanded rows retain each
+          // stable/unresolved actor ID and relation for identity diagnostics.
+          const key = (snapshotName || displayNamesByActorId.has(actorId))
+            ? `${actorType}:name:${normalizedName}`
+            : `${actorType}:id:${actorId || "unknown"}`;
           const item = grouped.get(key) || {
-            actorId: link.actor_id || "",
-            displayName: link.display_name_snapshot || link.actor_id || "--",
+            displayName,
             links: [],
           };
           item.links.push(link);
@@ -369,6 +385,14 @@ export class TopicPage {
       const mentionedActors = actorLinks.filter(link => !participantRoles.has(link.relation_type));
       const participantGroups = groupActors(participants);
       const mentionedGroups = groupActors(mentionedActors);
+      const importanceProjection = topic.metadata?.importance_projection || {};
+      const importanceMetrics = [
+        [window.t("topic.currentImportance"), topic.importance],
+        [window.t("topic.baseImportance"), topic.base_importance],
+        [window.t("topic.semanticImportance"), topic.semantic_importance],
+        [window.t("topic.sourceImportance"), topic.source_base_component],
+        [window.t("topic.evidenceStrength"), topic.evidence_strength],
+      ];
       const renderAtoms = () => (provenance.atoms || []).map(atom => {
         const sources = sourcesByAtom[atom.atom_uid] || [];
         return `<div class="topic-source-item topic-atom-item">
@@ -393,6 +417,11 @@ export class TopicPage {
       title.innerHTML = `${esc(topic.title)} <span class="topic-detail-readonly text-tertiary">（${esc(window.t("topic.readOnly"))}）</span>`;
       body.innerHTML = `
         <p class="topic-detail-summary">${esc(topic.summary)}</p>
+        <div class="topic-importance-metrics">
+          ${importanceMetrics.map(([label, value]) => `<span><small>${esc(label)}</small><strong>${Number(value ?? 0).toFixed(2)}</strong></span>`).join("")}
+          <span><small>${esc(window.t("topic.accessCount"))}</small><strong>${Number(topic.access_count || 0)}</strong></span>
+          <span><small>${esc(window.t("topic.dynamicFactor"))}</small><strong>${Number(importanceProjection.dynamic_factor ?? 1).toFixed(2)}</strong></span>
+        </div>
         <div class="topic-related-section">
           <strong>${esc(window.t("topic.relatedTopics"))} (${relatedTopics.length})</strong>
           <div class="topic-related-list">${relatedTopics.length ? relatedTopics.map(item => `

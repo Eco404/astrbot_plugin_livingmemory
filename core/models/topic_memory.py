@@ -71,6 +71,11 @@ class TopicMemory:
     status: TopicMemoryStatus = TopicMemoryStatus.ACTIVE
     base_importance: float = 0.5
     importance: float = 0.5
+    semantic_importance: float = 0.5
+    source_base_component: float = 0.5
+    evidence_strength: float = 0.5
+    importance_policy_version: int = 1
+    source_importance_hash: str = ""
     confidence: float = 0.7
     started_at: float | None = None
     ended_at: float | None = None
@@ -239,6 +244,9 @@ class TimelineTopicCandidate:
     session_id: str | None
     content: str
     summary: str
+    base_importance: float = 0.5
+    effective_importance: float = 0.5
+    importance_revision: int = 1
     topics: list[str] = field(default_factory=list)
     key_facts: list[str] = field(default_factory=list)
     atom_fingerprints: list[str] = field(default_factory=list)

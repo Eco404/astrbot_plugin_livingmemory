@@ -381,7 +381,9 @@ export class MaintenancePage {
       const items = data.items || [];
       list.innerHTML = items.length ? items.map(item => {
         const details = item.details || {};
-        const title = details.proposed_title || item.candidate_titles?.[0]?.title || window.t("maintenance.reviewUnknown");
+        const title = details.proposed_title
+          || item.candidate_titles?.[0]?.title
+          || (item.review_type === "deleted_timeline_source_repair" ? window.t("maintenance.sourceRepairTitle") : window.t("maintenance.reviewUnknown"));
         return `<button class="maintenance-review-item${this.reviewUid === item.review_uid ? " active" : ""}" type="button" data-review-uid="${esc(item.review_uid)}">
           <strong>${esc(title)}</strong><span>${esc(window.t(`maintenance.reviewType.${item.review_type}`))}</span>
           <small>Timeline ${(item.timeline_uids || []).length} · Topic ${(item.topic_uids || []).length}</small>
@@ -409,8 +411,11 @@ export class MaintenancePage {
       const candidates = review.candidate_topics || [];
       const timelines = review.timelines || [];
       const canMaterialize = review.review_type === "ambiguous_topic_match";
+      const canSyncSources = review.review_type === "deleted_timeline_source_repair";
+      const reviewTitle = review.details?.proposed_title
+        || (canSyncSources ? window.t("maintenance.sourceRepairTitle") : window.t("maintenance.reviewUnknown"));
       detail.innerHTML = `
-        <div class="maintenance-review-detail-head"><div><h3>${esc(review.details?.proposed_title || window.t("maintenance.reviewUnknown"))}</h3><p>${esc(review.details?.proposed_summary || "")}</p></div><code>${esc(review.review_uid)}</code></div>
+        <div class="maintenance-review-detail-head"><div><h3>${esc(reviewTitle)}</h3><p>${esc(review.details?.proposed_summary || (canSyncSources ? window.t("maintenance.sourceRepairDescription") : ""))}</p></div><code>${esc(review.review_uid)}</code></div>
         <section><strong>${esc(window.t("maintenance.sourceFragments"))} (${fragments.length})</strong>
           <div class="maintenance-review-fragments">${fragments.map(fragment => `<details><summary>${esc(fragment.label)} · ${esc(fragment.summary)}</summary>${this.renderTimeRange(fragment.started_at, fragment.ended_at)}<div>${(fragment.facts || []).map(fact => `<p>${esc(fact.content || "")}</p>`).join("")}</div></details>`).join("") || `<span class="text-tertiary">${esc(window.t("topic.none"))}</span>`}</div>
         </section>
@@ -422,6 +427,7 @@ export class MaintenancePage {
         </section>
         <div class="maintenance-review-actions">
           ${canMaterialize ? `<button class="btn btn-primary" type="button" data-review-action="merge" ${candidates.length ? "" : "disabled"}>${esc(window.t("maintenance.mergeCandidate"))}</button><button class="btn btn-secondary" type="button" data-review-action="new">${esc(window.t("maintenance.createTopic"))}</button>` : ""}
+          ${canSyncSources ? `<button class="btn btn-primary" type="button" data-review-action="sync_sources">${esc(window.t("maintenance.syncSourceRepair"))}</button>` : ""}
           <button class="btn btn-secondary" type="button" data-review-action="defer">${esc(window.t("maintenance.defer"))}</button>
           <button class="btn btn-ghost" type="button" data-review-action="ignore">${esc(window.t("maintenance.ignore"))}</button>
         </div>`;
