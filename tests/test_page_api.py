@@ -1581,6 +1581,7 @@ class TestTestRecall:
         topic_result = SimpleNamespace(
             topic_uid="topic-1",
             topic=topic,
+            content="Topic title\nTopic summary",
             final_score=0.9,
             relevance_score=0.8,
             embedding_score=0.7,
@@ -1639,6 +1640,7 @@ class TestTestRecall:
         topic_result = SimpleNamespace(
             topic_uid="topic-1",
             topic=topic,
+            content="工资核对\n工资核对详情",
             final_score=0.9,
             relevance_score=0.8,
             embedding_score=0.7,

@@ -166,8 +166,12 @@ async def test_memory_search_tool_records_topic_access_after_serializing_result(
     topic_result = SimpleNamespace(
         topic_uid="topic-wage",
         topic=topic,
+        content="工资核对\n核对工资天数",
         final_score=0.8,
         sources=[],
+        affect_match_score=0.0,
+        affect_match_boost=0.0,
+        selected_affect_events=[],
     )
     topic_outcome = SimpleNamespace(results=[topic_result])
     fragment_outcome = SimpleNamespace(results=[], available_count=0)

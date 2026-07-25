@@ -122,6 +122,9 @@ class TopicMemoryStore:
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 embedding_signature TEXT NOT NULL DEFAULT '{}',
+                affect_profile TEXT NOT NULL DEFAULT '[]',
+                affective_salience REAL NOT NULL DEFAULT 0.0,
+                affect_signature TEXT NOT NULL DEFAULT '{}',
                 metadata TEXT NOT NULL DEFAULT '{}'
             )
             """
@@ -417,6 +420,8 @@ class TopicMemoryStore:
                 provider_id TEXT,
                 model_id TEXT,
                 embedding_signature TEXT NOT NULL DEFAULT '{}',
+                affect_events TEXT NOT NULL DEFAULT '[]',
+                affect_signature TEXT NOT NULL DEFAULT '{}',
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 metadata TEXT NOT NULL DEFAULT '{}',
@@ -466,6 +471,8 @@ class TopicMemoryStore:
                 provider_id TEXT,
                 model_id TEXT,
                 embedding_signature TEXT NOT NULL DEFAULT '{}',
+                affect_events TEXT NOT NULL DEFAULT '[]',
+                affect_signature TEXT NOT NULL DEFAULT '{}',
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 metadata TEXT NOT NULL DEFAULT '{}'
@@ -1150,8 +1157,9 @@ class TopicMemoryStore:
                 importance_policy_version, source_importance_hash,
                 confidence, started_at, ended_at,
                 last_accessed_at, access_count, decay_anchor_at,
-                created_at, updated_at, embedding_signature, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, updated_at, embedding_signature,
+                affect_profile, affective_salience, affect_signature, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(topic_uid) DO UPDATE SET
                 memory_space_id = excluded.memory_space_id,
                 title = excluded.title,
@@ -1173,6 +1181,9 @@ class TopicMemoryStore:
                 decay_anchor_at = excluded.decay_anchor_at,
                 updated_at = excluded.updated_at,
                 embedding_signature = excluded.embedding_signature,
+                affect_profile = excluded.affect_profile,
+                affective_salience = excluded.affective_salience,
+                affect_signature = excluded.affect_signature,
                 metadata = excluded.metadata
             """,
             (
@@ -1198,6 +1209,9 @@ class TopicMemoryStore:
                 created_at,
                 now,
                 self._to_json(topic.embedding_signature),
+                self._to_json(topic.affect_profile),
+                float(topic.affective_salience),
+                self._to_json(topic.affect_signature),
                 self._to_json(topic.metadata),
             ),
         )
@@ -3705,10 +3719,10 @@ class TopicMemoryStore:
                             importance, confidence, logical_fragment_uid,
                             fragment_revision, embedding, started_at, ended_at,
                             status, prompt_hash, input_hash, provider_id, model_id,
-                            embedding_signature,
+                            embedding_signature, affect_events, affect_signature,
                             created_at, updated_at, metadata
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             fragment.fragment_uid,
@@ -3735,6 +3749,8 @@ class TopicMemoryStore:
                             fragment.provider_id,
                             fragment.model_id,
                             self._to_json(fragment.embedding_signature),
+                            self._to_json(fragment.affect_events),
+                            self._to_json(fragment.affect_signature),
                             float(fragment.created_at),
                             float(fragment.updated_at),
                             self._to_json(fragment.metadata),
@@ -4256,7 +4272,8 @@ class TopicMemoryStore:
             previous = await (
                 await db.execute(
                     """
-                    SELECT fragment_revision, input_hash, summary, facts
+                    SELECT fragment_revision, input_hash, summary, facts,
+                           affect_events
                     FROM topic_fragments
                     WHERE memory_space_id = ? AND logical_fragment_uid = ?
                     ORDER BY fragment_revision DESC, updated_at DESC
@@ -4272,6 +4289,8 @@ class TopicMemoryStore:
                 and str(previous["summary"] or "") == fragment.summary
                 and str(previous["facts"] or "")
                 == TopicMemoryStore._to_json(fragment.facts)
+                and str(previous["affect_events"] or "")
+                == TopicMemoryStore._to_json(fragment.affect_events)
             ):
                 fragment.fragment_revision = int(previous["fragment_revision"])
             else:
@@ -4286,10 +4305,11 @@ class TopicMemoryStore:
                     logical_fragment_uid, fragment_revision,
                     embedding, started_at, ended_at, status, prompt_hash,
                     input_hash, provider_id, model_id, embedding_signature,
+                    affect_events, affect_signature,
                     created_at, updated_at,
                     metadata
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fragment_uid) DO UPDATE SET
                     run_uid = excluded.run_uid,
                     candidate_group_uid = excluded.candidate_group_uid,
@@ -4314,6 +4334,8 @@ class TopicMemoryStore:
                     provider_id = excluded.provider_id,
                     model_id = excluded.model_id,
                     embedding_signature = excluded.embedding_signature,
+                    affect_events = excluded.affect_events,
+                    affect_signature = excluded.affect_signature,
                     updated_at = excluded.updated_at,
                     metadata = excluded.metadata
                 """,
@@ -4341,6 +4363,8 @@ class TopicMemoryStore:
                     fragment.provider_id,
                     fragment.model_id,
                     TopicMemoryStore._to_json(fragment.embedding_signature),
+                    TopicMemoryStore._to_json(fragment.affect_events),
+                    TopicMemoryStore._to_json(fragment.affect_signature),
                     float(fragment.created_at),
                     now,
                     TopicMemoryStore._to_json(fragment.metadata),
@@ -4519,6 +4543,9 @@ class TopicMemoryStore:
             embedding_signature=TopicMemoryStore._from_json(
                 row["embedding_signature"]
             ),
+            affect_profile=TopicMemoryStore._from_json_list(row["affect_profile"]),
+            affective_salience=float(row["affective_salience"] or 0.0),
+            affect_signature=TopicMemoryStore._from_json(row["affect_signature"]),
             metadata=TopicMemoryStore._from_json(row["metadata"]),
         )
 
@@ -4735,6 +4762,12 @@ class TopicMemoryStore:
             embedding_signature=TopicMemoryStore._from_json(
                 row["embedding_signature"]
             ),
+            affect_events=[
+                item
+                for item in TopicMemoryStore._from_json_list(row["affect_events"])
+                if isinstance(item, dict)
+            ],
+            affect_signature=TopicMemoryStore._from_json(row["affect_signature"]),
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
             metadata=TopicMemoryStore._from_json(row["metadata"]),
@@ -4753,6 +4786,16 @@ class TopicMemoryStore:
         except (TypeError, json.JSONDecodeError):
             return {}
         return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _from_json_list(value: Any) -> list[Any]:
+        if isinstance(value, list):
+            return value
+        try:
+            parsed = json.loads(value or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
 
     @staticmethod
     def _decode_json(value: Any, default: Any) -> Any:

@@ -1570,6 +1570,14 @@ def test_fragment_tool_schema_keeps_actor_roles_at_fact_level():
     assert omission["properties"]["reason"]["enum"] == [
         "duplicate", "superseded", "non_durable", "invalid_source"
     ]
+    affect_event = fragment["properties"]["affect_events"]["items"]
+    assert "affect_events" in fragment["required"]
+    assert affect_event["properties"]["evidence_type"]["enum"] == [
+        "explicit", "behavioral", "contextual", "model_inferred"
+    ]
+    assert affect_event["properties"]["temporal_status"]["enum"] == [
+        "historical", "ongoing", "resolved", "uncertain"
+    ]
 
 
 @pytest.mark.asyncio
@@ -2809,6 +2817,113 @@ def test_fragment_actor_refs_are_constrained_and_unresolved_ids_are_fragment_loc
         f"unresolved:{fragment.fragment_uid}:"
     )
     assert fragment.facts[0]["actor_refs"][0]["actor_id"] == unresolved["actor_id"]
+
+
+def test_fragment_affect_events_are_source_and_actor_grounded():
+    manager = TopicBuildManager(":memory:", None, None)
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-affect-1",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:u1",
+        content="空雨说有人陪着会让他安心",
+        summary="空雨明确表示陪伴让他安心",
+        key_facts=["空雨明确表示陪伴让他安心"],
+        role_bindings={
+            "narrator_actor_id": "qq:assistant:bot-1",
+            "actors": [
+                {
+                    "actor_id": "qq:human:u1",
+                    "actor_type": "human",
+                    "observed_names": ["空雨"],
+                },
+                {
+                    "actor_id": "qq:assistant:bot-1",
+                    "actor_type": "assistant",
+                    "observed_names": ["唯"],
+                },
+            ],
+        },
+    )
+    payload, timeline_refs, source_refs, actor_refs = manager._fragment_llm_context(
+        [candidate]
+    )
+    human_ref = next(
+        item["ref"]
+        for item in payload["actor_refs"]
+        if item["actor_id"] == "qq:human:u1"
+    )
+    decoded = manager._decode_fragment_refs(
+        {
+            "fragments": [
+                {
+                    "label": "陪伴带来的安心",
+                    "summary": "空雨因获得陪伴而感到安心",
+                    "timeline_refs": ["T1"],
+                    "facts": [
+                        {
+                            "content": "空雨明确表示陪伴让他安心",
+                            "source_refs": ["T1.K1"],
+                            "actor_refs": [],
+                        }
+                    ],
+                    "affect_events": [
+                        {
+                            "actor_ref": human_ref,
+                            "display_name_snapshot": "空雨",
+                            "emotion": "安心",
+                            "description": "因获得陪伴而感到安心",
+                            "trigger": "获得陪伴",
+                            "target": "睡眠",
+                            "evidence_type": "model_inferred",
+                            "temporal_status": "historical",
+                            "valence": 0.78,
+                            "arousal": 0.24,
+                            "dominance": 0.62,
+                            "intensity": 0.8,
+                            "confidence": 0.95,
+                            "categories": [
+                                {"label": "relief", "score": 0.94}
+                            ],
+                            "source_refs": ["T1.K1"],
+                        }
+                    ],
+                }
+            ]
+        },
+        timeline_refs,
+        source_refs,
+        actor_refs,
+    )
+    group = TopicCandidateGroup(
+        run_uid="run-affect",
+        group_index=0,
+        memory_space_id="space-1",
+        label="陪伴带来的安心",
+        timeline_uids=[candidate.memory_uid],
+        time_cluster_keys=[],
+        cohesion=1.0,
+        group_uid="group-affect",
+    )
+
+    fragment = manager._validate_fragments(
+        decoded,
+        "run-affect",
+        group,
+        [candidate],
+        "prompt",
+        "input",
+        "provider",
+        "model",
+    )[0]
+    event = fragment.affect_events[0]
+
+    assert event["actor_id"] == "qq:human:u1"
+    assert event["source_timeline_uids"] == [candidate.memory_uid]
+    assert event["source_fact_keys"]
+    assert event["confidence"] == pytest.approx(0.65)
+    assert fragment.affect_signature["schema_version"] == 1
 
 
 def test_fragment_participation_uses_timeline_bindings_instead_of_model_roles():

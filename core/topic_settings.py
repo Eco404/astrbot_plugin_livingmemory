@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TOPIC_SETTINGS_REVISION = 8
+TOPIC_SETTINGS_REVISION = 9
 
 
 TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -25,6 +25,10 @@ TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "fragment_relative_floor": {"default": 0.65, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "recall", "label": "Topic 片段相对门槛", "effect": "recall"},
     "recall_actor_match_boost": {"default": 0.04, "type": "float", "min": 0.0, "max": 0.2, "step": 0.01, "category": "recall", "label": "当前人物匹配加分", "effect": "recall"},
     "recall_group_current_sender_only": {"default": True, "type": "bool", "category": "recall", "label": "群聊仅匹配当前发言者", "effect": "recall"},
+    "recall_affect_enabled": {"default": True, "type": "bool", "category": "recall", "label": "使用情感上下文", "effect": "recall"},
+    "recall_affect_boost_cap": {"default": 0.04, "type": "float", "min": 0.0, "max": 0.12, "step": 0.01, "category": "recall", "label": "情感匹配加分上限", "effect": "recall"},
+    "recall_affect_event_limit": {"default": 1, "type": "int", "min": 0, "max": 3, "category": "recall", "label": "情感上下文数量", "effect": "recall"},
+    "recall_affect_min_confidence": {"default": 0.65, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "recall", "label": "情感事件最低置信度", "effect": "recall"},
     "time_gap_hours": {"default": 6.0, "type": "float", "min": 1 / 60, "max": 720.0, "step": 0.25, "category": "build", "label": "候选时间簇间隔（小时）", "effect": "rebuild"},
     "candidate_similarity_threshold": {"default": 0.52, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "候选窗口相似度阈值", "effect": "rebuild"},
     "fragment_similarity_threshold": {"default": 0.78, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "片段归并阈值", "effect": "rebuild"},
@@ -78,6 +82,10 @@ TOPIC_SETTING_DESCRIPTIONS: dict[str, str] = {
     "fragment_relative_floor": "相对最佳正式片段的保留比例，用于去掉明显较弱的补充片段。",
     "recall_actor_match_boost": "召回 Topic 的人物索引命中当前人物时增加的分数；只加分，不会作为硬过滤条件。",
     "recall_group_current_sender_only": "开启时群聊只用当前发言者匹配 Topic 人物索引；关闭时使用本次 LLM 可见上下文中实际发过言的人类参与者。无法确定范围时退化为当前发言者。",
+    "recall_affect_enabled": "在语义召回已合格后，用可溯源情感事件做小幅排序辅助，并在相关查询中注入简短情感上下文。",
+    "recall_affect_boost_cap": "显式情绪查询与记忆情感画像匹配时的最大加分；不会帮助候选越过语义最低门槛。",
+    "recall_affect_event_limit": "每条 Topic 或正式片段最多注入的情感事件数；0 表示保留情感索引但不注入文本。",
+    "recall_affect_min_confidence": "低于该置信度的情感事件不会注入；模型推断事件的置信度会被额外限制。",
     "time_gap_hours": "相邻 Timeline 超过该间隔后优先划入不同时间簇。",
     "candidate_similarity_threshold": "扫描阶段把 Timeline 放入同一候选邻域所需的最低相似度。",
     "fragment_similarity_threshold": "正式片段之间进入归并候选所需的最低 Embedding 相似度。",

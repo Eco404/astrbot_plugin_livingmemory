@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from astrbot.api import logger
 
+from ..affect_memory import format_affect_context
 from ..embedding_signature import (
     SUPPORTED_TOPIC_EMBEDDING_FORMATS,
     TOPIC_FRAGMENT_EMBEDDING_FORMAT,
@@ -60,6 +61,9 @@ class TopicRecallResult:
     actors: list[dict[str, Any]] = field(default_factory=list)
     matched_actor_ids: list[str] = field(default_factory=list)
     actor_match_boost: float = 0.0
+    affect_match_score: float = 0.0
+    affect_match_boost: float = 0.0
+    selected_affect_events: list[dict[str, Any]] = field(default_factory=list)
     context_coverage: float = 0.0
     branch_scores: dict[str, float] = field(default_factory=dict)
     current_relevance: float | None = None
@@ -78,7 +82,11 @@ class TopicRecallResult:
 
     @property
     def content(self) -> str:
-        return f"{self.topic.title}\n{self.topic.summary}".strip()
+        lines = [f"{self.topic.title}\n{self.topic.summary}".strip()]
+        affect_context = format_affect_context(self.selected_affect_events)
+        if affect_context:
+            lines.append(f"情感上下文: {affect_context}")
+        return "\n".join(lines).strip()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -126,6 +134,9 @@ class TopicRecallResult:
             },
             "matched_actor_ids": self.matched_actor_ids,
             "actor_match_boost": round(self.actor_match_boost, 6),
+            "affect_match_score": round(self.affect_match_score, 6),
+            "affect_match_boost": round(self.affect_match_boost, 6),
+            "affect_event_count": len(self.selected_affect_events),
             "selected": self.selected,
             "filter_reason": self.filter_reason,
         }
@@ -151,6 +162,9 @@ class TopicFragmentRecallResult:
     rerank_percentile: float | None = None
     rerank_confidence: float = 0.0
     rerank_rank_boost: float = 0.0
+    affect_match_score: float = 0.0
+    affect_match_boost: float = 0.0
+    selected_affect_events: list[dict[str, Any]] = field(default_factory=list)
     body_suppressed: bool = False
     selected: bool = False
     filter_reason: str | None = None
@@ -189,6 +203,9 @@ class TopicFragmentRecallResult:
         if facts:
             label = "Topic 片段补充事实" if self.body_suppressed else "关键事实"
             lines.append(f"{label}: " + "；".join(facts))
+        affect_context = format_affect_context(self.selected_affect_events)
+        if affect_context:
+            lines.append(f"情感上下文: {affect_context}")
         return "\n".join(value for value in lines if value).strip()
 
     def to_dict(self) -> dict[str, Any]:
@@ -227,6 +244,9 @@ class TopicFragmentRecallResult:
             ),
             "rerank_confidence": round(self.rerank_confidence, 6),
             "rerank_rank_boost": round(self.rerank_rank_boost, 6),
+            "affect_match_score": round(self.affect_match_score, 6),
+            "affect_match_boost": round(self.affect_match_boost, 6),
+            "affect_event_count": len(self.selected_affect_events),
             "body_suppressed": self.body_suppressed,
             "fact_count": len(self.fact_contents),
             "context_coverage": round(self.context_coverage, 6),

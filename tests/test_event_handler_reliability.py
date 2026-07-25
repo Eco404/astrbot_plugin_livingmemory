@@ -14,6 +14,10 @@ def _make_handler() -> EventHandler:
     memory_engine = Mock()
     memory_engine.search_memories = AsyncMock(return_value=[])
     memory_engine.add_memory = AsyncMock(return_value=1)
+    memory_engine.resolve_session_scope = AsyncMock(
+        side_effect=lambda session_id: [session_id]
+    )
+    memory_engine.recall_trace_store = None
 
     memory_processor = Mock()
     memory_processor.process_conversation = AsyncMock(return_value=("summary", {}, 0.5))

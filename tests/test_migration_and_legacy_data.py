@@ -195,6 +195,43 @@ def test_database_version_segments_do_not_use_float_ordering():
 
 
 @pytest.mark.asyncio
+async def test_migrate_v9_17_to_v9_18_adds_empty_affect_contract_idempotently(
+    tmp_path,
+):
+    db_path = str(tmp_path / "v9-18-affect.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("CREATE TABLE topic_memories (topic_uid TEXT PRIMARY KEY)")
+        await db.execute(
+            "CREATE TABLE topic_fragment_drafts (fragment_uid TEXT PRIMARY KEY)"
+        )
+        await db.execute(
+            "CREATE TABLE topic_fragments (fragment_uid TEXT PRIMARY KEY)"
+        )
+        await db.execute("INSERT INTO topic_memories VALUES ('topic-1')")
+        await db.execute("INSERT INTO topic_fragments VALUES ('fragment-1')")
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_17_to_v9_18(None)
+    await migration._migrate_v9_17_to_v9_18(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        topic = await (
+            await db.execute(
+                "SELECT affect_profile, affective_salience, affect_signature "
+                "FROM topic_memories"
+            )
+        ).fetchone()
+        fragment = await (
+            await db.execute(
+                "SELECT affect_events, affect_signature FROM topic_fragments"
+            )
+        ).fetchone()
+    assert topic == ("[]", 0.0, "{}")
+    assert fragment == ("[]", "{}")
+
+
+@pytest.mark.asyncio
 async def test_set_db_version_forces_text_in_legacy_integer_column(tmp_path):
     db_path = str(tmp_path / "version_affinity.db")
     async with aiosqlite.connect(db_path) as db:

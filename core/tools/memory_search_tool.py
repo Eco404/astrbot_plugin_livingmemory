@@ -221,11 +221,14 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
             serialized_results = [
                 {
                     "id": item.topic_uid,
-                    "content": f"Topic: {item.topic.title}\n{item.topic.summary}",
+                    "content": f"Topic: {item.content}".strip(),
                     "score": item.final_score,
                     "importance": item.topic.importance,
                     "memory_layer": "topic",
                     "source_timeline_count": len(item.sources),
+                    "affect_match_score": item.affect_match_score,
+                    "affect_match_boost": item.affect_match_boost,
+                    "affect_event_count": len(item.selected_affect_events),
                 }
                 for item in topic_results
             ]
