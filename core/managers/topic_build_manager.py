@@ -2061,8 +2061,13 @@ class TopicBuildManager:
             1,
             int(self.config.get("fragment_extraction_batch_size", 12)),
         )
+        validation_retries = max(
+            0,
+            int(self.config.get("fragment_validation_retries", 2)),
+        )
         prompt_hash = hashlib.sha256(
-            f"{_FRAGMENT_PROMPT_VERSION}\n{batch_size}\n{input_hash}\n"
+            f"{_FRAGMENT_PROMPT_VERSION}\n{batch_size}\n{validation_retries}\n"
+            f"{input_hash}\n"
             f"{identity_hash}".encode()
         ).hexdigest()
         provider_id, model_id = self._provider_identity(self.llm_provider)
@@ -2224,48 +2229,61 @@ class TopicBuildManager:
                         fragment_index_offset=fragment_index_offset,
                     )
                 except TopicBuildValidationError as first_exc:
-                    try:
-                        correction_prompt = self._validation_correction_prompt(
-                            prompt, raw, first_exc
-                        )
-                        batch_input_hash, batch_prompt_hash = (
-                            self._fragment_request_hashes(
-                                batch_payload,
-                                correction_prompt,
+                    validation_error: Exception = first_exc
+                    previous_output = raw
+                    batch_fragments = []
+                    for correction_index in range(1, validation_retries + 1):
+                        repaired_raw = ""
+                        try:
+                            correction_prompt = self._validation_correction_prompt(
+                                prompt, previous_output, validation_error
                             )
-                        )
-                        repaired_raw = await self._call_llm(
-                            correction_prompt,
-                            self._fragment_system_prompt(),
-                            output_contract="fragments",
-                        )
-                        repaired = self._decode_fragment_refs(
-                            self._parse_json_object(repaired_raw),
-                            timeline_refs,
-                            source_refs,
-                            actor_refs,
-                            require_source_accounting=True,
-                        )
-                        batch_fragments = self._validate_fragments(
-                            repaired,
-                            run_uid,
-                            group,
-                            batch,
-                            batch_prompt_hash,
-                            batch_input_hash,
-                            provider_id,
-                            model_id,
-                            fragment_index_offset=fragment_index_offset,
-                        )
+                            batch_input_hash, batch_prompt_hash = (
+                                self._fragment_request_hashes(
+                                    batch_payload,
+                                    correction_prompt,
+                                )
+                            )
+                            repaired_raw = await self._call_llm(
+                                correction_prompt,
+                                self._fragment_system_prompt(),
+                                output_contract="fragments",
+                            )
+                            repaired = self._decode_fragment_refs(
+                                self._parse_json_object(repaired_raw),
+                                timeline_refs,
+                                source_refs,
+                                actor_refs,
+                                require_source_accounting=True,
+                            )
+                            batch_fragments = self._validate_fragments(
+                                repaired,
+                                run_uid,
+                                group,
+                                batch,
+                                batch_prompt_hash,
+                                batch_input_hash,
+                                provider_id,
+                                model_id,
+                                fragment_index_offset=fragment_index_offset,
+                            )
+                        except Exception as repair_exc:
+                            validation_error = repair_exc
+                            if repaired_raw:
+                                previous_output = repaired_raw
+                            continue
                         logger.info(
-                            "[TopicMemory] 片段提取输出经一次校正后通过来源校验"
+                            "[TopicMemory] 片段提取输出经 %s 次校正后通过来源校验",
+                            correction_index,
                         )
-                    except Exception as repair_exc:
+                        break
+                    if not batch_fragments:
                         logger.warning(
-                            "[TopicMemory] 片段提取输出经一次校正后仍无法通过来源校验，"
-                            "已回退到输入 Timeline 的确定性片段: first=%s; repair=%s",
+                            "[TopicMemory] 片段提取输出经 %s 次校正后仍无法通过来源校验，"
+                            "已回退到输入 Timeline 的确定性片段: first=%s; last=%s",
+                            validation_retries,
                             first_exc,
-                            repair_exc,
+                            validation_error,
                         )
                         batch_fragments = self._fallback_fragments(
                             run_uid,
@@ -2276,7 +2294,10 @@ class TopicBuildManager:
                             provider_id,
                             model_id,
                             fragment_index_offset=fragment_index_offset,
-                            reason=f"{first_exc}; correction: {repair_exc}",
+                            reason=(
+                                f"{first_exc}; corrections={validation_retries}; "
+                                f"last={validation_error}"
+                            ),
                         )
                 fragments.extend(batch_fragments)
             await self.store.replace_group_fragments(run_uid, group.group_uid, fragments)
@@ -8185,6 +8206,7 @@ INPUT:
                         "sender_id",
                         "observed_names",
                         "persona_id",
+                        "persona_name",
                         "synthetic_narrator",
                     )
                     if key in actor

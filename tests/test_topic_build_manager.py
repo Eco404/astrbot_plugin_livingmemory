@@ -701,6 +701,17 @@ class _ConcurrentGroundedLLM(_GroundedLLM):
                 self.active_fragment_calls -= 1
 
 
+class _CountingInvalidFragmentLLM(_GroundedLLM):
+    def __init__(self):
+        super().__init__(hallucinate=True)
+        self.fragment_calls = 0
+
+    async def text_chat(self, *, prompt: str, system_prompt: str):
+        if prompt.startswith("Split"):
+            self.fragment_calls += 1
+        return await super().text_chat(prompt=prompt, system_prompt=system_prompt)
+
+
 class _ToggleFailingSynthesisLLM(_GroundedLLM):
     def __init__(self):
         super().__init__()
@@ -2534,6 +2545,48 @@ async def test_fragment_extraction_batches_a_wide_candidate_group():
     assert all(event["timeline_count"] <= 2 for event in events)
     assert max(event["llm_call_current"] for event in events) == 3
     assert all(event["llm_concurrency"] == 2 for event in events)
+
+
+@pytest.mark.asyncio
+async def test_fragment_validation_uses_two_correction_attempts_by_default():
+    store = _FragmentStore()
+    llm = _CountingInvalidFragmentLLM()
+    manager = TopicBuildManager(
+        ":memory:",
+        store,
+        None,
+        llm_provider=llm,
+    )
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-1",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="session-1",
+        content="空雨计划周末去京都。",
+        summary="空雨计划周末去京都。",
+        key_facts=["空雨计划周末去京都。"],
+        time_cluster_key="cluster-1",
+    )
+    group = TopicCandidateGroup(
+        run_uid="run-1",
+        group_index=1,
+        memory_space_id="space-1",
+        label="京都旅行",
+        timeline_uids=[candidate.memory_uid],
+        time_cluster_keys=["cluster-1"],
+        cohesion=0.8,
+        group_uid="group-1",
+    )
+
+    await manager._extract_group_fragments(
+        "run-1",
+        group,
+        {candidate.memory_uid: candidate},
+    )
+
+    assert llm.fragment_calls == 3
+    assert len(store.fragments) == 1
 
 
 def _topic_fragment(index: int) -> TopicFragmentDraft:

@@ -23,6 +23,7 @@ def test_effective_topic_settings_are_sparse_overrides_over_code_defaults():
     assert effective["recall_selection_relative_floor"] == 0.90
     assert effective["component_review_enabled"] is True
     assert effective["component_review_min_fragments"] == 6
+    assert effective["fragment_validation_retries"] == 2
     assert effective["recall_top_k"] == defaults["recall_top_k"]
     assert set(effective) == set(TOPIC_SETTING_DEFINITIONS)
     assert all(

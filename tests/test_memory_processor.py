@@ -10,9 +10,6 @@ from astrbot_plugin_livingmemory.core.models.conversation_models import Message
 from astrbot_plugin_livingmemory.core.models.identity_profile import (
     SupplementalIdentityStore,
 )
-from astrbot_plugin_livingmemory.core.models.timeline_quality import (
-    TimelineSummaryQualityError,
-)
 from astrbot_plugin_livingmemory.core.processors.memory_processor import MemoryProcessor
 
 
@@ -87,16 +84,19 @@ async def test_process_conversation_success():
 
 
 @pytest.mark.asyncio
-async def test_process_conversation_rejects_non_json_after_one_repair():
+async def test_process_conversation_retains_low_quality_non_json_after_repair():
     llm = _DummyLLMProvider("summary=测试, importance=0.6")
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    with pytest.raises(TimelineSummaryQualityError):
-        await processor.process_conversation(
-            messages=_make_messages(),
-            is_group_chat=False,
-            persona_id=None,
-        )
+    content, metadata, _ = await processor.process_conversation(
+        messages=_make_messages(),
+        is_group_chat=False,
+        persona_id=None,
+    )
+    assert content
+    assert metadata["summary_quality"] == "low"
+    assert metadata["summary_rebuild_recommended"] is True
+    assert metadata["summary_quality_report"]["status"] == "rejected"
     # AsyncMock advertises **kwargs, so the first call also covers one tool-mode
     # capability negotiation before falling back to the test provider signature.
     assert llm.text_chat.await_count == 3
@@ -335,7 +335,7 @@ async def test_source_grounding_contract_repairs_once_and_persists_report():
 
 
 @pytest.mark.asyncio
-async def test_source_grounding_contract_rejects_unknown_message_reference():
+async def test_source_grounding_contract_marks_unknown_message_reference_low():
     response = """{
         "summary":"张三说明天下午三点开会，我确认会进行提醒",
         "topics":["会议提醒"],
@@ -354,16 +354,15 @@ async def test_source_grounding_contract_rejects_unknown_message_reference():
         config={"timeline_require_source_grounding": True},
     )
 
-    with pytest.raises(TimelineSummaryQualityError) as captured:
-        await processor.process_conversation(_make_messages())
-
+    _, metadata, _ = await processor.process_conversation(_make_messages())
     assert "unknown_fact_evidence" in {
-        issue.code for issue in captured.value.report.errors
+        issue["code"] for issue in metadata["summary_quality_report"]["issues"]
     }
+    assert metadata["summary_quality"] == "low"
 
 
 @pytest.mark.asyncio
-async def test_summary_quality_rejects_empty_summary_after_repair():
+async def test_summary_quality_marks_empty_summary_low_after_repair():
     llm = _DummyLLMProvider(
         """{
             "summary":"",
@@ -375,16 +374,17 @@ async def test_summary_quality_rejects_empty_summary_after_repair():
     )
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    with pytest.raises(TimelineSummaryQualityError):
-        await processor.process_conversation(
-            messages=_make_messages(),
-            is_group_chat=False,
-            persona_id=None,
-        )
+    content, metadata, _ = await processor.process_conversation(
+        messages=_make_messages(),
+        is_group_chat=False,
+        persona_id=None,
+    )
+    assert content
+    assert metadata["summary_quality"] == "low"
 
 
 @pytest.mark.asyncio
-async def test_summary_quality_rejects_missing_key_facts_after_repair():
+async def test_summary_quality_marks_missing_key_facts_low_after_repair():
     llm = _DummyLLMProvider(
         """{
             "summary":"用户进行了一次普通对话",
@@ -396,16 +396,16 @@ async def test_summary_quality_rejects_missing_key_facts_after_repair():
     )
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    with pytest.raises(TimelineSummaryQualityError):
-        await processor.process_conversation(
-            messages=_make_messages(),
-            is_group_chat=False,
-            persona_id=None,
-        )
+    _, metadata, _ = await processor.process_conversation(
+        messages=_make_messages(),
+        is_group_chat=False,
+        persona_id=None,
+    )
+    assert metadata["summary_quality"] == "low"
 
 
 @pytest.mark.asyncio
-async def test_summary_quality_rejects_generic_terms_after_repair():
+async def test_summary_quality_marks_generic_terms_low_after_repair():
     llm = _DummyLLMProvider(
         """{
             "summary":"某用户提到了一些事情",
@@ -417,12 +417,12 @@ async def test_summary_quality_rejects_generic_terms_after_repair():
     )
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    with pytest.raises(TimelineSummaryQualityError):
-        await processor.process_conversation(
-            messages=_make_messages(),
-            is_group_chat=False,
-            persona_id=None,
-        )
+    _, metadata, _ = await processor.process_conversation(
+        messages=_make_messages(),
+        is_group_chat=False,
+        persona_id=None,
+    )
+    assert metadata["summary_quality"] == "low"
 
 
 def test_validate_summary_quality_directly():
@@ -756,7 +756,7 @@ async def test_process_group_chat_long_content():
 
 
 @pytest.mark.asyncio
-async def test_process_group_chat_rejects_generic_terms_after_repair():
+async def test_process_group_chat_retains_generic_terms_as_low_quality():
     llm = _DummyLLMProvider(
         """{
             "summary":"某用户在群里说了一些话",
@@ -769,12 +769,12 @@ async def test_process_group_chat_rejects_generic_terms_after_repair():
     )
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    with pytest.raises(TimelineSummaryQualityError):
-        await processor.process_conversation(
-            messages=_make_group_messages(),
-            is_group_chat=True,
-            persona_id=None,
-        )
+    _, metadata, _ = await processor.process_conversation(
+        messages=_make_group_messages(),
+        is_group_chat=True,
+        persona_id=None,
+    )
+    assert metadata["summary_quality"] == "low"
 
 
 def test_format_conversation_sanitizes_multimodal_private_message():

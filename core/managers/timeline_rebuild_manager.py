@@ -124,14 +124,23 @@ class TimelineRebuildManager:
         memory_ids: Iterable[int] | None = None,
         *,
         memory_space_id: str | None = None,
+        quality_filter: str = "all",
         limit: int = 500,
     ) -> dict[str, Any]:
+        quality_filter = str(quality_filter or "all").strip().lower()
+        if quality_filter not in {"all", "low"}:
+            raise ValueError("quality_filter 仅支持 all 或 low")
         records = await self._candidate_records(
             memory_ids,
             memory_space_id=memory_space_id,
+            quality_filter=quality_filter,
             limit=limit,
         )
         items = [await self._inspect_record(record) for record in records]
+        if quality_filter == "low":
+            items = [
+                item for item in items if item.get("summary_quality") == "low"
+            ]
         return {
             "items": items,
             "total_count": len(items),
@@ -141,6 +150,7 @@ class TimelineRebuildManager:
             "blocked_count": sum(
                 1 for item in items if not item["reconstructable"]
             ),
+            "quality_filter": quality_filter,
         }
 
     async def _candidate_records(
@@ -148,6 +158,7 @@ class TimelineRebuildManager:
         memory_ids: Iterable[int] | None,
         *,
         memory_space_id: str | None,
+        quality_filter: str,
         limit: int,
     ) -> list[dict[str, Any]]:
         ids_were_supplied = memory_ids is not None
@@ -260,12 +271,14 @@ class TimelineRebuildManager:
             "is_group_chat": bool(messages and messages[0].group_id)
             or "GroupMessage" in session_id,
             "topic_count": int(record.get("topic_count") or 0),
+            "summary_quality": str(metadata.get("summary_quality") or "unknown"),
         }
         return {
             **snapshot,
             "excerpt": excerpt[:180],
             "topic_count": int(record.get("topic_count") or 0),
             "identity_warnings": identity_issues,
+            "summary_quality": snapshot["summary_quality"],
             "reconstructable": not reasons,
             "blocked_reasons": reasons,
             "source_snapshot": snapshot,
@@ -588,6 +601,9 @@ class TimelineRebuildManager:
                 "new_revision": int(current["revision"]),
                 "message_count": int(snapshot["message_count"]),
                 "resumed_after_write": True,
+                "summary_quality": str(
+                    current_metadata.get("summary_quality") or "unknown"
+                ),
             }
         for key in (
             "memory_uid",
@@ -641,6 +657,10 @@ class TimelineRebuildManager:
             "new_revision": int(snapshot["revision"]) + 1,
             "message_count": len(messages),
             "importance": float(importance),
+            "summary_quality": str(metadata.get("summary_quality") or "unknown"),
+            "rebuild_recommended": bool(
+                metadata.get("summary_rebuild_recommended", False)
+            ),
         }
 
     async def _set_item(

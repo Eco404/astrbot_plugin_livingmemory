@@ -196,6 +196,7 @@ class TopicMemoryConfig(BaseModel):
     time_gap_hours: float = Field(default=6.0, ge=1 / 60, le=24 * 30)
     candidate_batch_size: int = Field(default=100, ge=1, le=1000)
     fragment_extraction_batch_size: int = Field(default=12, ge=1, le=100)
+    fragment_validation_retries: int = Field(default=2, ge=0, le=8)
     candidate_similarity_threshold: float = Field(default=0.52, ge=0.0, le=1.0)
     fragment_similarity_threshold: float = Field(default=0.78, ge=0.0, le=1.0)
     rerank_candidate_floor: float = Field(default=0.63, ge=0.0, le=1.0)

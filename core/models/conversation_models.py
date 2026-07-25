@@ -53,13 +53,18 @@ def build_role_bindings(
             },
         )
         display_name = str(message.sender_name or "").strip()
-        if display_name and display_name not in actor["observed_names"]:
-            actor["observed_names"].append(display_name)
         if actor_type == "assistant":
             if persona_id:
                 actor["persona_id"] = str(persona_id)
+            persona_name = str(message.metadata.get("persona_name") or "").strip()
+            if persona_name:
+                actor["persona_name"] = persona_name
+                if persona_name not in actor["observed_names"]:
+                    actor["observed_names"].append(persona_name)
             if actor_id not in assistant_ids:
                 assistant_ids.append(actor_id)
+        if display_name and display_name not in actor["observed_names"]:
+            actor["observed_names"].append(display_name)
 
     ambiguity_flags: list[str] = []
     human_names = {
@@ -78,12 +83,24 @@ def build_role_bindings(
         ]
         if len(retained) != len(actor.get("observed_names", [])):
             ambiguity_flags.append("assistant_name_collides_with_human")
-        actor["observed_names"] = retained or [str(persona_id or "助手")]
+        persona_name = str(actor.get("persona_name") or "").strip()
+        actor["observed_names"] = (
+            ([persona_name] if persona_name else [])
+            + [name for name in retained if name != persona_name]
+        ) or [str(persona_id or "助手")]
     if len(assistant_ids) > 1:
         ambiguity_flags.append("multiple_assistant_actors")
     narrator_actor_id = assistant_ids[0] if len(assistant_ids) == 1 else None
     if narrator_actor_id is None:
         platform = messages[0].platform if messages else "unknown"
+        persona_name = next(
+            (
+                str(message.metadata.get("persona_name") or "").strip()
+                for message in messages
+                if str(message.metadata.get("persona_name") or "").strip()
+            ),
+            "",
+        )
         narrator_sender_id = f"persona:{persona_id or 'default'}"
         narrator_actor_id = stable_actor_id(
             platform, narrator_sender_id, "assistant"
@@ -95,8 +112,9 @@ def build_role_bindings(
                 "actor_type": "assistant",
                 "platform": str(platform or "unknown"),
                 "sender_id": narrator_sender_id,
-                "observed_names": [str(persona_id or "助手")],
+                "observed_names": [persona_name or str(persona_id or "助手")],
                 "persona_id": str(persona_id or "default"),
+                "persona_name": persona_name or None,
                 "synthetic_narrator": True,
             },
         )

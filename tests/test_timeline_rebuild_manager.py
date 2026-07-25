@@ -205,6 +205,30 @@ async def test_empty_selection_never_expands_to_all_timelines(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_preview_can_filter_low_quality_timelines(tmp_path):
+    db_path = tmp_path / "memory.db"
+    await create_source_db(db_path)
+    memory = source_memory()
+    memory["metadata"]["summary_quality"] = "low"
+    engine = FakeMemoryEngine({1: memory})
+    manager = TimelineRebuildManager(
+        str(db_path),
+        FakeConversationManager(source_messages()),
+        engine,
+        FakeProcessor(),
+    )
+    await manager.initialize()
+
+    low_only = await manager.preview(quality_filter="low")
+    assert low_only["total_count"] == 1
+    assert low_only["items"][0]["summary_quality"] == "low"
+
+    engine.memories[1]["metadata"]["summary_quality"] = "normal"
+    normal_only = await manager.preview(quality_filter="low")
+    assert normal_only["total_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_rebuild_preserves_id_and_runs_local_topic_sync(tmp_path):
     db_path = tmp_path / "memory.db"
     await create_source_db(db_path)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TOPIC_SETTINGS_REVISION = 9
+TOPIC_SETTINGS_REVISION = 10
 
 
 TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -48,6 +48,7 @@ TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "existing_topic_match_threshold": {"default": 0.55, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "全量构建 Topic 延续阈值", "effect": "rebuild"},
     "candidate_batch_size": {"default": 100, "type": "int", "min": 1, "max": 1000, "category": "performance", "label": "候选扫描批量", "effect": "next_build"},
     "fragment_extraction_batch_size": {"default": 12, "type": "int", "min": 1, "max": 100, "category": "performance", "label": "片段提取批量", "effect": "rebuild"},
+    "fragment_validation_retries": {"default": 2, "type": "int", "min": 0, "max": 8, "category": "performance", "label": "片段格式校正重试次数", "effect": "next_build"},
     "synthesis_batch_size": {"default": 12, "type": "int", "min": 2, "max": 50, "category": "performance", "label": "分层合成批量", "effect": "rebuild"},
     "embedding_batch_size": {"default": 8, "type": "int", "min": 1, "max": 256, "category": "performance", "label": "片段向量批量", "effect": "next_build"},
     "llm_concurrency": {"default": 1, "type": "int", "min": 1, "max": 64, "category": "performance", "label": "LLM 并发数", "effect": "next_build"},
@@ -105,6 +106,7 @@ TOPIC_SETTING_DESCRIPTIONS: dict[str, str] = {
     "existing_topic_match_threshold": "全量构建未清空旧 Topic 时，判定新组件是否延续已有 Topic 的最低得分。",
     "candidate_batch_size": "候选扫描每批处理的 Timeline 数量，主要影响内存和进度刷新频率。",
     "fragment_extraction_batch_size": "一次 LLM 片段提取请求包含的 Timeline 数量。",
+    "fragment_validation_retries": "片段提取结果不符合结构或来源契约时，额外要求模型定向校正的次数；0 表示直接使用确定性回退。",
     "synthesis_batch_size": "一次 LLM 分层合成最多处理的正式片段数量。",
     "embedding_batch_size": "一次 Embedding 请求包含的片段文本数量；限流时可适当调小。",
     "llm_concurrency": "Topic 构建期间同时进行的 LLM 请求上限。",
