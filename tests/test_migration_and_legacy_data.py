@@ -138,6 +138,55 @@ async def _get_all_metadata(db_path: str) -> list[dict]:
     return result
 
 
+@pytest.mark.asyncio
+async def test_migrate_v9_16_to_v9_17_backfills_importance_contract_idempotently(
+    tmp_path,
+):
+    db_path = str(tmp_path / "v9-17-importance.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "CREATE TABLE documents (id INTEGER PRIMARY KEY, text TEXT, metadata TEXT)"
+        )
+        await db.execute(
+            "INSERT INTO documents VALUES (1, 'Timeline', ?)",
+            (json.dumps({"importance": 0.72}, ensure_ascii=False),),
+        )
+        await db.execute(
+            """
+            CREATE TABLE topic_memories (
+                topic_uid TEXT PRIMARY KEY,
+                base_importance REAL NOT NULL,
+                confidence REAL NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            "INSERT INTO topic_memories VALUES ('topic-1', 0.81, 0.66)"
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_16_to_v9_17(None)
+    await migration._migrate_v9_16_to_v9_17(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        topic = await (
+            await db.execute("SELECT * FROM topic_memories WHERE topic_uid='topic-1'")
+        ).fetchone()
+        document = await (
+            await db.execute("SELECT metadata FROM documents WHERE id=1")
+        ).fetchone()
+    metadata = json.loads(document["metadata"])
+    assert topic["semantic_importance"] == pytest.approx(0.81)
+    assert topic["source_base_component"] == pytest.approx(0.81)
+    assert topic["evidence_strength"] == pytest.approx(0.66)
+    assert topic["importance_policy_version"] == 2
+    assert metadata["base_importance"] == pytest.approx(0.72)
+    assert metadata["importance_revision"] == 1
+    assert metadata["importance_policy_version"] == 2
+
+
 def test_database_version_segments_do_not_use_float_ordering():
     assert DBMigration.normalize_version("v9.02") == "9.2"
     assert DBMigration.version_key("9.10") > DBMigration.version_key("9.2")

@@ -667,6 +667,15 @@ class TopicMaintenanceManager:
             ),
             content=content,
             summary=summary,
+            base_importance=self._score(
+                metadata.get("base_importance"),
+                self._score(metadata.get("importance"), 0.5),
+            ),
+            effective_importance=self._score(metadata.get("importance"), 0.5),
+            importance_revision=max(
+                1,
+                self._safe_int(metadata.get("importance_revision"), 1),
+            ),
             topics=topics,
             key_facts=key_facts,
             atom_fingerprints=atom_fingerprints,
@@ -681,6 +690,21 @@ class TopicMaintenanceManager:
                 "feature_schema_version": 1,
             },
         )
+
+    @staticmethod
+    def _score(value: Any, default: float = 0.5) -> float:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            score = float(default)
+        return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return int(default)
 
     @classmethod
     def assign_time_clusters(

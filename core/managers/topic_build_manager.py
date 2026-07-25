@@ -27,6 +27,15 @@ from ..embedding_signature import (
     make_embedding_signature,
     signature_mismatch_reason,
 )
+from ..importance_policy import (
+    IMPORTANCE_POLICY_VERSION,
+    aggregate_source_importance,
+    evidence_strength,
+    fragment_semantic_importance,
+    topic_base_importance,
+    topic_effective_importance,
+    topic_semantic_importance,
+)
 from ..models.identity_profile import (
     SupplementalIdentityProfile,
     SupplementalIdentityStore,
@@ -457,6 +466,22 @@ class TopicBuildManager:
             if not changed:
                 raise ValueError("Topic review is no longer pending")
             return {"review_uid": review_uid, "status": "ignored", "action": action}
+        if action == "sync_sources":
+            review = await self.store.get_maintenance_review_context(review_uid)
+            if review is None or str(review.get("status")) != "pending":
+                raise ValueError("Topic review is missing or no longer pending")
+            if str(review.get("review_type")) != "deleted_timeline_source_repair":
+                raise ValueError("This review is not a Timeline source repair")
+            return await self.repair_deleted_timeline_sources(
+                str(review["memory_space_id"]),
+                affected_topic_uids=[
+                    str(uid) for uid in review.get("topic_uids", []) if str(uid)
+                ],
+                deleted_timeline_uids=[
+                    str(uid) for uid in review.get("timeline_uids", []) if str(uid)
+                ],
+                review_uid=review_uid,
+            )
         if action not in {"merge", "new"}:
             raise ValueError("Unsupported Topic review action")
         review = await self.store.get_maintenance_review_context(review_uid)
@@ -1002,6 +1027,63 @@ class TopicBuildManager:
             result = await self.store.clear_space(memory_space_id)
             if self.vector_index is not None:
                 self.vector_index.invalidate(memory_space_id)
+            return result
+
+    async def repair_deleted_timeline_sources(
+        self,
+        memory_space_id: str,
+        *,
+        affected_topic_uids: list[str],
+        deleted_timeline_uids: list[str],
+        review_uid: str | None = None,
+    ) -> dict[str, Any]:
+        """Rebuild affected Topics only from their remaining authoritative sources."""
+        normalized_topics = sorted(
+            {str(uid).strip() for uid in affected_topic_uids if str(uid).strip()}
+        )
+        deleted = {
+            str(uid).strip() for uid in deleted_timeline_uids if str(uid).strip()
+        }
+        if not memory_space_id or not normalized_topics:
+            return {"status": "completed", "topic_uids": [], "archived_topics": 0}
+        lock = self._space_locks.setdefault(memory_space_id, asyncio.Lock())
+        async with lock:
+            topics = await self.store.get_topics_by_uids(
+                memory_space_id,
+                normalized_topics,
+                status=None,
+            )
+            repair_run_uid = str(uuid.uuid4())
+            fragment_groups: list[list[TopicFragmentDraft]] = []
+            retained_topics: list[TopicMemory | None] = []
+            for topic in topics:
+                fragment = await self._existing_topic_fragment(
+                    repair_run_uid,
+                    topic,
+                    exclude_timeline_uids=deleted,
+                )
+                if fragment is None:
+                    continue
+                fragment_groups.append([fragment])
+                retained_topics.append(topic)
+            result = await self._publish_governance_groups(
+                memory_space_id,
+                fragment_groups,
+                retained_topics=retained_topics,
+                affected_topic_uids=set(normalized_topics),
+                operation="deleted_timeline_source_repair",
+                operation_payload={
+                    "deleted_timeline_uids": sorted(deleted),
+                    "review_uid": review_uid,
+                },
+            )
+            if review_uid:
+                await self.store.set_maintenance_review_status(
+                    review_uid,
+                    status="resolved",
+                    action="automatic_source_repair",
+                    payload=result,
+                )
             return result
 
     async def build_space(
@@ -4585,6 +4667,29 @@ class TopicBuildManager:
                     str(value.get("topic_atom_uid") or ""), []
                 ).append(dict(value))
         excluded = set(exclude_timeline_uids or set())
+        if excluded:
+            existing_actor_links = [
+                value
+                for value in existing_actor_links
+                if not (
+                    (source_uids := {
+                        str(uid)
+                        for uid in (value.get("metadata") or {}).get(
+                            "timeline_uids", []
+                        )
+                        if str(uid)
+                    })
+                    and source_uids <= excluded
+                )
+            ]
+            actor_links_by_atom = {
+                atom_uid: [
+                    value
+                    for value in values
+                    if str(value.get("timeline_uid") or "") not in excluded
+                ]
+                for atom_uid, values in actor_links_by_atom.items()
+            }
         timeline_uids = sorted(
             {
                 str(row.get("timeline_uid") or "")
@@ -4686,7 +4791,7 @@ class TopicBuildManager:
             },
             facts=facts,
             time_cluster_keys=sorted({value for value in cluster_map.values() if value}),
-            importance=topic.importance,
+            importance=topic.semantic_importance,
             confidence=topic.confidence,
             embedding=[float(value) for value in topic.metadata.get("embedding", [])],
             started_at=topic.started_at,
@@ -4832,8 +4937,49 @@ class TopicBuildManager:
         starts = [item.started_at for item in fragments if item.started_at is not None]
         ends = [item.ended_at for item in fragments if item.ended_at is not None]
         evidence_clusters = set(timeline_cluster.values())
-        importance = self._cluster_aware_importance(
-            fragments, len(evidence_clusters)
+        semantic_importance = topic_semantic_importance(
+            (item.importance, item.confidence) for item in fragments
+        )
+        source_importance = aggregate_source_importance(
+            {
+                "timeline_uid": uid,
+                "time_cluster_key": timeline_cluster[uid],
+                "base_importance": (
+                    candidate_map[uid].base_importance
+                    if uid in candidate_map
+                    else 0.5
+                ),
+                "effective_importance": (
+                    candidate_map[uid].effective_importance
+                    if uid in candidate_map
+                    else 0.5
+                ),
+                "importance_revision": (
+                    candidate_map[uid].importance_revision
+                    if uid in candidate_map
+                    else 1
+                ),
+                "weight": min(
+                    1.0,
+                    0.6 + 0.4 / max(1, cluster_sizes[timeline_cluster[uid]]),
+                ),
+            }
+            for uid in timeline_uids
+        )
+        source_base_component = float(
+            source_importance["source_base_component"]
+        )
+        base_importance = topic_base_importance(
+            semantic_importance,
+            source_base_component,
+        )
+        importance = topic_effective_importance(
+            base_importance,
+            float(source_importance["dynamic_factor"]),
+        )
+        topic_evidence_strength = evidence_strength(
+            cluster_count=len(evidence_clusters),
+            timeline_count=len(timeline_uids),
         )
         raw_topic_confidence = self._score(synthesis.get("confidence"), 0.7)
         topic_confidence, topic_confidence_audit = self._calibrate_confidence(
@@ -4871,8 +5017,15 @@ class TopicBuildManager:
             summary=str(synthesis["summary"]),
             revision=existing.revision if existing else 0,
             status=TopicMemoryStatus.ACTIVE,
-            base_importance=importance,
+            base_importance=base_importance,
             importance=importance,
+            semantic_importance=semantic_importance,
+            source_base_component=source_base_component,
+            evidence_strength=topic_evidence_strength,
+            importance_policy_version=IMPORTANCE_POLICY_VERSION,
+            source_importance_hash=str(
+                source_importance["source_importance_hash"]
+            ),
             confidence=topic_confidence,
             started_at=min(starts) if starts else None,
             ended_at=max(ends) if ends else None,
@@ -4898,6 +5051,16 @@ class TopicBuildManager:
                     }
                 ),
                 "time_cluster_count": len(evidence_clusters),
+                "importance_projection": {
+                    "policy_version": IMPORTANCE_POLICY_VERSION,
+                    "semantic_importance": semantic_importance,
+                    "source_base_component": source_base_component,
+                    "dynamic_factor": source_importance["dynamic_factor"],
+                    "evidence_strength": topic_evidence_strength,
+                    "source_importance_hash": source_importance[
+                        "source_importance_hash"
+                    ],
+                },
                 "embedding": embedding,
                 "automatic": True,
                 "manually_editable": False,
@@ -4939,6 +5102,29 @@ class TopicBuildManager:
                 ),
                 semantic_similarity=self._timeline_fragment_similarity(uid, fragments),
                 temporal_affinity=1.0 / max(1, cluster_sizes[timeline_cluster[uid]]),
+                source_timeline_revision=(
+                    candidate_map[uid].source_revision
+                    if uid in candidate_map
+                    else 1
+                ),
+                metadata={
+                    "source_base_importance": (
+                        candidate_map[uid].base_importance
+                        if uid in candidate_map
+                        else 0.5
+                    ),
+                    "source_effective_importance": (
+                        candidate_map[uid].effective_importance
+                        if uid in candidate_map
+                        else 0.5
+                    ),
+                    "source_importance_revision": (
+                        candidate_map[uid].importance_revision
+                        if uid in candidate_map
+                        else 1
+                    ),
+                    "importance_policy_version": IMPORTANCE_POLICY_VERSION,
+                },
             )
             for uid in timeline_uids
         ]
@@ -4974,8 +5160,8 @@ class TopicBuildManager:
                 | set(raw_atom.get("source_fact_uids", []))
             )
             current["importance"] = max(
-                self._score(current.get("importance"), importance),
-                self._score(raw_atom.get("importance"), importance),
+                self._score(current.get("importance"), semantic_importance),
+                self._score(raw_atom.get("importance"), semantic_importance),
             )
             current["confidence"] = max(
                 self._score(current.get("confidence"), topic.confidence),
@@ -5029,7 +5215,9 @@ class TopicBuildManager:
                 atom_type=str(atom_payload.get("type") or "factual"),
                 content=content,
                 canonical_content=self._norm(content),
-                importance=self._score(atom_payload.get("importance"), importance),
+                importance=self._score(
+                    atom_payload.get("importance"), semantic_importance
+                ),
                 confidence=atom_confidence,
                 event_started_at=topic.started_at,
                 event_ended_at=topic.ended_at,
@@ -5412,7 +5600,7 @@ class TopicBuildManager:
                     time_cluster_keys=[candidate.time_cluster_key]
                     if candidate.time_cluster_key
                     else [],
-                    importance=0.5,
+                    importance=fragment_semantic_importance(facts),
                     confidence=0.7,
                     started_at=candidate.started_at,
                     ended_at=candidate.ended_at,
@@ -5422,6 +5610,8 @@ class TopicBuildManager:
                     model_id=model_id,
                     metadata={
                         "fragment_prompt_version": _FRAGMENT_PROMPT_VERSION,
+                        "importance_policy_version": IMPORTANCE_POLICY_VERSION,
+                        "llm_fragment_importance": None,
                         "deterministic_fallback": True,
                         "narrative_schema_version": "legacy_first_person_unresolved",
                         "conversation_roles": self._conversation_role_payload(
@@ -5762,6 +5952,10 @@ class TopicBuildManager:
                 mentioned_actor_refs,
                 normalized_facts,
             )
+            raw_fragment_importance = self._score(raw.get("importance"), 0.5)
+            semantic_fragment_importance = fragment_semantic_importance(
+                normalized_facts
+            )
             result.append(
                 TopicFragmentDraft(
                     fragment_uid=fragment_uid,
@@ -5782,7 +5976,7 @@ class TopicBuildManager:
                     time_cluster_keys=sorted(
                         {allowed[uid].time_cluster_key for uid in timeline_uids}
                     ),
-                    importance=self._score(raw.get("importance"), 0.5),
+                    importance=semantic_fragment_importance,
                     confidence=self._score(raw.get("confidence"), 0.7),
                     started_at=min(starts) if starts else None,
                     ended_at=max(ends) if ends else None,
@@ -5792,6 +5986,8 @@ class TopicBuildManager:
                     model_id=model_id,
                     metadata={
                         "fragment_prompt_version": _FRAGMENT_PROMPT_VERSION,
+                        "importance_policy_version": IMPORTANCE_POLICY_VERSION,
+                        "llm_fragment_importance": raw_fragment_importance,
                         "narrative_schema_version": _NARRATIVE_SCHEMA_VERSION,
                         "conversation_roles": self._conversation_role_payload(
                             source_items
@@ -6873,6 +7069,13 @@ Semantic rules:
    output fact. Use non_durable only for incidental details with no plausible future
    retrieval value. Use invalid_source only when the source text itself is unusable or
    contradictory without a supportable reading. Explain the decision in detail.
+20. Score each fact with the same durable-memory rubric used by Timeline memory:
+   0.9-1.0 for critical needs, decisions, commitments, safety issues or strong emotion;
+   0.7-0.8 for explicit plans, requirements and durable valuable information;
+   0.5-0.6 for ordinary but reusable daily information; 0.3-0.4 for minor routine
+   interaction; 0.0-0.2 for tests, noise or content without durable value. Group
+   participation may support confidence, but popularity alone must not raise semantic
+   importance. Score the fact itself, not how many Timeline rows repeat it.
 
 Reference rules:
 - Treat refs such as T1 and T1.A1 as opaque local identifiers.
@@ -6900,7 +7103,8 @@ Reference rules:
 Output constraints:
 - Submit exactly one result through the required output tool. In fallback mode, return
   exactly one JSON object without Markdown or commentary.
-- importance and confidence are numbers in [0, 1].
+- importance and confidence are numbers in [0, 1]. Fragment importance is retained
+  only for audit; the application deterministically derives it from fact importance.
 - Keep labels concise and summaries focused and non-repetitive.
 - keywords should contain no more than 12 short items.
 - If raw evidence is required to resolve an attribution, put at most one request per
@@ -7029,7 +7233,9 @@ Output constraints:
   exactly one JSON object without Markdown or commentary.
 - title should be concise (at most 40 Chinese characters or similar length).
 - summary should be focused, non-repetitive, and normally under 800 Chinese characters.
-- importance and confidence are numbers in [0, 1].
+- importance and confidence are numbers in [0, 1]. Topic importance is retained only
+  for audit; the application deterministically derives Topic importance from fragment
+  facts and current Timeline source state.
 
 Required result shape: title, summary, importance, confidence, and atoms.
 Every atom includes type, content, importance, confidence, and source_fact_refs.
@@ -8451,18 +8657,6 @@ INPUT:
     @staticmethod
     def _average_vectors(vectors: list[list[float]]) -> list[float]:
         return average_vectors(vectors)
-
-    @staticmethod
-    def _cluster_aware_importance(
-        fragments: list[TopicFragmentDraft], cluster_count: int
-    ) -> float:
-        if not fragments:
-            return 0.5
-        weighted = sum(item.importance * item.confidence for item in fragments) / max(
-            0.001, sum(item.confidence for item in fragments)
-        )
-        independent_evidence = 1.0 - math.exp(-max(1, cluster_count) / 3.0)
-        return round(max(0.0, min(1.0, 0.8 * weighted + 0.2 * independent_evidence)), 6)
 
     @classmethod
     def _timeline_fragment_similarity(

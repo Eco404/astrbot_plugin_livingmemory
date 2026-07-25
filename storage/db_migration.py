@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.16"
+    CURRENT_VERSION = "9.17"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -53,6 +53,7 @@ class DBMigration:
         "9.14": "Session audit, raw-message maintenance, and canonical aliases",
         "9.15": "Recall audit history and source Timeline access reinforcement",
         "9.16": "Supplemental identity hints and source-owned actor relations",
+        "9.17": "Unified Timeline-derived Topic importance projection and source repair",
     }
 
     def __init__(self, db_path: str):
@@ -360,6 +361,8 @@ class DBMigration:
 
                 if current_key <= self.version_key("9.15"):
                     migration_steps.append(self._migrate_v9_15_to_v9_16)
+                if current_key <= self.version_key("9.16"):
+                    migration_steps.append(self._migrate_v9_16_to_v9_17)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1495,6 +1498,98 @@ class DBMigration:
         if progress_callback:
             progress_callback("清理旧人物资料同步标记", 1, 1)
         logger.info("v9.15 -> v9.16 迁移完成")
+
+    async def _migrate_v9_16_to_v9_17(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Add stateless Topic importance projection and Timeline anchors."""
+        logger.info("执行迁移步骤: v9.16 -> v9.17 (unified importance projection)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            if await self._table_exists(db, "topic_memories"):
+                columns = {
+                    str(row[1])
+                    for row in await (
+                        await db.execute("PRAGMA table_info(topic_memories)")
+                    ).fetchall()
+                }
+                additions = {
+                    "semantic_importance": "REAL NOT NULL DEFAULT 0.5",
+                    "source_base_component": "REAL NOT NULL DEFAULT 0.5",
+                    "evidence_strength": "REAL NOT NULL DEFAULT 0.5",
+                    "importance_policy_version": "INTEGER NOT NULL DEFAULT 1",
+                    "source_importance_hash": "TEXT NOT NULL DEFAULT ''",
+                }
+                for name, definition in additions.items():
+                    if name not in columns:
+                        await db.execute(
+                            f"ALTER TABLE topic_memories ADD COLUMN {name} {definition}"
+                        )
+                await db.execute(
+                    """
+                    UPDATE topic_memories
+                    SET semantic_importance = base_importance,
+                        source_base_component = base_importance,
+                        evidence_strength = confidence,
+                        importance_policy_version = 2
+                    WHERE importance_policy_version < 2
+                    """
+                )
+            if await self._table_exists(db, "documents"):
+                timeline_filter = ""
+                if await self._table_exists(db, "memory_registry"):
+                    timeline_filter = (
+                        " WHERE id IN (SELECT document_id FROM memory_registry "
+                        "WHERE memory_layer = 'timeline')"
+                    )
+                rows = await (
+                    await db.execute(
+                        "SELECT id, metadata FROM documents" + timeline_filter
+                    )
+                ).fetchall()
+                updates: list[tuple[str, int]] = []
+                for document_id, raw_metadata in rows:
+                    try:
+                        metadata = json.loads(raw_metadata or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(metadata, dict):
+                        continue
+                    try:
+                        effective = max(
+                            0.0,
+                            min(1.0, float(metadata.get("importance", 0.5))),
+                        )
+                    except (TypeError, ValueError):
+                        effective = 0.5
+                    changed = False
+                    defaults = {
+                        "base_importance": effective,
+                        "importance_revision": 1,
+                        "importance_reason": "migrated",
+                        "importance_policy_version": 2,
+                    }
+                    for key, value in defaults.items():
+                        if key not in metadata:
+                            metadata[key] = value
+                            changed = True
+                    if changed:
+                        updates.append(
+                            (
+                                json.dumps(metadata, ensure_ascii=False),
+                                int(document_id),
+                            )
+                        )
+                if updates:
+                    await db.executemany(
+                        "UPDATE documents SET metadata = ? WHERE id = ?",
+                        updates,
+                    )
+            await db.commit()
+        if progress_callback:
+            progress_callback("建立统一重要性投影与 Timeline 基础值", 1, 1)
+        logger.info("v9.16 -> v9.17 迁移完成")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

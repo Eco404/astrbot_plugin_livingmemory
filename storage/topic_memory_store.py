@@ -11,6 +11,12 @@ from typing import Any
 
 import aiosqlite
 
+from ..core.importance_policy import (
+    IMPORTANCE_POLICY_VERSION,
+    aggregate_source_importance,
+    topic_base_importance,
+    topic_effective_importance,
+)
 from ..core.models.topic_memory import (
     TopicActorLink,
     TopicActorRef,
@@ -102,6 +108,11 @@ class TopicMemoryStore:
                 status TEXT NOT NULL DEFAULT 'active',
                 base_importance REAL NOT NULL DEFAULT 0.5,
                 importance REAL NOT NULL DEFAULT 0.5,
+                semantic_importance REAL NOT NULL DEFAULT 0.5,
+                source_base_component REAL NOT NULL DEFAULT 0.5,
+                evidence_strength REAL NOT NULL DEFAULT 0.5,
+                importance_policy_version INTEGER NOT NULL DEFAULT 1,
+                source_importance_hash TEXT NOT NULL DEFAULT '',
                 confidence REAL NOT NULL DEFAULT 0.7,
                 started_at REAL,
                 ended_at REAL,
@@ -1134,10 +1145,13 @@ class TopicMemoryStore:
             """
             INSERT INTO topic_memories (
                 topic_uid, memory_space_id, title, summary, revision, status,
-                base_importance, importance, confidence, started_at, ended_at,
+                base_importance, importance, semantic_importance,
+                source_base_component, evidence_strength,
+                importance_policy_version, source_importance_hash,
+                confidence, started_at, ended_at,
                 last_accessed_at, access_count, decay_anchor_at,
                 created_at, updated_at, embedding_signature, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(topic_uid) DO UPDATE SET
                 memory_space_id = excluded.memory_space_id,
                 title = excluded.title,
@@ -1146,6 +1160,11 @@ class TopicMemoryStore:
                 status = excluded.status,
                 base_importance = excluded.base_importance,
                 importance = excluded.importance,
+                semantic_importance = excluded.semantic_importance,
+                source_base_component = excluded.source_base_component,
+                evidence_strength = excluded.evidence_strength,
+                importance_policy_version = excluded.importance_policy_version,
+                source_importance_hash = excluded.source_importance_hash,
                 confidence = excluded.confidence,
                 started_at = excluded.started_at,
                 ended_at = excluded.ended_at,
@@ -1165,6 +1184,11 @@ class TopicMemoryStore:
                 self._enum_value(topic.status),
                 float(topic.base_importance),
                 float(topic.importance),
+                float(topic.semantic_importance),
+                float(topic.source_base_component),
+                float(topic.evidence_strength),
+                max(1, int(topic.importance_policy_version)),
+                str(topic.source_importance_hash or ""),
                 float(topic.confidence),
                 topic.started_at,
                 topic.ended_at,
@@ -1261,6 +1285,7 @@ class TopicMemoryStore:
         topic.participants, topic.mentioned_actors = self._aggregate_actor_refs(
             actor_rows
         )
+        await self.project_topic_importance([topic])
         return topic
 
     async def list_topics(
@@ -1304,7 +1329,13 @@ class TopicMemoryStore:
                 params,
             )
             rows = await cursor.fetchall()
-        return [self._row_to_topic(row) for row in rows]
+        topics = [self._row_to_topic(row) for row in rows]
+        await self.project_topic_importance(topics)
+        return sorted(
+            topics,
+            key=lambda item: (item.importance, item.updated_at),
+            reverse=True,
+        )
 
     async def list_topic_actors(
         self, memory_space_id: str
@@ -1422,7 +1453,123 @@ class TopicMemoryStore:
                     params,
                 )
             ).fetchall()
-        return [self._row_to_topic(row) for row in rows]
+        topics = [self._row_to_topic(row) for row in rows]
+        await self.project_topic_importance(topics)
+        return sorted(
+            topics,
+            key=lambda item: (item.importance, item.updated_at),
+            reverse=True,
+        )
+
+    async def project_topic_importance(
+        self,
+        topics: list[TopicMemory],
+    ) -> list[TopicMemory]:
+        """Project current Topic importance from live Timeline state without writes."""
+        topic_map = {topic.topic_uid: topic for topic in topics}
+        if not topic_map:
+            return topics
+        topic_uids = sorted(topic_map)
+        placeholders = ",".join("?" * len(topic_uids))
+        async with self._connect() as db:
+            document_columns = {
+                str(row[1])
+                for row in await (
+                    await db.execute("PRAGMA table_info(documents)")
+                ).fetchall()
+            }
+            if "id" not in document_columns or "metadata" not in document_columns:
+                return topics
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT l.topic_uid, l.timeline_uid, l.time_cluster_key,
+                           l.contribution_weight, d.metadata
+                    FROM topic_timeline_links l
+                    JOIN memory_registry r ON r.memory_uid = l.timeline_uid
+                    JOIN documents d ON d.id = r.document_id
+                    WHERE l.topic_uid IN ({placeholders})
+                      AND l.status = 'active'
+                      AND r.status = 'active'
+                    ORDER BY l.topic_uid, l.timeline_uid
+                    """,
+                    topic_uids,
+                )
+            ).fetchall()
+        sources_by_topic: dict[str, list[dict[str, Any]]] = {
+            uid: [] for uid in topic_uids
+        }
+        for row in rows:
+            metadata = self._from_json(row["metadata"])
+            effective = self._bounded_score(metadata.get("importance"), 0.5)
+            base = self._bounded_score(
+                metadata.get("base_importance"), effective
+            )
+            sources_by_topic[str(row["topic_uid"])].append(
+                {
+                    "timeline_uid": str(row["timeline_uid"]),
+                    "time_cluster_key": str(row["time_cluster_key"] or ""),
+                    "base_importance": base,
+                    "effective_importance": effective,
+                    "importance_revision": self._positive_int(
+                        metadata.get("importance_revision"), 1
+                    ),
+                    "weight": self._bounded_score(
+                        row["contribution_weight"], 1.0
+                    ),
+                }
+            )
+        for topic_uid, topic in topic_map.items():
+            source_rows = sources_by_topic.get(topic_uid, [])
+            if not source_rows:
+                continue
+            projection = aggregate_source_importance(source_rows)
+            source_base = float(projection["source_base_component"])
+            projected_base = topic_base_importance(
+                topic.semantic_importance,
+                source_base,
+            )
+            topic.source_base_component = source_base
+            topic.base_importance = projected_base
+            topic.importance = topic_effective_importance(
+                projected_base,
+                float(projection["dynamic_factor"]),
+            )
+            topic.importance_policy_version = IMPORTANCE_POLICY_VERSION
+            topic.source_importance_hash = str(
+                projection["source_importance_hash"]
+            )
+            topic.metadata = {
+                **topic.metadata,
+                "importance_projection": {
+                    "policy_version": IMPORTANCE_POLICY_VERSION,
+                    "semantic_importance": topic.semantic_importance,
+                    "source_base_component": source_base,
+                    "dynamic_factor": projection["dynamic_factor"],
+                    "evidence_strength": topic.evidence_strength,
+                    "source_importance_hash": projection[
+                        "source_importance_hash"
+                    ],
+                    "live": True,
+                },
+            }
+        return topics
+
+    @staticmethod
+    def _bounded_score(value: Any, default: float) -> float:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            score = float(default)
+        return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _positive_int(value: Any, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = int(default)
+        return max(1, parsed)
 
     async def list_all_topics(
         self,
@@ -1605,6 +1752,32 @@ class TopicMemoryStore:
                 ),
                 "created_at": float(row["created_at"]),
                 "updated_at": float(row["updated_at"]),
+            }
+            for row in rows
+        ]
+
+    async def list_pending_source_repairs(self) -> list[dict[str, Any]]:
+        """Return durable deletion repairs that can be resumed after restart."""
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT review_uid, memory_space_id, timeline_uids,
+                           topic_uids, details
+                    FROM topic_maintenance_queue
+                    WHERE review_type = 'deleted_timeline_source_repair'
+                      AND status = 'pending'
+                    ORDER BY created_at
+                    """
+                )
+            ).fetchall()
+        return [
+            {
+                "review_uid": str(row["review_uid"]),
+                "memory_space_id": str(row["memory_space_id"]),
+                "timeline_uids": self._decode_json(row["timeline_uids"], []),
+                "topic_uids": self._decode_json(row["topic_uids"], []),
+                "details": self._decode_json(row["details"], {}),
             }
             for row in rows
         ]
@@ -1975,9 +2148,12 @@ class TopicMemoryStore:
             item = dict(row)
             item["metadata"] = self._from_json(item.get("metadata"))
             actors_by_topic[str(row["topic_uid"])].append(item)
+        topics = [self._row_to_topic(row) for row in topic_rows]
+        await self.project_topic_importance(topics)
+        topic_map = {topic.topic_uid: topic for topic in topics}
         return [
             {
-                "topic": self._row_to_topic(row),
+                "topic": topic_map[str(row["topic_uid"])],
                 "atoms": atoms_by_topic[str(row["topic_uid"])],
                 "sources": sources_by_topic[str(row["topic_uid"])],
                 "actors": actors_by_topic[str(row["topic_uid"])],
@@ -3869,6 +4045,9 @@ class TopicMemoryStore:
         for name, value in (
             ("base_importance", topic.base_importance),
             ("importance", topic.importance),
+            ("semantic_importance", topic.semantic_importance),
+            ("source_base_component", topic.source_base_component),
+            ("evidence_strength", topic.evidence_strength),
             ("confidence", topic.confidence),
         ):
             TopicMemoryStore._validate_score(name, value)
@@ -4322,6 +4501,13 @@ class TopicMemoryStore:
             status=TopicMemoryStatus(str(row["status"])),
             base_importance=float(row["base_importance"]),
             importance=float(row["importance"]),
+            semantic_importance=float(row["semantic_importance"]),
+            source_base_component=float(row["source_base_component"]),
+            evidence_strength=float(row["evidence_strength"]),
+            importance_policy_version=max(
+                1, int(row["importance_policy_version"])
+            ),
+            source_importance_hash=str(row["source_importance_hash"] or ""),
             confidence=float(row["confidence"]),
             started_at=row["started_at"],
             ended_at=row["ended_at"],
@@ -4398,6 +4584,9 @@ class TopicMemoryStore:
             "traceability": candidate.traceability,
             "content": candidate.content,
             "summary": candidate.summary,
+            "base_importance": candidate.base_importance,
+            "effective_importance": candidate.effective_importance,
+            "importance_revision": candidate.importance_revision,
             "topics": candidate.topics,
             "key_facts": candidate.key_facts,
             "atom_fingerprints": candidate.atom_fingerprints,
@@ -4456,6 +4645,15 @@ class TopicMemoryStore:
             ),
             content=str(payload.get("content") or ""),
             summary=str(payload.get("summary") or ""),
+            base_importance=float(payload.get("base_importance") or 0.5),
+            effective_importance=float(
+                payload.get("effective_importance")
+                if payload.get("effective_importance") is not None
+                else payload.get("base_importance") or 0.5
+            ),
+            importance_revision=max(
+                1, int(payload.get("importance_revision") or 1)
+            ),
             topics=[str(item) for item in payload.get("topics", [])],
             key_facts=[str(item) for item in payload.get("key_facts", [])],
             atom_fingerprints=[

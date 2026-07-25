@@ -25,6 +25,7 @@ from ..managers.graph_memory_manager import GraphMemoryManager
 from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
 from ..models.memory_identity import resolve_memory_space
 from ..models.identity_profile import SupplementalIdentityStore
+from ..importance_policy import IMPORTANCE_POLICY_VERSION
 from ..processors.graph_extractor import GraphExtractor
 from ..processors.text_processor import TextProcessor
 from ..retrieval.atom_retriever import AtomRetriever
@@ -303,6 +304,8 @@ class MemoryEngine:
 
         if self._write_op_repair_enabled:
             await self._repair_incomplete_write_ops()
+        if self.topic_memory_enabled and self.topic_auto_maintenance:
+            await self._resume_deleted_timeline_repairs()
 
     async def close(self):
         """关闭数据库连接和清理资源"""
@@ -585,10 +588,11 @@ class MemoryEngine:
         memory_uid: str | None,
         *,
         reason: str,
-    ) -> None:
+    ) -> list[str]:
         """Record affected Topics while preserving atomic replacement on edits."""
         if not memory_uid:
-            return
+            return []
+        affected: list[str] = []
         try:
             if "deleted" in reason:
                 affected = await self.topic_memory_store.mark_timeline_stale(
@@ -608,6 +612,7 @@ class MemoryEngine:
                     f"[TopicMemory] Timeline 变化影响 {len(affected)} 个 Topic；"
                     f"正式数据将在局部构建发布时原子替换 (reason={reason})"
                 )
+            return affected
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -617,6 +622,89 @@ class MemoryEngine:
                 f"[TopicMemory] 标记关联 Topic 失败 "
                 f"(memory_uid={memory_uid}, reason={reason})",
                 exc_info=True,
+            )
+            return []
+
+    async def _queue_deleted_timeline_repair(
+        self,
+        memory_space_id: str | None,
+        *,
+        deleted_timeline_uids: Iterable[str],
+        affected_topic_uids: Iterable[str],
+    ) -> str | None:
+        """Persist source repair and run it immediately only when auto maintenance is on."""
+        if not self.topic_memory_enabled or not memory_space_id:
+            return None
+        deleted = sorted(
+            {str(uid).strip() for uid in deleted_timeline_uids if str(uid).strip()}
+        )
+        affected = sorted(
+            {str(uid).strip() for uid in affected_topic_uids if str(uid).strip()}
+        )
+        if not deleted or not affected:
+            return None
+        review_uid = await self.topic_memory_store.enqueue_maintenance_review(
+            memory_space_id=str(memory_space_id),
+            review_type="deleted_timeline_source_repair",
+            timeline_uids=deleted,
+            topic_uids=affected,
+            details={
+                "automatic": bool(self.topic_auto_maintenance),
+                "reason": "Timeline source deleted",
+                "requires_llm": True,
+            },
+        )
+        if self.topic_auto_maintenance:
+            self._create_tracked_task(
+                self._run_deleted_timeline_repair(
+                    str(memory_space_id),
+                    affected_topic_uids=affected,
+                    deleted_timeline_uids=deleted,
+                    review_uid=review_uid,
+                )
+            )
+        return review_uid
+
+    async def _run_deleted_timeline_repair(
+        self,
+        memory_space_id: str,
+        *,
+        affected_topic_uids: list[str],
+        deleted_timeline_uids: list[str],
+        review_uid: str,
+    ) -> None:
+        try:
+            await self.topic_build_manager.repair_deleted_timeline_sources(
+                memory_space_id,
+                affected_topic_uids=affected_topic_uids,
+                deleted_timeline_uids=deleted_timeline_uids,
+                review_uid=review_uid,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "[TopicMemory] Timeline 删除后的 Topic 来源修复失败 "
+                "(memory_space_id=%s, review_uid=%s): %s",
+                memory_space_id,
+                review_uid,
+                exc,
+                exc_info=True,
+            )
+
+    async def _resume_deleted_timeline_repairs(self) -> None:
+        for item in await self.topic_memory_store.list_pending_source_repairs():
+            self._create_tracked_task(
+                self._run_deleted_timeline_repair(
+                    str(item["memory_space_id"]),
+                    affected_topic_uids=[
+                        str(uid) for uid in item.get("topic_uids", [])
+                    ],
+                    deleted_timeline_uids=[
+                        str(uid) for uid in item.get("timeline_uids", [])
+                    ],
+                    review_uid=str(item["review_uid"]),
+                )
             )
 
     def _schedule_topic_maintenance(
@@ -1447,6 +1535,24 @@ class MemoryEngine:
         if metadata:
             full_metadata.update(metadata)
 
+        effective_importance = clamp_float(
+            full_metadata.get("importance"), default=importance
+        )
+        full_metadata["importance"] = effective_importance
+        full_metadata["base_importance"] = clamp_float(
+            full_metadata.get("base_importance"),
+            default=effective_importance,
+        )
+        try:
+            importance_revision = int(full_metadata.get("importance_revision", 1))
+        except (TypeError, ValueError):
+            importance_revision = 1
+        full_metadata["importance_revision"] = max(1, importance_revision)
+        full_metadata.setdefault("importance_reason", "generated")
+        full_metadata.setdefault(
+            "importance_policy_version", IMPORTANCE_POLICY_VERSION
+        )
+
         # A confirmed alias only broadens reads for legacy data. New Timeline
         # records and their source spans must consistently use the canonical ID.
         if session_id:
@@ -1863,8 +1969,24 @@ class MemoryEngine:
         metadata_updates = {}
 
         if "importance" in updates:
-            metadata_updates["importance"] = clamp_float(
+            explicit_importance = clamp_float(
                 updates["importance"], default=0.5
+            )
+            try:
+                current_importance_revision = int(
+                    current_metadata.get("importance_revision", 1)
+                )
+            except (TypeError, ValueError):
+                current_importance_revision = 1
+            metadata_updates.update(
+                {
+                    "importance": explicit_importance,
+                    "base_importance": explicit_importance,
+                    "importance_revision": current_importance_revision + 1,
+                    "importance_reason": "manual",
+                    "importance_anchor_at": time.time(),
+                    "importance_policy_version": IMPORTANCE_POLICY_VERSION,
+                }
             )
 
         if "metadata" in updates:
@@ -1925,7 +2047,6 @@ class MemoryEngine:
                     "persona_summary",
                     "topics",
                     "key_facts",
-                    "importance",
                 }
                 if topic_source_fields & metadata_updates.keys():
                     await self._mark_dependent_topics_stale(
@@ -1993,7 +2114,23 @@ class MemoryEngine:
             current_revision = 1
         replacement_metadata["revision"] = current_revision + 1
         replacement_metadata["updated_at"] = time.time()
-        replacement_metadata["importance"] = clamp_float(importance, default=0.5)
+        rebuilt_importance = clamp_float(importance, default=0.5)
+        try:
+            importance_revision = int(
+                current_metadata.get("importance_revision", 1)
+            )
+        except (TypeError, ValueError):
+            importance_revision = 1
+        replacement_metadata.update(
+            {
+                "importance": rebuilt_importance,
+                "base_importance": rebuilt_importance,
+                "importance_revision": importance_revision + 1,
+                "importance_reason": "timeline_rebuilt",
+                "importance_anchor_at": replacement_metadata["updated_at"],
+                "importance_policy_version": IMPORTANCE_POLICY_VERSION,
+            }
+        )
         replacement_metadata = self._apply_stable_identity(
             replacement_metadata,
             session_id=replacement_metadata.get("session_id")
@@ -2136,6 +2273,21 @@ class MemoryEngine:
         replacement_metadata["revision"] = current_revision + 1
         replacement_metadata["previous_id"] = memory_id
         replacement_metadata["updated_at"] = time.time()
+        replacement_importance = clamp_float(importance, default=0.5)
+        replacement_metadata["importance"] = replacement_importance
+        replacement_metadata["base_importance"] = replacement_importance
+        try:
+            importance_revision = int(
+                current_metadata.get("importance_revision", 1) or 1
+            )
+        except (TypeError, ValueError):
+            importance_revision = 1
+        replacement_metadata["importance_revision"] = importance_revision + 1
+        replacement_metadata["importance_reason"] = "memory_replaced"
+        replacement_metadata["importance_anchor_at"] = time.time()
+        replacement_metadata["importance_policy_version"] = (
+            IMPORTANCE_POLICY_VERSION
+        )
         # Physical replacement must keep the logical memory on its original
         # timeline even when callers only provide newly generated metadata.
         replacement_metadata["create_time"] = current_metadata.get("create_time")
@@ -2152,7 +2304,7 @@ class MemoryEngine:
                 content=content,
                 session_id=session_id,
                 persona_id=persona_id,
-                importance=importance,
+                importance=replacement_importance,
                 metadata=replacement_metadata,
                 atoms=atoms,
                 preserve_create_time=True,
@@ -2265,8 +2417,9 @@ class MemoryEngine:
                 exc_info=True,
             )
 
+        affected_topic_uids: list[str] = []
         try:
-            await self._mark_dependent_topics_stale(
+            affected_topic_uids = await self._mark_dependent_topics_stale(
                 registry_record.memory_uid if registry_record else None,
                 reason="timeline_deleted",
             )
@@ -2295,10 +2448,12 @@ class MemoryEngine:
                 status="completed",
                 memory_id=memory_id,
             )
-        self._schedule_topic_maintenance(
-            registry_record.memory_space_id if registry_record else None,
-            full=True,
-        )
+        if registry_record and affected_topic_uids:
+            await self._queue_deleted_timeline_repair(
+                registry_record.memory_space_id,
+                deleted_timeline_uids=[registry_record.memory_uid],
+                affected_topic_uids=affected_topic_uids,
+            )
         self._invalidate_search_cache()
         return success
 
@@ -2640,13 +2795,17 @@ class MemoryEngine:
 
             try:
                 registry_cursor = await self.db_connection.execute(
-                    f"SELECT memory_uid FROM memory_registry "
+                    f"SELECT memory_uid, memory_space_id FROM memory_registry "
                     f"WHERE document_id IN ({placeholders})",
                     batch,
                 )
-                batch_memory_uids = [
-                    str(row["memory_uid"]) for row in await registry_cursor.fetchall()
-                ]
+                registry_rows = await registry_cursor.fetchall()
+                batch_memory_uids = [str(row["memory_uid"]) for row in registry_rows]
+                deleted_by_space: dict[str, list[str]] = {}
+                for row in registry_rows:
+                    deleted_by_space.setdefault(
+                        str(row["memory_space_id"]), []
+                    ).append(str(row["memory_uid"]))
                 # 1. Batch delete from BM25 FTS
                 await self.db_connection.execute(
                     f"DELETE FROM livingmemory_memories_fts WHERE doc_id IN ({placeholders})",
@@ -2709,12 +2868,28 @@ class MemoryEngine:
                 )
 
                 # 5. Remove logical identities that still point at deleted IDs.
+                affected_by_space: dict[str, set[str]] = {}
+                space_by_uid = {
+                    str(row["memory_uid"]): str(row["memory_space_id"])
+                    for row in registry_rows
+                }
                 for memory_uid in batch_memory_uids:
-                    await self._mark_dependent_topics_stale(
+                    affected = await self._mark_dependent_topics_stale(
                         memory_uid,
                         reason="timeline_batch_deleted",
                     )
+                    affected_by_space.setdefault(
+                        space_by_uid[memory_uid], set()
+                    ).update(affected)
                 await self.memory_identity_store.delete_by_document_ids(batch)
+                for memory_space_id, deleted_uids in deleted_by_space.items():
+                    await self._queue_deleted_timeline_repair(
+                        memory_space_id,
+                        deleted_timeline_uids=deleted_uids,
+                        affected_topic_uids=affected_by_space.get(
+                            memory_space_id, set()
+                        ),
+                    )
                 await self._advance_write_op(
                     op_id,
                     "identities_deleted",

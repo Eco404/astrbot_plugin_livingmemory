@@ -558,6 +558,9 @@ class TopicRetriever:
         )
 
     def _effective_importance(self, topic: TopicMemory) -> float:
+        projection = topic.metadata.get("importance_projection", {})
+        if isinstance(projection, dict) and projection.get("live") is True:
+            return max(0.0, min(1.0, float(topic.importance)))
         rate = max(0.0, float(self.config.get("recall_decay_rate", 0.01)))
         anchor = max(
             float(topic.decay_anchor_at or topic.updated_at or topic.created_at),
