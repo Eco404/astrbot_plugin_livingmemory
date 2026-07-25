@@ -1,6 +1,7 @@
 """供 Agent 主动调用的长期记忆回忆工具。"""
 
 import asyncio
+import inspect
 import json
 from dataclasses import field
 from typing import Any
@@ -13,8 +14,11 @@ from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
 from ..base.config_manager import ConfigManager
-from ..models.memory_identity import resolve_memory_space
-from ..retrieval.recall_pipeline import RecallQueryBranch
+from ..models.conversation_models import stable_actor_id
+from ..retrieval.unified_recall import (
+    UnifiedRecallCoordinator,
+    UnifiedRecallRequest,
+)
 from ..utils import get_persona_id
 
 
@@ -98,13 +102,25 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
             use_persona_filtering = filtering_config.get("use_persona_filtering", True)
             use_session_filtering = filtering_config.get("use_session_filtering", True)
 
-            session_id = event.unified_msg_origin
-            topic_enabled = bool(
-                getattr(self.memory_engine, "topic_memory_enabled", False) is True
-                and bool(
-                    self.config_manager.get("topic_memory.recall_enabled", True)
-                )
+            raw_session_id = event.unified_msg_origin
+            scope_resolver = getattr(
+                self.memory_engine, "resolve_session_scope", None
             )
+            scope_result = (
+                scope_resolver(raw_session_id)
+                if callable(scope_resolver)
+                else None
+            )
+            session_scope = (
+                await scope_result
+                if inspect.isawaitable(scope_result)
+                else [raw_session_id]
+            )
+            session_id = session_scope[0] if session_scope else raw_session_id
+            coordinator = UnifiedRecallCoordinator(
+                self.memory_engine, self.config_manager
+            )
+            topic_enabled = coordinator.topic_enabled()
             persona_id = (
                 await get_persona_id(self.context, event)
                 if use_persona_filtering or topic_enabled
@@ -124,100 +140,37 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
             limited_k = max(1, min(requested_k_int, max_k))
 
-            topic_outcome = None
-            topic_branches = [
-                RecallQueryBranch(
-                    name="tool_query",
-                    text=cleaned_query,
-                    weight=1.0,
-                    role="user",
-                )
-            ]
-            if topic_enabled:
-                topic_config = getattr(
-                    self.memory_engine.topic_recall_pipeline, "config", {}
-                ) or {}
-                timeline_search = self.memory_engine.search_memories(
+            sender_id = (
+                event.get_sender_id()
+                if hasattr(event, "get_sender_id")
+                else getattr(event, "sender_id", "")
+            )
+            platform = (
+                event.get_platform_name()
+                if hasattr(event, "get_platform_name")
+                else "unknown"
+            )
+            current_actor_ids = {
+                stable_actor_id(platform, str(sender_id), "human")
+            } if sender_id else set()
+            unified_outcome = await coordinator.search(
+                UnifiedRecallRequest(
                     query=cleaned_query,
-                    k=limited_k,
-                    session_id=recall_session_id,
-                    persona_id=recall_persona_id,
-                    track_access=False,
+                    final_k=limited_k,
+                    session_id=session_id,
+                    persona_id=persona_id,
+                    recall_session_id=recall_session_id,
+                    recall_persona_id=recall_persona_id,
+                    session_scope=list(session_scope or [session_id]),
+                    current_actor_ids=current_actor_ids,
+                    topic_enabled=topic_enabled,
                 )
-                topic_search = self.memory_engine.topic_recall_pipeline.search(
-                    branches=topic_branches,
-                    memory_space_id=resolve_memory_space(
-                        session_id, persona_id
-                    ).memory_space_id,
-                    final_k=min(
-                        limited_k,
-                        int(topic_config.get("recall_top_k", 3)),
-                    ),
-                )
-                timeline_result, topic_result = await asyncio.gather(
-                    timeline_search,
-                    topic_search,
-                    return_exceptions=True,
-                )
-                if isinstance(timeline_result, BaseException):
-                    raise timeline_result
-                memories = timeline_result
-                if isinstance(topic_result, asyncio.CancelledError):
-                    raise topic_result
-                if isinstance(topic_result, Exception):
-                    logger.warning(
-                        "记忆工具 Topic 召回失败，本次回退 Timeline: "
-                        f"{topic_result}",
-                    )
-                else:
-                    topic_outcome = topic_result
-            else:
-                memories = await self.memory_engine.search_memories(
-                    query=cleaned_query,
-                    k=limited_k,
-                    session_id=recall_session_id,
-                    persona_id=recall_persona_id,
-                )
-
-            topic_results = topic_outcome.results if topic_outcome else []
-            fragment_outcome = None
-            fragment_results = []
-            if topic_results:
-                topic_config = getattr(
-                    self.memory_engine.topic_recall_pipeline, "config", {}
-                ) or {}
-                supplement_k = min(
-                    int(topic_config.get("timeline_supplement_k", 2)),
-                    max(0, limited_k - len(topic_results)),
-                )
-                try:
-                    fragment_outcome = await self.memory_engine.topic_recall_pipeline.search_fragment_supplements(
-                        branches=topic_branches,
-                        topic_results=topic_results,
-                        limit=supplement_k,
-                        query_vectors=getattr(topic_outcome, "query_vectors", None),
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    logger.warning(
-                        "记忆工具 Topic 片段召回失败，回退 Timeline 补充",
-                        exc_info=True,
-                    )
-                if fragment_outcome is not None:
-                    fragment_results = fragment_outcome.results
-                suppress_timeline_for_parent_duplicates = bool(
-                    fragment_outcome is not None
-                    and fragment_outcome.available_count > 0
-                    and int(getattr(fragment_outcome, "duplicate_parent_count", 0))
-                    == fragment_outcome.available_count
-                )
-                if fragment_results or suppress_timeline_for_parent_duplicates:
-                    memories = []
-                else:
-                    memories = self.memory_engine.topic_recall_pipeline.select_timeline_supplements(
-                        memories, topic_results, supplement_k
-                    )
+            )
+            topic_outcome = unified_outcome.topic_outcome
+            topic_results = unified_outcome.topic_results
+            fragment_outcome = unified_outcome.fragment_outcome
+            fragment_results = unified_outcome.fragment_results
+            memories = unified_outcome.timeline_results
             serialized_results = [
                 {
                     "id": item.topic_uid,
@@ -275,14 +228,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
             if serialized_results:
                 try:
-                    if topic_outcome is not None:
-                        await self.memory_engine.topic_recall_pipeline.record_topic_access(
-                            topic_results
-                        )
-                    if topic_enabled and memories:
-                        self.memory_engine.record_memory_access(
-                            [memory.doc_id for memory in memories]
-                        )
+                    await coordinator.record_access(unified_outcome)
                 except Exception:
                     logger.warning(
                         "记忆工具已生成结果，但访问统计更新失败",
@@ -298,6 +244,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     },
                     "count": len(serialized_results),
                     "results": serialized_results,
+                    "diagnostics": unified_outcome.diagnostics(),
                 }
             )
         except asyncio.CancelledError:

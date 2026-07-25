@@ -6,6 +6,7 @@
 
 # 消息格式说明
 对话历史中的每条消息都包含以下信息:
+- **[M1]、[M2]...**: 当前来源窗口内的稳定消息引用，只用于本次输出的证据绑定
 - **[昵称 | ID: 账号 | 时间]**: 表示对方发送的消息
 - **[Bot: 昵称 | ID: 账号 | 时间]**: 表示**你自己**发送的消息,以"Bot:"开头
 - **[图片]**: 表示消息中包含图片
@@ -56,6 +57,15 @@
   "summary": "我与{具体昵称}的对话摘要(第一人称,确保包含关键信息)",
   "topics": ["讨论的主题1", "主题2"],
   "key_facts": ["{具体昵称}提到的关键事实1", "事实2"],
+  "key_fact_evidence": [
+    {"fact_index": 0, "message_refs": ["M1"]},
+    {"fact_index": 1, "message_refs": ["M2", "M3"]}
+  ],
+  "message_coverage": [
+    {"message_ref": "M1", "disposition": "fact", "fact_indexes": [0], "reason": "直接支持事实0"},
+    {"message_ref": "M2", "disposition": "context", "fact_indexes": [], "reason": "确认上下文"},
+    {"message_ref": "M3", "disposition": "omitted", "fact_indexes": [], "reason": "无实质信息的寒暄"}
+  ],
   "sentiment": "positive|neutral|negative",
   "importance": 0.7
 }
@@ -72,9 +82,9 @@
 
 **输入**:
 ```
-[张三 | ID: 123456 | 2025-11-19 14:30:12] 明天下午3点的会议记得带上项目文档
-[Bot: AstrBot | ID: 999999 | 2025-11-19 14:30:25] 好的,我会准备好的。是在会议室A吗?
-[张三 | ID: 123456 | 2025-11-19 14:30:38] 对,老地方。另外帮我约一下李经理
+[M1] [张三 | ID: 123456 | 2025-11-19 14:30:12] 明天下午3点的会议记得带上项目文档
+[M2] [Bot: AstrBot | ID: 999999 | 2025-11-19 14:30:25] 好的,我会准备好的。是在会议室A吗?
+[M3] [张三 | ID: 123456 | 2025-11-19 14:30:38] 对,老地方。另外帮我约一下李经理
 ```
 
 **输出**:
@@ -83,6 +93,17 @@
   "summary": "张三提醒我明天下午3点(2025-11-20 15:00:00)在会议室A有会议,需要带项目文档。我确认了会议地点,张三还让我帮忙约李经理",
   "topics": ["会议提醒", "文档准备", "约见安排"],
   "key_facts": ["张三安排明天下午3点(2025-11-20 15:00:00)会议", "会议室A(老地方)", "需携带项目文档", "张三要求约见李经理"],
+  "key_fact_evidence": [
+    {"fact_index": 0, "message_refs": ["M1"]},
+    {"fact_index": 1, "message_refs": ["M2", "M3"]},
+    {"fact_index": 2, "message_refs": ["M1"]},
+    {"fact_index": 3, "message_refs": ["M3"]}
+  ],
+  "message_coverage": [
+    {"message_ref": "M1", "disposition": "fact", "fact_indexes": [0, 2], "reason": "会议时间和文档要求"},
+    {"message_ref": "M2", "disposition": "context", "fact_indexes": [1], "reason": "询问并确认会议地点"},
+    {"message_ref": "M3", "disposition": "fact", "fact_indexes": [1, 3], "reason": "确认地点并提出约见要求"}
+  ],
   "sentiment": "neutral",
   "importance": 0.85
 }
@@ -101,6 +122,8 @@
 - 直接输出JSON,不要其他内容
 - 确保JSON格式正确可解析
 - topics和key_facts最多各5项,应涵盖对话的核心要点
+- key_fact_evidence必须逐项覆盖key_facts；每项只能引用真正支持该事实的M编号
+- message_coverage必须逐一且仅一次覆盖所有M编号；省略消息时必须说明理由
 - importance必须在0.0-1.0之间,保留1-2位小数
 
 现在请以符合你人格设定的第一人称视角回顾上述对话并输出JSON:

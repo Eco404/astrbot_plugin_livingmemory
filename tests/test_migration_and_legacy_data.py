@@ -232,6 +232,27 @@ async def test_migrate_v9_17_to_v9_18_adds_empty_affect_contract_idempotently(
 
 
 @pytest.mark.asyncio
+async def test_migrate_v9_18_to_v9_19_adds_timeline_rebuild_journal(tmp_path):
+    db_path = str(tmp_path / "legacy-v9.18.db")
+    migration = DBMigration(db_path)
+
+    await migration._migrate_v9_18_to_v9_19(None)
+    await migration._migrate_v9_18_to_v9_19(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            row[0]
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+    assert "timeline_rebuild_tasks" in tables
+    assert "timeline_rebuild_items" in tables
+
+
+@pytest.mark.asyncio
 async def test_set_db_version_forces_text_in_legacy_integer_column(tmp_path):
     db_path = str(tmp_path / "version_affinity.db")
     async with aiosqlite.connect(db_path) as db:

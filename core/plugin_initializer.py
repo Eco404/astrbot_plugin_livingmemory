@@ -31,6 +31,7 @@ from .base.exceptions import InitializationError, ProviderNotReadyError
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
 from .managers.session_maintenance_manager import SessionMaintenanceManager
+from .managers.timeline_rebuild_manager import TimelineRebuildManager
 from .managers.timeline_summary_service import TimelineSummaryService
 from .models.identity_profile import SupplementalIdentityStore
 from .processors.memory_processor import MemoryProcessor
@@ -129,6 +130,7 @@ class PluginInitializer:
         self.index_validator: IndexValidator | None = None
         self.decay_scheduler: DecayScheduler | None = None
         self.timeline_summary_service: TimelineSummaryService | None = None
+        self.timeline_rebuild_manager: TimelineRebuildManager | None = None
         self.idle_summary_scheduler: IdleSummaryScheduler | None = None
         self.session_maintenance_manager: SessionMaintenanceManager | None = None
         self.recall_trace_store: RecallTraceStore | None = None
@@ -828,6 +830,7 @@ class PluginInitializer:
                 llm_provider=llm_id if llm_id else None,
                 config={
                     "atom_enabled": memory_engine_config["atom_enabled"],
+                    "timeline_require_source_grounding": True,
                 },
                 identity_profile_store=self.identity_profile_store,
             )
@@ -839,6 +842,13 @@ class PluginInitializer:
                 memory_engine=self.memory_engine,
                 memory_processor=self.memory_processor,
             )
+            self.timeline_rebuild_manager = TimelineRebuildManager(
+                str(db_path),
+                self.conversation_manager,
+                self.memory_engine,
+                self.memory_processor,
+            )
+            await self.timeline_rebuild_manager.initialize()
             self.idle_summary_scheduler = IdleSummaryScheduler(
                 config_manager=self.config_manager,
                 conversation_manager=self.conversation_manager,

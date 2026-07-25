@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.18"
+    CURRENT_VERSION = "9.19"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -55,6 +55,7 @@ class DBMigration:
         "9.16": "Supplemental identity hints and source-owned actor relations",
         "9.17": "Unified Timeline-derived Topic importance projection and source repair",
         "9.18": "Source-grounded affect events and Topic affect profiles",
+        "9.19": "Source-verified and resumable Timeline reconstruction",
     }
 
     def __init__(self, db_path: str):
@@ -366,6 +367,8 @@ class DBMigration:
                     migration_steps.append(self._migrate_v9_16_to_v9_17)
                 if current_key <= self.version_key("9.17"):
                     migration_steps.append(self._migrate_v9_17_to_v9_18)
+                if current_key <= self.version_key("9.18"):
+                    migration_steps.append(self._migrate_v9_18_to_v9_19)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1636,6 +1639,23 @@ class DBMigration:
         if progress_callback:
             progress_callback("建立可溯源情感事件与 Topic 情感画像字段", 1, 1)
         logger.info("v9.17 -> v9.18 迁移完成")
+
+    async def _migrate_v9_18_to_v9_19(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Add persistent source-verified Timeline reconstruction journals."""
+        logger.info("执行迁移步骤: v9.18 -> v9.19 (Timeline reconstruction)")
+        from ..core.managers.timeline_rebuild_manager import TimelineRebuildManager
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await TimelineRebuildManager.create_tables(db)
+            await db.commit()
+        if progress_callback:
+            progress_callback("建立可恢复的 Timeline 重构任务", 1, 1)
+        logger.info("v9.18 -> v9.19 迁移完成")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

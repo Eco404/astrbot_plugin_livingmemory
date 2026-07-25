@@ -13,9 +13,11 @@ from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import TextPart
 
-from ..models.memory_identity import resolve_memory_space
 from ..models.conversation_models import stable_actor_id
-from ..retrieval.recall_pipeline import RecallPipeline
+from ..retrieval.unified_recall import (
+    UnifiedRecallCoordinator,
+    UnifiedRecallRequest,
+)
 from ..utils import (
     OperationContext,
     format_memories_for_fake_tool_call,
@@ -62,7 +64,11 @@ class MemoryRecall:
         self.message_utils = message_utils
         self.injection_adapter = injection_adapter
         self.persona_resolver = persona_resolver or get_persona_id
-        self.recall_pipeline = RecallPipeline(memory_engine, config_manager)
+        self.recall_coordinator = UnifiedRecallCoordinator(
+            memory_engine, config_manager
+        )
+        # Compatibility for tests and callers that inspect query branches.
+        self.recall_pipeline = self.recall_coordinator.timeline_pipeline
 
     async def handle_memory_recall(
         self, event: AstrMessageEvent, req: ProviderRequest
@@ -110,8 +116,13 @@ class MemoryRecall:
                             f"[{session_id}] 已清理 {removed} 处历史记忆注入片段"
                         )
 
-                # 先提取用户消息（消息存储和召回都需要）
-                actual_query = await self.message_utils.get_event_message_str(event)
+                # 先提取用户消息（消息存储和召回都需要）。组件提取保留
+                # 图片、文件等非纯文本消息，避免它们从原始证据链中消失。
+                raw_query = await self.message_utils.get_event_message_str(event)
+                extracted_query = await self.message_utils.extract_message_content(
+                    event, req
+                )
+                actual_query = raw_query or extracted_query
 
                 request_query = (
                     prompt_text.strip() if isinstance(prompt_text, str) else ""
@@ -120,17 +131,14 @@ class MemoryRecall:
                 # 存储用户消息（仅私聊），无论是否启用召回都需要
                 is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
                 if not is_group and actual_query:
-                    message_to_store = request_query
-                    if not message_to_store:
-                        message_to_store = (
-                            await self.message_utils.extract_message_content(event, req)
-                        )
-                    if not message_to_store:
-                        message_to_store = actual_query.strip()
+                    # 原始事件内容优先于 ProviderRequest.prompt，后者可能已被
+                    # 其他插件改写，不适合作为可追溯的原始对话证据。
+                    message_to_store = extracted_query or raw_query or request_query
                     await self.conversation_manager.add_message_from_event(
                         event=event,
                         role="user",
                         content=message_to_store,
+                        event_source="incoming_private_message",
                     )
                     await self.message_utils.enforce_message_limit(session_id)
 
@@ -192,39 +200,12 @@ class MemoryRecall:
                 assistant_mode = self.config_manager.get(
                     "recall_engine.assistant_context_mode", "exclude"
                 )
-                timeline_search = self.recall_pipeline.search(
-                    current_query=actual_query,
-                    final_k=top_k,
-                    session_id=recall_session_id,
-                    persona_id=recall_persona_id,
-                    recent_messages=recent_messages,
-                    expansion_enabled=expansion_enabled,
-                    assistant_mode=assistant_mode,
-                    context_session_id=session_id,
-                    visible_message_start_index=visible_start,
-                    visible_message_end_index=visible_end,
-                    track_access=False,
-                )
-                topic_enabled = bool(
-                    getattr(self.memory_engine, "topic_memory_enabled", False) is True
-                    and self.config_manager.get("topic_memory.recall_enabled", True)
-                )
-                topic_search = None
-                branches = []
+                topic_enabled = self.recall_coordinator.topic_enabled()
+                current_actor_ids: set[str] = set()
                 if topic_enabled:
                     topic_config = getattr(
                         self.memory_engine.topic_recall_pipeline, "config", {}
                     ) or {}
-                    branches = self.recall_pipeline.build_query_branches(
-                        actual_query,
-                        recent_messages,
-                        expansion_enabled=expansion_enabled,
-                        assistant_mode=assistant_mode,
-                    )
-                    memory_space_ids = [
-                        resolve_memory_space(scope_session_id, persona_id).memory_space_id
-                        for scope_session_id in (session_scope or [session_id])
-                    ]
                     sender_id = (
                         event.get_sender_id()
                         if hasattr(event, "get_sender_id")
@@ -253,70 +234,30 @@ class MemoryRecall:
                             current_actor_ids=current_actor_ids,
                             fallback_platform=platform,
                         )
-                    topic_search = self._safe_topic_recall(
-                        self.memory_engine.topic_recall_pipeline.search_spaces(
-                            branches=branches,
-                            memory_space_ids=memory_space_ids,
-                            final_k=min(
-                                top_k,
-                                int(topic_config.get("recall_top_k", 3)),
-                            ),
-                            context_session_id=session_id,
-                            visible_message_start_index=visible_start,
-                            visible_message_end_index=visible_end,
-                            current_actor_ids=current_actor_ids,
-                        ),
-                        session_id,
+                unified_outcome = await self.recall_coordinator.search(
+                    UnifiedRecallRequest(
+                        query=actual_query,
+                        final_k=top_k,
+                        session_id=session_id,
+                        persona_id=persona_id,
+                        recall_session_id=recall_session_id,
+                        recall_persona_id=recall_persona_id,
+                        session_scope=list(session_scope or [session_id]),
+                        recent_messages=recent_messages,
+                        expansion_enabled=expansion_enabled,
+                        assistant_mode=assistant_mode,
+                        visible_message_start_index=visible_start,
+                        visible_message_end_index=visible_end,
+                        current_actor_ids=current_actor_ids,
+                        topic_enabled=topic_enabled,
                     )
-                if topic_search is not None:
-                    recall_outcome, topic_outcome = await asyncio.gather(
-                        timeline_search, topic_search
-                    )
-                else:
-                    recall_outcome = await timeline_search
-                    topic_outcome = None
-
-                topic_results = topic_outcome.results if topic_outcome else []
-                fragment_outcome = None
-                fragment_results = []
-                if topic_results:
-                    topic_config = getattr(
-                        self.memory_engine.topic_recall_pipeline, "config", {}
-                    ) or {}
-                    supplement_limit = min(
-                        int(topic_config.get("timeline_supplement_k", 2)),
-                        max(0, top_k - len(topic_results)),
-                    )
-                    fragment_outcome = await self._safe_topic_recall(
-                        self.memory_engine.topic_recall_pipeline.search_fragment_supplements(
-                            branches=branches,
-                            topic_results=topic_results,
-                            limit=supplement_limit,
-                            context_session_id=session_id,
-                            visible_message_start_index=visible_start,
-                            visible_message_end_index=visible_end,
-                            query_vectors=getattr(topic_outcome, "query_vectors", None),
-                        ),
-                        session_id,
-                    )
-                    if fragment_outcome is not None:
-                        fragment_results = fragment_outcome.results
-                    suppress_timeline_for_parent_duplicates = bool(
-                        fragment_outcome is not None
-                        and fragment_outcome.available_count > 0
-                        and int(getattr(fragment_outcome, "duplicate_parent_count", 0))
-                        == fragment_outcome.available_count
-                    )
-                    if fragment_results or suppress_timeline_for_parent_duplicates:
-                        recalled_memories = []
-                    else:
-                        recalled_memories = self._select_timeline_supplements(
-                            recall_outcome.results,
-                            topic_results,
-                            supplement_limit,
-                        )
-                else:
-                    recalled_memories = recall_outcome.results
+                )
+                recall_outcome = unified_outcome.timeline_outcome
+                topic_outcome = unified_outcome.topic_outcome
+                fragment_outcome = unified_outcome.fragment_outcome
+                recalled_memories = unified_outcome.timeline_results
+                topic_results = unified_outcome.topic_results
+                fragment_results = unified_outcome.fragment_results
                 branch_summary = ", ".join(
                     f"{item.name}:{item.weight:.2f}"
                     for item in recall_outcome.branches
@@ -437,28 +378,9 @@ class MemoryRecall:
                         )
                     if injection_succeeded:
                         try:
-                            if topic_results:
-                                await self.memory_engine.topic_recall_pipeline.record_topic_access(
-                                    topic_results
-                                )
-                            source_document_ids = (
-                                await self.memory_engine.topic_recall_pipeline.source_timeline_document_ids(
-                                    topic_results,
-                                    fragment_results,
-                                )
-                                if topic_results or fragment_results
-                                else []
+                            await self.recall_coordinator.record_access(
+                                unified_outcome
                             )
-                            accessed_document_ids = list(
-                                dict.fromkeys(
-                                    [item.doc_id for item in recalled_memories]
-                                    + source_document_ids
-                                )
-                            )
-                            if accessed_document_ids:
-                                self.memory_engine.record_memory_access(
-                                    accessed_document_ids
-                                )
                         except Exception:
                             logger.warning(
                                 f"[{session_id}] 记忆注入已成功，但访问统计更新失败",
@@ -551,32 +473,6 @@ class MemoryRecall:
             )
         except Exception:
             logger.warning("保存实际召回记录失败，已忽略", exc_info=True)
-
-    @staticmethod
-    async def _safe_topic_recall(search_coro, session_id: str):
-        """A derived-layer outage must never disable Timeline recall."""
-        try:
-            return await search_coro
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning(
-                f"[{session_id}] Topic 召回失败，本轮回退纯 Timeline 召回",
-                exc_info=True,
-            )
-            return None
-
-    @staticmethod
-    def _select_timeline_supplements(
-        timeline_results,
-        topic_results,
-        limit: int,
-    ) -> list:
-        from ..retrieval.topic_recall_pipeline import TopicRecallPipeline
-
-        return TopicRecallPipeline.select_timeline_supplements(
-            timeline_results, topic_results, limit
-        )
 
     @staticmethod
     def _topic_memory_dict(item) -> dict:

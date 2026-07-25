@@ -19,6 +19,9 @@ from astrbot_plugin_livingmemory.core.managers.conversation_manager import (
     ConversationManager,
 )
 from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+from astrbot_plugin_livingmemory.core.models.timeline_quality import (
+    TimelineSummaryQualityError,
+)
 from astrbot_plugin_livingmemory.core.processors.memory_processor import MemoryProcessor
 from astrbot_plugin_livingmemory.core.retrieval.vector_retriever import VectorRetriever
 from astrbot_plugin_livingmemory.storage.conversation_store import ConversationStore
@@ -710,10 +713,9 @@ async def test_group_memory_quality_low_for_group_member_generic_term():
     )
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    _, metadata, _ = await processor.process_conversation(
-        messages=_make_group_messages(),
-        is_group_chat=True,
-        persona_id=None,
-    )
-
-    assert metadata.get("summary_quality") == "low"
+    with pytest.raises(TimelineSummaryQualityError):
+        await processor.process_conversation(
+            messages=_make_group_messages(),
+            is_group_chat=True,
+            persona_id=None,
+        )

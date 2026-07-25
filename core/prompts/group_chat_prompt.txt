@@ -6,6 +6,7 @@
 
 # 消息格式说明
 对话历史中的每条消息都包含以下信息:
+- **[M1]、[M2]...**: 当前来源窗口内的稳定消息引用，只用于本次输出的证据绑定
 - **[昵称 | ID: 账号 | 时间]**: 表示群成员发送的消息，昵称位于方括号开头
 - **[Bot: 昵称 | ID: 账号 | 时间]**: 表示**你自己**发送的消息，以"Bot:"开头
 - **[图片]**: 表示消息中包含图片
@@ -66,6 +67,15 @@
   "summary": "我观察到的群聊摘要(第一人称,确保包含关键信息)",
   "topics": ["讨论的主题1", "主题2"],
   "key_facts": ["关键事实1", "事实2"],
+  "key_fact_evidence": [
+    {"fact_index": 0, "message_refs": ["M1"]},
+    {"fact_index": 1, "message_refs": ["M2", "M3"]}
+  ],
+  "message_coverage": [
+    {"message_ref": "M1", "disposition": "fact", "fact_indexes": [0], "reason": "直接支持事实0"},
+    {"message_ref": "M2", "disposition": "context", "fact_indexes": [], "reason": "确认上下文"},
+    {"message_ref": "M3", "disposition": "omitted", "fact_indexes": [], "reason": "无实质信息的寒暄"}
+  ],
   "participants": ["参与者1", "参与者2"],
   "sentiment": "positive|neutral|negative",
   "importance": 0.7
@@ -83,14 +93,14 @@
 
 **输入**:
 ```
-[张三 | ID: 123456 | 2025-11-19 14:30:12] @所有人 明天团建大家都能来吗?
-[李四 | ID: 234567 | 2025-11-19 14:30:45] 我可以!去哪里?
-[王五 | ID: 345678 | 2025-11-19 14:31:03] +1,好久没聚了
-[张三 | ID: 123456 | 2025-11-19 14:31:20] 打算去滑雪场
-[李四 | ID: 234567 | 2025-11-19 14:31:38] 太棒了!我正想学滑雪
-[王五 | ID: 345678 | 2025-11-19 14:31:55] 我不太会,有教练吗?
-[Bot: AstrBot | ID: 999999 | 2025-11-19 14:32:10] 根据我的了解,大部分滑雪场都会提供初级教练服务
-[张三 | ID: 123456 | 2025-11-19 14:32:25] 对的,初级道有教练
+[M1] [张三 | ID: 123456 | 2025-11-19 14:30:12] @所有人 明天团建大家都能来吗?
+[M2] [李四 | ID: 234567 | 2025-11-19 14:30:45] 我可以!去哪里?
+[M3] [王五 | ID: 345678 | 2025-11-19 14:31:03] +1,好久没聚了
+[M4] [张三 | ID: 123456 | 2025-11-19 14:31:20] 打算去滑雪场
+[M5] [李四 | ID: 234567 | 2025-11-19 14:31:38] 太棒了!我正想学滑雪
+[M6] [王五 | ID: 345678 | 2025-11-19 14:31:55] 我不太会,有教练吗?
+[M7] [Bot: AstrBot | ID: 999999 | 2025-11-19 14:32:10] 根据我的了解,大部分滑雪场都会提供初级教练服务
+[M8] [张三 | ID: 123456 | 2025-11-19 14:32:25] 对的,初级道有教练
 ```
 
 **输出**:
@@ -99,6 +109,23 @@
   "summary": "我看到张三在群里组织明天(2025-11-20)的团建活动,计划去滑雪场,李四和王五都确认参加。我还回复了关于教练的问题,张三确认初级道有教练",
   "topics": ["团建活动", "滑雪安排", "教练服务"],
   "key_facts": ["明天(2025-11-20)团建", "目的地是滑雪场", "初级道有教练", "李四和王五确认参加", "我提供了滑雪场教练信息"],
+  "key_fact_evidence": [
+    {"fact_index": 0, "message_refs": ["M1"]},
+    {"fact_index": 1, "message_refs": ["M4"]},
+    {"fact_index": 2, "message_refs": ["M6", "M7", "M8"]},
+    {"fact_index": 3, "message_refs": ["M2", "M3"]},
+    {"fact_index": 4, "message_refs": ["M7"]}
+  ],
+  "message_coverage": [
+    {"message_ref": "M1", "disposition": "fact", "fact_indexes": [0], "reason": "发起团建"},
+    {"message_ref": "M2", "disposition": "fact", "fact_indexes": [3], "reason": "李四确认参加"},
+    {"message_ref": "M3", "disposition": "fact", "fact_indexes": [3], "reason": "王五确认参加"},
+    {"message_ref": "M4", "disposition": "fact", "fact_indexes": [1], "reason": "确定目的地"},
+    {"message_ref": "M5", "disposition": "context", "fact_indexes": [], "reason": "表达积极态度"},
+    {"message_ref": "M6", "disposition": "context", "fact_indexes": [2], "reason": "提出教练问题"},
+    {"message_ref": "M7", "disposition": "fact", "fact_indexes": [2, 4], "reason": "Bot提供教练信息"},
+    {"message_ref": "M8", "disposition": "fact", "fact_indexes": [2], "reason": "张三确认教练信息"}
+  ],
   "participants": ["张三", "李四", "王五", "我(Bot)"],
   "sentiment": "positive",
   "importance": 0.75
@@ -119,6 +146,8 @@
 - 直接输出JSON,不要其他内容
 - 确保JSON格式正确可解析
 - topics和key_facts最多各5项,应全面涵盖讨论要点
+- key_fact_evidence必须逐项覆盖key_facts；每项只能引用真正支持该事实的M编号
+- message_coverage必须逐一且仅一次覆盖所有M编号；省略消息时必须说明理由
 - sentiment反映群体整体氛围
 - importance必须在0.0-1.0之间,保留1-2位小数
 

@@ -9,6 +9,9 @@ import pytest
 from astrbot_plugin_livingmemory.core.managers.conversation_manager import (
     ConversationManager,
 )
+from astrbot_plugin_livingmemory.core.models.conversation_identity import (
+    audit_message_identity,
+)
 from astrbot_plugin_livingmemory.storage.conversation_store import ConversationStore
 
 from astrbot.api.platform import MessageType
@@ -114,12 +117,87 @@ async def test_group_assistant_never_inherits_triggering_user_name(tmp_path: Pat
     assert message.sender_id == "bot-1"
     assert message.sender_name == "bot-1"
     assert message.sender_name != event.get_sender_name()
-    assert message.metadata == {
-        "is_bot_message": True,
-        "actor_type": "assistant",
-        "actor_id": "test:assistant:bot-1",
-    }
+    assert message.metadata["is_bot_message"] is True
+    assert message.metadata["actor_type"] == "assistant"
+    assert message.metadata["actor_id"] == "test:assistant:bot-1"
+    assert message.metadata["identity_source"] == "event_self_id"
+    assert message.metadata["event_source"] == "llm_response"
     await store.close()
+
+
+@pytest.mark.asyncio
+async def test_synthetic_assistant_event_uses_platform_instance_and_persona(
+    tmp_path: Path,
+):
+    store = ConversationStore(str(tmp_path / "synthetic-identity.db"))
+    await store.initialize()
+    manager = ConversationManager(store=store)
+
+    class _SyntheticEvent:
+        unified_msg_origin = "QQ2949374079:FriendMessage:1141337347"
+        message_obj = SimpleNamespace(
+            self_id="1141337347",
+            sender=SimpleNamespace(user_id="1141337347", nickname="空雨"),
+        )
+
+        def get_sender_id(self):
+            return "1141337347"
+
+        def get_sender_name(self):
+            return "空雨"
+
+        def get_self_id(self):
+            return "1141337347"
+
+        def get_message_type(self):
+            return MessageType.FRIEND_MESSAGE
+
+        def get_platform_name(self):
+            return "QQ2949374079"
+
+    message = await manager.add_message_from_event(
+        _SyntheticEvent(),
+        role="assistant",
+        content="reply",
+        persona_id="persona-only",
+        persona_name="唯",
+    )
+
+    assert message.sender_id == "2949374079"
+    assert message.sender_name == "唯"
+    assert message.platform == "qq"
+    assert message.metadata["actor_id"] == "qq:assistant:2949374079"
+    assert message.metadata["persona_id"] == "persona-only"
+    assert message.metadata["platform_instance_id"] == "QQ2949374079"
+    assert message.metadata["identity_source"] == "platform_instance_id"
+    assert "event_self_id_collides_with_human_sender" in message.metadata[
+        "identity_warnings"
+    ]
+    assert "message_object_self_id_collides_with_human_sender" in message.metadata[
+        "identity_warnings"
+    ]
+    await store.close()
+
+
+def test_identity_audit_detects_historical_synthetic_assistant_row():
+    from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+
+    message = Message(
+        id=1034,
+        session_id="QQ2949374079:FriendMessage:1141337347",
+        role="assistant",
+        content="legacy",
+        sender_id="1141337347",
+        sender_name="1141337347",
+        platform="QQ2949374079",
+        metadata={"actor_type": "assistant"},
+    )
+
+    assert set(audit_message_identity(message)) >= {
+        "platform_value_is_instance_id",
+        "assistant_display_name_is_account_id",
+        "assistant_sender_matches_session_peer",
+    }
 
 
 @pytest.mark.asyncio

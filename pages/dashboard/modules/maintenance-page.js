@@ -12,6 +12,8 @@ export class MaintenancePage {
     this.governance = null;
     this.sessionAudit = [];
     this.sessionPreview = null;
+    this.timelineRebuildItems = [];
+    this.timelineRebuildPoller = null;
   }
 
   initEventListeners() {
@@ -37,6 +39,15 @@ export class MaintenancePage {
     document.getElementById("session-task-list")?.addEventListener("click", event => {
       const button = event.target.closest("[data-session-task-delete]");
       if (button) this.deleteSessionTask(button.dataset.sessionTaskDelete, button);
+    });
+    document.getElementById("timeline-rebuild-preview")?.addEventListener("click", () => this.previewTimelineRebuild());
+    document.getElementById("timeline-rebuild-start")?.addEventListener("click", () => this.startTimelineRebuild());
+    document.getElementById("timeline-rebuild-list")?.addEventListener("change", () => this.updateTimelineRebuildSelection());
+    document.getElementById("timeline-rebuild-task-refresh")?.addEventListener("click", () => this.loadTimelineRebuildTasks());
+    document.getElementById("timeline-rebuild-task-clear")?.addEventListener("click", () => this.clearTimelineRebuildTasks());
+    document.getElementById("timeline-rebuild-task-list")?.addEventListener("click", event => {
+      const button = event.target.closest("[data-timeline-rebuild-action]");
+      if (button) this.handleTimelineRebuildTaskAction(button.dataset.timelineRebuildAction, button.dataset.taskUid, button);
     });
     document.getElementById("recall-trace-enabled")?.addEventListener("change", event => this.setRecallTraceEnabled(event.target.checked));
     document.getElementById("recent-recall-refresh")?.addEventListener("click", () => this.loadRecentRecalls());
@@ -72,6 +83,7 @@ export class MaintenancePage {
     if (this.tab === "review") this.loadReviews();
     if (this.tab === "sessions") this.loadSessionAudit();
     if (this.tab === "recent-recall") this.loadRecentRecalls();
+    if (this.tab === "timeline-rebuild") this.loadTimelineRebuildTasks();
   }
 
   selectTab(tab) {
@@ -91,19 +103,175 @@ export class MaintenancePage {
     if (tab === "review") this.loadReviews();
     if (tab === "sessions") this.loadSessionAudit();
     if (tab === "recent-recall") this.loadRecentRecalls();
+    if (tab === "timeline-rebuild") this.loadTimelineRebuildTasks();
   }
 
   syncTopicSpaces() {
     const source = document.getElementById("topic-space");
     const target = document.getElementById("maintenance-topic-space");
     if (!source || !target) return;
-    [target, document.getElementById("maintenance-review-space")].filter(Boolean).forEach(select => {
+    [target, document.getElementById("maintenance-review-space"), document.getElementById("timeline-rebuild-space")].filter(Boolean).forEach(select => {
       const previous = select.value;
       select.innerHTML = source.innerHTML;
       select.value = previous && Array.from(select.options).some(option => option.value === previous)
         ? previous
         : source.value;
     });
+  }
+
+  selectedTimelineRebuildIds() {
+    return Array.from(document.querySelectorAll("[data-timeline-rebuild-select]:checked"))
+      .map(input => Number(input.value))
+      .filter(Number.isFinite);
+  }
+
+  updateTimelineRebuildSelection() {
+    const selected = this.selectedTimelineRebuildIds();
+    const button = document.getElementById("timeline-rebuild-start");
+    if (button) button.disabled = selected.length === 0;
+    const summary = document.getElementById("timeline-rebuild-summary");
+    if (summary && this.timelineRebuildItems.length) {
+      const available = this.timelineRebuildItems.filter(item => item.reconstructable).length;
+      const blocked = this.timelineRebuildItems.length - available;
+      summary.textContent = window.t("maintenance.rebuildSummary", this.timelineRebuildItems.length, available, blocked, selected.length);
+    }
+  }
+
+  async previewTimelineRebuild() {
+    const space = document.getElementById("timeline-rebuild-space")?.value || "";
+    if (!space) return this.showToast(window.t("topic.chooseSpace"), true);
+    const button = document.getElementById("timeline-rebuild-preview");
+    const list = document.getElementById("timeline-rebuild-list");
+    button.disabled = true;
+    list.innerHTML = `<div class="identity-state">${esc(window.t("common.loading"))}</div>`;
+    try {
+      const data = await this.topicPage.api.post("timeline/rebuild/preview", { memory_space_id: space, limit: 2000 });
+      this.timelineRebuildItems = data.items || [];
+      document.getElementById("timeline-rebuild-options")?.classList.toggle("hidden", !this.timelineRebuildItems.length);
+      list.innerHTML = this.timelineRebuildItems.length ? this.timelineRebuildItems.map(item => {
+        const blocked = (item.blocked_reasons || []).join("；");
+        const warnings = (item.identity_warnings || []).join("、");
+        return `<label class="timeline-rebuild-row ${item.reconstructable ? "" : "is-blocked"}">
+          <input type="checkbox" data-timeline-rebuild-select value="${Number(item.memory_id)}" ${item.reconstructable ? "checked" : "disabled"}>
+          <span class="timeline-rebuild-main"><strong>ID ${Number(item.memory_id)}</strong><span>${esc(item.excerpt || "--")}</span><small>${esc(item.session_id || "--")} · ${Number(item.message_count || 0)} / ${Number(item.expected_message_count || 0)} ${esc(window.t("maintenance.sourceMessages"))} · Topic ${Number(item.topic_count || 0)}</small></span>
+          <span class="timeline-rebuild-state ${item.reconstructable ? "is-ready" : "is-blocked"}">${esc(item.reconstructable ? window.t("maintenance.rebuildable") : blocked)}${warnings ? `<small>${esc(window.t("maintenance.identityWarning"))}: ${esc(warnings)}</small>` : ""}</span>
+        </label>`;
+      }).join("") : `<div class="identity-state">${esc(window.t("maintenance.noTimelinesInSpace"))}</div>`;
+      this.updateTimelineRebuildSelection();
+    } catch (error) {
+      list.innerHTML = `<div class="identity-state identity-state-error">${esc(error.message)}</div>`;
+      this.showToast(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async startTimelineRebuild() {
+    const memoryIds = this.selectedTimelineRebuildIds();
+    if (!memoryIds.length) return;
+    const topicMode = document.getElementById("timeline-rebuild-topic-mode")?.value || "local";
+    const confirmed = await this.confirmDialog.show({
+      title: window.t("maintenance.confirmTimelineRebuild"),
+      message: window.t("maintenance.confirmTimelineRebuildMessage", memoryIds.length),
+      confirmLabel: window.t("maintenance.startRebuild"),
+    });
+    if (!confirmed) return;
+    const button = document.getElementById("timeline-rebuild-start");
+    button.disabled = true;
+    try {
+      const task = await this.topicPage.api.post("timeline/rebuild/start", { memory_ids: memoryIds, topic_mode: topicMode });
+      this.showToast(window.t("maintenance.rebuildStarted"));
+      await this.loadTimelineRebuildTasks();
+      this.pollTimelineRebuildTask(task.task_uid);
+    } catch (error) {
+      this.showToast(error.message, true);
+      button.disabled = false;
+    }
+  }
+
+  async loadTimelineRebuildTasks() {
+    const target = document.getElementById("timeline-rebuild-task-list");
+    if (!target) return;
+    try {
+      const data = await this.topicPage.api.get("timeline/rebuild/tasks", { limit: 30 });
+      const tasks = data.items || [];
+      target.innerHTML = tasks.length ? tasks.map(task => {
+        const total = Number(task.total_count || 0);
+        const done = Number(task.completed_count || 0);
+        const failed = Number(task.failed_count || 0);
+        const terminal = ["completed", "completed_with_errors", "failed", "cancelled"].includes(task.status);
+        const resumable = ["failed", "completed_with_errors"].includes(task.status);
+        const cancellable = ["queued", "running", "cancelling"].includes(task.status);
+        return `<div class="session-task-row timeline-rebuild-task-row">
+          <span class="session-task-main"><strong>${esc(task.topic_mode === "full" ? window.t("maintenance.topicSyncFull") : window.t("maintenance.topicSyncLocal"))}</strong><small>${done} / ${total} · ${esc(window.t("maintenance.failedCount", failed))}</small></span>
+          <span class="status-badge status-${esc(task.status)}">${esc(task.status)}</span>
+          <small class="session-task-detail">${esc(task.current_step || "")}${task.error ? ` · ${esc(task.error)}` : ""}</small>
+          <span class="session-task-actions">
+            ${resumable ? `<button class="btn btn-secondary btn-sm" data-timeline-rebuild-action="resume" data-task-uid="${esc(task.task_uid)}">${esc(window.t("maintenance.resumeTask"))}</button>` : ""}
+            ${cancellable ? `<button class="btn btn-danger btn-sm" data-timeline-rebuild-action="cancel" data-task-uid="${esc(task.task_uid)}">${esc(window.t("common.cancel"))}</button>` : ""}
+            ${terminal ? `<button class="session-task-delete" data-timeline-rebuild-action="delete" data-task-uid="${esc(task.task_uid)}" title="${esc(window.t("common.delete"))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 10v6m4-6v6"/></svg></button>` : ""}
+          </span>
+        </div>`;
+      }).join("") : `<span class="text-tertiary">${esc(window.t("maintenance.noTasks"))}</span>`;
+    } catch (error) {
+      target.innerHTML = `<span class="text-danger">${esc(error.message)}</span>`;
+    }
+  }
+
+  pollTimelineRebuildTask(taskUid) {
+    if (this.timelineRebuildPoller) clearInterval(this.timelineRebuildPoller);
+    this.timelineRebuildPoller = setInterval(async () => {
+      try {
+        const task = await this.topicPage.api.get("timeline/rebuild/task", { task_uid: taskUid });
+        await this.loadTimelineRebuildTasks();
+        if (["completed", "completed_with_errors", "failed", "cancelled"].includes(task.status)) {
+          clearInterval(this.timelineRebuildPoller);
+          this.timelineRebuildPoller = null;
+          document.getElementById("timeline-rebuild-start").disabled = this.selectedTimelineRebuildIds().length === 0;
+        }
+      } catch (_) {
+        clearInterval(this.timelineRebuildPoller);
+        this.timelineRebuildPoller = null;
+      }
+    }, 1500);
+  }
+
+  async handleTimelineRebuildTaskAction(action, taskUid, button) {
+    if (!taskUid || button.disabled) return;
+    button.disabled = true;
+    try {
+      if (action === "resume") {
+        await this.topicPage.api.post("timeline/rebuild/resume", { task_uid: taskUid });
+        this.pollTimelineRebuildTask(taskUid);
+      } else if (action === "cancel") {
+        await this.topicPage.api.post("timeline/rebuild/cancel", { task_uid: taskUid });
+      } else if (action === "delete") {
+        await this.topicPage.api.post("timeline/rebuild/tasks/delete", { task_uid: taskUid });
+      }
+      await this.loadTimelineRebuildTasks();
+    } catch (error) {
+      this.showToast(error.message, true);
+      button.disabled = false;
+    }
+  }
+
+  async clearTimelineRebuildTasks() {
+    const confirmed = await this.confirmDialog.show({
+      title: window.t("maintenance.clearRebuildTasks"),
+      message: window.t("maintenance.clearRebuildTasksMessage"),
+      confirmLabel: window.t("common.clear"),
+    });
+    if (!confirmed) return;
+    const button = document.getElementById("timeline-rebuild-task-clear");
+    if (button) button.disabled = true;
+    try {
+      await this.topicPage.api.post("timeline/rebuild/tasks/clear", {});
+      await this.loadTimelineRebuildTasks();
+    } catch (error) {
+      this.showToast(error.message, true);
+    } finally {
+      if (button) button.disabled = false;
+    }
   }
 
   async openTopicMaintenance(trigger) {

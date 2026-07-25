@@ -10,6 +10,9 @@ from astrbot_plugin_livingmemory.core.models.conversation_models import Message
 from astrbot_plugin_livingmemory.core.models.identity_profile import (
     SupplementalIdentityStore,
 )
+from astrbot_plugin_livingmemory.core.models.timeline_quality import (
+    TimelineSummaryQualityError,
+)
 from astrbot_plugin_livingmemory.core.processors.memory_processor import MemoryProcessor
 
 
@@ -20,6 +23,15 @@ class _DummyLLMProvider:
 
     async def _chat(self, prompt: str, system_prompt: str):
         return SimpleNamespace(completion_text=self._completion_text)
+
+
+class _SequenceLLMProvider:
+    def __init__(self, *completion_texts: str):
+        self._completion_texts = list(completion_texts)
+        self.text_chat = AsyncMock(side_effect=self._chat)
+
+    async def _chat(self, prompt: str, system_prompt: str):
+        return SimpleNamespace(completion_text=self._completion_texts.pop(0))
 
 
 def _make_messages():
@@ -75,19 +87,19 @@ async def test_process_conversation_success():
 
 
 @pytest.mark.asyncio
-async def test_process_conversation_handles_non_json_response_with_fallback():
+async def test_process_conversation_rejects_non_json_after_one_repair():
     llm = _DummyLLMProvider("summary=测试, importance=0.6")
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    content, metadata, importance = await processor.process_conversation(
-        messages=_make_messages(),
-        is_group_chat=False,
-        persona_id=None,
-    )
-
-    assert isinstance(content, str) and len(content) > 0
-    assert "topics" in metadata
-    assert 0.0 <= importance <= 1.0
+    with pytest.raises(TimelineSummaryQualityError):
+        await processor.process_conversation(
+            messages=_make_messages(),
+            is_group_chat=False,
+            persona_id=None,
+        )
+    # AsyncMock advertises **kwargs, so the first call also covers one tool-mode
+    # capability negotiation before falling back to the test provider signature.
+    assert llm.text_chat.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -230,7 +242,7 @@ async def test_dual_channel_summary_stores_canonical_and_persona():
     assert content == metadata["canonical_summary"]
 
     # schema 版本标记
-    assert metadata.get("summary_schema_version") == "v2"
+    assert metadata.get("summary_schema_version") == "v3-source-grounded"
 
 
 @pytest.mark.asyncio
@@ -238,7 +250,7 @@ async def test_canonical_summary_includes_key_facts():
     """canonical_summary 应将 key_facts 拼接到摘要中，提升检索覆盖率。"""
     llm = _DummyLLMProvider(
         """{
-            "summary":"用户提到了一个重要事项",
+            "summary":"张三提到了一个重要事项",
             "topics":["备忘"],
             "key_facts":["明天下午三点开会", "需要准备PPT"],
             "sentiment":"neutral",
@@ -282,8 +294,76 @@ async def test_summary_quality_normal_for_valid_response():
 
 
 @pytest.mark.asyncio
-async def test_summary_quality_low_for_empty_summary():
-    """summary 为空时应标记为 summary_quality=low。"""
+async def test_source_grounding_contract_repairs_once_and_persists_report():
+    llm = _SequenceLLMProvider(
+        """{
+            "summary":"某用户提到了一次会议",
+            "topics":["会议"],
+            "key_facts":["某用户需要开会"],
+            "sentiment":"neutral",
+            "importance":0.7
+        }""",
+        """{
+            "summary":"张三说明天下午三点开会，我确认会进行提醒",
+            "topics":["会议提醒"],
+            "key_facts":["张三明天下午三点开会"],
+            "key_fact_evidence":[{"fact_index":0,"message_refs":["M1"]}],
+            "message_coverage":[
+                {"message_ref":"M1","disposition":"fact","fact_indexes":[0],"reason":"会议时间来源"},
+                {"message_ref":"M2","disposition":"context","fact_indexes":[],"reason":"Bot确认提醒"}
+            ],
+            "sentiment":"neutral",
+            "importance":0.7
+        }""",
+    )
+    processor = MemoryProcessor(
+        llm_provider=llm,
+        context=None,
+        config={"timeline_require_source_grounding": True},
+    )
+
+    _, metadata, _ = await processor.process_conversation(_make_messages())
+
+    assert llm.text_chat.await_count == 3
+    assert metadata["summary_quality"] == "repaired"
+    assert metadata["summary_repair_attempted"] is True
+    assert metadata["summary_quality_report"]["grounded_fact_count"] == 1
+    assert metadata["summary_quality_report"]["covered_message_count"] == 2
+    assert metadata["key_fact_evidence"] == [
+        {"fact_index": 0, "message_refs": ["M1"]}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_source_grounding_contract_rejects_unknown_message_reference():
+    response = """{
+        "summary":"张三说明天下午三点开会，我确认会进行提醒",
+        "topics":["会议提醒"],
+        "key_facts":["张三明天下午三点开会"],
+        "key_fact_evidence":[{"fact_index":0,"message_refs":["M99"]}],
+        "message_coverage":[
+            {"message_ref":"M1","disposition":"fact","fact_indexes":[0],"reason":"会议时间来源"},
+            {"message_ref":"M2","disposition":"context","fact_indexes":[],"reason":"Bot确认提醒"}
+        ],
+        "sentiment":"neutral",
+        "importance":0.7
+    }"""
+    processor = MemoryProcessor(
+        llm_provider=_DummyLLMProvider(response),
+        context=None,
+        config={"timeline_require_source_grounding": True},
+    )
+
+    with pytest.raises(TimelineSummaryQualityError) as captured:
+        await processor.process_conversation(_make_messages())
+
+    assert "unknown_fact_evidence" in {
+        issue.code for issue in captured.value.report.errors
+    }
+
+
+@pytest.mark.asyncio
+async def test_summary_quality_rejects_empty_summary_after_repair():
     llm = _DummyLLMProvider(
         """{
             "summary":"",
@@ -295,18 +375,16 @@ async def test_summary_quality_low_for_empty_summary():
     )
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    _, metadata, _ = await processor.process_conversation(
-        messages=_make_messages(),
-        is_group_chat=False,
-        persona_id=None,
-    )
-
-    assert metadata.get("summary_quality") == "low"
+    with pytest.raises(TimelineSummaryQualityError):
+        await processor.process_conversation(
+            messages=_make_messages(),
+            is_group_chat=False,
+            persona_id=None,
+        )
 
 
 @pytest.mark.asyncio
-async def test_summary_quality_low_for_missing_key_facts():
-    """key_facts 为空时应标记为 summary_quality=low。"""
+async def test_summary_quality_rejects_missing_key_facts_after_repair():
     llm = _DummyLLMProvider(
         """{
             "summary":"用户进行了一次普通对话",
@@ -318,18 +396,16 @@ async def test_summary_quality_low_for_missing_key_facts():
     )
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    _, metadata, _ = await processor.process_conversation(
-        messages=_make_messages(),
-        is_group_chat=False,
-        persona_id=None,
-    )
-
-    assert metadata.get("summary_quality") == "low"
+    with pytest.raises(TimelineSummaryQualityError):
+        await processor.process_conversation(
+            messages=_make_messages(),
+            is_group_chat=False,
+            persona_id=None,
+        )
 
 
 @pytest.mark.asyncio
-async def test_summary_quality_low_for_generic_terms():
-    """summary 包含泛化词（某用户、有人等）时应标记为 summary_quality=low。"""
+async def test_summary_quality_rejects_generic_terms_after_repair():
     llm = _DummyLLMProvider(
         """{
             "summary":"某用户提到了一些事情",
@@ -341,13 +417,12 @@ async def test_summary_quality_low_for_generic_terms():
     )
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    _, metadata, _ = await processor.process_conversation(
-        messages=_make_messages(),
-        is_group_chat=False,
-        persona_id=None,
-    )
-
-    assert metadata.get("summary_quality") == "low"
+    with pytest.raises(TimelineSummaryQualityError):
+        await processor.process_conversation(
+            messages=_make_messages(),
+            is_group_chat=False,
+            persona_id=None,
+        )
 
 
 def test_validate_summary_quality_directly():
@@ -359,11 +434,13 @@ def test_validate_summary_quality_directly():
     # 正常情况
     assert (
         processor._validate_summary_quality(
-            {
-                "summary": "用户明确表示喜欢吃寿司",
-                "key_facts": ["用户喜欢寿司"],
-                "importance": 0.7,
-            }
+                {
+                    "summary": "张三明确表示喜欢吃寿司",
+                    "topics": ["饮食偏好"],
+                    "key_facts": ["张三喜欢寿司"],
+                    "sentiment": "positive",
+                    "importance": 0.7,
+                }
         )
         == "normal"
     )
@@ -426,7 +503,7 @@ def test_build_memory_from_structured_data_uses_standard_storage_format():
     assert metadata["key_facts"] == ["主动记忆应复用 MemoryProcessor 格式化流程"]
     assert metadata["sentiment"] == "neutral"
     assert metadata["interaction_type"] == "private_chat"
-    assert metadata["summary_schema_version"] == "v2"
+    assert metadata["summary_schema_version"] == "v3-source-grounded"
     assert metadata["summary_quality"] == "normal"
     assert importance == 0.8
 
@@ -577,7 +654,7 @@ async def test_process_group_chat_dual_channel_summary():
 
     assert "canonical_summary" in metadata
     assert "persona_summary" in metadata
-    assert metadata.get("summary_schema_version") == "v2"
+    assert metadata.get("summary_schema_version") == "v3-source-grounded"
     # canonical_summary 应包含 key_facts
     assert "私有化 LLM" in metadata["canonical_summary"]
     # content 应等于 canonical_summary
@@ -679,8 +756,7 @@ async def test_process_group_chat_long_content():
 
 
 @pytest.mark.asyncio
-async def test_process_group_chat_quality_low_for_generic_terms():
-    """群聊总结包含泛化词时，summary_quality 应为 low。"""
+async def test_process_group_chat_rejects_generic_terms_after_repair():
     llm = _DummyLLMProvider(
         """{
             "summary":"某用户在群里说了一些话",
@@ -693,13 +769,12 @@ async def test_process_group_chat_quality_low_for_generic_terms():
     )
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    _, metadata, _ = await processor.process_conversation(
-        messages=_make_group_messages(),
-        is_group_chat=True,
-        persona_id=None,
-    )
-
-    assert metadata.get("summary_quality") == "low"
+    with pytest.raises(TimelineSummaryQualityError):
+        await processor.process_conversation(
+            messages=_make_group_messages(),
+            is_group_chat=True,
+            persona_id=None,
+        )
 
 
 def test_format_conversation_sanitizes_multimodal_private_message():
