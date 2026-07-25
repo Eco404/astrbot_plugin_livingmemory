@@ -25,6 +25,10 @@ def setup_bundle():
     memory_engine = Mock()
     memory_engine.search_memories = AsyncMock(return_value=[])
     memory_engine.add_memory = AsyncMock(return_value=1)
+    memory_engine.resolve_session_scope = AsyncMock(
+        side_effect=lambda session_id: [session_id]
+    )
+    memory_engine.recall_trace_store = None
     memory_engine.get_statistics = AsyncMock(
         return_value={
             "total_memories": 0,

@@ -24,7 +24,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.17"
+    CURRENT_VERSION = "9.18"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -54,6 +54,7 @@ class DBMigration:
         "9.15": "Recall audit history and source Timeline access reinforcement",
         "9.16": "Supplemental identity hints and source-owned actor relations",
         "9.17": "Unified Timeline-derived Topic importance projection and source repair",
+        "9.18": "Source-grounded affect events and Topic affect profiles",
     }
 
     def __init__(self, db_path: str):
@@ -363,6 +364,8 @@ class DBMigration:
                     migration_steps.append(self._migrate_v9_15_to_v9_16)
                 if current_key <= self.version_key("9.16"):
                     migration_steps.append(self._migrate_v9_16_to_v9_17)
+                if current_key <= self.version_key("9.17"):
+                    migration_steps.append(self._migrate_v9_17_to_v9_18)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1590,6 +1593,49 @@ class DBMigration:
         if progress_callback:
             progress_callback("建立统一重要性投影与 Timeline 基础值", 1, 1)
         logger.info("v9.16 -> v9.17 迁移完成")
+
+    async def _migrate_v9_17_to_v9_18(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Add empty affect contracts without guessing emotion for legacy rows."""
+        logger.info("执行迁移步骤: v9.17 -> v9.18 (source-grounded affect memory)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            additions = {
+                "topic_memories": {
+                    "affect_profile": "TEXT NOT NULL DEFAULT '[]'",
+                    "affective_salience": "REAL NOT NULL DEFAULT 0.0",
+                    "affect_signature": "TEXT NOT NULL DEFAULT '{}'",
+                },
+                "topic_fragment_drafts": {
+                    "affect_events": "TEXT NOT NULL DEFAULT '[]'",
+                    "affect_signature": "TEXT NOT NULL DEFAULT '{}'",
+                },
+                "topic_fragments": {
+                    "affect_events": "TEXT NOT NULL DEFAULT '[]'",
+                    "affect_signature": "TEXT NOT NULL DEFAULT '{}'",
+                },
+            }
+            for table_name, columns in additions.items():
+                if not await self._table_exists(db, table_name):
+                    continue
+                existing = {
+                    str(row[1])
+                    for row in await (
+                        await db.execute(f"PRAGMA table_info({table_name})")
+                    ).fetchall()
+                }
+                for column_name, definition in columns.items():
+                    if column_name not in existing:
+                        await db.execute(
+                            f"ALTER TABLE {table_name} ADD COLUMN "
+                            f"{column_name} {definition}"
+                        )
+            await db.commit()
+        if progress_callback:
+            progress_callback("建立可溯源情感事件与 Topic 情感画像字段", 1, 1)
+        logger.info("v9.17 -> v9.18 迁移完成")
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(

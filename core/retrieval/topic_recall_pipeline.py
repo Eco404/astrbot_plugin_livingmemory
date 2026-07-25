@@ -8,6 +8,11 @@ from typing import Any
 
 from astrbot.api import logger
 
+from ..affect_memory import (
+    affect_similarity,
+    extract_query_affect,
+    select_affect_events,
+)
 from .recall_pipeline import RecallPipeline, RecallQueryBranch
 from .topic_retriever import (
     TopicFragmentRecallResult,
@@ -91,6 +96,7 @@ class TopicRecallPipeline:
         multiplier = max(1, min(10, int(self.config.get("recall_candidate_multiplier", 4))))
         candidate_k = min(50, max(final_k, final_k * multiplier))
         primary_branch = self._primary_branch(branches)
+        query_affect = extract_query_affect(primary_branch.text)
         query_vectors = await self.retriever._get_embeddings(
             [branch.text for branch in branches]
         )
@@ -148,6 +154,23 @@ class TopicRecallPipeline:
                     min(
                         0.2,
                         float(self.config.get("recall_actor_match_boost", 0.04)),
+                    ),
+                )
+            if bool(self.config.get("recall_affect_enabled", True)):
+                candidate.affect_match_score = affect_similarity(
+                    query_affect,
+                    candidate.topic.affect_profile,
+                )
+                candidate.affect_match_boost = self._affect_boost(
+                    candidate.affect_match_score,
+                    query_affect,
+                )
+                candidate.selected_affect_events = select_affect_events(
+                    candidate.topic.affect_profile,
+                    query_affect,
+                    limit=int(self.config.get("recall_affect_event_limit", 1)),
+                    min_confidence=float(
+                        self.config.get("recall_affect_min_confidence", 0.65)
                     ),
                 )
             candidate.ranking_score = self._topic_ranking_score(candidate)
@@ -382,7 +405,23 @@ class TopicRecallPipeline:
             base
             + candidate.context_support
             + candidate.actor_match_boost
+            + candidate.affect_match_boost
             + candidate.rerank_rank_boost,
+        )
+
+    def _affect_boost(
+        self,
+        similarity: float,
+        query_affect: dict[str, Any],
+    ) -> float:
+        if not query_affect.get("explicit"):
+            return 0.0
+        cap = max(
+            0.0,
+            min(0.12, float(self.config.get("recall_affect_boost_cap", 0.04))),
+        )
+        return cap * max(0.0, min(1.0, similarity)) * max(
+            0.0, min(1.0, float(query_affect.get("confidence") or 0.0))
         )
 
     def _bounded_context_support(
@@ -462,6 +501,7 @@ class TopicRecallPipeline:
             for row in rows
             if row["fragment"].metadata.get("narrative_schema_version")
             in {
+                "first_person_assistant_roles_affect_v4",
                 "first_person_assistant_roles_v3",
                 "first_person_assistant_roles_v2",
                 "third_person_roles_v1",
@@ -472,6 +512,7 @@ class TopicRecallPipeline:
             return TopicFragmentRecallOutcome([], [], available_count, 0.0)
 
         primary_branch = self._primary_branch(branches)
+        query_affect = extract_query_affect(primary_branch.text)
         if query_vectors is None or len(query_vectors) != len(branches):
             query_vectors = await self.retriever._get_embeddings(
                 [branch.text for branch in branches]
@@ -552,6 +593,23 @@ class TopicRecallPipeline:
                 branches,
                 primary_branch.name,
             )
+            if bool(self.config.get("recall_affect_enabled", True)):
+                candidate.affect_match_score = affect_similarity(
+                    query_affect,
+                    fragment.affect_events,
+                )
+                candidate.affect_match_boost = self._affect_boost(
+                    candidate.affect_match_score,
+                    query_affect,
+                )
+                candidate.selected_affect_events = select_affect_events(
+                    fragment.affect_events,
+                    query_affect,
+                    limit=int(self.config.get("recall_affect_event_limit", 1)),
+                    min_confidence=float(
+                        self.config.get("recall_affect_min_confidence", 0.65)
+                    ),
+                )
             candidate.ranking_score = self._fragment_ranking_score(candidate)
             candidate.final_score = candidate.ranking_score
             parent = parents.get(candidate.topic_uid)
@@ -670,6 +728,23 @@ class TopicRecallPipeline:
             item.filter_reason = (
                 None if item.selected else "diversity_or_result_limit"
             )
+        selected_event_uids_by_topic: dict[str, set[str]] = {}
+        for item in selected:
+            selected_event_uids_by_topic.setdefault(item.topic_uid, set()).update(
+                str(event.get("event_uid") or "")
+                for event in item.selected_affect_events
+                if str(event.get("event_uid") or "")
+            )
+        for parent in topic_results:
+            duplicate_event_uids = selected_event_uids_by_topic.get(
+                parent.topic_uid, set()
+            )
+            if duplicate_event_uids:
+                parent.selected_affect_events = [
+                    event
+                    for event in parent.selected_affect_events
+                    if str(event.get("event_uid") or "") not in duplicate_event_uids
+                ]
         candidates.sort(key=lambda item: item.final_score, reverse=True)
         return TopicFragmentRecallOutcome(
             selected,
@@ -708,6 +783,7 @@ class TopicRecallPipeline:
             + float(candidate.fragment.importance) * 0.06
             + float(candidate.fragment.confidence) * 0.04
             + candidate.context_support
+            + candidate.affect_match_boost
             + candidate.rerank_rank_boost,
         )
 

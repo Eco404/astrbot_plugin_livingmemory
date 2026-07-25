@@ -187,6 +187,10 @@ class TopicMemoryConfig(BaseModel):
     timeline_supplement_k: int = Field(default=2, ge=0, le=10)
     fragment_min_relevance: float = Field(default=0.28, ge=0.0, le=1.0)
     fragment_relative_floor: float = Field(default=0.65, ge=0.0, le=1.0)
+    recall_affect_enabled: bool = True
+    recall_affect_boost_cap: float = Field(default=0.04, ge=0.0, le=0.12)
+    recall_affect_event_limit: int = Field(default=1, ge=0, le=3)
+    recall_affect_min_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
     auto_maintenance: bool = True
     auto_debounce_seconds: float = Field(default=60.0, ge=0.0, le=3600.0)
     time_gap_hours: float = Field(default=6.0, ge=1 / 60, le=24 * 30)

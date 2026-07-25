@@ -202,7 +202,7 @@ class RecallHandler:
                 formatted_results.append(
                     {
                         "memory_id": result.topic_uid,
-                        "content": f"Topic: {result.topic.title}\n{result.topic.summary}",
+                        "content": f"Topic: {result.content}".strip(),
                         "similarity_score": round(float(result.final_score), 4),
                         "score_percentage": round(float(result.final_score) * 100, 2),
                         "metadata": {
@@ -242,6 +242,15 @@ class RecallHandler:
                             ),
                             "topic_actor_match_boost": round(
                                 float(getattr(result, "actor_match_boost", 0.0)), 6
+                            ),
+                            "topic_affect_match_score": round(
+                                float(getattr(result, "affect_match_score", 0.0)), 6
+                            ),
+                            "topic_affect_match_boost": round(
+                                float(getattr(result, "affect_match_boost", 0.0)), 6
+                            ),
+                            "topic_affect_event_count": len(
+                                getattr(result, "selected_affect_events", [])
                             ),
                             **(
                                 {
@@ -332,6 +341,15 @@ class RecallHandler:
                             if getattr(result, "ranking_score", None) is not None
                             else result.final_score,
                             6,
+                        ),
+                        "fragment_affect_match_score": round(
+                            float(getattr(result, "affect_match_score", 0.0)), 6
+                        ),
+                        "fragment_affect_match_boost": round(
+                            float(getattr(result, "affect_match_boost", 0.0)), 6
+                        ),
+                        "fragment_affect_event_count": len(
+                            getattr(result, "selected_affect_events", [])
                         ),
                         **(
                             {

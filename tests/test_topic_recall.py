@@ -138,6 +138,29 @@ def _fragment_signature(embedding: list[float]) -> dict:
     )
 
 
+def _affect_event(category: str = "frustration") -> dict:
+    return {
+        "event_uid": f"event-{category}",
+        "actor_id": "qq:human:u1",
+        "display_name_snapshot": "示例甲",
+        "emotion": "感到烦躁和挫败",
+        "description": "因项目受阻而感到烦躁和挫败",
+        "trigger": "项目受阻",
+        "target": "项目",
+        "evidence_type": "explicit",
+        "temporal_status": "historical",
+        "valence": 0.18,
+        "arousal": 0.74,
+        "dominance": 0.38,
+        "intensity": 0.8,
+        "confidence": 0.9,
+        "categories": [{"label": category, "score": 0.95}],
+        "source_timeline_uids": ["timeline-1"],
+        "source_atom_fingerprints": [],
+        "source_fact_keys": [],
+    }
+
+
 @pytest.mark.asyncio
 async def test_topic_retriever_rejects_unsigned_legacy_vectors():
     payload = _payload("weather", "上海雷雨", [1.0, 0.0])
@@ -150,6 +173,80 @@ async def test_topic_retriever_rejects_unsigned_legacy_vectors():
 
     with pytest.raises(TopicEmbeddingCompatibilityError, match="重新向量化"):
         await retriever.search("上海天气", memory_space_id="space-1", k=1)
+
+
+@pytest.mark.asyncio
+async def test_affect_boost_reorders_only_semantically_eligible_topics():
+    matched = _payload("matched", "项目进展", [1.0])["topic"]
+    matched.affect_profile = [_affect_event()]
+    other = _payload("other", "项目进展", [1.0])["topic"]
+    low = _payload("low", "无关内容", [1.0])["topic"]
+    low.affect_profile = [_affect_event()]
+    retriever = _FixedScoreRetriever(
+        _Store([]),
+        [
+            TopicRecallResult(matched, 0.50, 0.50, 0.50, 0.0),
+            TopicRecallResult(other, 0.51, 0.51, 0.51, 0.0),
+            TopicRecallResult(low, 0.29, 0.29, 0.29, 0.0),
+        ],
+    )
+    pipeline = TopicRecallPipeline(
+        retriever,
+        {
+            "recall_use_rerank": False,
+            "recall_min_relevance": 0.40,
+            "recall_relative_floor": 0.0,
+            "recall_selection_relative_floor": 0.5,
+            "recall_affect_enabled": True,
+            "recall_affect_boost_cap": 0.04,
+        },
+    )
+
+    outcome = await pipeline.search(
+        branches=[RecallQueryBranch("current", "项目受阻让我很烦", 1.0, "user")],
+        memory_space_id="space-1",
+        final_k=3,
+    )
+
+    assert [item.topic_uid for item in outcome.results] == ["matched", "other"]
+    assert outcome.results[0].affect_match_boost > 0.0
+    assert "情感上下文" in outcome.results[0].content
+    low_result = next(item for item in outcome.candidates if item.topic_uid == "low")
+    assert low_result.filter_reason == "below_min_relevance"
+
+
+@pytest.mark.asyncio
+async def test_neutral_query_does_not_change_order_or_inject_affect():
+    matched = _payload("matched", "项目进展", [1.0])["topic"]
+    matched.affect_profile = [_affect_event()]
+    other = _payload("other", "项目进展", [1.0])["topic"]
+    retriever = _FixedScoreRetriever(
+        _Store([]),
+        [
+            TopicRecallResult(matched, 0.50, 0.50, 0.50, 0.0),
+            TopicRecallResult(other, 0.51, 0.51, 0.51, 0.0),
+        ],
+    )
+    pipeline = TopicRecallPipeline(
+        retriever,
+        {
+            "recall_use_rerank": False,
+            "recall_min_relevance": 0.0,
+            "recall_relative_floor": 0.0,
+            "recall_selection_relative_floor": 0.5,
+            "recall_affect_enabled": True,
+        },
+    )
+
+    outcome = await pipeline.search(
+        branches=[RecallQueryBranch("current", "项目进度是多少", 1.0, "user")],
+        memory_space_id="space-1",
+        final_k=2,
+    )
+
+    assert [item.topic_uid for item in outcome.results] == ["other", "matched"]
+    assert all(item.affect_match_boost == 0.0 for item in outcome.results)
+    assert all("情感上下文" not in item.content for item in outcome.results)
 
 
 @pytest.mark.asyncio

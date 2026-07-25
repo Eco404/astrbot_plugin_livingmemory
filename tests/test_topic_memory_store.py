@@ -239,6 +239,88 @@ async def test_formal_fragment_logical_identity_tracks_revisions(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_affect_profile_and_fragment_events_round_trip(tmp_path: Path):
+    db_path = str(tmp_path / "affect-round-trip.db")
+    space_id = await _register_timeline(
+        db_path,
+        memory_uid="timeline-1",
+        document_id=1,
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    event = {
+        "event_uid": "affect-event-1",
+        "actor_id": "qq:human:u1",
+        "display_name_snapshot": "示例甲",
+        "emotion": "感到安心",
+        "description": "因有人陪伴而感到安心",
+        "trigger": "获得陪伴",
+        "target": "睡眠",
+        "evidence_type": "explicit",
+        "temporal_status": "historical",
+        "valence": 0.78,
+        "arousal": 0.24,
+        "dominance": 0.62,
+        "intensity": 0.8,
+        "confidence": 0.92,
+        "categories": [{"label": "relief", "score": 0.95}],
+        "source_timeline_uids": ["timeline-1"],
+        "source_atom_fingerprints": [],
+        "source_fact_keys": [],
+    }
+    signature = {
+        "schema_version": 1,
+        "taxonomy": "livingmemory-affect-v1",
+    }
+    topic = TopicMemory(
+        topic_uid="topic-1",
+        memory_space_id=space_id,
+        title="睡眠陪伴",
+        summary="示例甲因获得陪伴而安心。",
+        affect_profile=[{**event, "fragment_uid": "fragment-1"}],
+        affective_salience=0.736,
+        affect_signature=signature,
+    )
+    fragment = TopicFragmentDraft(
+        fragment_uid="fragment-1",
+        logical_fragment_uid="logical-fragment-1",
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id=space_id,
+        label="获得陪伴后的安心",
+        summary="示例甲获得陪伴后感到安心。",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[{"content": "示例甲获得陪伴后感到安心。"}],
+        affect_events=[event],
+        affect_signature=signature,
+    )
+    await store.save_topic_snapshot(
+        topic,
+        atoms=[],
+        links=[
+            TopicTimelineLink(
+                topic_uid="topic-1",
+                timeline_uid="timeline-1",
+                time_cluster_key="cluster-1",
+            )
+        ],
+        atom_sources=[],
+        fragments=[fragment],
+    )
+
+    restored_topic = await store.get_topic("topic-1")
+    restored_fragments = await store.list_active_fragments_for_topics(["topic-1"])
+
+    assert restored_topic is not None
+    assert restored_topic.affect_profile == topic.affect_profile
+    assert restored_topic.affective_salience == pytest.approx(0.736)
+    assert restored_topic.affect_signature == signature
+    assert restored_fragments[0]["fragment"].affect_events == [event]
+    assert restored_fragments[0]["fragment"].affect_signature == signature
+
+
+@pytest.mark.asyncio
 async def test_maintenance_review_identity_ignores_volatile_run_details(tmp_path: Path):
     db_path = str(tmp_path / "maintenance-review.db")
     store = TopicMemoryStore(db_path)

@@ -591,7 +591,7 @@ class MemoryRecall:
         ]
         return {
             "id": item.topic_uid,
-            "content": f"Topic: {item.topic.title}\n{item.topic.summary}".strip(),
+            "content": f"Topic: {item.content}".strip(),
             "score": item.final_score,
             "metadata": {
                 "memory_layer": "topic",
@@ -602,6 +602,9 @@ class MemoryRecall:
                 "topics": [item.topic.title, *keywords[:5]],
                 "key_facts": facts,
                 "source_timeline_count": len(item.sources),
+                "affect_match_score": item.affect_match_score,
+                "affect_match_boost": item.affect_match_boost,
+                "affect_event_count": len(item.selected_affect_events),
                 "context_coverage": item.context_coverage,
                 "started_at": item.topic.started_at,
                 "ended_at": item.topic.ended_at,
@@ -635,6 +638,9 @@ class MemoryRecall:
                 "confidence": item.fragment.confidence,
                 "fragment_body_suppressed": item.body_suppressed,
                 "fragment_fact_count": len(item.fact_contents),
+                "affect_match_score": item.affect_match_score,
+                "affect_match_boost": item.affect_match_boost,
+                "affect_event_count": len(item.selected_affect_events),
                 "source_timeline_count": len(item.fragment.timeline_uids),
                 "context_coverage": item.context_coverage,
                 "narrative_perspective": "first_person_assistant",

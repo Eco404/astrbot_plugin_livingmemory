@@ -19,6 +19,12 @@ from astrbot.api import logger
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 
 from ...storage.topic_memory_store import TopicMemoryStore
+from ..affect_memory import (
+    AFFECT_CATEGORIES,
+    affect_signature,
+    aggregate_affect_profile,
+    normalize_affect_event,
+)
 from ..embedding_signature import (
     SUPPORTED_TOPIC_EMBEDDING_FORMATS,
     TOPIC_CENTROID_EMBEDDING_FORMAT,
@@ -69,7 +75,7 @@ from .topic_maintenance_manager import TopicMaintenanceManager
 from .topic_relation_builder import vector_neighbor_rankings
 
 
-_FRAGMENT_PROMPT_VERSION = "topic-fragment-v15-source-owned-actors"
+_FRAGMENT_PROMPT_VERSION = "topic-fragment-v16-source-grounded-affect"
 _SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v11-source-owned-actors"
 _COMPONENT_REVIEW_PROMPT_VERSION = "topic-component-review-v2-structured-output"
 _NARRATIVE_SCHEMA_VERSION = "first_person_assistant_roles_v3"
@@ -5010,6 +5016,7 @@ class TopicBuildManager:
         )
         quality_penalty = min(0.15, repair_ratio * 0.12)
         topic_confidence = max(0.0, topic_confidence - quality_penalty)
+        affect_profile, affective_salience = aggregate_affect_profile(fragments)
         topic = TopicMemory(
             topic_uid=topic_uid,
             memory_space_id=memory_space_id,
@@ -5037,6 +5044,13 @@ class TopicBuildManager:
                 self.embedding_provider,
                 dimension=len(embedding),
                 input_format_version=TOPIC_CENTROID_EMBEDDING_FORMAT,
+            ),
+            affect_profile=affect_profile,
+            affective_salience=affective_salience,
+            affect_signature=affect_signature(
+                provider_id=self._provider_identity(self.llm_provider)[0],
+                model_id=self._provider_identity(self.llm_provider)[1],
+                prompt_version=_FRAGMENT_PROMPT_VERSION,
             ),
             metadata={
                 "build_run_uid": run_uid,
@@ -5952,6 +5966,55 @@ class TopicBuildManager:
                 mentioned_actor_refs,
                 normalized_facts,
             )
+            actor_ids_by_name = {
+                self._norm(value.get("display_name_snapshot")): str(
+                    value.get("actor_id") or ""
+                )
+                for value in [*participant_refs, *mentioned_actor_refs]
+                if isinstance(value, dict)
+                and self._norm(value.get("display_name_snapshot"))
+                and str(value.get("actor_id") or "")
+            }
+            affect_events: list[dict[str, Any]] = []
+            for event_index, raw_event in enumerate(raw.get("affect_events", [])):
+                event = normalize_affect_event(raw_event)
+                if event is None:
+                    raise TopicBuildValidationError(
+                        f"fragment {index} affect event {event_index} is incomplete"
+                    )
+                if not set(event["source_timeline_uids"]) <= set(timeline_uids):
+                    raise TopicBuildValidationError(
+                        f"fragment {index} affect event {event_index} provenance "
+                        "is outside its fragment"
+                    )
+                if event["evidence_type"] not in {
+                    "explicit", "behavioral", "contextual", "model_inferred"
+                }:
+                    raise TopicBuildValidationError(
+                        f"fragment {index} affect event {event_index} has invalid "
+                        "evidence_type"
+                    )
+                if event["temporal_status"] not in {
+                    "historical", "ongoing", "resolved", "uncertain"
+                }:
+                    raise TopicBuildValidationError(
+                        f"fragment {index} affect event {event_index} has invalid "
+                        "temporal_status"
+                    )
+                if event["evidence_type"] == "model_inferred":
+                    event["confidence"] = min(event["confidence"], 0.65)
+                if event["actor_id"] == "unresolved":
+                    name_key = self._norm(event["display_name_snapshot"])
+                    event["actor_id"] = actor_ids_by_name.get(name_key) or (
+                        f"unresolved:{fragment_uid}:affect:{event_index}"
+                    )
+                event["event_uid"] = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"livingmemory:affect-event:{fragment_uid}:{event_index}",
+                    )
+                )
+                affect_events.append(event)
             raw_fragment_importance = self._score(raw.get("importance"), 0.5)
             semantic_fragment_importance = fragment_semantic_importance(
                 normalized_facts
@@ -5978,6 +6041,12 @@ class TopicBuildManager:
                     ),
                     importance=semantic_fragment_importance,
                     confidence=self._score(raw.get("confidence"), 0.7),
+                    affect_events=affect_events,
+                    affect_signature=affect_signature(
+                        provider_id=provider_id,
+                        model_id=model_id,
+                        prompt_version=_FRAGMENT_PROMPT_VERSION,
+                    ),
                     started_at=min(starts) if starts else None,
                     ended_at=max(ends) if ends else None,
                     prompt_hash=prompt_hash,
@@ -6816,6 +6885,55 @@ class TopicBuildManager:
             ],
             "additionalProperties": False,
         }
+        affect_event_schema = {
+            "type": "object",
+            "properties": {
+                "actor_ref": {"type": "string", "minLength": 1},
+                "display_name_snapshot": {"type": "string"},
+                "emotion": {"type": "string", "minLength": 1},
+                "description": {"type": "string", "minLength": 1},
+                "trigger": {"type": "string"},
+                "target": {"type": "string"},
+                "evidence_type": {
+                    "type": "string",
+                    "enum": ["explicit", "behavioral", "contextual", "model_inferred"],
+                },
+                "temporal_status": {
+                    "type": "string",
+                    "enum": ["historical", "ongoing", "resolved", "uncertain"],
+                },
+                "valence": cls._score_schema(),
+                "arousal": cls._score_schema(),
+                "dominance": cls._score_schema(),
+                "intensity": cls._score_schema(),
+                "confidence": cls._score_schema(),
+                "categories": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string", "enum": list(AFFECT_CATEGORIES)},
+                            "score": cls._score_schema(),
+                        },
+                        "required": ["label", "score"],
+                        "additionalProperties": False,
+                    },
+                },
+                "source_refs": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "minItems": 1,
+                },
+            },
+            "required": [
+                "actor_ref", "display_name_snapshot", "emotion", "description",
+                "trigger", "target", "evidence_type", "temporal_status",
+                "valence", "arousal", "dominance", "intensity", "confidence",
+                "categories", "source_refs",
+            ],
+            "additionalProperties": False,
+        }
         fragment_schema = {
             "type": "object",
             "properties": {
@@ -6851,11 +6969,16 @@ class TopicBuildManager:
                     "maxItems": 12,
                 },
                 "facts": {"type": "array", "items": fact_schema, "minItems": 1},
+                "affect_events": {
+                    "type": "array",
+                    "items": affect_event_schema,
+                    "maxItems": 8,
+                },
             },
             "required": [
                 "label", "summary", "importance", "confidence",
                 "attribution_confidence", "ambiguity_flags", "evidence_requests",
-                "timeline_refs", "keywords", "facts",
+                "timeline_refs", "keywords", "facts", "affect_events",
             ],
             "additionalProperties": False,
         }
@@ -7076,6 +7199,21 @@ Semantic rules:
    interaction; 0.0-0.2 for tests, noise or content without durable value. Group
    participation may support confidence, but popularity alone must not raise semantic
    importance. Score the fact itself, not how many Timeline rows repeat it.
+21. Preserve source-grounded emotional meaning separately in affect_events. Add an
+   event only when a supplied source fact supports who felt what; otherwise return an
+   empty affect_events array. Never infer a stable mood, personality, diagnosis, or
+   relationship from writing style alone.
+22. Each affect event must describe one actor's state in context, cite its exact source
+   refs, and distinguish historical, ongoing, resolved, or uncertain status. A feeling
+   reported in an old event is historical unless the source explicitly says it continues.
+23. Use evidence_type explicit for directly stated feelings, behavioral only for a
+   source-described behavior with a cautious reading, contextual for clear local context,
+   and model_inferred only as a last resort with confidence at most 0.65.
+24. valence, arousal, and dominance use [0,1], where 0.5 is neutral/midpoint. intensity
+   measures strength in this event, not long-term importance. Categories are optional
+   multi-label signals selected only from the supplied taxonomy.
+25. Keep affect descriptions concise but response-useful: retain trigger, target and
+   interpersonal tone when supported. Do not copy a generic Topic summary as emotion.
 
 Reference rules:
 - Treat refs such as T1 and T1.A1 as opaque local identifiers.
@@ -7099,6 +7237,8 @@ Reference rules:
   source_refs; otherwise split it into another grounded fragment.
 - A source ref cannot be both cited and omitted. An omitted source ref must be supplied
   in this input. A replacement_ref cannot itself be omitted.
+- Affect actor_ref and source_refs follow the same opaque-reference rules as facts.
+  An affect source must belong to that fragment; never cite profile hints as evidence.
 
 Output constraints:
 - Submit exactly one result through the required output tool. In fallback mode, return
@@ -7117,8 +7257,11 @@ Required result shape:
   array when every supplied source fact is retained.
 - Every fragment includes label, summary, importance, confidence,
   attribution_confidence, ambiguity_flags, evidence_requests, timeline_refs, keywords,
-  and facts. Do not return participant_refs or mentioned_actor_refs.
+  facts, and affect_events. Do not return participant_refs or mentioned_actor_refs.
 - Every fact includes type, content, importance, confidence, source_refs, and actor_refs.
+- Every affect event includes actor_ref, display_name_snapshot, emotion, description,
+  trigger, target, evidence_type, temporal_status, valence, arousal, dominance,
+  intensity, confidence, categories, and source_refs. Use [] when none is grounded.
 
 Compact example of merging duplicate evidence when the human display name is 张三:
 source_facts = [{{"ref":"T1.A1","content":"张三喜欢黑咖啡"}},
@@ -7564,11 +7707,85 @@ INPUT:
                         ),
                     }
                 )
+            raw_affect_events = raw.get("affect_events", [])
+            if not isinstance(raw_affect_events, list):
+                raise TopicBuildValidationError(
+                    f"fragment {fragment_index} affect_events must be an array"
+                )
+            affect_events: list[dict[str, Any]] = []
+            for event_index, event in enumerate(raw_affect_events):
+                if not isinstance(event, dict):
+                    raise TopicBuildValidationError(
+                        f"fragment {fragment_index} affect event {event_index} "
+                        "must be an object"
+                    )
+                event_source_refs = self._unique_strings(event.get("source_refs"))
+                unknown_event_sources = [
+                    ref for ref in event_source_refs if ref not in source_refs
+                ]
+                if not event_source_refs or unknown_event_sources:
+                    raise TopicBuildValidationError(
+                        f"fragment {fragment_index} affect event {event_index} has "
+                        f"invalid source refs: {unknown_event_sources or event_source_refs}"
+                    )
+                event_timeline_uids = list(
+                    dict.fromkeys(
+                        str(source_refs[ref]["timeline_uid"])
+                        for ref in event_source_refs
+                    )
+                )
+                if any(uid not in timeline_uids for uid in event_timeline_uids):
+                    raise TopicBuildValidationError(
+                        f"fragment {fragment_index} affect event {event_index} "
+                        "cites a source outside fragment.timeline_refs"
+                    )
+                actor_ref = str(event.get("actor_ref") or "").strip()
+                if actor_ref == "unresolved":
+                    actor_id = "unresolved"
+                    actor_name = str(
+                        event.get("display_name_snapshot") or ""
+                    ).strip()
+                elif actor_ref in actor_refs:
+                    actor_id = str(actor_refs[actor_ref].get("actor_id") or "")
+                    actor_name = str(
+                        event.get("display_name_snapshot")
+                        or actor_refs[actor_ref].get("display_name")
+                        or actor_refs[actor_ref].get("sender_name")
+                        or ""
+                    ).strip()
+                else:
+                    raise TopicBuildValidationError(
+                        f"fragment {fragment_index} affect event {event_index} "
+                        f"has unknown actor_ref {actor_ref or '<empty>'}"
+                    )
+                affect_events.append(
+                    {
+                        **event,
+                        "actor_id": actor_id or "unresolved",
+                        "display_name_snapshot": actor_name,
+                        "source_timeline_uids": event_timeline_uids,
+                        "source_atom_fingerprints": list(
+                            dict.fromkeys(
+                                str(source_refs[ref]["fingerprint"])
+                                for ref in event_source_refs
+                                if source_refs[ref].get("fingerprint")
+                            )
+                        ),
+                        "source_fact_keys": sorted(
+                            {
+                                str(source_refs[ref].get("source_key") or "")
+                                for ref in event_source_refs
+                                if source_refs[ref].get("source_key")
+                            }
+                        ),
+                    }
+                )
             decoded.append(
                 {
                     **raw,
                     "timeline_uids": timeline_uids,
                     "facts": facts,
+                    "affect_events": affect_events,
                 }
             )
 

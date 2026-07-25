@@ -979,9 +979,13 @@ async def test_topic_access_is_recorded_only_after_successful_injection(
     topic_result = Mock(
         topic_uid="topic-wage",
         topic=topic,
+        content="工资核对\n核对工资天数和补发记录",
         final_score=0.8,
         atoms=[],
         sources=[],
+        affect_match_score=0.0,
+        affect_match_boost=0.0,
+        selected_affect_events=[],
         context_coverage=0.0,
     )
     topic_outcome = Mock(

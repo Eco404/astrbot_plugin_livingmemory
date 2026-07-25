@@ -16,6 +16,7 @@ class _FakeInitializer:
         self.memory_engine = None
         self.memory_processor = None
         self.conversation_manager = None
+        self.session_maintenance_manager = None
         self.index_validator = None
         self.db = None
         self._initialization_complete = False
