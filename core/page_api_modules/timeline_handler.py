@@ -60,6 +60,7 @@ class TimelineHandler:
                 memory_space_id=self.utils.optional_text(
                     payload.get("memory_space_id")
                 ),
+                quality_filter=str(payload.get("quality_filter") or "all"),
                 limit=min(2000, max(1, int(payload.get("limit", 500)))),
             )
             return self.utils.ok(result)

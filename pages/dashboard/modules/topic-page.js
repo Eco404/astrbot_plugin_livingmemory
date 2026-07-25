@@ -328,11 +328,43 @@ export class TopicPage {
       const actorFactGroups = provenance.actor_fact_groups || [];
       this.timelineSources = provenance.links || [];
       const participantRoles = new Set(["speaker", "narrator", "responder"]);
+      const roleNamesByActorId = new Map();
+      (provenance.fragments || []).forEach(fragment => {
+        const roles = fragment?.metadata?.conversation_roles || {};
+        ["human_participants", "assistant_personas"].forEach(bucket => {
+          (roles[bucket] || []).forEach(actor => {
+            const actorId = String(actor.actor_id || "").trim();
+            const observedNames = Array.isArray(actor.observed_names) ? actor.observed_names : [];
+            const names = [actor.persona_name, ...observedNames]
+              .map(value => String(value || "").trim())
+              .filter(Boolean);
+            if (actorId && names.length && !roleNamesByActorId.has(actorId)) {
+              roleNamesByActorId.set(actorId, names[0]);
+            }
+          });
+        });
+      });
+      const actorDisplayName = link => {
+        const actorId = String(link.actor_id || "").trim();
+        const actorType = String(link.actor_type || "unknown").trim().toLocaleLowerCase();
+        const snapshot = String(link.display_name_snapshot || "").trim();
+        const roleName = roleNamesByActorId.get(actorId) || "";
+        if (actorType === "assistant") {
+          if (roleName && !/^\d+$/.test(roleName)) return roleName;
+          const suffix = actorId.startsWith("assistant-persona:")
+            ? actorId.slice("assistant-persona:".length).trim()
+            : "";
+          if (snapshot && !/^\d+$/.test(snapshot) && snapshot !== actorId) return snapshot;
+          if (suffix && !/^\d+$/.test(suffix) && suffix !== "default") return suffix;
+          return window.t("topic.assistantFallback");
+        }
+        return snapshot || roleName || actorId || "--";
+      };
       const groupActors = links => {
         const displayNamesByActorId = new Map();
         links.forEach(link => {
           const actorId = String(link.actor_id || "").trim();
-          const displayName = String(link.display_name_snapshot || "").trim();
+          const displayName = actorDisplayName(link);
           if (actorId && displayName && !displayNamesByActorId.has(actorId)) {
             displayNamesByActorId.set(actorId, displayName);
           }
@@ -340,7 +372,7 @@ export class TopicPage {
         const grouped = new Map();
         links.forEach(link => {
           const actorId = String(link.actor_id || "").trim();
-          const snapshotName = String(link.display_name_snapshot || "").trim();
+          const snapshotName = actorDisplayName(link);
           const displayName = snapshotName || displayNamesByActorId.get(actorId) || actorId || "--";
           const actorType = String(link.actor_type || "unknown").trim().toLocaleLowerCase();
           const normalizedName = displayName.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ");
@@ -367,7 +399,7 @@ export class TopicPage {
           const actorFacts = factGroup?.facts || [];
           const metadata = link.metadata || {};
           const roleKey = `topic.role.${link.relation_type}`;
-          const displayName = link.display_name_snapshot || link.actor_id;
+          const displayName = actorDisplayName(link);
           const resolution = window.t(`topic.resolution.${link.resolution_status || "unresolved"}`);
           const identitySources = factGroup?.identity_sources || [];
           return `<div class="topic-actor-detail-row">

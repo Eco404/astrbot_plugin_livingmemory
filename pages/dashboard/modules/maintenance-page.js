@@ -56,6 +56,10 @@ export class MaintenancePage {
       const details = event.target.closest("details[data-recall-trace-uid]");
       if (details?.open) this.loadRecentRecallDetail(details);
     }, true);
+    document.getElementById("recent-recall-list")?.addEventListener("click", event => {
+      const button = event.target.closest("[data-recent-recall-action]");
+      if (button) this.handleRecentRecallAction(button.dataset.recentRecallAction, button.dataset.traceUid, button);
+    });
     document.getElementById("session-maintenance-operation")?.addEventListener("change", () => this.resetSessionPreview());
     document.getElementById("session-maintenance-close")?.addEventListener("click", () => this.closeSessionMaintenance());
     document.getElementById("session-maintenance-cancel")?.addEventListener("click", () => this.closeSessionMaintenance());
@@ -139,13 +143,14 @@ export class MaintenancePage {
 
   async previewTimelineRebuild() {
     const space = document.getElementById("timeline-rebuild-space")?.value || "";
+    const qualityFilter = document.getElementById("timeline-rebuild-quality")?.value || "all";
     if (!space) return this.showToast(window.t("topic.chooseSpace"), true);
     const button = document.getElementById("timeline-rebuild-preview");
     const list = document.getElementById("timeline-rebuild-list");
     button.disabled = true;
     list.innerHTML = `<div class="identity-state">${esc(window.t("common.loading"))}</div>`;
     try {
-      const data = await this.topicPage.api.post("timeline/rebuild/preview", { memory_space_id: space, limit: 2000 });
+      const data = await this.topicPage.api.post("timeline/rebuild/preview", { memory_space_id: space, quality_filter: qualityFilter, limit: 2000 });
       this.timelineRebuildItems = data.items || [];
       document.getElementById("timeline-rebuild-options")?.classList.toggle("hidden", !this.timelineRebuildItems.length);
       list.innerHTML = this.timelineRebuildItems.length ? this.timelineRebuildItems.map(item => {
@@ -153,7 +158,7 @@ export class MaintenancePage {
         const warnings = (item.identity_warnings || []).join("、");
         return `<label class="timeline-rebuild-row ${item.reconstructable ? "" : "is-blocked"}">
           <input type="checkbox" data-timeline-rebuild-select value="${Number(item.memory_id)}" ${item.reconstructable ? "checked" : "disabled"}>
-          <span class="timeline-rebuild-main"><strong>ID ${Number(item.memory_id)}</strong><span>${esc(item.excerpt || "--")}</span><small>${esc(item.session_id || "--")} · ${Number(item.message_count || 0)} / ${Number(item.expected_message_count || 0)} ${esc(window.t("maintenance.sourceMessages"))} · Topic ${Number(item.topic_count || 0)}</small></span>
+          <span class="timeline-rebuild-main"><strong>ID ${Number(item.memory_id)}${item.summary_quality === "low" ? ` <span class="timeline-quality-flag">${esc(window.t("memory.lowQuality"))}</span>` : ""}</strong><span>${esc(item.excerpt || "--")}</span><small>${esc(item.session_id || "--")} · ${Number(item.message_count || 0)} / ${Number(item.expected_message_count || 0)} ${esc(window.t("maintenance.sourceMessages"))} · Topic ${Number(item.topic_count || 0)}</small></span>
           <span class="timeline-rebuild-state ${item.reconstructable ? "is-ready" : "is-blocked"}">${esc(item.reconstructable ? window.t("maintenance.rebuildable") : blocked)}${warnings ? `<small>${esc(window.t("maintenance.identityWarning"))}: ${esc(warnings)}</small>` : ""}</span>
         </label>`;
       }).join("") : `<div class="identity-state">${esc(window.t("maintenance.noTimelinesInSpace"))}</div>`;
@@ -227,7 +232,11 @@ export class MaintenancePage {
         if (["completed", "completed_with_errors", "failed", "cancelled"].includes(task.status)) {
           clearInterval(this.timelineRebuildPoller);
           this.timelineRebuildPoller = null;
-          document.getElementById("timeline-rebuild-start").disabled = this.selectedTimelineRebuildIds().length === 0;
+          if (this.tab === "timeline-rebuild" && document.getElementById("timeline-rebuild-space")?.value) {
+            await this.previewTimelineRebuild();
+          } else {
+            document.getElementById("timeline-rebuild-start").disabled = this.selectedTimelineRebuildIds().length === 0;
+          }
         }
       } catch (_) {
         clearInterval(this.timelineRebuildPoller);
@@ -380,10 +389,16 @@ export class MaintenancePage {
       if (toggle) toggle.checked = Boolean(data.production_enabled);
       const items = data.items || [];
       target.innerHTML = items.length ? items.map(item => `
-        <details class="recall-trace-record" data-recall-trace-uid="${esc(item.trace_uid)}">
-          <summary><span><strong>${esc(item.query_text || "--")}</strong><small>${esc(item.session_id || "--")} · ${Number(item.result_count || 0)} 条 · ${new Date(Number(item.created_at || 0) * 1000).toLocaleString()}</small></span><span class="status-badge status-${esc(item.status)}">${esc(item.status)}</span></summary>
-          <div class="recall-trace-detail text-tertiary">展开后加载详情...</div>
-        </details>`).join("") : `<span class="text-tertiary">暂无实际召回记录</span>`;
+        <div class="recent-recall-row">
+          <details class="recall-trace-record" data-recall-trace-uid="${esc(item.trace_uid)}">
+            <summary><span><strong>${esc(item.query_text || "--")}</strong><small>${esc(item.session_id || "--")} · ${Number(item.result_count || 0)} 条 · ${new Date(Number(item.created_at || 0) * 1000).toLocaleString()}</small></span><span class="status-badge status-${esc(item.status)}">${esc(item.status)}</span></summary>
+            <div class="recall-trace-detail">${esc(window.t("maintenance.expandToLoad"))}</div>
+          </details>
+          <div class="recent-recall-actions">
+            <button class="btn btn-secondary btn-sm" type="button" data-recent-recall-action="export" data-trace-uid="${esc(item.trace_uid)}">${esc(window.t("common.export"))}</button>
+            <button class="btn btn-danger btn-sm" type="button" data-recent-recall-action="delete" data-trace-uid="${esc(item.trace_uid)}">${esc(window.t("common.delete"))}</button>
+          </div>
+        </div>`).join("") : `<span class="text-tertiary">暂无实际召回记录</span>`;
     } catch (error) {
       target.innerHTML = `<span class="text-tertiary">${esc(error.message || "加载失败")}</span>`;
     }
@@ -407,6 +422,27 @@ export class MaintenancePage {
       target.dataset.loaded = "true";
     } catch (error) {
       target.textContent = error.message || "加载失败";
+    }
+  }
+
+  async handleRecentRecallAction(action, traceUid, button) {
+    if (!traceUid || button.disabled) return;
+    button.disabled = true;
+    try {
+      if (action === "delete") {
+        await this.topicPage.api.post("recall/traces/delete", { trace_uid: traceUid, type: "production" });
+        await this.loadRecentRecalls();
+        this.showToast(window.t("maintenance.recallDeleted"));
+        return;
+      }
+      if (action === "export") {
+        const record = await this.topicPage.api.get("recall/traces/detail", { trace_uid: traceUid });
+        await this.recallPage.exportJson(record);
+      }
+    } catch (error) {
+      this.showToast(error.message || window.t("maintenance.recallActionFailed"), true);
+    } finally {
+      if (button.isConnected) button.disabled = false;
     }
   }
 

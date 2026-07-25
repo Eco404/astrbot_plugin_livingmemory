@@ -21,11 +21,7 @@ from ..models.identity_profile import (
     identity_prompt_payload,
 )
 from ..models.memory_atom import MemoryAtom
-from ..models.timeline_quality import (
-    TimelineQualityIssue,
-    TimelineQualityReport,
-    TimelineSummaryQualityError,
-)
+from ..models.timeline_quality import TimelineQualityIssue, TimelineQualityReport
 from .atom_classifier import classify_atoms
 
 
@@ -602,11 +598,22 @@ class MemoryProcessor:
                         self.config.get("timeline_require_source_grounding", False)
                     ),
                 )
-            if not quality_report.acceptable:
-                raise TimelineSummaryQualityError(quality_report)
-            structured_data["_quality"] = (
-                "repaired" if repair_attempted else "normal"
-            )
+            if quality_report.acceptable:
+                structured_data["_quality"] = (
+                    "repaired" if repair_attempted else "normal"
+                )
+            else:
+                # The raw source window remains the recovery anchor. Persist the
+                # best available summary with an explicit low-quality marker so
+                # it can be inspected and rebuilt later instead of silently
+                # dropping the whole conversation window.
+                structured_data["_quality"] = "low"
+                quality_report = quality_report.rejected()
+                logger.warning(
+                    "[MemoryProcessor] Timeline 总结修复后仍未通过质量契约，"
+                    "将保留低质量标记并等待人工重构: %s",
+                    ", ".join(issue.code for issue in quality_report.errors),
+                )
 
             # 5. 构建存储格式
             fallback_excerpt = (
@@ -639,6 +646,9 @@ class MemoryProcessor:
             metadata["summary_quality"] = structured_data.get("_quality", "normal")
             metadata["summary_quality_report"] = quality_report.to_dict()
             metadata["summary_repair_attempted"] = repair_attempted
+            metadata["summary_rebuild_recommended"] = (
+                structured_data.get("_quality") == "low"
+            )
 
             importance = float(structured_data.get("importance", 0.5))
 

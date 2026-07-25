@@ -147,6 +147,11 @@ class MemoryEngine:
 
         # 后台任务跟踪
         self._pending_tasks: set[asyncio.Task] = set()
+        # Runtime migration is durable in SQLite, but recall requests can arrive
+        # concurrently before the durable marker is written. Serialize the first
+        # check and remember completed sessions for this process lifetime.
+        self._session_migration_lock = asyncio.Lock()
+        self._session_migration_checked: set[str] = set()
 
         # 初始化组件(在initialize中完成)
         self.text_processor = None
@@ -3055,13 +3060,31 @@ class MemoryEngine:
         """
 
         try:
+            async with self._session_migration_lock:
+                if unified_msg_origin in self._session_migration_checked:
+                    return
+                completed = await self._migrate_session_data_locked(
+                    unified_msg_origin
+                )
+                if completed:
+                    self._session_migration_checked.add(unified_msg_origin)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[自动迁移] 迁移失败: {e}", exc_info=True)
+
+    async def _migrate_session_data_locked(
+        self, unified_msg_origin: str
+    ) -> bool:
+        """Run one migration check while ``_session_migration_lock`` is held."""
+        try:
             # 1. 解析 unified_msg_origin
             parts = unified_msg_origin.split(":", 2)
             if len(parts) != 3:
                 logger.warning(
                     f"[自动迁移] unified_msg_origin 格式不正确: {unified_msg_origin}"
                 )
-                return
+                return True
 
             platform_id, message_type, full_session_id = parts
 
@@ -3077,19 +3100,22 @@ class MemoryEngine:
                 for i in range(1, len(parts_by_bang)):
                     candidates.append("!".join(parts_by_bang[i:]))
 
-            logger.info(f"[自动迁移] 开始检查会话，候选匹配: {candidates}")
-
             # 3. 检查是否已迁移（使用unified_msg_origin本身作为标记）
             migration_key = f"migrated_umo_{unified_msg_origin}"
             if self.db_connection is None:
-                return
+                return False
             cursor = await self.db_connection.execute(
                 "SELECT value FROM migration_status WHERE key = ?", (migration_key,)
             )
             row = await cursor.fetchone()
             if row and row[0] == "true":
                 # 已迁移过，跳过
-                return
+                return True
+
+            logger.debug(
+                "[自动迁移] 首次检查会话，候选匹配: %s",
+                candidates,
+            )
 
             # 4. 查找所有需要迁移的记录
             # 条件：session_id 匹配任一候选 且 不包含冒号（旧格式标识）
@@ -3113,7 +3139,7 @@ class MemoryEngine:
                     (migration_key, "true"),
                 )
                 await self.db_connection.commit()
-                return
+                return True
 
             logger.info(f"[自动迁移] 找到 {len(list(rows))} 条旧数据需要迁移")
 
@@ -3155,11 +3181,13 @@ class MemoryEngine:
             logger.info(
                 f"[自动迁移] 完成！已更新 {updated_count} 条记录 -> {unified_msg_origin}"
             )
+            return True
 
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"[自动迁移] 迁移失败: {e}", exc_info=True)
+            return False
 
     async def get_statistics(self) -> dict[str, Any]:
         """
