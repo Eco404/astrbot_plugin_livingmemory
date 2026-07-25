@@ -96,6 +96,27 @@ def _make_resp(text: str = "assistant reply"):
     return resp
 
 
+@pytest.mark.asyncio
+async def test_reflection_records_persona_display_name_before_assistant_write(
+    handler, conversation_manager
+):
+    event = _make_event(group=False)
+    persona = Mock()
+    persona.name = "测试助手"
+    handler.context.persona_manager.get_persona = AsyncMock(return_value=persona)
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.event_handler_modules.memory_reflection.get_persona_id",
+        new=AsyncMock(return_value="persona-id"),
+    ):
+        await handler.handle_memory_reflection(event, _make_resp())
+
+    assistant_call = conversation_manager.add_message_from_event.await_args
+    assert assistant_call.kwargs["persona_id"] == "persona-id"
+    assert assistant_call.kwargs["persona_name"] == "测试助手"
+    assert assistant_call.kwargs["event_source"] == "llm_response"
+
+
 def _make_event(group: bool = False):
     event = Mock()
     event.unified_msg_origin = "test:private:sid-1"
@@ -1565,7 +1586,38 @@ async def test_top_k_0_still_stores_private_message(
 
     conversation_manager.add_message_from_event.assert_awaited_once()
     conversation_manager.add_message_from_event.assert_awaited_with(
-        event=event, role="user", content="private message"
+        event=event,
+        role="user",
+        content="hello",
+        event_source="incoming_private_message",
+    )
+
+
+@pytest.mark.asyncio
+async def test_media_only_private_message_is_preserved_as_raw_evidence(
+    memory_engine, memory_processor, conversation_manager
+):
+    from astrbot.core.message.components import Image
+
+    handler = _make_handler_with_top_k_0(
+        memory_engine, memory_processor, conversation_manager
+    )
+    event = _make_event(group=False)
+    event.get_message_str.return_value = ""
+    event.get_messages.return_value = [Image()]
+    req = _make_req("")
+    # A caption may be added by AstrBot after the raw message was received.
+    req.extra_user_content_parts = [
+        Mock(text="<image_caption>一张工资单截图</image_caption>")
+    ]
+
+    await handler.handle_memory_recall(event, req)
+
+    conversation_manager.add_message_from_event.assert_awaited_once_with(
+        event=event,
+        role="user",
+        content="[图片: 一张工资单截图]",
+        event_source="incoming_private_message",
     )
 
 

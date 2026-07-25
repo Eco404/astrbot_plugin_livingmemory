@@ -129,11 +129,17 @@ class MemoryReflection:
                 )
                 return
 
-            # 添加助手响应
+            # 助手消息必须在写入前解析人格。触发事件携带的是用户身份，
+            # 人格名称才是 Bot 在记忆中的显示锚点。
+            persona_id = await get_persona_id(self.context, event)
+            persona_name = await self._resolve_persona_name(persona_id)
             await self.conversation_manager.add_message_from_event(
                 event=event,
                 role="assistant",
                 content=response_text,
+                persona_id=persona_id,
+                persona_name=persona_name,
+                event_source="llm_response",
             )
             logger.debug(f"[DEBUG-Reflection] [{session_id}] 已添加助手响应消息")
 
@@ -167,7 +173,6 @@ class MemoryReflection:
             total_messages = actual_message_count
 
             if self.summary_service is not None:
-                persona_id = await get_persona_id(self.context, event)
                 await self.conversation_manager.update_session_metadata_values(
                     session_id,
                     {
@@ -290,8 +295,6 @@ class MemoryReflection:
                     f"[{session_id}] 获取到 {len(history_messages)} 条消息用于总结"
                 )
 
-                persona_id = await get_persona_id(self.context, event)
-
                 # 创建后台任务进行存储（跟踪任务）
                 if not self._shutting_down:
                     async with self._storage_state_lock:
@@ -326,6 +329,28 @@ class MemoryReflection:
             raise
         except Exception as e:
             logger.error(f"处理记忆反思时发生错误: {e}", exc_info=True)
+
+    async def _resolve_persona_name(self, persona_id: str | None) -> str | None:
+        """Resolve a persona display name without making message writes depend on it."""
+        if not persona_id:
+            return None
+        persona_manager = getattr(self.context, "persona_manager", None)
+        resolver = getattr(persona_manager, "get_persona", None)
+        if callable(resolver):
+            try:
+                persona = await resolver(persona_id)
+                if isinstance(persona, dict):
+                    name = persona.get("name")
+                else:
+                    name = getattr(persona, "name", None)
+                if name and str(name).strip():
+                    return str(name).strip()
+            except Exception:
+                logger.debug(
+                    "[MemoryReflection] 解析人格显示名失败，回退人格标识",
+                    exc_info=True,
+                )
+        return str(persona_id)
 
     async def _storage_task(
         self,

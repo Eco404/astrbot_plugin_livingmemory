@@ -608,6 +608,12 @@ class LivingMemoryPlugin(Star):
         if self.initializer.session_maintenance_manager:
             await self.initializer.session_maintenance_manager.shutdown()
 
+        timeline_rebuild_manager = getattr(
+            self.initializer, "timeline_rebuild_manager", None
+        )
+        if timeline_rebuild_manager:
+            await timeline_rebuild_manager.shutdown()
+
         # 关闭 ConversationManager
         if (
             self.initializer.conversation_manager

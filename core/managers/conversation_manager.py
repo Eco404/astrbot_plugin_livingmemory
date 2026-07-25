@@ -20,6 +20,7 @@ from astrbot.api import logger
 from astrbot.api.platform import MessageType
 
 from ...storage.conversation_store import ConversationStore
+from ..models.conversation_identity import ConversationIdentityResolver
 from ..models.conversation_models import Message, Session, stable_actor_id
 
 
@@ -71,6 +72,10 @@ class ConversationManager:
         self.session_ttl = session_ttl
         self.raw_message_retention_days = 0
         self.auto_delete_raw_sessions = False
+        self._identity_resolver = ConversationIdentityResolver(
+            self._normalize_sender_name,
+            self._resolve_sender_name,
+        )
 
         # LRU缓存: {session_id: (messages, last_access_time)}
         self._cache: OrderedDict = OrderedDict()
@@ -87,6 +92,10 @@ class ConversationManager:
         event: Any,  # AstrBot MessageEvent
         role: str,
         content: str,
+        *,
+        persona_id: str | None = None,
+        persona_name: str | None = None,
+        event_source: str | None = None,
     ) -> Message:
         """
         从AstrBot事件添加消息(自动提取发送者信息)
@@ -99,30 +108,14 @@ class ConversationManager:
         Returns:
             创建的Message对象
         """
-        # 使用 unified_msg_origin 作为会话ID，确保多Bot场景下的唯一性
         session_id = event.unified_msg_origin
-
-        # 提取发送者信息
-        sender_id = None
-        sender_name = None
         group_id = None
-
-        # 尝试获取发送者ID
-        if hasattr(event, "get_sender_id"):
-            sender_id = event.get_sender_id()
-        elif hasattr(event, "sender_id"):
-            sender_id = event.sender_id
-
-        # 如果还是没有sender_id,使用session_id作为后备
-        if not sender_id:
-            sender_id = session_id
-
-        sender_name = self._resolve_sender_name(event, sender_id)
-
-        platform = (
-            event.get_platform_name()
-            if hasattr(event, "get_platform_name")
-            else "unknown"
+        identity = self._identity_resolver.resolve(
+            event,
+            role,
+            persona_id=persona_id,
+            persona_name=persona_name,
+            event_source=event_source,
         )
 
         # Debug: 记录原始 message_obj.sender 信息
@@ -141,56 +134,38 @@ class ConversationManager:
             if is_group:
                 group_id = session_id  # 群聊时session_id即为group_id
 
-        # Assistant responses reuse the triggering event. Never retain the human
-        # sender name from that event as the Bot's display name.
-        is_bot_message = role == "assistant"
-        if is_bot_message:
-            bot_id = None
-            if hasattr(event, "get_self_id"):
-                bot_id = event.get_self_id()
-            if hasattr(event, "message_obj") and hasattr(event.message_obj, "self_id"):
-                bot_id = event.message_obj.self_id
-            bot_id = str(bot_id or f"assistant:{session_id}")
-            bot_display_name = None
-            for attr in ("get_self_name", "get_bot_name"):
-                resolver = getattr(event, attr, None)
-                if callable(resolver):
-                    try:
-                        bot_display_name = self._normalize_sender_name(resolver())
-                    except Exception:
-                        logger.debug(
-                            "[add_message_from_event] Bot 名称接口 %s 不可用",
-                            attr,
-                            exc_info=True,
-                        )
-                    if bot_display_name:
-                        break
-            message_obj = getattr(event, "message_obj", None)
-            for attr in ("self_name", "bot_name"):
-                if bot_display_name:
-                    break
-                bot_display_name = self._normalize_sender_name(
-                    getattr(message_obj, attr, None)
-                )
-            sender_id = bot_id
-            sender_name = bot_display_name or bot_id
-
         # 调试日志：记录最终获取到的发送者信息
         logger.debug(
             f"[add_message_from_event] [{session_id}] 最终发送者信息: "
-            f"sender_id={sender_id}, sender_name='{sender_name}', "
-            f"role={role}, is_group={is_group}, group_id={group_id}"
+            f"sender_id={identity.sender_id}, sender_name='{identity.sender_name}', "
+            f"role={role}, is_group={is_group}, group_id={group_id}, "
+            f"source={identity.identity_source}, warnings={list(identity.warnings)}"
         )
+
+        identity_metadata = identity.metadata()
+        message_obj = getattr(event, "message_obj", None)
+        source_message_id = None
+        for owner in (message_obj, event):
+            for attr in ("message_id", "id"):
+                source_message_id = self._raw_get(owner, attr)
+                if source_message_id not in (None, ""):
+                    break
+            if source_message_id not in (None, ""):
+                break
+        if source_message_id not in (None, ""):
+            identity_metadata["source_message_id"] = str(source_message_id)
+        identity_metadata["source_event_class"] = event.__class__.__name__
 
         return await self.add_message(
             session_id=session_id,
             role=role,
             content=content,
-            sender_id=sender_id,
-            sender_name=sender_name,
+            sender_id=identity.sender_id,
+            sender_name=identity.sender_name,
             group_id=group_id,
-            platform=platform,
+            platform=identity.platform,
             is_bot_message=(role == "assistant"),
+            metadata=identity_metadata,
         )
 
     async def add_message(
@@ -203,6 +178,7 @@ class ConversationManager:
         group_id: str | None = None,
         platform: str = "unknown",
         is_bot_message: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> Message:
         """
         添加消息到会话
@@ -226,6 +202,14 @@ class ConversationManager:
 
         # 创建消息对象
         actor_type = "assistant" if is_bot_message or role == "assistant" else "human"
+        message_metadata = dict(metadata or {})
+        message_metadata.update(
+            {
+                "is_bot_message": actor_type == "assistant",
+                "actor_type": actor_type,
+                "actor_id": stable_actor_id(platform, sender_id, actor_type),
+            }
+        )
         message = Message(
             id=0,  # 将由数据库分配
             session_id=session_id,
@@ -236,11 +220,7 @@ class ConversationManager:
             group_id=group_id,
             platform=platform,
             timestamp=time.time(),
-            metadata={
-                "is_bot_message": actor_type == "assistant",
-                "actor_type": actor_type,
-                "actor_id": stable_actor_id(platform, sender_id, actor_type),
-            },
+            metadata=message_metadata,
         )
 
         # 存储到数据库

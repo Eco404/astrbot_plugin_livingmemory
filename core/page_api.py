@@ -182,6 +182,54 @@ class PluginPageApi:
             "LivingMemory Page update Timeline settings",
         )
         register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/preview",
+            self.preview_timeline_rebuild,
+            ["POST"],
+            "LivingMemory Page preview Timeline reconstruction",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/start",
+            self.start_timeline_rebuild,
+            ["POST"],
+            "LivingMemory Page start Timeline reconstruction",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/task",
+            self.get_timeline_rebuild_task,
+            ["GET"],
+            "LivingMemory Page Timeline reconstruction task",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/tasks",
+            self.list_timeline_rebuild_tasks,
+            ["GET"],
+            "LivingMemory Page Timeline reconstruction tasks",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/resume",
+            self.resume_timeline_rebuild,
+            ["POST"],
+            "LivingMemory Page resume Timeline reconstruction",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/cancel",
+            self.cancel_timeline_rebuild,
+            ["POST"],
+            "LivingMemory Page cancel Timeline reconstruction",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/tasks/delete",
+            self.delete_timeline_rebuild_task,
+            ["POST"],
+            "LivingMemory Page delete Timeline reconstruction task",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/tasks/clear",
+            self.clear_timeline_rebuild_tasks,
+            ["POST"],
+            "LivingMemory Page clear Timeline reconstruction tasks",
+        )
+        register(
             f"{PAGE_API_PREFIX}/settings",
             self.get_settings,
             ["GET"],
@@ -529,6 +577,70 @@ class PluginPageApi:
             return error
         return await self.timeline_handler.update_settings(self.plugin.initializer)
 
+    async def preview_timeline_rebuild(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.preview_rebuild(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def start_timeline_rebuild(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.start_rebuild(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def get_timeline_rebuild_task(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.get_rebuild_task(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def list_timeline_rebuild_tasks(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.list_rebuild_tasks(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def resume_timeline_rebuild(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.resume_rebuild_task(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def cancel_timeline_rebuild(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.cancel_rebuild_task(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def delete_timeline_rebuild_task(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.delete_rebuild_task(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def clear_timeline_rebuild_tasks(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.clear_rebuild_tasks(
+            ready["timeline_rebuild_manager"]
+        )
+
     async def get_settings(self):
         ready, error = await self._ensure_plugin_ready()
         if error:
@@ -794,6 +906,9 @@ class PluginPageApi:
             ),
             "session_maintenance_manager": getattr(
                 self.plugin.initializer, "session_maintenance_manager", None
+            ),
+            "timeline_rebuild_manager": getattr(
+                self.plugin.initializer, "timeline_rebuild_manager", None
             ),
             "recall_trace_store": getattr(
                 self.plugin.initializer, "recall_trace_store", None

@@ -2076,6 +2076,7 @@ class MemoryEngine:
         metadata: dict[str, Any],
         importance: float,
         atoms: list | None = None,
+        schedule_topic_maintenance: bool = True,
     ) -> int:
         """Rebuild a memory and every derived index while preserving its ID."""
         current = await self.get_memory(memory_id)
@@ -2199,13 +2200,14 @@ class MemoryEngine:
                 str(replacement_metadata.get("memory_uid") or ""),
                 reason="timeline_rewritten_in_place",
             )
-            self._schedule_topic_maintenance(
-                str(replacement_metadata.get("memory_space_id") or ""),
-                full=False,
-                timeline_uids=[
-                    str(replacement_metadata.get("memory_uid") or "")
-                ],
-            )
+            if schedule_topic_maintenance:
+                self._schedule_topic_maintenance(
+                    str(replacement_metadata.get("memory_space_id") or ""),
+                    full=False,
+                    timeline_uids=[
+                        str(replacement_metadata.get("memory_uid") or "")
+                    ],
+                )
 
             self._invalidate_search_cache()
             logger.info(f"[原位更新] 记忆及派生索引更新完成 (memory_id={memory_id})")

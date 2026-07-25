@@ -65,10 +65,12 @@ async def test_memory_search_tool_uses_filtering_settings(memory_engine, astr_co
     }
     memory_engine.search_memories.assert_awaited_once_with(
         query="喜欢的游戏",
-        k=6,
+        k=18,
         session_id="test:private:session-1",
         persona_id="persona_a",
+        track_access=False,
     )
+    assert result["diagnostics"]["timeline"]["final_limit"] == 6
 
 
 @pytest.mark.asyncio
@@ -97,9 +99,10 @@ async def test_memory_search_tool_disables_filters_when_config_disabled(
 
     memory_engine.search_memories.assert_awaited_once_with(
         query="项目约定",
-        k=5,
+        k=15,
         session_id=None,
         persona_id=None,
+        track_access=False,
     )
     get_persona.assert_not_awaited()
 
@@ -147,6 +150,7 @@ async def test_memory_search_tool_serializes_results(memory_engine, astr_context
         "create_time": 100.0,
         "last_access_time": 200.0,
     }
+    memory_engine.record_memory_access.assert_called_once_with([7])
 
 
 @pytest.mark.asyncio
@@ -181,6 +185,7 @@ async def test_memory_search_tool_records_topic_access_after_serializing_result(
         search_fragment_supplements=AsyncMock(return_value=fragment_outcome),
         select_timeline_supplements=Mock(return_value=[]),
         record_topic_access=AsyncMock(return_value=1),
+        source_timeline_document_ids=AsyncMock(return_value=[31]),
     )
     memory_engine.topic_memory_enabled = True
     memory_engine.topic_recall_pipeline = topic_pipeline
@@ -196,6 +201,7 @@ async def test_memory_search_tool_records_topic_access_after_serializing_result(
     result = json.loads(raw_result)
     assert result["results"][0]["memory_layer"] == "topic"
     topic_pipeline.record_topic_access.assert_awaited_once_with([topic_result])
+    memory_engine.record_memory_access.assert_called_once_with([31])
 
 
 @pytest.mark.asyncio
@@ -255,9 +261,10 @@ async def test_memory_search_tool_limits_k_by_config(memory_engine, astr_context
 
     memory_engine.search_memories.assert_awaited_once_with(
         query="偏好",
-        k=4,
+        k=12,
         session_id="test:private:session-1",
         persona_id="persona_a",
+        track_access=False,
     )
 
 
@@ -286,12 +293,12 @@ async def test_memory_search_tool_clamps_low_k_to_one(memory_engine, astr_contex
 
         await tool.call(_make_run_context(), query="test query", k=0)
         called_k_zero = memory_engine.search_memories.await_args.kwargs["k"]
-        assert called_k_zero == 1
+        assert called_k_zero == 3
 
         memory_engine.search_memories.reset_mock()
         await tool.call(_make_run_context(), query="test query", k=-3)
         called_k_negative = memory_engine.search_memories.await_args.kwargs["k"]
-        assert called_k_negative == 1
+        assert called_k_negative == 3
 
 
 @pytest.mark.asyncio
@@ -314,9 +321,10 @@ async def test_memory_search_tool_falls_back_to_default_k_for_invalid_input(
 
     memory_engine.search_memories.assert_awaited_once_with(
         query="test query",
-        k=3,
+        k=9,
         session_id="test:private:session-1",
         persona_id="persona_a",
+        track_access=False,
     )
 
 
