@@ -2106,7 +2106,7 @@ class TopicMemoryStore:
                 await db.execute(
                     f"""
                     SELECT topic_uid, atom_uid, atom_type, content, importance,
-                           confidence, event_started_at, event_ended_at
+                           confidence, event_started_at, event_ended_at, metadata
                     FROM topic_memory_atoms
                     WHERE topic_uid IN ({placeholders}) AND status = 'active'
                     ORDER BY importance DESC, created_at, atom_uid
@@ -2155,7 +2155,9 @@ class TopicMemoryStore:
             uid: [] for uid in topic_uids
         }
         for row in atom_rows:
-            atoms_by_topic[str(row["topic_uid"])].append(dict(row))
+            item = dict(row)
+            item["metadata"] = self._from_json(item.get("metadata"))
+            atoms_by_topic[str(row["topic_uid"])].append(item)
         for row in source_rows:
             sources_by_topic[str(row["topic_uid"])].append(dict(row))
         for row in actor_rows:

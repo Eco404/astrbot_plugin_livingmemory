@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -501,6 +502,8 @@ class TopicRecallPipeline:
             for row in rows
             if row["fragment"].metadata.get("narrative_schema_version")
             in {
+                "first_person_assistant_roles_v5",
+                "first_person_assistant_roles_v4",
                 "first_person_assistant_roles_affect_v4",
                 "first_person_assistant_roles_v3",
                 "first_person_assistant_roles_v2",
@@ -613,14 +616,27 @@ class TopicRecallPipeline:
             candidate.ranking_score = self._fragment_ranking_score(candidate)
             candidate.final_score = candidate.ranking_score
             parent = parents.get(candidate.topic_uid)
-            if parent is not None and self._fragment_body_duplicates_parent(
-                candidate,
-                parent,
-                fragment_counts.get(candidate.topic_uid, 0),
-            ):
-                candidate.body_suppressed = True
-                if not candidate.fact_contents:
-                    candidate.filter_reason = "duplicate_parent_without_facts"
+            if parent is not None:
+                original_fact_count = len(candidate.fact_contents)
+                candidate.supplemental_fact_contents = (
+                    self._fragment_novel_fact_contents(candidate, parent)
+                )
+                candidate.duplicate_fact_count = max(
+                    0, original_fact_count - len(candidate.fact_contents)
+                )
+                facts_fully_covered = (
+                    original_fact_count > 0 and not candidate.fact_contents
+                )
+                if facts_fully_covered or self._fragment_body_duplicates_parent(
+                    candidate,
+                    parent,
+                    fragment_counts.get(candidate.topic_uid, 0),
+                ):
+                    candidate.body_suppressed = True
+                    if not candidate.fact_contents:
+                        candidate.filter_reason = (
+                            "duplicate_parent_without_novel_facts"
+                        )
             previous = candidates_by_uid.get(fragment.fragment_uid)
             if previous is None or candidate.final_score > previous.final_score:
                 candidates_by_uid[fragment.fragment_uid] = candidate
@@ -640,7 +656,7 @@ class TopicRecallPipeline:
         for candidate in candidates:
             if candidate.body_suppressed:
                 duplicate_parent_count += 1
-            if candidate.filter_reason == "duplicate_parent_without_facts":
+            if candidate.filter_reason == "duplicate_parent_without_novel_facts":
                 continue
             candidate.context_coverage = self._context_coverage(
                 candidate.sources,
@@ -773,6 +789,80 @@ class TopicRecallPipeline:
         fragment_content = RecallPipeline._text_features(candidate.body_content)
         parent_content = RecallPipeline._text_features(parent.content)
         return RecallPipeline._jaccard(fragment_content, parent_content) >= 0.90
+
+    @staticmethod
+    def _fragment_novel_fact_contents(
+        candidate: TopicFragmentRecallResult,
+        parent: TopicRecallResult,
+    ) -> list[str]:
+        """Keep only fragment facts that add information beyond the parent Topic."""
+        parent_source_fact_uids: set[str] = set()
+        for atom in parent.atoms:
+            if not isinstance(atom, dict):
+                continue
+            metadata = atom.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            parent_source_fact_uids.update(
+                str(value)
+                for value in metadata.get("source_fact_uids", [])
+                if str(value)
+            )
+        parent_texts = [
+            str(parent.topic.summary or "").strip(),
+            *(
+                str(atom.get("content") or "").strip()
+                for atom in parent.atoms
+                if isinstance(atom, dict)
+            ),
+        ]
+        parent_texts = [value for value in parent_texts if value]
+        if not parent_texts:
+            return candidate.fact_contents
+
+        def compact(value: str) -> str:
+            return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", value.casefold())
+
+        parent_entries = [
+            (
+                compact(value),
+                RecallPipeline._text_features(value),
+            )
+            for value in parent_texts
+        ]
+        novel: list[str] = []
+        seen: set[str] = set()
+        for fact_item in candidate.fragment.facts:
+            if not isinstance(fact_item, dict):
+                continue
+            fact = str(fact_item.get("content") or "").strip()
+            if not fact or fact in seen:
+                continue
+            seen.add(fact)
+            fact_uid = str(fact_item.get("fact_uid") or "").strip()
+            if fact_uid and fact_uid in parent_source_fact_uids:
+                continue
+            fact_compact = compact(fact)
+            fact_features = RecallPipeline._text_features(fact)
+            duplicated = False
+            for parent_compact, parent_features in parent_entries:
+                if not fact_compact or not parent_compact:
+                    continue
+                if fact_compact == parent_compact:
+                    duplicated = True
+                    break
+                # Containment catches a complete fact embedded in a longer summary.
+                if len(fact_compact) >= 12 and fact_compact in parent_compact:
+                    duplicated = True
+                    break
+                # Keep this deliberately strict: a related fact is still useful, while
+                # a near-verbatim paraphrase adds no injection value.
+                if RecallPipeline._jaccard(fact_features, parent_features) >= 0.90:
+                    duplicated = True
+                    break
+            if not duplicated:
+                novel.append(fact)
+        return novel
 
     @staticmethod
     def _fragment_ranking_score(candidate: TopicFragmentRecallResult) -> float:
