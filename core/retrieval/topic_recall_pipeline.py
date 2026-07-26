@@ -15,6 +15,11 @@ from ..affect_memory import (
     select_affect_events,
 )
 from .recall_pipeline import RecallPipeline, RecallQueryBranch
+from .temporal_constraint import (
+    TemporalConstraint,
+    matching_sources,
+    sources_time_anchor,
+)
 from .topic_retriever import (
     TopicFragmentRecallResult,
     TopicRecallResult,
@@ -31,6 +36,8 @@ class TopicFragmentRecallOutcome:
     context_suppressed: int = 0
     selection_threshold: float = 0.0
     duplicate_parent_count: int = 0
+    temporal_constraint: TemporalConstraint | None = None
+    temporal_suppressed: int = 0
 
     def diagnostics(self) -> dict[str, Any]:
         selected = {item.fragment_uid for item in self.results}
@@ -42,6 +49,12 @@ class TopicFragmentRecallOutcome:
             "selection_threshold": round(self.selection_threshold, 6),
             "context_suppressed": self.context_suppressed,
             "duplicate_parent_count": self.duplicate_parent_count,
+            "temporal_constraint": (
+                self.temporal_constraint.to_dict()
+                if self.temporal_constraint is not None
+                else None
+            ),
+            "temporal_suppressed": self.temporal_suppressed,
             "candidates": [
                 {**item.to_dict(), "selected": item.fragment_uid in selected}
                 for item in self.candidates
@@ -57,6 +70,8 @@ class TopicRecallOutcome:
     context_suppressed: int = 0
     selection_threshold: float = 0.0
     query_vectors: list[list[float]] | None = None
+    temporal_constraint: TemporalConstraint | None = None
+    temporal_suppressed: int = 0
 
     def diagnostics(self) -> dict[str, Any]:
         selected_uids = {item.topic_uid for item in self.results}
@@ -66,6 +81,12 @@ class TopicRecallOutcome:
             "applied_threshold": round(self.applied_threshold, 6),
             "selection_threshold": round(self.selection_threshold, 6),
             "context_suppressed": self.context_suppressed,
+            "temporal_constraint": (
+                self.temporal_constraint.to_dict()
+                if self.temporal_constraint is not None
+                else None
+            ),
+            "temporal_suppressed": self.temporal_suppressed,
             "candidates": [
                 {
                     **item.to_dict(),
@@ -91,9 +112,10 @@ class TopicRecallPipeline:
         visible_message_start_index: int | None = None,
         visible_message_end_index: int | None = None,
         current_actor_ids: set[str] | None = None,
+        temporal: TemporalConstraint | None = None,
     ) -> TopicRecallOutcome:
         if not branches or not memory_space_id or final_k <= 0:
-            return TopicRecallOutcome([], [], 0.0)
+            return TopicRecallOutcome([], [], 0.0, temporal_constraint=temporal)
         multiplier = max(1, min(10, int(self.config.get("recall_candidate_multiplier", 4))))
         candidate_k = min(50, max(final_k, final_k * multiplier))
         primary_branch = self._primary_branch(branches)
@@ -101,6 +123,24 @@ class TopicRecallPipeline:
         query_vectors = await self.retriever._get_embeddings(
             [branch.text for branch in branches]
         )
+        temporal_payloads: list[dict[str, Any]] | None = None
+        temporal_suppressed = 0
+        if temporal is not None:
+            all_payloads = await self.retriever.store.list_topic_recall_payloads(
+                memory_space_id,
+                limit=5000,
+            )
+            temporal_payloads = []
+            for payload in all_payloads:
+                matches = self._matching_timed_sources(
+                    temporal,
+                    list(payload.get("sources") or []),
+                )
+                if matches:
+                    payload["_temporal_matches"] = matches
+                    temporal_payloads.append(payload)
+                else:
+                    temporal_suppressed += 1
         branch_results = await asyncio.gather(
             *(
                 self.retriever.search(
@@ -109,6 +149,7 @@ class TopicRecallPipeline:
                     k=candidate_k,
                     query_vector=query_vector,
                     use_rerank=False,
+                    payloads=temporal_payloads,
                 )
                 for branch, query_vector in zip(
                     branches, query_vectors, strict=True
@@ -129,6 +170,37 @@ class TopicRecallPipeline:
                 candidate.branch_scores[branch.name] = result.relevance_score
 
         for candidate in candidate_map.values():
+            if temporal is not None:
+                matched_sources = self._matching_timed_sources(
+                    temporal,
+                    candidate.sources,
+                )
+                (
+                    candidate.event_started_at,
+                    candidate.event_ended_at,
+                    candidate.time_basis,
+                    candidate.time_fallback,
+                ) = sources_time_anchor(matched_sources)
+                candidate.time_fallback = any(
+                    bool(item.get("time_fallback", False))
+                    for item in matched_sources
+                )
+                bases = {
+                    str(item.get("time_basis") or "")
+                    for item in matched_sources
+                    if str(item.get("time_basis") or "")
+                }
+                if len(bases) == 1:
+                    candidate.time_basis = next(iter(bases))
+                elif bases:
+                    candidate.time_basis = "mixed_timeline_sources"
+                candidate.matched_source_uids = sorted(
+                    {
+                        str(item.get("timeline_uid") or item.get("memory_uid") or "")
+                        for item in matched_sources
+                        if str(item.get("timeline_uid") or item.get("memory_uid") or "")
+                    }
+                )
             current_relevance = float(
                 candidate.branch_scores.get(primary_branch.name, 0.0)
             )
@@ -223,7 +295,11 @@ class TopicRecallPipeline:
             0.0, min(1.0, float(self.config.get("recall_relative_floor", 0.7)))
         )
         best = max((item.current_relevance or 0.0 for item in visible), default=0.0)
-        threshold = max(minimum, best * relative)
+        threshold = (
+            minimum
+            if temporal is not None and temporal.order in {"earliest", "latest"}
+            else max(minimum, best * relative)
+        )
         eligible: list[TopicRecallResult] = []
         for item in visible:
             current_relevance = float(item.current_relevance or 0.0)
@@ -235,9 +311,10 @@ class TopicRecallPipeline:
                 continue
             eligible.append(item)
 
-        selection_threshold = self._selection_threshold(
-            eligible,
-            threshold,
+        selection_threshold = (
+            threshold
+            if temporal is not None and temporal.order in {"earliest", "latest"}
+            else self._selection_threshold(eligible, threshold)
         )
         selection_pool: list[TopicRecallResult] = []
         for item in eligible:
@@ -270,12 +347,16 @@ class TopicRecallPipeline:
                     "[TopicRecall] Topic Rerank 失败，保留当前消息基础排序",
                     exc_info=True,
                 )
-        selection_pool.sort(key=lambda item: item.final_score, reverse=True)
-        selected = self._select_mmr(
-            selection_pool,
-            final_k,
-            max(0.0, min(1.0, float(self.config.get("recall_mmr_lambda", 0.78)))),
-        )
+        if temporal is not None and temporal.order in {"earliest", "latest"}:
+            self._sort_temporal(selection_pool, temporal)
+            selected = selection_pool[:final_k]
+        else:
+            selection_pool.sort(key=lambda item: item.final_score, reverse=True)
+            selected = self._select_mmr(
+                selection_pool,
+                final_k,
+                max(0.0, min(1.0, float(self.config.get("recall_mmr_lambda", 0.78)))),
+            )
         selected_uids = {item.topic_uid for item in selected}
         for item in selection_pool:
             item.selected = item.topic_uid in selected_uids
@@ -290,6 +371,8 @@ class TopicRecallPipeline:
             context_suppressed=context_suppressed,
             selection_threshold=selection_threshold,
             query_vectors=query_vectors,
+            temporal_constraint=temporal,
+            temporal_suppressed=temporal_suppressed,
         )
 
     async def search_spaces(
@@ -302,11 +385,12 @@ class TopicRecallPipeline:
         visible_message_start_index: int | None = None,
         visible_message_end_index: int | None = None,
         current_actor_ids: set[str] | None = None,
+        temporal: TemporalConstraint | None = None,
     ) -> TopicRecallOutcome:
         """Search an explicit canonical/alias space group and merge by Topic UID."""
         spaces = list(dict.fromkeys(item for item in memory_space_ids if item))
         if not spaces:
-            return TopicRecallOutcome([], [], 0.0)
+            return TopicRecallOutcome([], [], 0.0, temporal_constraint=temporal)
         if len(spaces) == 1:
             return await self.search(
                 branches=branches,
@@ -316,6 +400,7 @@ class TopicRecallPipeline:
                 visible_message_start_index=visible_message_start_index,
                 visible_message_end_index=visible_message_end_index,
                 current_actor_ids=current_actor_ids,
+                temporal=temporal,
             )
         outcomes = await asyncio.gather(
             *(
@@ -327,6 +412,7 @@ class TopicRecallPipeline:
                     visible_message_start_index=visible_message_start_index,
                     visible_message_end_index=visible_message_end_index,
                     current_actor_ids=current_actor_ids,
+                    temporal=temporal,
                 )
                 for memory_space_id in spaces
             )
@@ -337,7 +423,11 @@ class TopicRecallPipeline:
                 previous = candidates.get(candidate.topic_uid)
                 if previous is None or candidate.final_score > previous.final_score:
                     candidates[candidate.topic_uid] = candidate
-        ordered = sorted(candidates.values(), key=lambda item: item.final_score, reverse=True)
+        ordered = list(candidates.values())
+        if temporal is not None and temporal.order in {"earliest", "latest"}:
+            self._sort_temporal(ordered, temporal)
+        else:
+            ordered.sort(key=lambda item: item.final_score, reverse=True)
         selected = ordered[:final_k]
         selected_uids = {item.topic_uid for item in selected}
         for candidate in ordered:
@@ -353,6 +443,8 @@ class TopicRecallPipeline:
                 (item.selection_threshold for item in outcomes), default=0.0
             ),
             query_vectors=outcomes[0].query_vectors if outcomes else None,
+            temporal_constraint=temporal,
+            temporal_suppressed=sum(item.temporal_suppressed for item in outcomes),
         )
 
     async def record_topic_access(
@@ -490,10 +582,13 @@ class TopicRecallPipeline:
         visible_message_start_index: int | None = None,
         visible_message_end_index: int | None = None,
         query_vectors: list[list[float]] | None = None,
+        temporal: TemporalConstraint | None = None,
     ) -> TopicFragmentRecallOutcome:
         """Recall formal role-anchored fragments owned by selected Topics."""
         if not topic_results or limit <= 0:
-            return TopicFragmentRecallOutcome([], [], 0, 0.0)
+            return TopicFragmentRecallOutcome(
+                [], [], 0, 0.0, temporal_constraint=temporal
+            )
         rows = await self.retriever.store.list_active_fragments_for_topics(
             [item.topic_uid for item in topic_results]
         )
@@ -510,9 +605,40 @@ class TopicRecallPipeline:
                 "third_person_roles_v1",
             }
         ]
+        temporal_suppressed = 0
+        if temporal is not None:
+            filtered_rows: list[dict[str, Any]] = []
+            for row in safe_rows:
+                sources = list(row.get("sources") or [])
+                matches = self._matching_timed_sources(temporal, sources)
+                if not matches:
+                    fragment = row["fragment"]
+                    synthetic_source = {
+                        "memory_uid": fragment.fragment_uid,
+                        "started_at": fragment.started_at,
+                        "ended_at": fragment.ended_at,
+                        "time_basis": "fragment_time_span",
+                        "time_fallback": False,
+                    }
+                    matches = self._matching_timed_sources(
+                        temporal, [synthetic_source]
+                    )
+                if matches:
+                    row["_temporal_matches"] = matches
+                    filtered_rows.append(row)
+                else:
+                    temporal_suppressed += 1
+            safe_rows = filtered_rows
         available_count = len(safe_rows)
         if not safe_rows or not branches:
-            return TopicFragmentRecallOutcome([], [], available_count, 0.0)
+            return TopicFragmentRecallOutcome(
+                [],
+                [],
+                available_count,
+                0.0,
+                temporal_constraint=temporal,
+                temporal_suppressed=temporal_suppressed,
+            )
 
         primary_branch = self._primary_branch(branches)
         query_affect = extract_query_affect(primary_branch.text)
@@ -591,6 +717,34 @@ class TopicRecallPipeline:
                 branch_scores=branch_scores,
                 current_relevance=current_relevance,
             )
+            if temporal is not None:
+                matched_sources = list(row.get("_temporal_matches") or [])
+                (
+                    candidate.event_started_at,
+                    candidate.event_ended_at,
+                    candidate.time_basis,
+                    candidate.time_fallback,
+                ) = sources_time_anchor(matched_sources)
+                candidate.time_fallback = any(
+                    bool(item.get("time_fallback", False))
+                    for item in matched_sources
+                )
+                bases = {
+                    str(item.get("time_basis") or "")
+                    for item in matched_sources
+                    if str(item.get("time_basis") or "")
+                }
+                if len(bases) == 1:
+                    candidate.time_basis = next(iter(bases))
+                elif bases:
+                    candidate.time_basis = "mixed_timeline_sources"
+                candidate.matched_source_uids = sorted(
+                    {
+                        str(item.get("timeline_uid") or item.get("memory_uid") or "")
+                        for item in matched_sources
+                        if str(item.get("timeline_uid") or item.get("memory_uid") or "")
+                    }
+                )
             candidate.context_support = self._bounded_context_support(
                 branch_scores,
                 branches,
@@ -682,7 +836,11 @@ class TopicRecallPipeline:
             min(1.0, float(self.config.get("fragment_relative_floor", 0.65))),
         )
         best = max((item.current_relevance or 0.0 for item in visible), default=0.0)
-        threshold = max(minimum, best * relative)
+        threshold = (
+            minimum
+            if temporal is not None and temporal.order in {"earliest", "latest"}
+            else max(minimum, best * relative)
+        )
         eligible: list[TopicFragmentRecallResult] = []
         for item in visible:
             current_relevance = float(item.current_relevance or 0.0)
@@ -694,9 +852,10 @@ class TopicRecallPipeline:
                 continue
             eligible.append(item)
 
-        selection_threshold = self._selection_threshold(
-            eligible,
-            threshold,
+        selection_threshold = (
+            threshold
+            if temporal is not None and temporal.order in {"earliest", "latest"}
+            else self._selection_threshold(eligible, threshold)
         )
         selection_pool: list[TopicFragmentRecallResult] = []
         for item in eligible:
@@ -729,15 +888,19 @@ class TopicRecallPipeline:
                     "[TopicRecall] 片段 Rerank 失败，保留当前消息基础排序",
                     exc_info=True,
                 )
-        selection_pool.sort(key=lambda item: item.final_score, reverse=True)
-        selected = self._select_fragment_mmr(
-            selection_pool,
-            limit,
-            max(
-                0.0,
-                min(1.0, float(self.config.get("recall_mmr_lambda", 0.78))),
-            ),
-        )
+        if temporal is not None and temporal.order in {"earliest", "latest"}:
+            self._sort_temporal(selection_pool, temporal)
+            selected = selection_pool[:limit]
+        else:
+            selection_pool.sort(key=lambda item: item.final_score, reverse=True)
+            selected = self._select_fragment_mmr(
+                selection_pool,
+                limit,
+                max(
+                    0.0,
+                    min(1.0, float(self.config.get("recall_mmr_lambda", 0.78))),
+                ),
+            )
         selected_uids = {item.fragment_uid for item in selected}
         for item in selection_pool:
             item.selected = item.fragment_uid in selected_uids
@@ -770,7 +933,45 @@ class TopicRecallPipeline:
             context_suppressed=context_suppressed,
             selection_threshold=selection_threshold,
             duplicate_parent_count=duplicate_parent_count,
+            temporal_constraint=temporal,
+            temporal_suppressed=temporal_suppressed,
         )
+
+    @staticmethod
+    def _matching_timed_sources(
+        temporal: TemporalConstraint,
+        sources: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        candidates = matching_sources(temporal, sources)
+        return [
+            item
+            for item in candidates
+            if TemporalConstraint._finite_or_none(item.get("started_at")) is not None
+            or TemporalConstraint._finite_or_none(item.get("ended_at")) is not None
+        ]
+
+    @staticmethod
+    def _sort_temporal(
+        candidates: list[TopicRecallResult | TopicFragmentRecallResult],
+        temporal: TemporalConstraint,
+    ) -> None:
+        if temporal.order == "latest":
+            candidates.sort(
+                key=lambda item: (
+                    temporal.sort_value(item.event_started_at, item.event_ended_at),
+                    float(item.current_relevance or 0.0),
+                    item.topic_uid,
+                ),
+                reverse=True,
+            )
+        else:
+            candidates.sort(
+                key=lambda item: (
+                    temporal.sort_value(item.event_started_at, item.event_ended_at),
+                    -float(item.current_relevance or 0.0),
+                    item.topic_uid,
+                )
+            )
 
     @staticmethod
     def _fragment_body_duplicates_parent(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -255,6 +256,107 @@ class MemoryIdentityStore:
             )
             row = await cursor.fetchone()
         return dict(row) if row else None
+
+    async def get_time_anchors_by_document_ids(
+        self, document_ids: list[int]
+    ) -> dict[int, dict[str, Any]]:
+        """Resolve Timeline event times without depending on raw chat storage."""
+        normalized = sorted({int(item) for item in document_ids})
+        if not normalized:
+            return {}
+        placeholders = ",".join("?" * len(normalized))
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT r.document_id, r.memory_uid, r.created_at,
+                           s.started_at, s.ended_at, s.traceability,
+                           s.metadata AS source_metadata
+                    FROM memory_registry r
+                    LEFT JOIN memory_source_spans s
+                      ON s.memory_uid = r.memory_uid
+                    WHERE r.document_id IN ({placeholders})
+                      AND r.memory_layer = 'timeline'
+                      AND r.status = 'active'
+                    """,
+                    normalized,
+                )
+            ).fetchall()
+        output: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            try:
+                source_metadata = json.loads(row["source_metadata"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                source_metadata = {}
+            if not isinstance(source_metadata, dict):
+                source_metadata = {}
+            def finite(value: Any) -> float | None:
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    return None
+                return parsed if math.isfinite(parsed) else None
+
+            source_start = finite(source_metadata.get("started_at"))
+            source_end = finite(source_metadata.get("ended_at"))
+            if source_start is not None or source_end is not None:
+                started_at = source_start if source_start is not None else source_end
+                ended_at = source_end if source_end is not None else source_start
+                time_basis = "timeline_source_span"
+                fallback = False
+            else:
+                started_at = row["created_at"]
+                ended_at = row["created_at"]
+                time_basis = "timeline_created_at"
+                fallback = True
+            output[int(row["document_id"])] = {
+                "memory_uid": str(row["memory_uid"]),
+                "started_at": float(started_at) if started_at is not None else None,
+                "ended_at": float(ended_at) if ended_at is not None else None,
+                "time_basis": time_basis,
+                "time_fallback": fallback,
+                "traceability": str(row["traceability"] or "none"),
+            }
+        return output
+
+    async def list_timeline_document_ids(
+        self,
+        *,
+        session_ids: list[str] | None = None,
+        persona_id: str | None = None,
+        limit: int = 2000,
+    ) -> list[int]:
+        """List active Timeline IDs in an explicit recall scope."""
+        clauses = ["r.memory_layer = 'timeline'", "r.status = 'active'"]
+        params: list[Any] = []
+        normalized_sessions = sorted(
+            {str(item) for item in (session_ids or []) if str(item)}
+        )
+        if normalized_sessions:
+            placeholders = ",".join("?" * len(normalized_sessions))
+            clauses.append(
+                f"json_extract(d.metadata, '$.session_id') IN ({placeholders})"
+            )
+            params.extend(normalized_sessions)
+        if persona_id is not None:
+            clauses.append("json_extract(d.metadata, '$.persona_id') = ?")
+            params.append(str(persona_id))
+        params.append(max(1, min(int(limit), 10000)))
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT r.document_id
+                    FROM memory_registry r
+                    JOIN documents d ON d.id = r.document_id
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY r.created_at, r.document_id
+                    LIMIT ?
+                    """,
+                    params,
+                )
+            ).fetchall()
+        return [int(row["document_id"]) for row in rows]
 
     async def delete_by_document_id(self, document_id: int) -> bool:
         async with self._connect() as db:

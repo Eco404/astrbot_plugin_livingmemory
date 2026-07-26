@@ -1565,6 +1565,20 @@ class TestTestRecall:
         assert "会话 ID" in result["message"]
 
     @pytest.mark.asyncio
+    async def test_recall_rejects_invalid_temporal_constraint(self, api):
+        req = _mock_page_request(
+            get_json={
+                "query": "七月的安排",
+                "mode": "timeline",
+                "temporal": {"mode": "range"},
+            }
+        )
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "error"
+        assert "时间检索参数无效" in result["message"]
+
+    @pytest.mark.asyncio
     async def test_topic_mode_bypasses_feature_switch_and_skips_timeline_search(self, api):
         engine = api.plugin.initializer.memory_engine
         engine.topic_memory_enabled = False

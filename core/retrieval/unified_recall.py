@@ -10,6 +10,7 @@ from astrbot.api import logger
 
 from ..models.memory_identity import resolve_memory_space
 from .recall_pipeline import RecallPipeline, RecallPipelineResult, RecallQueryBranch
+from .temporal_constraint import TemporalConstraint
 from .topic_recall_pipeline import TopicRecallPipeline
 
 
@@ -29,6 +30,7 @@ class UnifiedRecallRequest:
     visible_message_end_index: int | None = None
     current_actor_ids: set[str] = field(default_factory=set)
     topic_enabled: bool | None = None
+    temporal: TemporalConstraint | None = None
 
 
 @dataclass(slots=True)
@@ -79,6 +81,7 @@ class UnifiedRecallCoordinator:
             visible_message_start_index=request.visible_message_start_index,
             visible_message_end_index=request.visible_message_end_index,
             track_access=False,
+            temporal=request.temporal,
         )
         use_topic = (
             self.topic_enabled()
@@ -118,6 +121,7 @@ class UnifiedRecallCoordinator:
                     visible_message_start_index=request.visible_message_start_index,
                     visible_message_end_index=request.visible_message_end_index,
                     current_actor_ids=request.current_actor_ids,
+                    temporal=request.temporal,
                 )
             else:
                 search_coro = topic_pipeline.search(
@@ -131,6 +135,7 @@ class UnifiedRecallCoordinator:
                     visible_message_start_index=request.visible_message_start_index,
                     visible_message_end_index=request.visible_message_end_index,
                     current_actor_ids=request.current_actor_ids,
+                    temporal=request.temporal,
                 )
             topic_search = self._safe_topic_recall(search_coro, request.session_id)
         if topic_search is not None:
@@ -161,6 +166,7 @@ class UnifiedRecallCoordinator:
                     visible_message_start_index=request.visible_message_start_index,
                     visible_message_end_index=request.visible_message_end_index,
                     query_vectors=getattr(topic_outcome, "query_vectors", None),
+                    temporal=request.temporal,
                 ),
                 request.session_id,
             )
