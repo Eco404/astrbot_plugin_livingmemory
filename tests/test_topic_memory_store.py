@@ -635,6 +635,55 @@ async def test_actor_filter_and_fact_groups_expose_concrete_provenance(tmp_path:
     ]
 
 
+@pytest.mark.asyncio
+async def test_actor_catalog_prefers_persona_name_over_numeric_snapshot(
+    tmp_path: Path,
+):
+    db_path = str(tmp_path / "actor-persona-catalog.db")
+    space_id = await _register_timeline(
+        db_path,
+        memory_uid="timeline-persona",
+        document_id=1,
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    actor_id = "assistant-persona:测试助手"
+    for index, snapshot in enumerate(("20000001", "测试助手"), start=1):
+        topic = TopicMemory(
+            topic_uid=f"topic-persona-{index}",
+            memory_space_id=space_id,
+            title=f"人格目录 {index}",
+            summary="同一稳定人格的不同历史名称快照。",
+        )
+        await store.save_topic_snapshot(
+            topic,
+            atoms=[],
+            links=[
+                TopicTimelineLink(
+                    topic_uid=topic.topic_uid,
+                    timeline_uid="timeline-persona",
+                    time_cluster_key="cluster-persona",
+                )
+            ],
+            atom_sources=[],
+            actor_links=[
+                TopicActorLink(
+                    topic_uid=topic.topic_uid,
+                    actor_id=actor_id,
+                    actor_type="assistant",
+                    relation_type="narrator",
+                    display_name_snapshot=snapshot,
+                    resolution_status="timeline_bound",
+                )
+            ],
+        )
+
+    catalog = await store.list_topic_actors(space_id)
+    persona = next(item for item in catalog if item["actor_id"] == actor_id)
+    assert persona["display_name"] == "测试助手"
+    assert persona["topic_count"] == 2
+
+
 async def _register_timeline(
     db_path: str,
     *,
