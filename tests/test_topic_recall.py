@@ -836,6 +836,10 @@ async def test_fragment_reuses_query_vectors_and_keeps_facts_when_body_duplicate
     payload = _payload("wage", "工资补发", [1.0, 0.0])
     topic = payload["topic"]
     topic.summary = "工资少发六百元，计划下月补回。"
+    payload["atoms"] = [
+        {"content": "工资少发六百元", "importance": 0.8},
+        {"content": "计划在八月补发", "importance": 0.8},
+    ]
     fragment = TopicFragmentDraft(
         fragment_uid="wage-fragment",
         run_uid="run-1",
@@ -895,18 +899,18 @@ async def test_fragment_reuses_query_vectors_and_keeps_facts_when_body_duplicate
     result = fragment_outcome.results[0]
     assert result.body_suppressed is True
     assert result.fact_contents == [
-        "工资少发六百元",
         "六月实际工作二十天",
         "合同日薪为三百元",
-        "计划在八月补发",
     ]
-    assert result.content.startswith("Topic 片段补充事实: 工资少发六百元")
+    assert result.content.startswith("Topic 片段补充事实: 六月实际工作二十天")
+    assert "工资少发六百元" not in result.content
     assert "六月实际工作二十天" in result.content
     assert "合同日薪为三百元" in result.content
-    assert "计划在八月补发" in result.content
+    assert "计划在八月补发" not in result.content
     assert "计划下月补回" not in result.content
     assert result.filter_reason is None
-    assert result.to_dict()["fact_count"] == 4
+    assert result.to_dict()["fact_count"] == 2
+    assert result.to_dict()["duplicate_fact_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -963,8 +967,139 @@ async def test_fragment_skips_parent_duplicate_body_only_when_it_has_no_facts():
     assert fragment_outcome.duplicate_parent_count == 1
     assert (
         fragment_outcome.candidates[0].filter_reason
-        == "duplicate_parent_without_facts"
+        == "duplicate_parent_without_novel_facts"
     )
+
+
+@pytest.mark.asyncio
+async def test_fragment_skips_duplicate_parent_body_and_duplicate_facts():
+    payload = _payload("wage", "工资补发", [1.0, 0.0])
+    payload["topic"].summary = "工资少发六百元，计划在八月补发。"
+    payload["atoms"] = [
+        {"content": "工资少发六百元", "importance": 0.8},
+        {"content": "计划在八月补发", "importance": 0.8},
+    ]
+    fragment = TopicFragmentDraft(
+        fragment_uid="wage-fragment",
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        label="工资补发",
+        summary="工资少发六百元，计划在八月补发。",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[
+            {"content": "工资少发六百元"},
+            {"content": "计划在八月补发"},
+        ],
+        embedding=[1.0, 0.0],
+        embedding_signature=_fragment_signature([1.0, 0.0]),
+        metadata={"narrative_schema_version": "first_person_assistant_roles_v4"},
+    )
+    store = _Store(
+        [payload],
+        [{"topic_uid": "wage", "fragment": fragment, "sources": []}],
+    )
+    pipeline = TopicRecallPipeline(
+        TopicRetriever(
+            store,
+            embedding_provider=_Embedding(),
+            config={"recall_use_rerank": False},
+        ),
+        {
+            "recall_use_rerank": False,
+            "recall_min_relevance": 0.0,
+            "recall_relative_floor": 0.0,
+            "fragment_min_relevance": 0.0,
+            "fragment_relative_floor": 0.0,
+        },
+    )
+    branches = [RecallQueryBranch("current", "工资", 1.0, "user")]
+    topic_outcome = await pipeline.search(
+        branches=branches,
+        memory_space_id="space-1",
+        final_k=1,
+    )
+    outcome = await pipeline.search_fragment_supplements(
+        branches=branches,
+        topic_results=topic_outcome.results,
+        limit=1,
+        query_vectors=topic_outcome.query_vectors,
+    )
+
+    assert outcome.results == []
+    assert outcome.duplicate_parent_count == 1
+    candidate = outcome.candidates[0]
+    assert candidate.duplicate_fact_count == 2
+    assert candidate.filter_reason == "duplicate_parent_without_novel_facts"
+
+
+@pytest.mark.asyncio
+async def test_fragment_fact_provenance_filters_paraphrased_parent_atom():
+    payload = _payload("topic-1", "BW 购票", [1.0, 0.0])
+    payload["topic"].summary = "空雨曾计划参加 BW，但错过前两轮开票。"
+    payload["atoms"] = [
+        {
+            "content": "空雨曾计划参加 BW，但错过前两轮开票。",
+            "importance": 0.8,
+            "metadata": {"source_fact_uids": ["fragment-fact-1"]},
+        }
+    ]
+    fragment = TopicFragmentDraft(
+        fragment_uid="fragment-provenance-duplicate",
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        label="BW 购票计划",
+        summary="空雨错过了前两轮开票。",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[
+            {
+                "fact_uid": "fragment-fact-1",
+                "content": "空雨在2026-07-05说前两轮开票都错过了。",
+            }
+        ],
+        embedding=[1.0, 0.0],
+        embedding_signature=_fragment_signature([1.0, 0.0]),
+        metadata={"narrative_schema_version": "first_person_assistant_roles_v4"},
+    )
+    store = _Store(
+        [payload],
+        [{"topic_uid": "topic-1", "fragment": fragment, "sources": []}],
+    )
+    pipeline = TopicRecallPipeline(
+        TopicRetriever(
+            store,
+            embedding_provider=_Embedding(),
+            config={"recall_use_rerank": False},
+        ),
+        {
+            "recall_use_rerank": False,
+            "recall_min_relevance": 0.0,
+            "recall_relative_floor": 0.0,
+            "fragment_min_relevance": 0.0,
+            "fragment_relative_floor": 0.0,
+        },
+    )
+    branches = [RecallQueryBranch("current", "BW", 1.0, "user")]
+    topic_outcome = await pipeline.search(
+        branches=branches,
+        memory_space_id="space-1",
+        final_k=1,
+    )
+    fragment_outcome = await pipeline.search_fragment_supplements(
+        branches=branches,
+        topic_results=topic_outcome.results,
+        limit=1,
+        query_vectors=topic_outcome.query_vectors,
+    )
+
+    assert fragment_outcome.results == []
+    candidate = fragment_outcome.candidates[0]
+    assert candidate.duplicate_fact_count == 1
+    assert candidate.body_suppressed is True
+    assert candidate.filter_reason == "duplicate_parent_without_novel_facts"
 
 
 @pytest.mark.asyncio

@@ -75,12 +75,14 @@ from .topic_maintenance_manager import TopicMaintenanceManager
 from .topic_relation_builder import vector_neighbor_rankings
 
 
-_FRAGMENT_PROMPT_VERSION = "topic-fragment-v16-source-grounded-affect"
-_SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v11-source-owned-actors"
+_FRAGMENT_PROMPT_VERSION = "topic-fragment-v18-first-person-assistant"
+_SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v13-first-person-assistant"
 _COMPONENT_REVIEW_PROMPT_VERSION = "topic-component-review-v2-structured-output"
-_NARRATIVE_SCHEMA_VERSION = "first_person_assistant_roles_v3"
+_NARRATIVE_SCHEMA_VERSION = "first_person_assistant_roles_v5"
 _SUPPORTED_NARRATIVE_SCHEMA_VERSIONS = {
     _NARRATIVE_SCHEMA_VERSION,
+    "first_person_assistant_roles_v4",
+    "first_person_assistant_roles_v3",
     "first_person_assistant_roles_v2",
     "third_person_roles_v1",
 }
@@ -5560,6 +5562,10 @@ class TopicBuildManager:
                 ).strip()
                 if fallback_content:
                     fact_contents = [fallback_content]
+            conversation_roles = self._conversation_role_payload([candidate])
+            fallback_summary = (
+                candidate.summary or candidate.content or "Timeline memory"
+            )
             facts: list[dict[str, Any]] = []
             for fact_index, content in enumerate(fact_contents):
                 fingerprints = sorted(
@@ -5625,7 +5631,7 @@ class TopicBuildManager:
                     memory_space_id=group.memory_space_id,
                     label=(candidate.topics[0] if candidate.topics else group.label)
                     or "Timeline memory",
-                    summary=candidate.summary or candidate.content or "Timeline memory",
+                    summary=fallback_summary,
                     timeline_uids=[candidate.memory_uid],
                     source_revisions={
                         candidate.memory_uid: candidate.source_revision
@@ -5648,10 +5654,8 @@ class TopicBuildManager:
                         "importance_policy_version": IMPORTANCE_POLICY_VERSION,
                         "llm_fragment_importance": None,
                         "deterministic_fallback": True,
-                        "narrative_schema_version": "legacy_first_person_unresolved",
-                        "conversation_roles": self._conversation_role_payload(
-                            [candidate]
-                        ),
+                        "narrative_schema_version": _NARRATIVE_SCHEMA_VERSION,
+                        "conversation_roles": conversation_roles,
                         "participant_refs": self._deterministic_fragment_participants(
                             [candidate]
                         ),
@@ -5947,7 +5951,7 @@ class TopicBuildManager:
             if role_repairs:
                 validation_repairs.append(
                     {
-                        "type": "unambiguous_generic_human_role_repair",
+                        "type": "narrative_role_repair",
                         "replacements": role_repairs,
                     }
                 )
@@ -7196,6 +7200,14 @@ Semantic rules:
 15. Preserve that first-person memory voice when it is useful. Use exact human names
    from conversation_roles instead of generic 用户、对方 or 叙述者. Do not replace a
    human speaker's quoted first person with the Bot narrator.
+   In fragment summaries and facts, refer to every mapped assistant persona as 我/我的,
+   never by its persona display name as a third-person subject or object. A persona
+   name may remain only when the fact is explicitly about that name or quotes it.
+   Assistant display names are identity anchors, not words to find and replace. Inspect
+   the actor meaning before choosing perspective. For an assistant named `唯`,
+   `空雨请唯估算，唯回复了结果` is wrong and must become
+   `空雨请我估算，我回复了结果`; ordinary text such as `唯一方案`
+   must remain unchanged. An identity fact such as `我说明自己是唯` also keeps the name.
 16. Before returning, verify actor-by-actor that every action, opinion, feeling and
    relationship remains attached to the same source actor. If attribution is unclear,
    preserve the source wording and lower confidence instead of guessing.
@@ -7383,6 +7395,13 @@ Semantic rules:
    memory voice and all mapped human identities. Never reinterpret 我 as the human
    user or replace a known human name with 用户、对方、叙述者. Before returning,
    verify that every action remains attached to its source actor.
+11. In the summary and atoms, refer to every mapped assistant persona as 我/我的,
+    not by its persona display name as a third-person subject or object. Keep a persona
+    name only when the claim is explicitly about the name itself or preserves a quote.
+    Treat assistant names as actor bindings, never as character-level replacement
+    targets. For an assistant named `唯`, rewrite `空雨请唯估算，唯回复了结果`
+    as `空雨请我估算，我回复了结果`, but preserve `唯一方案` and the
+    identity claim `我说明自己是唯` exactly.
 
 Reference rules:
 - Treat F1, F2, ... as opaque local identifiers.
@@ -8498,7 +8517,6 @@ INPUT:
                 "fragment must use the mapped human display name instead of a "
                 "generic role"
             )
-
     def _repair_unambiguous_generic_human_roles(
         self,
         value: str,
@@ -8594,7 +8612,6 @@ INPUT:
             raise TopicBuildValidationError(
                 "Topic synthesis replaced a mapped human name with a generic role"
             )
-
     def _active_identity_profiles(self) -> list[SupplementalIdentityProfile]:
         context = self._runtime_context.get()
         if context is not None:

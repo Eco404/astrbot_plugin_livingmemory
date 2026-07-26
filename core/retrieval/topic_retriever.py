@@ -166,6 +166,8 @@ class TopicFragmentRecallResult:
     affect_match_boost: float = 0.0
     selected_affect_events: list[dict[str, Any]] = field(default_factory=list)
     body_suppressed: bool = False
+    supplemental_fact_contents: list[str] | None = None
+    duplicate_fact_count: int = 0
     selected: bool = False
     filter_reason: str | None = None
 
@@ -175,6 +177,8 @@ class TopicFragmentRecallResult:
 
     @property
     def fact_contents(self) -> list[str]:
+        if self.supplemental_fact_contents is not None:
+            return list(self.supplemental_fact_contents)
         facts: list[str] = []
         seen: set[str] = set()
         for fact in self.fragment.facts:
@@ -249,6 +253,7 @@ class TopicFragmentRecallResult:
             "affect_event_count": len(self.selected_affect_events),
             "body_suppressed": self.body_suppressed,
             "fact_count": len(self.fact_contents),
+            "duplicate_fact_count": self.duplicate_fact_count,
             "context_coverage": round(self.context_coverage, 6),
             "branch_scores": {
                 key: round(value, 6) for key, value in self.branch_scores.items()

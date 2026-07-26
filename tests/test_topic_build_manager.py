@@ -3157,6 +3157,16 @@ def test_fragment_prompt_defines_one_future_retrieval_intent_per_fragment():
     assert "participant or mentioned-person arrays at fragment level" in prompt
 
 
+def test_topic_prompts_anchor_assistant_perspective_without_character_replacement():
+    fragment_prompt = TopicBuildManager._fragment_prompt("{}")
+    synthesis_prompt = TopicBuildManager._synthesis_prompt("{}")
+
+    for prompt in (fragment_prompt, synthesis_prompt):
+        assert "identity anchors" in prompt or "actor bindings" in prompt
+        assert "唯一方案" in prompt
+        assert "我说明自己是唯" in prompt
+
+
 def test_synthesis_prompt_strips_nested_provenance_and_derives_fragment_scope():
     manager = TopicBuildManager(":memory:", None, None)
     fragments = [_topic_fragment(1), _topic_fragment(2)]
@@ -3562,10 +3572,10 @@ def test_fragment_validation_repairs_unambiguous_generic_human_role_in_place():
     assert fragment.summary == "我提醒空雨检查结果"
     assert fragment.facts[0]["content"] == "空雨已收到提醒"
     assert fragment.metadata["narrative_schema_version"] == (
-        "first_person_assistant_roles_v3"
+        "first_person_assistant_roles_v5"
     )
     assert fragment.metadata["validation_repairs"][-1]["type"] == (
-        "unambiguous_generic_human_role_repair"
+        "narrative_role_repair"
     )
 
 
