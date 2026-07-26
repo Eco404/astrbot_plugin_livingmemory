@@ -112,6 +112,73 @@ async def test_summary_service_failure_preserves_source_range(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_summary_service_audits_no_memory_and_advances_checkpoint(tmp_path: Path):
+    store, manager = await _conversation(tmp_path)
+    processor = AsyncMock()
+    processor.process_conversation.return_value = (
+        "",
+        {
+            "memory_decision": "no_memory",
+            "no_memory_reason": "ack_only",
+            "summary_quality": "normal",
+            "message_coverage": [
+                {
+                    "message_ref": f"M{index}",
+                    "disposition": "context",
+                    "fact_indexes": [],
+                    "reason": "无持久信息",
+                }
+                for index in range(1, 5)
+            ],
+        },
+        0.1,
+    )
+    processor.classify_atoms_from_metadata = MagicMock()
+    engine = AsyncMock()
+    service = TimelineSummaryService(
+        config_manager=ConfigManager({}),
+        conversation_manager=manager,
+        memory_engine=engine,
+        memory_processor=processor,
+    )
+
+    result = await service.summarize_if_needed(
+        "test:FriendMessage:user",
+        persona_id="persona",
+        trigger_type="idle",
+        min_rounds=2,
+    )
+
+    assert result.status == "no_memory"
+    assert result.decision_reason == "ack_only"
+    engine.add_memory.assert_not_awaited()
+    processor.classify_atoms_from_metadata.assert_not_called()
+    processor.process_conversation.assert_awaited_once_with(
+        messages=await manager.get_messages_range(
+            "test:FriendMessage:user", 0, 4
+        ),
+        is_group_chat=False,
+        persona_id="persona",
+        allow_no_memory=True,
+    )
+    session = await store.get_session("test:FriendMessage:user")
+    assert session is not None
+    assert session.metadata["last_summarized_index"] == 4
+    assert session.metadata["last_summary_decision"] == "no_memory"
+    assert "pending_summary" not in session.metadata
+    assert await store.get_message_count("test:FriendMessage:user") == 4
+    decisions = await store.list_summary_decisions(
+        session_id="test:FriendMessage:user"
+    )
+    assert len(decisions) == 1
+    assert decisions[0]["reason"] == "ack_only"
+    assert len(decisions[0]["message_coverage"]) == 4
+    job = await store.get_summary_job("test:FriendMessage:user")
+    assert job is not None and job["status"] == "completed"
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_idle_scheduler_only_schedules_resolved_persona(tmp_path: Path):
     store, manager = await _conversation(tmp_path)
     await manager.update_session_metadata_values(

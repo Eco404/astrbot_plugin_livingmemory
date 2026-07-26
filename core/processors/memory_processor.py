@@ -25,6 +25,15 @@ from ..models.timeline_quality import TimelineQualityIssue, TimelineQualityRepor
 from .atom_classifier import classify_atoms
 
 
+_NO_MEMORY_REASONS = {
+    "greeting_only",
+    "ack_only",
+    "noise_or_test",
+    "emoji_or_media_only",
+    "no_durable_information",
+}
+
+
 class MemoryProcessor:
     """
     记忆处理器
@@ -233,6 +242,7 @@ class MemoryProcessor:
         max_retries: int = 3,
         *,
         is_group_chat: bool | None = None,
+        allow_no_memory: bool = False,
     ) -> str:
         """
         带指数退避的 LLM 调用
@@ -265,7 +275,10 @@ class MemoryProcessor:
                         description=(
                             "Submit one source-grounded Timeline memory summary."
                         ),
-                        parameters=self._timeline_output_schema(is_group_chat),
+                        parameters=self._timeline_output_schema(
+                            is_group_chat,
+                            allow_no_memory=allow_no_memory,
+                        ),
                     )
                     kwargs = {
                         "func_tool": ToolSet([tool]),
@@ -365,19 +378,39 @@ class MemoryProcessor:
         return isinstance(exc, TypeError) or any(marker in message for marker in markers)
 
     @classmethod
-    def _timeline_output_schema(cls, is_group_chat: bool) -> dict[str, Any]:
+    def _timeline_output_schema(
+        cls,
+        is_group_chat: bool,
+        *,
+        allow_no_memory: bool = False,
+    ) -> dict[str, Any]:
         properties: dict[str, Any] = {
-            "summary": {"type": "string", "minLength": 6},
+            "memory_decision": {
+                "type": "string",
+                "enum": ["store", "no_memory"] if allow_no_memory else ["store"],
+            },
+            "no_memory_reason": {
+                "type": "string",
+                "enum": (
+                    ["none", *sorted(_NO_MEMORY_REASONS)]
+                    if allow_no_memory
+                    else ["none"]
+                ),
+            },
+            "summary": {
+                "type": "string",
+                **({} if allow_no_memory else {"minLength": 6}),
+            },
             "topics": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
-                "minItems": 1,
+                "minItems": 0 if allow_no_memory else 1,
                 "maxItems": 5,
             },
             "key_facts": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
-                "minItems": 1,
+                "minItems": 0 if allow_no_memory else 1,
                 "maxItems": 5,
             },
             "key_fact_evidence": {
@@ -395,7 +428,7 @@ class MemoryProcessor:
                     "required": ["fact_index", "message_refs"],
                     "additionalProperties": False,
                 },
-                "minItems": 1,
+                "minItems": 0 if allow_no_memory else 1,
                 "maxItems": 5,
             },
             "message_coverage": {
@@ -428,6 +461,8 @@ class MemoryProcessor:
             "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         }
         required = [
+            "memory_decision",
+            "no_memory_reason",
             "summary",
             "topics",
             "key_facts",
@@ -499,6 +534,8 @@ class MemoryProcessor:
         messages: list[Message],
         is_group_chat: bool = False,
         persona_id: str | None = None,
+        *,
+        allow_no_memory: bool = False,
     ) -> tuple[str, dict[str, Any], float]:
         """
         处理对话历史,生成结构化记忆
@@ -537,6 +574,8 @@ class MemoryProcessor:
         matched_identities = self._identity_profiles_for_messages(messages)
         if matched_identities:
             prompt = self._identity_prompt_block(matched_identities) + "\n\n" + prompt
+        if allow_no_memory:
+            prompt = self._memory_decision_prompt_block() + "\n\n" + prompt
 
         # 3. 调用LLM生成结构化记忆
         conversation_type = "群聊" if is_group_chat else "私聊"
@@ -557,6 +596,7 @@ class MemoryProcessor:
                 prompt=prompt,
                 system_prompt=system_prompt,
                 is_group_chat=is_group_chat,
+                allow_no_memory=allow_no_memory,
             )
 
             logger.info(
@@ -575,6 +615,7 @@ class MemoryProcessor:
                 require_source_grounding=bool(
                     self.config.get("timeline_require_source_grounding", False)
                 ),
+                allow_no_memory=allow_no_memory,
             )
             repair_attempted = False
             if not quality_report.acceptable:
@@ -589,6 +630,7 @@ class MemoryProcessor:
                     quality_report=quality_report,
                     is_group_chat=is_group_chat,
                     system_prompt=system_prompt,
+                    allow_no_memory=allow_no_memory,
                 )
                 quality_report = self.assess_summary_quality(
                     structured_data,
@@ -597,6 +639,7 @@ class MemoryProcessor:
                     require_source_grounding=bool(
                         self.config.get("timeline_require_source_grounding", False)
                     ),
+                    allow_no_memory=allow_no_memory,
                 )
             if quality_report.acceptable:
                 structured_data["_quality"] = (
@@ -608,6 +651,21 @@ class MemoryProcessor:
                 # it can be inspected and rebuilt later instead of silently
                 # dropping the whole conversation window.
                 structured_data["_quality"] = "low"
+                if (
+                    str(structured_data.get("memory_decision") or "store")
+                    .strip()
+                    .lower()
+                    == "no_memory"
+                ):
+                    # Only a fully valid no_memory decision may advance the
+                    # checkpoint without creating a Timeline. A malformed
+                    # decision falls back to an auditable low-quality Timeline.
+                    structured_data["_rejected_memory_decision"] = "no_memory"
+                    structured_data["_rejected_no_memory_reason"] = str(
+                        structured_data.get("no_memory_reason") or "none"
+                    )
+                    structured_data["memory_decision"] = "store"
+                    structured_data["no_memory_reason"] = "none"
                 quality_report = quality_report.rejected()
                 logger.warning(
                     "[MemoryProcessor] Timeline 总结修复后仍未通过质量契约，"
@@ -649,6 +707,13 @@ class MemoryProcessor:
             metadata["summary_rebuild_recommended"] = (
                 structured_data.get("_quality") == "low"
             )
+            if structured_data.get("_rejected_memory_decision"):
+                metadata["rejected_memory_decision"] = structured_data[
+                    "_rejected_memory_decision"
+                ]
+                metadata["rejected_no_memory_reason"] = structured_data.get(
+                    "_rejected_no_memory_reason", "none"
+                )
 
             importance = float(structured_data.get("importance", 0.5))
 
@@ -767,6 +832,7 @@ class MemoryProcessor:
         quality_report: TimelineQualityReport,
         is_group_chat: bool,
         system_prompt: str,
+        allow_no_memory: bool = False,
     ) -> dict[str, Any]:
         candidate = {
             key: value
@@ -783,6 +849,8 @@ class MemoryProcessor:
 - message_coverage 必须逐一且仅一次覆盖全部来源消息。
 - disposition=fact 时 fact_indexes 至少一项；context 可不关联事实；omitted 必须写明省略理由。
 - 不得根据昵称、语气、兴趣或人格设定猜测身份、性别、代词或人物关系。
+- memory_decision=no_memory 只能在条件全部满足时保留：无摘要、无主题、无事实、无事实引用、重要性不高于0.2，且所有消息均为context或omitted。
+- 存在可持续的人物信息、偏好、计划、决定、承诺、关系互动或显著情绪时必须选择store。
 - 输出必须完全符合指定工具结构；无法使用工具时只输出一个 JSON 对象。
 
 ## 质量问题
@@ -801,8 +869,22 @@ class MemoryProcessor:
                 + "\n你正在执行来源约束修复。候选内容不是事实来源，唯一事实来源是带 M 引用的对话。"
             ),
             is_group_chat=is_group_chat,
+            allow_no_memory=allow_no_memory,
         )
         return self._parse_llm_response(response_text, is_group_chat)
+
+    @staticmethod
+    def _memory_decision_prompt_block() -> str:
+        reasons = "、".join(sorted(_NO_MEMORY_REASONS))
+        return f"""# Timeline 记忆保留决策（严格契约）
+先判断这个窗口是否含有对未来交流有持续价值的信息。
+
+- 有任何可持续事实、偏好、需求、计划、决定、承诺、人际互动、情绪变化或值得回忆的共同经历时，memory_decision 必须为 store。对话短、日常或轻松不是丢弃理由。
+- 只有整个窗口均是纯问候、无信息确认、测试/噪声、纯表情/无语义媒体，或不含任何可持续信息时，才允许 memory_decision=no_memory。
+- no_memory_reason 只能是：{reasons}。store 时必须为 none。
+- no_memory 时必须精确输出：summary=""，topics=[]，key_facts=[]，key_fact_evidence=[]，importance<=0.2。
+- no_memory 时 message_coverage 仍必须不重不漏地覆盖每个 M 引用，disposition 只能为 context 或 omitted，fact_indexes=[]，并说明理由。
+- 不确定时选择 store，禁止为了减少记忆而省略有意义的内容。"""
 
     @staticmethod
     def _format_sender_info(msg: Message) -> str:
@@ -894,6 +976,12 @@ class MemoryProcessor:
             raw_sentiment = data.get("sentiment")
 
             # 数据类型校验和规范化
+            data["memory_decision"] = str(
+                data.get("memory_decision") or "store"
+            ).strip().lower()
+            data["no_memory_reason"] = str(
+                data.get("no_memory_reason") or "none"
+            ).strip().lower()
             data["summary"] = str(data.get("summary", ""))
             logger.debug(f"[MemoryProcessor] 提取 summary: {data['summary'][:100]}...")
 
@@ -1094,7 +1182,9 @@ class MemoryProcessor:
         canonical_summary = " | ".join(canonical_parts) if canonical_parts else ""
 
         # content 字段使用 canonical_summary，提升检索稳定性
-        if canonical_summary:
+        if str(structured_data.get("memory_decision") or "store") == "no_memory":
+            content = ""
+        elif canonical_summary:
             content = canonical_summary
         else:
             content = fallback_excerpt
@@ -1103,6 +1193,12 @@ class MemoryProcessor:
         # 注意：不要在这里设置 create_time 和 last_access_time
         # 这些字段会由 MemoryEngine.add_memory() 自动添加
         metadata = {
+            "memory_decision": str(
+                structured_data.get("memory_decision") or "store"
+            ),
+            "no_memory_reason": str(
+                structured_data.get("no_memory_reason") or "none"
+            ),
             "topics": structured_data.get("topics", []),
             "key_facts": key_facts,
             "key_fact_evidence": structured_data.get("key_fact_evidence", []),
@@ -1112,7 +1208,7 @@ class MemoryProcessor:
             # 双通道：canonical 用于检索，persona_summary 保留原始人格风格摘要
             "canonical_summary": canonical_summary,
             "persona_summary": summary,
-            "summary_schema_version": "v3-source-grounded",
+            "summary_schema_version": "v4-memory-decision",
             # summary_quality 由 process_conversation 中的 SummaryValidator 覆盖写入
         }
 
@@ -1142,6 +1238,12 @@ class MemoryProcessor:
 
         data.setdefault("_raw_importance", data.get("importance"))
         data.setdefault("_raw_sentiment", data.get("sentiment"))
+        data["memory_decision"] = str(
+            data.get("memory_decision") or "store"
+        ).strip().lower()
+        data["no_memory_reason"] = str(
+            data.get("no_memory_reason") or "none"
+        ).strip().lower()
         data["summary"] = str(data.get("summary", ""))
         data["topics"] = self._ensure_list(data.get("topics", []))[:5]
         data["key_facts"] = self._ensure_list(data.get("key_facts", []))[:5]
@@ -1245,6 +1347,7 @@ class MemoryProcessor:
         messages: list[Message] | None = None,
         is_group_chat: bool = False,
         require_source_grounding: bool = False,
+        allow_no_memory: bool = False,
     ) -> TimelineQualityReport:
         """Evaluate a summary with deterministic, source-reference-aware rules."""
 
@@ -1263,32 +1366,61 @@ class MemoryProcessor:
             else:
                 add("unreliable_parse", f"Unreliable parser fallback: {value}")
 
+        decision = str(structured_data.get("memory_decision") or "store").strip().lower()
+        no_memory = decision == "no_memory"
+        if decision not in {"store", "no_memory"}:
+            add("invalid_memory_decision", "memory_decision must be store or no_memory")
+        if no_memory and not allow_no_memory:
+            add("no_memory_not_allowed", "This operation requires a Timeline memory")
+
         summary = str(structured_data.get("summary") or "").strip()
         topics = structured_data.get("topics")
         key_facts = structured_data.get("key_facts")
-        if not summary:
+        if not no_memory and not summary:
             add("missing_summary", "Summary is empty", "summary")
-        elif len(re.sub(r"\s+", "", summary)) < 6:
+        elif not no_memory and len(re.sub(r"\s+", "", summary)) < 6:
             add("summary_too_short", "Summary is shorter than 6 effective characters", "summary")
+        elif no_memory and summary:
+            add("no_memory_has_summary", "no_memory must not retain a summary", "summary")
 
-        if not isinstance(topics, list) or not topics:
+        if not no_memory and (not isinstance(topics, list) or not topics):
             add("missing_topics", "At least one Topic is required", "topics")
-        elif any(not str(topic).strip() for topic in topics):
+        elif not no_memory and any(not str(topic).strip() for topic in topics):
             add("empty_topic", "Topic values must be non-empty", "topics")
+        elif no_memory and isinstance(topics, list) and topics:
+            add("no_memory_has_topics", "no_memory must not retain Topics", "topics")
 
         normalized_facts = (
             [str(fact).strip() for fact in key_facts]
             if isinstance(key_facts, list)
             else []
         )
-        if not normalized_facts:
+        if not no_memory and not normalized_facts:
             add("missing_key_facts", "At least one key fact is required", "key_facts")
-        else:
+        elif not no_memory:
             if any(not fact for fact in normalized_facts):
                 add("empty_key_fact", "Key facts must be non-empty", "key_facts")
             folded = [re.sub(r"\s+", "", fact).casefold() for fact in normalized_facts]
             if len(set(folded)) != len(folded):
                 add("duplicate_key_fact", "Duplicate key facts are not allowed", "key_facts")
+        elif normalized_facts:
+            add("no_memory_has_key_facts", "no_memory must not retain key facts", "key_facts")
+
+        no_memory_reason = str(
+            structured_data.get("no_memory_reason") or "none"
+        ).strip().lower()
+        if no_memory and no_memory_reason not in _NO_MEMORY_REASONS:
+            add(
+                "invalid_no_memory_reason",
+                "no_memory requires one enumerated reason",
+                "no_memory_reason",
+            )
+        elif not no_memory and no_memory_reason != "none":
+            add(
+                "store_has_no_memory_reason",
+                "store decisions must use no_memory_reason=none",
+                "no_memory_reason",
+            )
 
         raw_importance = structured_data.get(
             "_raw_importance", structured_data.get("importance")
@@ -1301,6 +1433,12 @@ class MemoryProcessor:
             add(
                 "invalid_importance",
                 "Importance must be a number in [0, 1] before normalization",
+                "importance",
+            )
+        elif no_memory and float(raw_importance) > 0.2:
+            add(
+                "no_memory_importance_too_high",
+                "no_memory importance must not exceed 0.2",
                 "importance",
             )
 
@@ -1359,11 +1497,17 @@ class MemoryProcessor:
         grounded_fact_count = 0
         covered_message_count = 0
         source_messages = list(messages or [])
-        if require_source_grounding:
+        if require_source_grounding or no_memory:
             expected_refs = {f"M{index + 1}" for index in range(len(source_messages))}
             evidence_rows = self._ensure_dict_list(
                 structured_data.get("key_fact_evidence", [])
             )
+            if no_memory and evidence_rows:
+                add(
+                    "no_memory_has_fact_evidence",
+                    "no_memory must not retain fact evidence",
+                    "key_fact_evidence",
+                )
             evidence_by_index: dict[int, dict[str, Any]] = {}
             for row in evidence_rows:
                 try:
@@ -1445,6 +1589,18 @@ class MemoryProcessor:
                     add(
                         "ungrounded_fact_disposition",
                         f"Message {message_ref} is marked fact without fact indexes",
+                        "message_coverage",
+                    )
+                if no_memory and (disposition == "fact" or fact_indexes):
+                    add(
+                        "no_memory_has_fact_coverage",
+                        f"Message {message_ref} cannot support a fact in no_memory",
+                        "message_coverage",
+                    )
+                if no_memory and len(str(row.get("reason") or "").strip()) < 2:
+                    add(
+                        "no_memory_missing_coverage_reason",
+                        f"Message {message_ref} has no no_memory explanation",
                         "message_coverage",
                     )
                 if disposition == "omitted" and len(str(row.get("reason") or "").strip()) < 2:

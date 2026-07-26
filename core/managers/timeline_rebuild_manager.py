@@ -641,7 +641,7 @@ class TimelineRebuildManager:
             "rebuilt_at": time.time(),
             "source_revision": int(snapshot["revision"]),
             "source_message_count": len(messages),
-            "quality_contract": "v3-source-grounded",
+            "quality_contract": "v4-memory-decision",
         }
         await self.memory_engine.rewrite_memory_in_place(
             int(item["memory_id"]),

@@ -364,6 +364,15 @@ class CommandHandler:
                         )
                     )
                     return
+                if result.status == "no_memory":
+                    yield event.plain_result(
+                        t(
+                            "summarize.no_memory",
+                            reason=result.decision_reason or "no_durable_information",
+                            count=result.message_count,
+                        )
+                    )
+                    return
                 if result.status != "created":
                     raise RuntimeError(result.error or f"总结未完成: {result.status}")
                 topics = ", ".join(result.topics or []) or t("common.none")
