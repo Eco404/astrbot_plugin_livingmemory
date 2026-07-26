@@ -27,6 +27,7 @@ class TimelineSummaryResult:
     message_count: int = 0
     importance: float | None = None
     topics: list[str] | None = None
+    decision_reason: str | None = None
     error: str | None = None
 
 
@@ -180,7 +181,7 @@ class TimelineSummaryService:
             )
             or "default"
         )
-        await store.start_summary_job(
+        job = await store.start_summary_job(
             session_id,
             trigger_type=trigger_type,
             start_index=start_index,
@@ -196,13 +197,8 @@ class TimelineSummaryService:
                         messages=history,
                         is_group_chat=is_group,
                         persona_id=effective_persona,
+                        allow_no_memory=True,
                     )
-                )
-                atoms = self.memory_processor.classify_atoms_from_metadata(
-                    metadata=metadata,
-                    parent_importance=importance,
-                    session_id=session_id,
-                    persona_id=effective_persona,
                 )
                 metadata["source_window"] = {
                     "session_id": session_id,
@@ -215,6 +211,56 @@ class TimelineSummaryService:
                     "ended_at": history[-1].timestamp,
                     "triggered_by": trigger_type,
                 }
+                if (
+                    metadata.get("memory_decision") == "no_memory"
+                    and metadata.get("summary_quality") in {"normal", "repaired"}
+                    and not str(content).strip()
+                ):
+                    reason = str(metadata.get("no_memory_reason") or "")
+                    await store.complete_no_memory_summary(
+                        session_id,
+                        job_uid=str(job["job_uid"]),
+                        trigger_type=trigger_type,
+                        start_index=start_index,
+                        end_index=end_index,
+                        first_message_id=history[0].id,
+                        last_message_id=history[-1].id,
+                        persona_id=effective_persona,
+                        reason=reason,
+                        importance=float(importance),
+                        message_coverage=[
+                            dict(row)
+                            for row in metadata.get("message_coverage", [])
+                            if isinstance(row, dict)
+                        ],
+                        metadata=metadata,
+                    )
+                    logger.info(
+                        "[%s] Timeline 窗口已检查且无需写入记忆: "
+                        "trigger=%s range=[%s:%s] reason=%s",
+                        session_id,
+                        trigger_type,
+                        start_index,
+                        end_index,
+                        reason,
+                    )
+                    return TimelineSummaryResult(
+                        "no_memory",
+                        session_id,
+                        start_index=start_index,
+                        end_index=end_index,
+                        message_count=len(history),
+                        importance=float(importance),
+                        topics=[],
+                        decision_reason=reason,
+                    )
+
+                atoms = self.memory_processor.classify_atoms_from_metadata(
+                    metadata=metadata,
+                    parent_importance=importance,
+                    session_id=session_id,
+                    persona_id=effective_persona,
+                )
                 await self.memory_engine.add_memory(
                     content=content,
                     session_id=session_id,
@@ -231,6 +277,8 @@ class TimelineSummaryService:
                         "last_summary_trigger": trigger_type,
                         "last_summary_at": time.time(),
                         "last_persona_id": effective_persona,
+                        "last_summary_decision": "store",
+                        "last_no_memory_reason": None,
                     },
                 )
                 await store.finish_summary_job(session_id)

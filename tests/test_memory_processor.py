@@ -103,6 +103,74 @@ async def test_process_conversation_retains_low_quality_non_json_after_repair():
 
 
 @pytest.mark.asyncio
+async def test_process_conversation_accepts_strict_no_memory_decision():
+    llm = _DummyLLMProvider(
+        """{
+            "memory_decision":"no_memory",
+            "no_memory_reason":"ack_only",
+            "summary":"",
+            "topics":[],
+            "key_facts":[],
+            "key_fact_evidence":[],
+            "message_coverage":[
+                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason":"仅简短确认"},
+                {"message_ref":"M2","disposition":"omitted","fact_indexes":[],"reason":"无持久信息"}
+            ],
+            "sentiment":"neutral",
+            "importance":0.1
+        }"""
+    )
+    processor = MemoryProcessor(llm_provider=llm, context=None)
+
+    content, metadata, importance = await processor.process_conversation(
+        messages=_make_messages(),
+        is_group_chat=False,
+        allow_no_memory=True,
+    )
+
+    assert content == ""
+    assert metadata["memory_decision"] == "no_memory"
+    assert metadata["no_memory_reason"] == "ack_only"
+    assert metadata["summary_quality"] == "normal"
+    assert metadata["summary_rebuild_recommended"] is False
+    assert importance == 0.1
+
+
+@pytest.mark.asyncio
+async def test_invalid_no_memory_falls_back_to_low_quality_timeline():
+    llm = _DummyLLMProvider(
+        """{
+            "memory_decision":"no_memory",
+            "no_memory_reason":"ack_only",
+            "summary":"",
+            "topics":[],
+            "key_facts":[],
+            "key_fact_evidence":[],
+            "message_coverage":[
+                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason":"仅简短确认"},
+                {"message_ref":"M2","disposition":"omitted","fact_indexes":[],"reason":"无持久信息"}
+            ],
+            "sentiment":"neutral",
+            "importance":0.8
+        }"""
+    )
+    processor = MemoryProcessor(llm_provider=llm, context=None)
+
+    content, metadata, importance = await processor.process_conversation(
+        messages=_make_messages(),
+        is_group_chat=False,
+        allow_no_memory=True,
+    )
+
+    assert content
+    assert metadata["memory_decision"] == "store"
+    assert metadata["rejected_memory_decision"] == "no_memory"
+    assert metadata["summary_quality"] == "low"
+    assert metadata["summary_rebuild_recommended"] is True
+    assert importance == 0.8
+
+
+@pytest.mark.asyncio
 async def test_persona_prompt_is_included_when_available():
     llm = _DummyLLMProvider(
         """{
@@ -242,7 +310,7 @@ async def test_dual_channel_summary_stores_canonical_and_persona():
     assert content == metadata["canonical_summary"]
 
     # schema 版本标记
-    assert metadata.get("summary_schema_version") == "v3-source-grounded"
+    assert metadata.get("summary_schema_version") == "v4-memory-decision"
 
 
 @pytest.mark.asyncio
@@ -503,7 +571,7 @@ def test_build_memory_from_structured_data_uses_standard_storage_format():
     assert metadata["key_facts"] == ["主动记忆应复用 MemoryProcessor 格式化流程"]
     assert metadata["sentiment"] == "neutral"
     assert metadata["interaction_type"] == "private_chat"
-    assert metadata["summary_schema_version"] == "v3-source-grounded"
+    assert metadata["summary_schema_version"] == "v4-memory-decision"
     assert metadata["summary_quality"] == "normal"
     assert importance == 0.8
 
@@ -654,7 +722,7 @@ async def test_process_group_chat_dual_channel_summary():
 
     assert "canonical_summary" in metadata
     assert "persona_summary" in metadata
-    assert metadata.get("summary_schema_version") == "v3-source-grounded"
+    assert metadata.get("summary_schema_version") == "v4-memory-decision"
     # canonical_summary 应包含 key_facts
     assert "私有化 LLM" in metadata["canonical_summary"]
     # content 应等于 canonical_summary
