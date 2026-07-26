@@ -166,6 +166,53 @@ def test_logical_fragment_uid_uses_source_identity_not_generated_wording():
     assert first == second
 
 
+def test_logical_fragment_collision_is_split_by_semantic_facet():
+    manager = TopicBuildManager(":memory:", None, None)
+    facts = [
+        {
+            "content": "共享来源中的事实",
+            "source_timeline_uids": ["timeline-1"],
+            "source_fact_keys": ["timeline-1:key_fact:stable"],
+        }
+    ]
+    base_uid = logical_fragment_uid(
+        memory_space_id="space-1",
+        timeline_uids=["timeline-1"],
+        facts=facts,
+    )
+    first = TopicFragmentDraft(
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        label="亲密互动",
+        summary="空雨表达了亲近和安心",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[{**facts[0], "content": "空雨表达了亲近和安心"}],
+        logical_fragment_uid=base_uid,
+    )
+    second = TopicFragmentDraft(
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        label="天气准备",
+        summary="空雨担心台风并准备雨具",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[{**facts[0], "content": "空雨担心台风并准备雨具"}],
+        logical_fragment_uid=base_uid,
+    )
+
+    manager._disambiguate_logical_fragment_collisions([first, second])
+
+    assert first.logical_fragment_uid != second.logical_fragment_uid
+    assert first.logical_fragment_uid != base_uid
+    assert second.logical_fragment_uid != base_uid
+    assert first.metadata["logical_identity_disambiguation"][
+        "base_logical_fragment_uid"
+    ] == base_uid
+
+
 @pytest.mark.asyncio
 async def test_manual_merge_retains_selected_topic_and_reuses_formal_fragments():
     main = TopicMemory(
@@ -2977,6 +3024,95 @@ def test_fragment_affect_events_are_source_and_actor_grounded():
     assert event["source_fact_keys"]
     assert event["confidence"] == pytest.approx(0.65)
     assert fragment.affect_signature["schema_version"] == 1
+
+
+def test_unresolved_affect_actor_reuses_matching_fact_actor_identity():
+    manager = TopicBuildManager(":memory:", None, None)
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-affect-unresolved",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:u1",
+        content="空雨说看到我让他安心",
+        summary="空雨明确表示看到我让他安心",
+        key_facts=["空雨明确表示看到我让他安心"],
+    )
+    _, timeline_refs, source_refs, actor_refs = manager._fragment_llm_context(
+        [candidate]
+    )
+    decoded = manager._decode_fragment_refs(
+        {
+            "fragments": [
+                {
+                    "label": "看到我时的安心",
+                    "summary": "空雨明确表示看到我让他安心",
+                    "timeline_refs": ["T1"],
+                    "facts": [
+                        {
+                            "content": "空雨明确表示看到我让他安心",
+                            "source_refs": ["T1.K1"],
+                            "actor_refs": [
+                                {
+                                    "actor_ref": "unresolved",
+                                    "display_name_snapshot": "空雨",
+                                    "relation_type": "speaker",
+                                    "confidence": 0.95,
+                                }
+                            ],
+                        }
+                    ],
+                    "affect_events": [
+                        {
+                            "actor_ref": "unresolved",
+                            "display_name_snapshot": "空雨",
+                            "emotion": "安心",
+                            "description": "空雨看到我时感到安心",
+                            "trigger": "看到我",
+                            "target": "我",
+                            "evidence_type": "explicit",
+                            "temporal_status": "historical",
+                            "valence": 0.8,
+                            "arousal": 0.3,
+                            "dominance": 0.5,
+                            "intensity": 0.7,
+                            "confidence": 0.95,
+                            "categories": [{"label": "relief", "score": 0.9}],
+                            "source_refs": ["T1.K1"],
+                        }
+                    ],
+                }
+            ]
+        },
+        timeline_refs,
+        source_refs,
+        actor_refs,
+    )
+    group = TopicCandidateGroup(
+        run_uid="run-affect-unresolved",
+        group_index=0,
+        memory_space_id="space-1",
+        label="安心",
+        timeline_uids=[candidate.memory_uid],
+        time_cluster_keys=[],
+        cohesion=1.0,
+        group_uid="group-affect-unresolved",
+    )
+
+    fragment = manager._validate_fragments(
+        decoded,
+        "run-affect-unresolved",
+        group,
+        [candidate],
+        "prompt",
+        "input",
+        "provider",
+        "model",
+    )[0]
+
+    fact_actor_id = fragment.facts[0]["actor_refs"][0]["actor_id"]
+    assert fragment.affect_events[0]["actor_id"] == fact_actor_id
+    assert not fact_actor_id.endswith(":affect:0")
 
 
 def test_fragment_participation_uses_timeline_bindings_instead_of_model_roles():

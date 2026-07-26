@@ -253,6 +253,197 @@ async def test_migrate_v9_18_to_v9_19_adds_timeline_rebuild_journal(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_migrate_v9_19_to_v9_20_repairs_fragment_and_affect_identity(
+    tmp_path,
+):
+    db_path = str(tmp_path / "legacy-v9.19.db")
+    base_logical_uid = "shared-source-logical-id"
+    target_actor_id = "unresolved:fragment-2:person-hash"
+    event_uid = "affect-event-1"
+    common_columns = {
+        "memory_space_id": "space-1",
+        "timeline_uids": json.dumps(["timeline-1"]),
+        "logical_fragment_uid": base_logical_uid,
+        "fragment_revision": 4,
+        "status": "active",
+        "updated_at": 1.0,
+    }
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE topic_fragments (
+                fragment_uid TEXT PRIMARY KEY,
+                memory_space_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                timeline_uids TEXT NOT NULL,
+                facts TEXT NOT NULL,
+                logical_fragment_uid TEXT NOT NULL,
+                fragment_revision INTEGER NOT NULL,
+                metadata TEXT NOT NULL,
+                affect_events TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE topic_fragment_drafts AS
+            SELECT * FROM topic_fragments WHERE 0
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE topic_memories (
+                topic_uid TEXT PRIMARY KEY,
+                affect_profile TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE topic_actor_links (
+                topic_uid TEXT NOT NULL,
+                actor_id TEXT NOT NULL
+            )
+            """
+        )
+        first_fact = {
+            "type": "weather",
+            "content": "当天遇到台风天气。",
+            "source_fact_keys": ["timeline-1:key-fact-1"],
+        }
+        second_fact = {
+            "type": "relationship",
+            "content": "空雨表达了获得陪伴后的安心。",
+            "source_fact_keys": ["timeline-1:key-fact-1"],
+            "actor_refs": [
+                {
+                    "actor_id": target_actor_id,
+                    "display_name_snapshot": "空雨",
+                    "relation_type": "subject",
+                }
+            ],
+        }
+        detached_event = {
+            "event_uid": event_uid,
+            "actor_id": "unresolved:fragment-2:affect:0",
+            "display_name_snapshot": "空雨",
+            "source_timeline_uids": ["timeline-1"],
+        }
+        rows = [
+            {
+                **common_columns,
+                "fragment_uid": "fragment-1",
+                "label": "台风天气",
+                "summary": "当天遇到台风天气。",
+                "facts": json.dumps([first_fact], ensure_ascii=False),
+                "metadata": "{}",
+                "affect_events": "[]",
+            },
+            {
+                **common_columns,
+                "fragment_uid": "fragment-2",
+                "label": "安心陪伴",
+                "summary": "空雨表达了获得陪伴后的安心。",
+                "facts": json.dumps([second_fact], ensure_ascii=False),
+                "metadata": "{}",
+                "affect_events": json.dumps(
+                    [detached_event], ensure_ascii=False
+                ),
+            },
+        ]
+        insert_fragment_sql = """
+            INSERT INTO {table_name} (
+                fragment_uid, memory_space_id, label, summary, timeline_uids,
+                facts, logical_fragment_uid, fragment_revision, metadata,
+                affect_events, status, updated_at
+            ) VALUES (
+                :fragment_uid, :memory_space_id, :label, :summary,
+                :timeline_uids, :facts, :logical_fragment_uid,
+                :fragment_revision, :metadata, :affect_events, :status,
+                :updated_at
+            )
+        """
+        await db.executemany(
+            insert_fragment_sql.format(table_name="topic_fragments"),
+            rows,
+        )
+        await db.executemany(
+            insert_fragment_sql.format(table_name="topic_fragment_drafts"),
+            rows,
+        )
+        await db.execute(
+            "INSERT INTO topic_memories VALUES (?, ?, 'active', 1.0)",
+            (
+                "topic-1",
+                json.dumps(
+                    [{**detached_event, "fragment_uid": "fragment-2"}],
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        await db.execute(
+            "INSERT INTO topic_actor_links VALUES ('topic-1', ?)",
+            (target_actor_id,),
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_19_to_v9_20(None)
+    await migration._migrate_v9_19_to_v9_20(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        fragments = await (
+            await db.execute(
+                """
+                SELECT fragment_uid, summary, logical_fragment_uid,
+                       fragment_revision, metadata, affect_events
+                FROM topic_fragments ORDER BY fragment_uid
+                """
+            )
+        ).fetchall()
+        topic = await (
+            await db.execute(
+                "SELECT affect_profile FROM topic_memories WHERE topic_uid='topic-1'"
+            )
+        ).fetchone()
+        drafts = await (
+            await db.execute(
+                """
+                SELECT logical_fragment_uid, fragment_revision, affect_events
+                FROM topic_fragment_drafts ORDER BY fragment_uid
+                """
+            )
+        ).fetchall()
+
+    assert fragments[0]["logical_fragment_uid"] != fragments[1][
+        "logical_fragment_uid"
+    ]
+    assert all(row["fragment_revision"] == 1 for row in fragments)
+    assert all(
+        "logical_identity_disambiguation" in json.loads(row["metadata"])
+        for row in fragments
+    )
+    assert fragments[0]["summary"] == "当天遇到台风天气。"
+    repaired_fragment_event = json.loads(fragments[1]["affect_events"])[0]
+    repaired_topic_event = json.loads(topic["affect_profile"])[0]
+    assert repaired_fragment_event["actor_id"] == target_actor_id
+    assert repaired_topic_event["actor_id"] == target_actor_id
+    assert drafts[0]["logical_fragment_uid"] != drafts[1][
+        "logical_fragment_uid"
+    ]
+    assert all(row["fragment_revision"] == 1 for row in drafts)
+    assert json.loads(drafts[1]["affect_events"])[0][
+        "actor_id"
+    ] == target_actor_id
+
+
+@pytest.mark.asyncio
 async def test_set_db_version_forces_text_in_legacy_integer_column(tmp_path):
     db_path = str(tmp_path / "version_affinity.db")
     async with aiosqlite.connect(db_path) as db:

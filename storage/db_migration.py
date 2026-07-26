@@ -16,6 +16,10 @@ import aiosqlite
 from astrbot.api import logger
 
 from ..core.models.memory_identity import resolve_memory_space
+from ..core.topic_fragment_identity import (
+    fragment_semantic_discriminator,
+    logical_fragment_uid,
+)
 from .memory_identity_store import MemoryIdentityStore
 from .topic_memory_store import TopicMemoryStore
 
@@ -24,7 +28,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.19"
+    CURRENT_VERSION = "9.20"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -56,6 +60,7 @@ class DBMigration:
         "9.17": "Unified Timeline-derived Topic importance projection and source repair",
         "9.18": "Source-grounded affect events and Topic affect profiles",
         "9.19": "Source-verified and resumable Timeline reconstruction",
+        "9.20": "Collision-safe Topic fragment identity and affect provenance repair",
     }
 
     def __init__(self, db_path: str):
@@ -369,6 +374,8 @@ class DBMigration:
                     migration_steps.append(self._migrate_v9_17_to_v9_18)
                 if current_key <= self.version_key("9.18"):
                     migration_steps.append(self._migrate_v9_18_to_v9_19)
+                if current_key <= self.version_key("9.19"):
+                    migration_steps.append(self._migrate_v9_19_to_v9_20)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1656,6 +1663,321 @@ class DBMigration:
         if progress_callback:
             progress_callback("建立可恢复的 Timeline 重构任务", 1, 1)
         logger.info("v9.18 -> v9.19 迁移完成")
+
+    async def _migrate_v9_19_to_v9_20(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Repair ambiguous fragment identities and detached affect actors."""
+        logger.info(
+            "执行迁移步骤: v9.19 -> v9.20 "
+            "(fragment identity and affect provenance repair)"
+        )
+        repaired_identities = 0
+        repaired_affect_events = 0
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            if not await self._table_exists(db, "topic_fragments"):
+                if progress_callback:
+                    progress_callback("修复 Topic 片段身份与情绪溯源", 1, 1)
+                return
+
+            formal_rows = list(
+                await (
+                    await db.execute(
+                        """
+                        SELECT fragment_uid, memory_space_id, label, summary,
+                               timeline_uids, facts, logical_fragment_uid,
+                               fragment_revision, metadata, affect_events
+                        FROM topic_fragments
+                        WHERE status = 'active'
+                        ORDER BY memory_space_id, logical_fragment_uid, fragment_uid
+                        """
+                    )
+                ).fetchall()
+            )
+            draft_table_exists = await self._table_exists(
+                db, "topic_fragment_drafts"
+            )
+            rows_by_table = {"topic_fragments": formal_rows}
+            if draft_table_exists:
+                rows_by_table["topic_fragment_drafts"] = list(
+                    await (
+                        await db.execute(
+                            """
+                            SELECT fragment_uid, memory_space_id, label, summary,
+                                   timeline_uids, facts, logical_fragment_uid,
+                                   fragment_revision, metadata, affect_events
+                            FROM topic_fragment_drafts
+                            ORDER BY memory_space_id, logical_fragment_uid,
+                                     fragment_uid
+                            """
+                        )
+                    ).fetchall()
+                )
+            collision_groups: dict[
+                tuple[str, str, str], list[aiosqlite.Row]
+            ] = {}
+            for table_name, table_rows in rows_by_table.items():
+                for row in table_rows:
+                    logical_uid = str(row["logical_fragment_uid"] or "").strip()
+                    if logical_uid:
+                        collision_groups.setdefault(
+                            (
+                                table_name,
+                                str(row["memory_space_id"]),
+                                logical_uid,
+                            ),
+                            [],
+                        ).append(row)
+
+            for (
+                table_name,
+                memory_space_id,
+                base_uid,
+            ), group in collision_groups.items():
+                if len(group) < 2:
+                    continue
+                seen_discriminators: set[str] = set()
+                for row in group:
+                    facts = self._migration_json_object_list(row["facts"])
+                    timeline_uids = self._migration_json_string_list(
+                        row["timeline_uids"]
+                    )
+                    discriminator = fragment_semantic_discriminator(
+                        label=str(row["label"] or ""),
+                        summary=str(row["summary"] or ""),
+                        facts=facts,
+                    )
+                    if discriminator in seen_discriminators:
+                        # Legacy data may contain exact duplicate snapshots. Keep
+                        # both rows addressable; a later maintenance run can decide
+                        # whether one should be archived.
+                        discriminator = fragment_semantic_discriminator(
+                            label=str(row["label"] or ""),
+                            summary=(
+                                str(row["summary"] or "")
+                                + "\nlegacy-fragment:"
+                                + str(row["fragment_uid"])
+                            ),
+                            facts=facts,
+                        )
+                    seen_discriminators.add(discriminator)
+                    new_uid = logical_fragment_uid(
+                        memory_space_id=memory_space_id,
+                        timeline_uids=timeline_uids,
+                        facts=facts,
+                        semantic_discriminator=discriminator,
+                    )
+                    metadata = self._migration_json_object(row["metadata"])
+                    marker = {
+                        "base_logical_fragment_uid": base_uid,
+                        "semantic_discriminator": discriminator,
+                        "reason": "v9.20_existing_source_split_repair",
+                    }
+                    if (
+                        str(row["logical_fragment_uid"] or "") == new_uid
+                        and metadata.get("logical_identity_disambiguation") == marker
+                    ):
+                        continue
+                    metadata["logical_identity_disambiguation"] = marker
+                    await db.execute(
+                        f"""
+                        UPDATE {table_name}
+                        SET logical_fragment_uid = ?, fragment_revision = 1,
+                            metadata = ?, updated_at = ?
+                        WHERE fragment_uid = ?
+                        """,
+                        (
+                            new_uid,
+                            json.dumps(metadata, ensure_ascii=False),
+                            time.time(),
+                            str(row["fragment_uid"]),
+                        ),
+                    )
+                    repaired_identities += 1
+
+            event_actor_repairs: dict[str, str] = {}
+            for table_name, table_rows in rows_by_table.items():
+                for row in table_rows:
+                    facts = self._migration_json_object_list(row["facts"])
+                    metadata = self._migration_json_object(row["metadata"])
+                    actors = [
+                        *self._migration_json_actor_list(
+                            metadata.get("participant_refs")
+                        ),
+                        *self._migration_json_actor_list(
+                            metadata.get("mentioned_actor_refs")
+                        ),
+                        *[
+                            actor
+                            for fact in facts
+                            for actor in self._migration_json_actor_list(
+                                fact.get("actor_refs")
+                            )
+                        ],
+                    ]
+                    actor_ids_by_name: dict[str, set[str]] = {}
+                    for actor in actors:
+                        name = self._migration_identity_name(
+                            actor.get("display_name_snapshot")
+                        )
+                        actor_id = str(actor.get("actor_id") or "").strip()
+                        if name and actor_id:
+                            actor_ids_by_name.setdefault(name, set()).add(actor_id)
+                    unique_actor_ids = {
+                        name: next(iter(actor_ids))
+                        for name, actor_ids in actor_ids_by_name.items()
+                        if len(actor_ids) == 1
+                    }
+                    events = self._migration_json_object_list(row["affect_events"])
+                    changed = False
+                    for event in events:
+                        name = self._migration_identity_name(
+                            event.get("display_name_snapshot")
+                        )
+                        target_actor_id = unique_actor_ids.get(name)
+                        if not target_actor_id:
+                            continue
+                        current_actor_id = str(event.get("actor_id") or "").strip()
+                        if current_actor_id == target_actor_id:
+                            continue
+                        if not self._migration_is_detached_affect_actor(
+                            current_actor_id
+                        ):
+                            continue
+                        event["actor_id"] = target_actor_id
+                        event_uid = str(event.get("event_uid") or "").strip()
+                        if event_uid:
+                            event_actor_repairs[event_uid] = target_actor_id
+                        repaired_affect_events += 1
+                        changed = True
+                    if changed:
+                        await db.execute(
+                            f"""
+                            UPDATE {table_name}
+                            SET affect_events = ?, updated_at = ?
+                            WHERE fragment_uid = ?
+                            """,
+                            (
+                                json.dumps(events, ensure_ascii=False),
+                                time.time(),
+                                str(row["fragment_uid"]),
+                            ),
+                        )
+
+            if (
+                event_actor_repairs
+                and await self._table_exists(db, "topic_memories")
+                and await self._table_exists(db, "topic_actor_links")
+            ):
+                topic_rows = await (
+                    await db.execute(
+                        """
+                        SELECT topic_uid, affect_profile
+                        FROM topic_memories
+                        WHERE status = 'active' AND affect_profile != '[]'
+                        """
+                    )
+                ).fetchall()
+                for topic_row in topic_rows:
+                    topic_uid = str(topic_row["topic_uid"])
+                    actor_rows = await (
+                        await db.execute(
+                            """
+                            SELECT actor_id FROM topic_actor_links
+                            WHERE topic_uid = ?
+                            """,
+                            (topic_uid,),
+                        )
+                    ).fetchall()
+                    valid_actor_ids = {
+                        str(actor_row["actor_id"]) for actor_row in actor_rows
+                    }
+                    profile = self._migration_json_object_list(
+                        topic_row["affect_profile"]
+                    )
+                    changed = False
+                    for event in profile:
+                        event_uid = str(event.get("event_uid") or "").strip()
+                        target_actor_id = event_actor_repairs.get(event_uid)
+                        if (
+                            target_actor_id
+                            and target_actor_id in valid_actor_ids
+                            and str(event.get("actor_id") or "") != target_actor_id
+                        ):
+                            event["actor_id"] = target_actor_id
+                            changed = True
+                    if changed:
+                        await db.execute(
+                            """
+                            UPDATE topic_memories
+                            SET affect_profile = ?, updated_at = ?
+                            WHERE topic_uid = ?
+                            """,
+                            (
+                                json.dumps(profile, ensure_ascii=False),
+                                time.time(),
+                                topic_uid,
+                            ),
+                        )
+            await db.commit()
+        if progress_callback:
+            progress_callback("修复 Topic 片段身份与情绪溯源", 1, 1)
+        logger.info(
+            "v9.19 -> v9.20 迁移完成 "
+            f"(fragment_identities={repaired_identities}, "
+            f"affect_events={repaired_affect_events})"
+        )
+
+    @staticmethod
+    def _migration_json_object(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        try:
+            parsed = json.loads(value or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _migration_json_object_list(value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, list):
+            parsed = value
+        else:
+            try:
+                parsed = json.loads(value or "[]")
+            except (TypeError, ValueError):
+                return []
+        return [dict(item) for item in parsed if isinstance(item, dict)]
+
+    @staticmethod
+    def _migration_json_string_list(value: Any) -> list[str]:
+        if isinstance(value, list):
+            parsed = value
+        else:
+            try:
+                parsed = json.loads(value or "[]")
+            except (TypeError, ValueError):
+                return []
+        return [str(item) for item in parsed if str(item)]
+
+    @staticmethod
+    def _migration_json_actor_list(value: Any) -> list[dict[str, Any]]:
+        return DBMigration._migration_json_object_list(value)
+
+    @staticmethod
+    def _migration_identity_name(value: Any) -> str:
+        return " ".join(str(value or "").strip().casefold().split())
+
+    @staticmethod
+    def _migration_is_detached_affect_actor(actor_id: str) -> bool:
+        value = str(actor_id or "").strip()
+        return value == "unresolved" or (
+            value.startswith("unresolved:") and ":affect:" in value
+        )
 
     async def _table_exists(self, db: aiosqlite.Connection, table_name: str) -> bool:
         cursor = await db.execute(
