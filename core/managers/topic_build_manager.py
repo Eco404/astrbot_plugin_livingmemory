@@ -70,7 +70,10 @@ from ..topic_settings import TOPIC_SETTINGS_REVISION
 from ..topic_runtime import TopicBuildRunContext
 from ..topic_similarity import average_vectors, cosine_similarity
 from ..topic_vector_index import TopicVectorIndex
-from .topic_fragment_identity import logical_fragment_uid
+from .topic_fragment_identity import (
+    fragment_semantic_discriminator,
+    logical_fragment_uid,
+)
 from .topic_maintenance_manager import TopicMaintenanceManager
 from .topic_relation_builder import vector_neighbor_rankings
 
@@ -5991,14 +5994,25 @@ class TopicBuildManager:
                 mentioned_actor_refs,
                 normalized_facts,
             )
+            actors_by_name: dict[str, set[str]] = {}
+            for value in [
+                *participant_refs,
+                *mentioned_actor_refs,
+                *[
+                    actor
+                    for fact in normalized_facts
+                    for actor in fact.get("actor_refs", [])
+                    if isinstance(actor, dict)
+                ],
+            ]:
+                name_key = self._norm(value.get("display_name_snapshot"))
+                actor_id = str(value.get("actor_id") or "").strip()
+                if name_key and actor_id:
+                    actors_by_name.setdefault(name_key, set()).add(actor_id)
             actor_ids_by_name = {
-                self._norm(value.get("display_name_snapshot")): str(
-                    value.get("actor_id") or ""
-                )
-                for value in [*participant_refs, *mentioned_actor_refs]
-                if isinstance(value, dict)
-                and self._norm(value.get("display_name_snapshot"))
-                and str(value.get("actor_id") or "")
+                name: next(iter(actor_ids))
+                for name, actor_ids in actors_by_name.items()
+                if len(actor_ids) == 1
             }
             affect_events: list[dict[str, Any]] = []
             for event_index, raw_event in enumerate(raw.get("affect_events", [])):
@@ -6178,7 +6192,47 @@ class TopicBuildManager:
                 )
         if covered != allowed.keys():
             raise TopicBuildValidationError("LLM fragments did not cover every Timeline input")
+        self._disambiguate_logical_fragment_collisions(result)
         return result
+
+    @staticmethod
+    def _disambiguate_logical_fragment_collisions(
+        fragments: list[TopicFragmentDraft],
+    ) -> None:
+        """Keep provenance identity stable unless one source splits into facets."""
+        by_logical_uid: dict[str, list[TopicFragmentDraft]] = {}
+        for fragment in fragments:
+            by_logical_uid.setdefault(fragment.logical_fragment_uid, []).append(
+                fragment
+            )
+        for base_uid, colliding in by_logical_uid.items():
+            if len(colliding) < 2:
+                continue
+            discriminators: dict[str, TopicFragmentDraft] = {}
+            for fragment in colliding:
+                discriminator = fragment_semantic_discriminator(
+                    label=fragment.label,
+                    summary=fragment.summary,
+                    facts=fragment.facts,
+                )
+                if discriminator in discriminators:
+                    raise TopicBuildValidationError(
+                        "LLM returned duplicate semantic fragments for the same "
+                        "source facts"
+                    )
+                discriminators[discriminator] = fragment
+            for discriminator, fragment in discriminators.items():
+                fragment.logical_fragment_uid = logical_fragment_uid(
+                    memory_space_id=fragment.memory_space_id,
+                    timeline_uids=fragment.timeline_uids,
+                    facts=fragment.facts,
+                    semantic_discriminator=discriminator,
+                )
+                fragment.metadata["logical_identity_disambiguation"] = {
+                    "base_logical_fragment_uid": base_uid,
+                    "semantic_discriminator": discriminator,
+                    "reason": "shared_source_split_into_multiple_fragments",
+                }
 
     @staticmethod
     def _scope_unresolved_actor_ids(
@@ -7258,6 +7312,11 @@ Reference rules:
   actor_ref "unresolved" and copy only the local source label into
   display_name_snapshot. The application will create a fragment-local identity; never
   reuse it as if it were a stable account.
+- Actor relations are only for people, assistant personas, or explicitly described
+  groups of people capable of speaking, acting, requesting, or feeling. Weather,
+  seasons, dates, times, places, objects, products, organizations, policies, and
+  abstract concepts are not actors and must never receive actor_refs merely because
+  the source mentions them.
 - The application derives fragment participants from Timeline role bindings. Do not
   return participant or mentioned-person arrays at fragment level.
 - Fact actor_refs may use the seven exact relation types speaker, narrator, responder,

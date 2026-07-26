@@ -845,6 +845,12 @@ class TopicMemoryStore:
             atom_actor_links,
             fragments=fragments,
         )
+        self._validate_affect_links(
+            topic,
+            links,
+            actor_links,
+            fragments=fragments,
+        )
         async with self._connect() as db:
             try:
                 await db.execute("BEGIN IMMEDIATE")
@@ -905,6 +911,12 @@ class TopicMemoryStore:
                 atoms,
                 actor_links,
                 atom_actor_links,
+                fragments=list(snapshot.get("fragments") or []),
+            )
+            self._validate_affect_links(
+                topic,
+                links,
+                actor_links,
                 fragments=list(snapshot.get("fragments") or []),
             )
             normalized_snapshots.append(
@@ -4219,6 +4231,49 @@ class TopicMemoryStore:
             TopicMemoryStore._validate_score(
                 "atom actor confidence", link.confidence
             )
+
+    @staticmethod
+    def _validate_affect_links(
+        topic: TopicMemory,
+        links: list[TopicTimelineLink],
+        actor_links: list[TopicActorLink],
+        *,
+        fragments: list[TopicFragmentDraft] | None = None,
+    ) -> None:
+        """Require Topic affect prototypes to keep their actor/source chain."""
+        actor_ids = {link.actor_id for link in actor_links}
+        timeline_uids = {link.timeline_uid for link in links}
+        fragment_uids = (
+            {fragment.fragment_uid for fragment in fragments}
+            if fragments is not None
+            else None
+        )
+        for index, event in enumerate(topic.affect_profile or []):
+            if not isinstance(event, dict):
+                raise TypeError(f"Topic affect event {index} must be an object")
+            actor_id = str(event.get("actor_id") or "").strip()
+            if not actor_id or actor_id not in actor_ids:
+                raise ValueError(
+                    f"Topic affect event {index} requires a matching actor link"
+                )
+            event_timelines = {
+                str(value)
+                for value in event.get("source_timeline_uids", [])
+                if str(value)
+            }
+            if not event_timelines or not event_timelines <= timeline_uids:
+                raise ValueError(
+                    f"Topic affect event {index} has invalid Timeline provenance"
+                )
+            fragment_uid = str(event.get("fragment_uid") or "").strip()
+            if (
+                fragment_uids is not None
+                and (not fragment_uid or fragment_uid not in fragment_uids)
+            ):
+                raise ValueError(
+                    f"Topic affect event {index} references a fragment outside "
+                    "the snapshot"
+                )
 
     @staticmethod
     def _validate_score(name: str, value: float) -> None:

@@ -306,6 +306,16 @@ async def test_affect_profile_and_fragment_events_round_trip(tmp_path: Path):
             )
         ],
         atom_sources=[],
+        actor_links=[
+            TopicActorLink(
+                topic_uid="topic-1",
+                actor_id="qq:human:u1",
+                actor_type="human",
+                relation_type="subject",
+                display_name_snapshot="示例甲",
+                resolution_status="evidence_confirmed",
+            )
+        ],
         fragments=[fragment],
     )
 
@@ -318,6 +328,55 @@ async def test_affect_profile_and_fragment_events_round_trip(tmp_path: Path):
     assert restored_topic.affect_signature == signature
     assert restored_fragments[0]["fragment"].affect_events == [event]
     assert restored_fragments[0]["fragment"].affect_signature == signature
+
+
+def test_affect_profile_rejects_actor_outside_topic_actor_index():
+    topic = TopicMemory(
+        topic_uid="topic-1",
+        memory_space_id="space-1",
+        title="情绪溯源",
+        summary="一条有人物引用的情绪记录。",
+        affect_profile=[
+            {
+                "event_uid": "affect-event-1",
+                "actor_id": "unresolved:fragment-1:affect:0",
+                "source_timeline_uids": ["timeline-1"],
+                "fragment_uid": "fragment-1",
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="matching actor link"):
+        TopicMemoryStore._validate_affect_links(
+            topic,
+            [
+                TopicTimelineLink(
+                    topic_uid="topic-1",
+                    timeline_uid="timeline-1",
+                    time_cluster_key="cluster-1",
+                )
+            ],
+            [
+                TopicActorLink(
+                    topic_uid="topic-1",
+                    actor_id="unresolved:fragment-1:person-hash",
+                    actor_type="human",
+                    relation_type="subject",
+                )
+            ],
+            fragments=[
+                TopicFragmentDraft(
+                    fragment_uid="fragment-1",
+                    run_uid="run-1",
+                    candidate_group_uid="group-1",
+                    memory_space_id="space-1",
+                    label="片段",
+                    summary="片段",
+                    timeline_uids=["timeline-1"],
+                    source_revisions={"timeline-1": 1},
+                    facts=[],
+                )
+            ],
+        )
 
 
 @pytest.mark.asyncio
