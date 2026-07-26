@@ -418,6 +418,7 @@ export class TopicPage {
       const participantGroups = groupActors(participants);
       const mentionedGroups = groupActors(mentionedActors);
       const importanceProjection = topic.metadata?.importance_projection || {};
+      const affectProfile = Array.isArray(topic.affect_profile) ? topic.affect_profile : [];
       const importanceMetrics = [
         [window.t("topic.currentImportance"), topic.importance],
         [window.t("topic.baseImportance"), topic.base_importance],
@@ -446,6 +447,41 @@ export class TopicPage {
           </details>
         </div>`;
       }).join("") || `<div class="text-tertiary">${esc(window.t("topic.none"))}</div>`;
+      const translatedEnum = (prefix, value) => {
+        const normalized = String(value || "").trim();
+        if (!normalized) return "--";
+        const key = `${prefix}.${normalized}`;
+        const translated = window.t(key);
+        return translated === key ? normalized : translated;
+      };
+      const affectActorName = event => {
+        const actorId = String(event.actor_id || "").trim();
+        const actorLink = actorLinks.find(link => String(link.actor_id || "").trim() === actorId);
+        return actorLink
+          ? actorDisplayName(actorLink)
+          : String(event.display_name_snapshot || actorId || "--").trim();
+      };
+      const renderAffect = () => affectProfile.length ? affectProfile.map(event => {
+        const sourceTimelines = Array.isArray(event.source_timeline_uids) ? event.source_timeline_uids : [];
+        const sourceFacts = Array.isArray(event.source_fact_keys) ? event.source_fact_keys : [];
+        const sourceAtoms = Array.isArray(event.source_atom_fingerprints) ? event.source_atom_fingerprints : [];
+        const identifiers = [event.event_uid, event.fragment_uid, ...sourceTimelines, ...sourceFacts, ...sourceAtoms]
+          .map(value => String(value || "").trim())
+          .filter(Boolean);
+        return `<article class="topic-affect-event">
+          <div class="topic-affect-event-heading"><strong>${esc(affectActorName(event))}</strong><span>${esc(event.emotion || "--")}</span></div>
+          <p>${esc(event.description || "--")}</p>
+          <div class="topic-affect-event-meta">
+            <span><small>${esc(window.t("topic.affectTimeStatus"))}</small>${esc(translatedEnum("topic.affectStatus", event.temporal_status))}</span>
+            <span><small>${esc(window.t("topic.affectEvidence"))}</small>${esc(translatedEnum("topic.affectEvidence", event.evidence_type))}</span>
+            <span><small>${esc(window.t("topic.affectIntensity"))}</small>${Number(event.intensity || 0).toFixed(2)}</span>
+            <span><small>${esc(window.t("topic.affectConfidence"))}</small>${Number(event.confidence || 0).toFixed(2)}</span>
+          </div>
+          ${event.trigger ? `<div class="topic-affect-event-context"><small>${esc(window.t("topic.affectTrigger"))}</small><span>${esc(event.trigger)}</span></div>` : ""}
+          ${event.target ? `<div class="topic-affect-event-context"><small>${esc(window.t("topic.affectTarget"))}</small><span>${esc(event.target)}</span></div>` : ""}
+          ${identifiers.length ? `<div class="topic-affect-sources"><small>${esc(window.t("topic.affectSource"))}</small>${identifiers.map(value => `<code>${esc(value)}</code>`).join("")}</div>` : ""}
+        </article>`;
+      }).join("") : `<div class="text-tertiary">${esc(window.t("topic.affectNone"))}</div>`;
       title.innerHTML = `${esc(topic.title)} <span class="topic-detail-readonly text-tertiary">（${esc(window.t("topic.readOnly"))}）</span>`;
       body.innerHTML = `
         <p class="topic-detail-summary">${esc(topic.summary)}</p>
@@ -454,6 +490,16 @@ export class TopicPage {
           <span><small>${esc(window.t("topic.accessCount"))}</small><strong>${Number(topic.access_count || 0)}</strong></span>
           <span><small>${esc(window.t("topic.dynamicFactor"))}</small><strong>${Number(importanceProjection.dynamic_factor ?? 1).toFixed(2)}</strong></span>
         </div>
+        <details class="topic-compact-details topic-more-details">
+          <summary>${esc(window.t("topic.identifierDetails"))}</summary>
+          <div class="topic-more-details-content">
+            <section>
+              <div class="topic-more-details-heading"><strong>${esc(window.t("topic.affectMemory"))} (${affectProfile.length})</strong><small>${esc(window.t("topic.affectSalience"))} ${Number(topic.affective_salience || 0).toFixed(2)}</small></div>
+              <div class="topic-affect-list">${renderAffect()}</div>
+            </section>
+            <section class="topic-identifier-list"><code>${esc(topic.topic_uid)}</code><code>r${Number(topic.revision || 0)}</code></section>
+          </div>
+        </details>
         <div class="topic-related-section">
           <strong>${esc(window.t("topic.relatedTopics"))} (${relatedTopics.length})</strong>
           <div class="topic-related-list">${relatedTopics.length ? relatedTopics.map(item => `

@@ -1376,11 +1376,13 @@ class TopicMemoryStore:
         actors: dict[str, dict[str, Any]] = {}
         for row in rows:
             actor_id = str(row["actor_id"])
+            display_name = str(row["display_name"] or actor_id).strip() or actor_id
             item = actors.setdefault(
                 actor_id,
                 {
                     "actor_ids": [actor_id],
-                    "display_name": str(row["display_name"] or actor_id),
+                    "display_name": display_name,
+                    "display_names": [],
                     "actor_type": str(row["actor_type"] or "unknown"),
                     "resolution_status": str(
                         row["resolution_status"] or "unresolved"
@@ -1388,7 +1390,39 @@ class TopicMemoryStore:
                     "topic_uids": set(),
                 },
             )
+            if display_name not in item["display_names"]:
+                item["display_names"].append(display_name)
             item["topic_uids"].add(str(row["topic_uid"]))
+
+        for actor_id, item in actors.items():
+            names = [
+                str(name).strip()
+                for name in item.pop("display_names", [])
+                if str(name).strip()
+            ]
+            actor_type = str(item.get("actor_type") or "unknown")
+            persona_name = ""
+            if actor_type == "assistant" and actor_id.startswith(
+                "assistant-persona:"
+            ):
+                persona_name = actor_id.split(":", 1)[1].strip()
+                if persona_name in {"", "default"} or persona_name.isdigit():
+                    persona_name = ""
+            readable_names = [
+                name
+                for name in names
+                if name != actor_id and not name.isdigit()
+            ]
+            # A Topic can contain older account-ID snapshots and newer persona
+            # snapshots for the same stable assistant actor. The stable
+            # assistant-persona ID is authoritative and also keeps different
+            # personas on the same bot account as separate filter entries.
+            item["display_name"] = (
+                persona_name
+                or next(iter(readable_names), "")
+                or next(iter(names), "")
+                or actor_id
+            )
 
         resolved: list[dict[str, Any]] = []
         unresolved: dict[str, dict[str, Any]] = {}
