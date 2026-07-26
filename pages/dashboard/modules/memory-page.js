@@ -114,7 +114,7 @@ export class MemoryPage {
         html += '<tr data-key="' + key + '" style="height:' + this.ROW_HEIGHT + 'px">';
         html += '<td class="cell-mono cell-id">' + item.memory_id + '</td>';
         const qualityFlag = item.summary_quality === "low"
-          ? '<span class="timeline-quality-flag" title="' + esc(window.t("memory.lowQualityHint")) + '">' + esc(window.t("memory.lowQuality")) + '</span>'
+          ? '<span class="timeline-quality-flag" title="' + esc(window.t("memory.lowQualityHint")) + '" aria-label="' + esc(window.t("memory.lowQuality")) + '"></span>'
           : '';
         html += '<td class="cell-summary"><div class="memory-summary-text">' + esc(item.summary || "") + '</div><div class="memory-summary-meta">' + esc(window.t("table.updated", item.updated_at || "--")) + qualityFlag + '</div></td>';
         html += '<td class="cell-topics"><span class="timeline-topic-count">' + item.topic_count + '</span></td>';

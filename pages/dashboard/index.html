@@ -634,10 +634,10 @@
         <div class="modal-body">
           <label class="identity-field"><span data-i18n="maintenance.operation">操作</span>
             <select class="select input" id="session-maintenance-operation">
-              <option value="cleanup_summarized" data-i18n="maintenance.cleanupSummarized">清理已总结的旧消息</option>
-              <option value="delete_raw_keep_memory" data-i18n="maintenance.deleteRawKeepMemory">删除原始会话，保留 Timeline/Topic</option>
+              <option value="cleanup_summarized" data-i18n="maintenance.cleanupSummarized">清理已总结的聊天记录</option>
+              <option value="delete_raw_keep_memory" data-i18n="maintenance.deleteRawKeepMemory">删除全部聊天记录（危险操作）</option>
               <option value="merge_aliases" data-i18n="maintenance.mergeAliases">合并会话别名</option>
-              <option value="delete_memory_chain" data-i18n="maintenance.deleteMemoryChain">完整删除会话记忆链</option>
+              <option value="delete_memory_chain" data-i18n="maintenance.deleteMemoryChain">完整删除会话记忆链（危险操作）</option>
             </select>
           </label>
           <label class="identity-field hidden" id="session-canonical-field"><span data-i18n="maintenance.canonicalSession">规范会话</span><select class="select input" id="session-maintenance-canonical"></select></label>
