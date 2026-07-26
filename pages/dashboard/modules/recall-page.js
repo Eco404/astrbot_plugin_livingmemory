@@ -45,6 +45,8 @@ export class RecallPage {
     const kSlider = document.getElementById("recall-k");
     const kValue = document.getElementById("recall-k-value");
     const sessionInput = document.getElementById("recall-session");
+    const temporalEnabled = document.getElementById("recall-temporal-enabled");
+    const temporalMode = document.getElementById("recall-temporal-mode");
 
     // k 值滑块
     if (kSlider && kValue) {
@@ -72,6 +74,13 @@ export class RecallPage {
       sessionInput.addEventListener("change", updateReminder);
       this.updateSessionReminder();
     }
+    temporalEnabled?.addEventListener("change", () => this.updateTemporalControls());
+    temporalMode?.addEventListener("change", () => {
+      const order = document.getElementById("recall-temporal-order");
+      if (order) order.value = temporalMode.value === "range" ? "relevance" : temporalMode.value;
+      this.updateTemporalControls();
+    });
+    this.updateTemporalControls();
     document.getElementById("recall-export-current")?.addEventListener("click", () => this.exportJson(this.currentExport));
     document.getElementById("recall-history-refresh")?.addEventListener("click", () => this.loadHistory());
     document.getElementById("recall-history-clear")?.addEventListener("click", () => this.clearHistory());
@@ -85,6 +94,47 @@ export class RecallPage {
     const missing = !input.value.trim();
     field.classList.toggle("is-missing", missing);
     input.setAttribute("aria-invalid", missing ? "true" : "false");
+  }
+
+  updateTemporalControls() {
+    const enabledInput = document.getElementById("recall-temporal-enabled");
+    const controls = document.getElementById("recall-temporal-controls");
+    const rangeFields = document.getElementById("recall-temporal-range-fields");
+    const mode = document.getElementById("recall-temporal-mode")?.value || "range";
+    const enabled = Boolean(enabledInput?.checked);
+    const rangeEnabled = enabled && mode === "range";
+
+    controls?.classList.toggle("hidden", !enabled);
+    controls?.classList.toggle("is-range", mode === "range");
+    rangeFields?.classList.toggle("hidden", mode !== "range");
+    enabledInput?.setAttribute("aria-expanded", enabled ? "true" : "false");
+    controls?.querySelectorAll("input, select").forEach(control => {
+      const isRangeControl = control.id === "recall-temporal-start" || control.id === "recall-temporal-end";
+      control.disabled = !enabled || (isRangeControl && !rangeEnabled);
+    });
+  }
+
+  buildTemporalRequest() {
+    if (!document.getElementById("recall-temporal-enabled")?.checked) return null;
+
+    const mode = document.getElementById("recall-temporal-mode")?.value || "range";
+    const order = document.getElementById("recall-temporal-order")?.value || "relevance";
+    const startValue = document.getElementById("recall-temporal-start")?.value || "";
+    const endValue = document.getElementById("recall-temporal-end")?.value || "";
+
+    if (mode === "range" && !startValue && !endValue) {
+      throw new Error(window.t("recall.temporal.rangeRequired"));
+    }
+    if (startValue && endValue && new Date(startValue).getTime() > new Date(endValue).getTime()) {
+      throw new Error(window.t("recall.temporal.invalidRange"));
+    }
+
+    const temporal = { mode, order };
+    if (mode === "range") {
+      if (startValue) temporal.start = new Date(startValue).toISOString();
+      if (endValue) temporal.end = new Date(endValue).toISOString();
+    }
+    return temporal;
   }
 
   /**
@@ -101,6 +151,14 @@ export class RecallPage {
       return;
     }
 
+    let temporal = null;
+    try {
+      temporal = this.buildTemporalRequest();
+    } catch (error) {
+      this.showToast(error.message, true);
+      return;
+    }
+
     const searchBtn = document.getElementById("recall-search-btn");
     if (searchBtn) searchBtn.disabled = true;
 
@@ -109,6 +167,7 @@ export class RecallPage {
     try {
       const params = { query, k, mode };
       if (sessionId) params.session_id = sessionId;
+      if (temporal) params.temporal = temporal;
 
       const data = await this.api.post("recall/test", params);
       const elapsed = Date.now() - startTime;
@@ -204,6 +263,12 @@ export class RecallPage {
       if (breakdown.recall_branch_count != null) {
         html += '<span>' + window.t("recall.branchCount") + ': ' + Number(breakdown.recall_branch_count).toFixed(0) + '</span>';
       }
+      if (mem.metadata?.event_started_at != null || mem.metadata?.event_ended_at != null) {
+        const started = mem.metadata.event_started_at != null ? new Date(Number(mem.metadata.event_started_at) * 1000).toLocaleString() : "--";
+        const ended = mem.metadata.event_ended_at != null ? new Date(Number(mem.metadata.event_ended_at) * 1000).toLocaleString() : started;
+        html += '<span>' + window.t("recall.temporal.matchedTime") + ': ' + esc(started === ended ? started : `${started} - ${ended}`) + '</span>';
+        if (mem.metadata.time_fallback) html += '<span>' + window.t("recall.temporal.fallback") + '</span>';
+      }
       html += '</div>';
       html += '</div>';
     });
@@ -244,6 +309,19 @@ export class RecallPage {
       metadata: [
         { label: "层", value: layer },
         { label: "得分", value: String(memory.similarity_score ?? "--") },
+        ...(memory.metadata?.event_started_at != null || memory.metadata?.event_ended_at != null ? [{
+          label: window.t("recall.temporal.matchedTime"),
+          value: (() => {
+            const started = memory.metadata.event_started_at != null
+              ? new Date(Number(memory.metadata.event_started_at) * 1000).toLocaleString()
+              : "--";
+            const ended = memory.metadata.event_ended_at != null
+              ? new Date(Number(memory.metadata.event_ended_at) * 1000).toLocaleString()
+              : started;
+            return started === ended ? started : `${started} - ${ended}`;
+          })(),
+        }] : []),
+        ...(memory.metadata?.time_basis ? [{ label: window.t("recall.temporal.basis"), value: String(memory.metadata.time_basis) }] : []),
       ],
     }, trigger);
   }

@@ -6,15 +6,15 @@ import json
 from dataclasses import field
 from typing import Any
 
-from pydantic.dataclasses import dataclass
-
 from astrbot.api import logger
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
+from pydantic.dataclasses import dataclass
 
 from ..base.config_manager import ConfigManager
 from ..models.conversation_models import stable_actor_id
+from ..retrieval.temporal_constraint import TemporalConstraint
 from ..retrieval.unified_recall import (
     UnifiedRecallCoordinator,
     UnifiedRecallRequest,
@@ -45,6 +45,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
         "or when resolving ambiguous references requires checking memory. "
         "Prefer short topic phrases, named entities, preferences, commitments, or past events as recall keywords. "
         "If the first recall is not enough, refine the keywords and recall again."
+        " Optionally provide a temporal constraint when an explicit time range or chronological order is required."
     )
     parameters: dict[str, Any] = field(
         default_factory=lambda: {
@@ -59,6 +60,33 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "description": "Maximum number of memory items to return for one recall. Keep this small unless more evidence is needed.",
                     "default": 5,
                 },
+                "temporal": {
+                    "type": "object",
+                    "description": "Optional event-time constraint. It is applied only to this explicit tool call and uses stored Timeline source times, never raw chat history.",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["range", "earliest", "latest"],
+                            "default": "range",
+                        },
+                        "start": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Optional inclusive RFC3339 lower bound with timezone.",
+                        },
+                        "end": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Optional inclusive RFC3339 upper bound with timezone.",
+                        },
+                        "order": {
+                            "type": "string",
+                            "enum": ["relevance", "earliest", "latest"],
+                            "description": "Result order after semantic qualification.",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
             },
             "required": ["query"],
         }
@@ -69,6 +97,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
         context: ContextWrapper[AstrAgentContext],
         query: str,
         k: int = 5,
+        temporal: dict[str, Any] | None = None,
     ) -> ToolExecResult:
         """执行长期记忆回忆。"""
         cleaned_query = (query or "").strip()
@@ -79,6 +108,19 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "count": 0,
                     "results": [],
                     "error": "query is empty",
+                }
+            )
+
+        try:
+            temporal_constraint = TemporalConstraint.from_payload(temporal)
+        except ValueError as exc:
+            return _json_result(
+                {
+                    "query": cleaned_query,
+                    "count": 0,
+                    "results": [],
+                    "error": "invalid_temporal_constraint",
+                    "detail": str(exc),
                 }
             )
 
@@ -164,6 +206,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     session_scope=list(session_scope or [session_id]),
                     current_actor_ids=current_actor_ids,
                     topic_enabled=topic_enabled,
+                    temporal=temporal_constraint,
                 )
             )
             topic_outcome = unified_outcome.topic_outcome
@@ -182,6 +225,17 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "affect_match_score": item.affect_match_score,
                     "affect_match_boost": item.affect_match_boost,
                     "affect_event_count": len(item.selected_affect_events),
+                    **(
+                        {
+                            "event_started_at": getattr(item, "event_started_at", None),
+                            "event_ended_at": getattr(item, "event_ended_at", None),
+                            "time_basis": getattr(item, "time_basis", "unavailable"),
+                            "time_fallback": getattr(item, "time_fallback", True),
+                            "matched_source_uids": getattr(item, "matched_source_uids", []),
+                        }
+                        if temporal_constraint is not None
+                        else {}
+                    ),
                 }
                 for item in topic_results
             ]
@@ -197,6 +251,17 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "fragment_fact_count": len(item.fact_contents),
                     "source_timeline_count": len(item.fragment.timeline_uids),
                     "narrative_perspective": "first_person_assistant",
+                    **(
+                        {
+                            "event_started_at": getattr(item, "event_started_at", None),
+                            "event_ended_at": getattr(item, "event_ended_at", None),
+                            "time_basis": getattr(item, "time_basis", "unavailable"),
+                            "time_fallback": getattr(item, "time_fallback", True),
+                            "matched_source_uids": getattr(item, "matched_source_uids", []),
+                        }
+                        if temporal_constraint is not None
+                        else {}
+                    ),
                 }
                 for item in fragment_results
             )
@@ -212,6 +277,19 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                         "persona_id": metadata.get("persona_id"),
                         "create_time": metadata.get("create_time"),
                         "last_access_time": metadata.get("last_access_time"),
+                        **(
+                            {
+                                "event_started_at": metadata.get("event_started_at"),
+                                "event_ended_at": metadata.get("event_ended_at"),
+                                "time_basis": metadata.get("time_basis"),
+                                "time_fallback": metadata.get("time_fallback"),
+                                "matched_source_uids": metadata.get(
+                                    "matched_source_uids", []
+                                ),
+                            }
+                            if temporal_constraint is not None
+                            else {}
+                        ),
                         **(
                             {
                                 "memory_layer": (
@@ -241,6 +319,11 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "applied_filters": {
                         "session_filtered": use_session_filtering,
                         "persona_filtered": use_persona_filtering,
+                        **(
+                            {"temporal": temporal_constraint.to_dict()}
+                            if temporal_constraint is not None
+                            else {}
+                        ),
                     },
                     "count": len(serialized_results),
                     "results": serialized_results,

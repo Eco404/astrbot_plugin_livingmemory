@@ -75,6 +75,11 @@ class TopicRecallResult:
     rerank_rank_boost: float = 0.0
     selected: bool = False
     filter_reason: str | None = None
+    event_started_at: float | None = None
+    event_ended_at: float | None = None
+    time_basis: str = "unavailable"
+    time_fallback: bool = True
+    matched_source_uids: list[str] = field(default_factory=list)
 
     @property
     def topic_uid(self) -> str:
@@ -139,6 +144,11 @@ class TopicRecallResult:
             "affect_event_count": len(self.selected_affect_events),
             "selected": self.selected,
             "filter_reason": self.filter_reason,
+            "event_started_at": self.event_started_at,
+            "event_ended_at": self.event_ended_at,
+            "time_basis": self.time_basis,
+            "time_fallback": self.time_fallback,
+            "matched_source_uids": self.matched_source_uids,
         }
 
 
@@ -170,6 +180,11 @@ class TopicFragmentRecallResult:
     duplicate_fact_count: int = 0
     selected: bool = False
     filter_reason: str | None = None
+    event_started_at: float | None = None
+    event_ended_at: float | None = None
+    time_basis: str = "unavailable"
+    time_fallback: bool = True
+    matched_source_uids: list[str] = field(default_factory=list)
 
     @property
     def fragment_uid(self) -> str:
@@ -260,6 +275,11 @@ class TopicFragmentRecallResult:
             },
             "selected": self.selected,
             "filter_reason": self.filter_reason,
+            "event_started_at": self.event_started_at,
+            "event_ended_at": self.event_ended_at,
+            "time_basis": self.time_basis,
+            "time_fallback": self.time_fallback,
+            "matched_source_uids": self.matched_source_uids,
         }
 
 

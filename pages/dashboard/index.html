@@ -429,6 +429,43 @@
                 </div>
                 <button class="btn btn-primary" id="recall-search-btn" data-i18n="recall.searchBtn">Run Recall</button>
               </div>
+              <div class="recall-temporal-section">
+                <label class="recall-temporal-toggle" for="recall-temporal-enabled">
+                  <input id="recall-temporal-enabled" type="checkbox" aria-controls="recall-temporal-controls" aria-expanded="false" />
+                  <span>
+                    <strong data-i18n="recall.temporal.enable">时间检索</strong>
+                    <small data-i18n="recall.temporal.hint">仅用于本次召回测试；关闭时不附加时间约束。</small>
+                  </span>
+                </label>
+                <div class="recall-temporal-controls hidden" id="recall-temporal-controls">
+                  <div class="recall-form-field">
+                    <label class="recall-form-label" for="recall-temporal-mode" data-i18n="recall.temporal.mode">检索方式</label>
+                    <select id="recall-temporal-mode" class="select input input-sm">
+                      <option value="range" data-i18n="recall.temporal.mode.range">指定时间范围</option>
+                      <option value="earliest" data-i18n="recall.temporal.mode.earliest">较早的相关记忆</option>
+                      <option value="latest" data-i18n="recall.temporal.mode.latest">较新的相关记忆</option>
+                    </select>
+                  </div>
+                  <div class="recall-temporal-range-fields" id="recall-temporal-range-fields">
+                    <div class="recall-form-field">
+                      <label class="recall-form-label" for="recall-temporal-start" data-i18n="recall.temporal.start">开始时间（可选）</label>
+                      <input id="recall-temporal-start" type="datetime-local" class="input input-sm" />
+                    </div>
+                    <div class="recall-form-field">
+                      <label class="recall-form-label" for="recall-temporal-end" data-i18n="recall.temporal.end">结束时间（可选）</label>
+                      <input id="recall-temporal-end" type="datetime-local" class="input input-sm" />
+                    </div>
+                  </div>
+                  <div class="recall-form-field">
+                    <label class="recall-form-label" for="recall-temporal-order" data-i18n="recall.temporal.order">结果排序</label>
+                    <select id="recall-temporal-order" class="select input input-sm">
+                      <option value="relevance" data-i18n="recall.temporal.order.relevance">相关度优先</option>
+                      <option value="earliest" data-i18n="recall.temporal.order.earliest">时间从早到晚</option>
+                      <option value="latest" data-i18n="recall.temporal.order.latest">时间从晚到早</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="recall-results-header hidden" id="recall-stats">
               <span id="recall-count-text">0 results</span>

@@ -5,11 +5,11 @@
 import time
 from typing import TYPE_CHECKING, Any
 
+from astrbot.api import logger
 from quart import request
 
-from astrbot.api import logger
-
 from ..retrieval.recall_pipeline import RecallPipeline, RecallPipelineResult
+from ..retrieval.temporal_constraint import TemporalConstraint
 
 if TYPE_CHECKING:
     from .utils import PageApiUtils
@@ -42,6 +42,7 @@ class RecallHandler:
             - k: 返回结果数量（默认5，最大50）
             - session_id: 会话ID过滤（可选，Topic 专测必需）
             - mode: current | timeline | topic（默认 current）
+            - temporal: 可选时间范围与排序，仅用于本次测试
 
         Returns:
             包含召回结果和性能指标的字典
@@ -62,6 +63,10 @@ class RecallHandler:
             return self.utils.error("mode 必须是 current、timeline 或 topic")
         if mode == "topic" and not session_id:
             return self.utils.error("Topic 专项召回需要选择会话 ID，以确定记忆空间")
+        try:
+            temporal = TemporalConstraint.from_payload(payload.get("temporal"))
+        except ValueError as exc:
+            return self.utils.error(f"时间检索参数无效: {exc}")
 
         expansion_enabled = self._config_value(
             config_manager, "recall_engine.inject_with_recent_context", False
@@ -109,6 +114,7 @@ class RecallHandler:
                     expansion_enabled=bool(expansion_enabled),
                     assistant_mode=str(assistant_mode),
                     track_access=False,
+                    temporal=temporal,
                 )
             results = outcome.results
             topic_outcome = None
@@ -140,6 +146,7 @@ class RecallHandler:
                                 if mode == "topic"
                                 else min(k, int(topic_config.get("recall_top_k", 3)))
                             ),
+                            temporal=temporal,
                         )
                         if topic_outcome.results and mode == "current":
                             supplement_k = min(
@@ -151,6 +158,7 @@ class RecallHandler:
                                 topic_results=topic_outcome.results,
                                 limit=supplement_k,
                                 query_vectors=getattr(topic_outcome, "query_vectors", None),
+                                temporal=temporal,
                             )
                             fragment_results = fragment_outcome.results
                             suppress_timeline_for_parent_duplicates = bool(
@@ -210,6 +218,17 @@ class RecallHandler:
                             "title": result.topic.title,
                             "importance": result.topic.importance,
                             "status": result.topic.status.value,
+                            **(
+                                {
+                                    "event_started_at": getattr(result, "event_started_at", None),
+                                    "event_ended_at": getattr(result, "event_ended_at", None),
+                                    "time_basis": getattr(result, "time_basis", "unavailable"),
+                                    "time_fallback": getattr(result, "time_fallback", True),
+                                    "matched_source_uids": getattr(result, "matched_source_uids", []),
+                                }
+                                if temporal is not None
+                                else {}
+                            ),
                         },
                         "score_breakdown": {
                             "topic_relevance_score": round(
@@ -313,6 +332,17 @@ class RecallHandler:
                         "fragment_body_suppressed": result.body_suppressed,
                         "fragment_fact_count": len(result.fact_contents),
                         "narrative_perspective": "first_person_assistant",
+                        **(
+                            {
+                                "event_started_at": getattr(result, "event_started_at", None),
+                                "event_ended_at": getattr(result, "event_ended_at", None),
+                                "time_basis": getattr(result, "time_basis", "unavailable"),
+                                "time_fallback": getattr(result, "time_fallback", True),
+                                "matched_source_uids": getattr(result, "matched_source_uids", []),
+                            }
+                            if temporal is not None
+                            else {}
+                        ),
                     },
                     "score_breakdown": {
                         "fragment_relevance_score": round(
@@ -417,6 +447,19 @@ class RecallHandler:
                     if topic_outcome is not None and topic_outcome.results
                     else "timeline"
                 ),
+                **(
+                    {
+                        "event_started_at": result.metadata.get("event_started_at"),
+                        "event_ended_at": result.metadata.get("event_ended_at"),
+                        "time_basis": result.metadata.get("time_basis"),
+                        "time_fallback": result.metadata.get("time_fallback"),
+                        "matched_source_uids": result.metadata.get(
+                            "matched_source_uids", []
+                        ),
+                    }
+                    if temporal is not None
+                    else {}
+                ),
             }
             metadata.update(score_breakdown)
             formatted_results.append(
@@ -437,6 +480,11 @@ class RecallHandler:
                 "k": k,
                 "session_id_filter": session_id,
                 "mode": mode,
+                **(
+                    {"temporal": temporal.to_dict()}
+                    if temporal is not None
+                    else {}
+                ),
                 "elapsed_time_ms": round(elapsed_time, 2),
                 "diagnostics": {
                     **outcome.diagnostics(),

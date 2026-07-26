@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -2166,7 +2167,8 @@ class TopicMemoryStore:
                     SELECT l.topic_uid, l.timeline_uid, l.time_cluster_key,
                            l.contribution_weight, l.semantic_similarity,
                            l.temporal_affinity, s.session_id, s.start_index,
-                           s.end_index, s.started_at, s.ended_at
+                           s.end_index, s.started_at, s.ended_at,
+                           s.metadata AS source_metadata
                     FROM topic_timeline_links l
                     LEFT JOIN memory_source_spans s
                       ON s.memory_uid = l.timeline_uid
@@ -2205,7 +2207,23 @@ class TopicMemoryStore:
             item["metadata"] = self._from_json(item.get("metadata"))
             atoms_by_topic[str(row["topic_uid"])].append(item)
         for row in source_rows:
-            sources_by_topic[str(row["topic_uid"])].append(dict(row))
+            item = dict(row)
+            source_metadata = self._from_json(item.pop("source_metadata", "{}"))
+            explicit_start = self._optional_float(source_metadata.get("started_at"))
+            explicit_end = self._optional_float(source_metadata.get("ended_at"))
+            if explicit_start is not None or explicit_end is not None:
+                item["started_at"] = (
+                    explicit_start if explicit_start is not None else explicit_end
+                )
+                item["ended_at"] = (
+                    explicit_end if explicit_end is not None else explicit_start
+                )
+                item["time_basis"] = "timeline_source_span"
+                item["time_fallback"] = False
+            else:
+                item["time_basis"] = "timeline_created_at"
+                item["time_fallback"] = True
+            sources_by_topic[str(row["topic_uid"])].append(item)
         for row in actor_rows:
             item = dict(row)
             item["metadata"] = self._from_json(item.get("metadata"))
@@ -2342,16 +2360,39 @@ class TopicMemoryStore:
                     await db.execute(
                         f"""
                         SELECT memory_uid, session_id, start_index, end_index,
-                               started_at, ended_at
+                               started_at, ended_at, metadata AS source_metadata
                         FROM memory_source_spans
                         WHERE memory_uid IN ({span_placeholders})
                         """,
                         fragment_timeline_uids,
                     )
                 ).fetchall()
-                spans_by_timeline = {
-                    str(row["memory_uid"]): dict(row) for row in span_rows
-                }
+                for row in span_rows:
+                    item = dict(row)
+                    source_metadata = self._from_json(
+                        item.pop("source_metadata", "{}")
+                    )
+                    explicit_start = self._optional_float(
+                        source_metadata.get("started_at")
+                    )
+                    explicit_end = self._optional_float(
+                        source_metadata.get("ended_at")
+                    )
+                    if explicit_start is not None or explicit_end is not None:
+                        item["started_at"] = (
+                            explicit_start
+                            if explicit_start is not None
+                            else explicit_end
+                        )
+                        item["ended_at"] = (
+                            explicit_end if explicit_end is not None else explicit_start
+                        )
+                        item["time_basis"] = "timeline_source_span"
+                        item["time_fallback"] = False
+                    else:
+                        item["time_basis"] = "timeline_created_at"
+                        item["time_fallback"] = True
+                    spans_by_timeline[str(row["memory_uid"])] = item
         result: list[dict[str, Any]] = []
         for row in rows:
             fragment = fragments_by_uid[str(row["fragment_uid"])]
@@ -4887,6 +4928,14 @@ class TopicMemoryStore:
         except (TypeError, json.JSONDecodeError):
             return []
         return parsed if isinstance(parsed, list) else []
+
+    @staticmethod
+    def _optional_float(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
 
     @staticmethod
     def _decode_json(value: Any, default: Any) -> Any:

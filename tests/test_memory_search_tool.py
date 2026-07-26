@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
+from astrbot_plugin_livingmemory.core.retrieval.hybrid_retriever import HybridResult
 from astrbot_plugin_livingmemory.core.tools.memory_search_tool import MemorySearchTool
 
 
@@ -407,3 +408,102 @@ async def test_memory_search_tool_propagates_cancellation(memory_engine, astr_co
         get_persona.return_value = "persona_a"
         with pytest.raises(asyncio.CancelledError):
             await tool.call(_make_run_context(), query="取消")
+
+
+def test_memory_search_tool_exposes_optional_temporal_contract(
+    memory_engine, astr_context
+):
+    tool = MemorySearchTool(
+        context=astr_context,
+        config_manager=ConfigManager(),
+        memory_engine=memory_engine,
+    )
+    temporal = tool.parameters["properties"]["temporal"]
+    assert "temporal" not in tool.parameters["required"]
+    assert temporal["properties"]["mode"]["enum"] == [
+        "range",
+        "earliest",
+        "latest",
+    ]
+    assert temporal["properties"]["start"]["format"] == "date-time"
+    assert temporal["properties"]["end"]["format"] == "date-time"
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_rejects_invalid_temporal_constraint(
+    memory_engine, astr_context
+):
+    tool = MemorySearchTool(
+        context=astr_context,
+        config_manager=ConfigManager(),
+        memory_engine=memory_engine,
+    )
+    raw_result = await tool.call(
+        _make_run_context(),
+        query="七月的安排",
+        temporal={"mode": "range"},
+    )
+    result = json.loads(raw_result)
+    assert result["error"] == "invalid_temporal_constraint"
+    memory_engine.search_memories.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_applies_temporal_constraint_and_reports_anchor(
+    memory_engine, astr_context
+):
+    tool = MemorySearchTool(
+        context=astr_context,
+        config_manager=ConfigManager(),
+        memory_engine=memory_engine,
+    )
+    memory_engine.resolve_session_scope = AsyncMock(
+        return_value=["test:private:session-1"]
+    )
+    memory_engine.memory_identity_store = SimpleNamespace(
+        list_timeline_document_ids=AsyncMock(return_value=[7]),
+        get_time_anchors_by_document_ids=AsyncMock(
+            return_value={
+                7: {
+                    "memory_uid": "timeline-7",
+                    "started_at": 1784505600.0,
+                    "ended_at": 1784509200.0,
+                    "time_basis": "timeline_source_span",
+                    "time_fallback": False,
+                }
+            }
+        ),
+    )
+    memory_engine.search_memories = AsyncMock(
+        return_value=[
+            HybridResult(
+                doc_id=7,
+                final_score=0.9,
+                rrf_score=0.9,
+                bm25_score=0.1,
+                vector_score=0.9,
+                content="七月二十日的安排",
+                metadata={"importance": 0.8},
+                score_breakdown={"document_vector_score": 0.9},
+            )
+        ]
+    )
+    with patch(
+        "astrbot_plugin_livingmemory.core.tools.memory_search_tool.get_persona_id",
+        new_callable=AsyncMock,
+    ) as get_persona:
+        get_persona.return_value = "persona_a"
+        raw_result = await tool.call(
+            _make_run_context(),
+            query="七月二十日的安排",
+            temporal={
+                "mode": "range",
+                "start": "2026-07-20T00:00:00Z",
+                "end": "2026-07-20T23:59:59Z",
+            },
+        )
+    result = json.loads(raw_result)
+    assert result["count"] == 1
+    assert result["applied_filters"]["temporal"]["mode"] == "range"
+    assert result["results"][0]["matched_source_uids"] == ["timeline-7"]
+    assert result["results"][0]["time_basis"] == "timeline_source_span"

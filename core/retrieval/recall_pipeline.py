@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .hybrid_retriever import HybridResult
+from .temporal_constraint import TemporalConstraint, timeline_time_anchor
 
 
 ASSISTANT_CONTEXT_MODES = {"exclude", "low_weight", "normal"}
@@ -43,6 +44,11 @@ class RecallCandidate:
     best_source_score: float = 0.0
     selected: bool = False
     filter_reason: str | None = None
+    event_started_at: float | None = None
+    event_ended_at: float | None = None
+    time_basis: str = "unavailable"
+    time_fallback: bool = True
+    matched_source_uids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +57,11 @@ class RecallCandidate:
             "relevance_score": round(self.relevance_score, 6),
             "selected": self.selected,
             "filter_reason": self.filter_reason,
+            "event_started_at": self.event_started_at,
+            "event_ended_at": self.event_ended_at,
+            "time_basis": self.time_basis,
+            "time_fallback": self.time_fallback,
+            "matched_source_uids": self.matched_source_uids,
             "branch_scores": self.branch_scores,
         }
 
@@ -66,6 +77,8 @@ class RecallPipelineResult:
     final_limit: int
     applied_threshold: float
     overlap_suppressed: int = 0
+    temporal_constraint: TemporalConstraint | None = None
+    temporal_suppressed: int = 0
 
     def diagnostics(self) -> dict[str, Any]:
         return {
@@ -76,6 +89,12 @@ class RecallPipelineResult:
             "candidate_count": len(self.candidates),
             "selected_count": len(self.results),
             "overlap_suppressed": self.overlap_suppressed,
+            "temporal_constraint": (
+                self.temporal_constraint.to_dict()
+                if self.temporal_constraint is not None
+                else None
+            ),
+            "temporal_suppressed": self.temporal_suppressed,
             "candidates": [item.to_dict() for item in self.candidates],
         }
 
@@ -208,6 +227,7 @@ class RecallPipeline:
         visible_message_start_index: int | None = None,
         visible_message_end_index: int | None = None,
         track_access: bool = True,
+        temporal: TemporalConstraint | None = None,
     ) -> RecallPipelineResult:
         final_limit = max(0, int(final_k))
         branches = self.build_query_branches(
@@ -217,10 +237,35 @@ class RecallPipeline:
             assistant_mode=assistant_mode,
         )
         if final_limit <= 0 or not branches:
-            return RecallPipelineResult([], branches, [], 0, final_limit, 0.0)
+            return RecallPipelineResult(
+                [],
+                branches,
+                [],
+                0,
+                final_limit,
+                0.0,
+                temporal_constraint=temporal,
+            )
 
         multiplier = max(1, int(self._config("candidate_multiplier", 3)))
         candidate_limit = min(50, max(final_limit, final_limit * multiplier))
+        if temporal is not None:
+            identity_store = getattr(self.memory_engine, "memory_identity_store", None)
+            list_document_ids = getattr(identity_store, "list_timeline_document_ids", None)
+            if callable(list_document_ids):
+                session_scope = [session_id] if session_id else []
+                resolver = getattr(self.memory_engine, "resolve_session_scope", None)
+                if session_id and callable(resolver):
+                    resolved = resolver(session_id)
+                    if asyncio.iscoroutine(resolved):
+                        resolved = await resolved
+                    session_scope = list(resolved or session_scope)
+                scoped_document_ids = await list_document_ids(
+                    session_ids=session_scope,
+                    persona_id=persona_id,
+                    limit=2000,
+                )
+                candidate_limit = max(candidate_limit, len(scoped_document_ids))
         branch_results = await asyncio.gather(
             *(
                 self.memory_engine.search_memories(
@@ -283,15 +328,38 @@ class RecallPipeline:
             )
             candidate.result.score_breakdown = breakdown
 
+        if temporal is not None and candidate_map:
+            await self._attach_time_anchors(candidate_map)
+
         candidates = sorted(
             candidate_map.values(), key=lambda item: item.fused_score, reverse=True
         )
+        temporal_suppressed = 0
+        temporally_visible: list[RecallCandidate] = []
+        for candidate in candidates:
+            if temporal is None:
+                temporally_visible.append(candidate)
+                continue
+            has_time = candidate.event_started_at is not None or candidate.event_ended_at is not None
+            if not has_time:
+                candidate.filter_reason = "temporal_anchor_unavailable"
+                temporal_suppressed += 1
+                continue
+            if temporal.has_range and not temporal.overlaps(
+                candidate.event_started_at,
+                candidate.event_ended_at,
+            ):
+                candidate.filter_reason = "outside_temporal_range"
+                temporal_suppressed += 1
+                continue
+            temporally_visible.append(candidate)
+
         suppress_overlap = bool(
             self._config("context_overlap_suppression", True)
         )
         non_overlapping: list[RecallCandidate] = []
         overlap_suppressed = 0
-        for candidate in candidates:
+        for candidate in temporally_visible:
             if suppress_overlap and self._overlaps_visible_context(
                 candidate.result,
                 session_id=context_session_id or session_id,
@@ -312,7 +380,11 @@ class RecallPipeline:
         best_relevance = max(
             (item.relevance_score for item in non_overlapping), default=0.0
         )
-        applied_threshold = max(min_relevance, best_relevance * relative_floor)
+        applied_threshold = (
+            min_relevance
+            if temporal is not None and temporal.order in {"earliest", "latest"}
+            else max(min_relevance, best_relevance * relative_floor)
+        )
 
         eligible: list[RecallCandidate] = []
         for candidate in non_overlapping:
@@ -324,8 +396,32 @@ class RecallPipeline:
                 continue
             eligible.append(candidate)
 
-        mmr_lambda = self._clamp(float(self._config("mmr_lambda", 0.72)))
-        selected = self._select_mmr(eligible, final_limit, mmr_lambda)
+        if temporal is not None and temporal.order in {"earliest", "latest"}:
+            reverse = temporal.order == "latest"
+            if reverse:
+                eligible.sort(
+                    key=lambda item: (
+                        -temporal.sort_value(
+                            item.event_started_at, item.event_ended_at
+                        ),
+                        -item.relevance_score,
+                        item.result.doc_id,
+                    )
+                )
+            else:
+                eligible.sort(
+                    key=lambda item: (
+                        temporal.sort_value(
+                            item.event_started_at, item.event_ended_at
+                        ),
+                        -item.relevance_score,
+                        item.result.doc_id,
+                    )
+                )
+            selected = eligible[:final_limit]
+        else:
+            mmr_lambda = self._clamp(float(self._config("mmr_lambda", 0.72)))
+            selected = self._select_mmr(eligible, final_limit, mmr_lambda)
         selected_ids = {item.result.doc_id for item in selected}
         for candidate in eligible:
             if candidate.result.doc_id in selected_ids:
@@ -348,7 +444,43 @@ class RecallPipeline:
             final_limit=final_limit,
             applied_threshold=applied_threshold,
             overlap_suppressed=overlap_suppressed,
+            temporal_constraint=temporal,
+            temporal_suppressed=temporal_suppressed,
         )
+
+    async def _attach_time_anchors(
+        self, candidate_map: dict[int, RecallCandidate]
+    ) -> None:
+        identity_store = getattr(self.memory_engine, "memory_identity_store", None)
+        resolver = getattr(identity_store, "get_time_anchors_by_document_ids", None)
+        anchors = (
+            await resolver(list(candidate_map)) if callable(resolver) else {}
+        )
+        for document_id, candidate in candidate_map.items():
+            anchor = anchors.get(document_id)
+            if anchor:
+                candidate.event_started_at = anchor.get("started_at")
+                candidate.event_ended_at = anchor.get("ended_at")
+                candidate.time_basis = str(anchor.get("time_basis") or "unavailable")
+                candidate.time_fallback = bool(anchor.get("time_fallback", True))
+                memory_uid = str(anchor.get("memory_uid") or "")
+                candidate.matched_source_uids = [memory_uid] if memory_uid else []
+            else:
+                (
+                    candidate.event_started_at,
+                    candidate.event_ended_at,
+                    candidate.time_basis,
+                    candidate.time_fallback,
+                ) = timeline_time_anchor(candidate.result.metadata)
+            candidate.result.metadata.update(
+                {
+                    "event_started_at": candidate.event_started_at,
+                    "event_ended_at": candidate.event_ended_at,
+                    "time_basis": candidate.time_basis,
+                    "time_fallback": candidate.time_fallback,
+                    "matched_source_uids": list(candidate.matched_source_uids),
+                }
+            )
 
     @classmethod
     def _select_mmr(
