@@ -14,6 +14,11 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.core.agent.tool import FunctionTool, ToolSet
 
+from ..fact_temporal import (
+    build_key_fact_temporal,
+    contains_absolute_date,
+    contains_relative_time,
+)
 from ..models.conversation_models import Message, build_role_bindings
 from ..models.identity_profile import (
     SupplementalIdentityProfile,
@@ -685,7 +690,7 @@ class MemoryProcessor:
             role_bindings = build_role_bindings(messages, persona_id)
             metadata["role_bindings"] = role_bindings
             metadata["narrative_perspective"] = "first_person_assistant"
-            metadata["source_message_refs"] = [
+            source_message_refs = [
                 {
                     "message_ref": f"M{index + 1}",
                     "message_id": int(message.id),
@@ -696,6 +701,12 @@ class MemoryProcessor:
                 }
                 for index, message in enumerate(messages)
             ]
+            metadata["source_message_refs"] = source_message_refs
+            metadata["key_fact_temporal"] = build_key_fact_temporal(
+                [str(value) for value in metadata.get("key_facts", [])],
+                metadata.get("key_fact_evidence", []),
+                source_message_refs,
+            )
             if is_group_chat:
                 metadata["participants"] = self._legacy_participants_from_roles(
                     role_bindings
@@ -849,6 +860,7 @@ class MemoryProcessor:
 - message_coverage 必须逐一且仅一次覆盖全部来源消息。
 - disposition=fact 时 fact_indexes 至少一项；context 可不关联事实；omitted 必须写明省略理由。
 - 不得根据昵称、语气、兴趣或人格设定猜测身份、性别、代词或人物关系。
+- summary 和每条 key_fact 中的相对时间必须根据消息前缀时间改写为绝对日期；不得保留“今天、昨天、两小时前”等悬空表达。
 - memory_decision=no_memory 只能在条件全部满足时保留：无摘要、无主题、无事实、无事实引用、重要性不高于0.2，且所有消息均为context或omitted。
 - 存在可持续的人物信息、偏好、计划、决定、承诺、关系互动或显著情绪时必须选择store。
 - 输出必须完全符合指定工具结构；无法使用工具时只输出一个 JSON 对象。
@@ -1474,6 +1486,18 @@ class MemoryProcessor:
                 "summary,key_facts",
             )
 
+        for fact_index, fact in enumerate(normalized_facts):
+            if (
+                require_source_grounding
+                and contains_relative_time(fact)
+                and not contains_absolute_date(fact)
+            ):
+                add(
+                    "relative_fact_time_without_absolute_anchor",
+                    f"Fact {fact_index} uses relative time without an absolute date",
+                    "key_facts",
+                )
+
         if is_group_chat:
             participants = structured_data.get("participants")
             if not isinstance(participants, list) or not participants:
@@ -1659,4 +1683,9 @@ class MemoryProcessor:
             parent_importance=parent_importance,
             session_id=session_id,
             persona_id=persona_id,
+            fact_temporal=(
+                metadata.get("key_fact_temporal", [])
+                if isinstance(metadata.get("key_fact_temporal"), list)
+                else []
+            ),
         )

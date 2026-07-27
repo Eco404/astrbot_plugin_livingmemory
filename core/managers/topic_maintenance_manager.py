@@ -20,6 +20,7 @@ import aiosqlite
 from astrbot.api import logger
 
 from ...storage.topic_memory_store import TopicMemoryStore
+from ..fact_temporal import normalize_fact_temporal
 from ..models.topic_memory import (
     TimelineTopicCandidate,
     TopicCandidateGroup,
@@ -586,7 +587,7 @@ class TopicMaintenanceManager:
         rows = await (
             await db.execute(
                 f"""
-                SELECT id, parent_memory_id, atom_type, content, metadata
+                SELECT id, parent_memory_id, atom_type, content, event_time, metadata
                 FROM memory_atoms
                 WHERE parent_memory_id IN ({placeholders}) AND status = 'active'
                 ORDER BY parent_memory_id, id
@@ -613,7 +614,11 @@ class TopicMaintenanceManager:
         )
         topics = self._string_list(metadata.get("topics"))
         key_facts = self._string_list(metadata.get("key_facts"))
-        atoms = atom_map.get(int(row["document_id"]), [])
+        atoms = [
+            atom
+            for atom in atom_map.get(int(row["document_id"]), [])
+            if str(atom.get("content") or "").strip()
+        ]
         atom_contents = [str(atom.get("content") or "") for atom in atoms]
         atom_fingerprints = [
             self.fingerprint_text(
@@ -647,6 +652,33 @@ class TopicMaintenanceManager:
         for key, value in source_fields.items():
             if source_window.get(key) is None and value is not None:
                 source_window[key] = value
+        started_at = self._optional_float(row["started_at"])
+        ended_at = self._optional_float(row["ended_at"])
+        key_fact_temporal_raw = metadata.get("key_fact_temporal", [])
+        key_fact_temporal = [
+            normalize_fact_temporal(
+                key_fact_temporal_raw[index]
+                if isinstance(key_fact_temporal_raw, list)
+                and index < len(key_fact_temporal_raw)
+                else {},
+                fallback_started_at=started_at,
+                fallback_ended_at=ended_at,
+            )
+            for index in range(len(key_facts))
+        ]
+        atom_temporal: list[dict[str, Any]] = []
+        for atom in atoms:
+            atom_metadata = self._json_dict(atom.get("metadata"))
+            if atom.get("event_time") is not None:
+                atom_metadata.setdefault("event_started_at", atom.get("event_time"))
+                atom_metadata.setdefault("event_ended_at", atom.get("event_time"))
+            atom_temporal.append(
+                normalize_fact_temporal(
+                    atom_metadata,
+                    fallback_started_at=started_at,
+                    fallback_ended_at=ended_at,
+                )
+            )
         return TimelineTopicCandidate(
             memory_uid=str(row["memory_uid"]),
             document_id=int(row["document_id"]),
@@ -678,10 +710,12 @@ class TopicMaintenanceManager:
             ),
             topics=topics,
             key_facts=key_facts,
+            key_fact_temporal=key_fact_temporal,
             atom_fingerprints=atom_fingerprints,
             atom_contents=atom_contents,
-            started_at=self._optional_float(row["started_at"]),
-            ended_at=self._optional_float(row["ended_at"]),
+            atom_temporal=atom_temporal,
+            started_at=started_at,
+            ended_at=ended_at,
             features={
                 "normalized_topics": normalized_topics,
                 "fact_fingerprints": fact_fingerprints,

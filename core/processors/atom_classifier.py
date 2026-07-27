@@ -6,6 +6,7 @@ import re
 import time
 from datetime import datetime, timedelta
 
+from ..fact_temporal import normalize_fact_temporal, resolve_event_time
 from ..models.memory_atom import AtomType, DecayType, MemoryAtom, compute_ttl
 
 # ---------- classification patterns (Chinese-focused, extensible) ----------
@@ -78,11 +79,13 @@ def _parse_weekday_time(text: str, now: float) -> float | None:
     return (now_dt + timedelta(days=days_delta)).timestamp()
 
 
-def _parse_event_time(text: str) -> float | None:
+def _parse_event_time(text: str, reference_time: float | None = None) -> float | None:
     """Best-effort extraction of an absolute timestamp from Chinese time expressions.
 
     Falls back to simple day-offset heuristics when dateparser is unavailable.
     """
+    if reference_time is not None:
+        return resolve_event_time(text, reference_time)
     now = time.time()
     day_sec = 86400.0
 
@@ -134,6 +137,7 @@ def classify_atoms(
     parent_importance: float = 0.5,
     session_id: str | None = None,
     persona_id: str | None = None,
+    fact_temporal: list[dict[str, object]] | None = None,
 ) -> list[MemoryAtom]:
     """Classify a list of key_fact strings into MemoryAtom instances.
 
@@ -155,12 +159,23 @@ def classify_atoms(
         entities.extend(participants)
 
     atoms: list[MemoryAtom] = []
-    for fact in key_facts:
+    temporal_rows = fact_temporal or []
+    for fact_index, fact in enumerate(key_facts):
         fact = fact.strip()
         if not fact:
             continue
 
-        atom_type, confidence, event_time = _classify_single(fact)
+        temporal = normalize_fact_temporal(
+            temporal_rows[fact_index] if fact_index < len(temporal_rows) else {}
+        )
+        reference_time = temporal.get("evidence_ended_at") or temporal.get(
+            "evidence_started_at"
+        )
+        atom_type, confidence, event_time = _classify_single(
+            fact, reference_time=reference_time
+        )
+        if temporal.get("event_started_at") is not None:
+            event_time = float(temporal["event_started_at"])
         ttl, decay = compute_ttl(atom_type, parent_importance, 0, event_time)
         now = time.time()
 
@@ -177,13 +192,16 @@ def classify_atoms(
             expires_at=now + ttl * 86400.0,
             session_id=session_id,
             persona_id=persona_id,
+            metadata={**temporal, "fact_index": fact_index},
         )
         atoms.append(atom)
 
     return atoms
 
 
-def _classify_single(text: str) -> tuple[AtomType, float, float | None]:
+def _classify_single(
+    text: str, reference_time: float | None = None
+) -> tuple[AtomType, float, float | None]:
     """Classify a single fact string and return (type, confidence, event_time)."""
     has_time = bool(_TIME_INDICATORS.search(text))
     has_action = bool(_ACTION_VERBS.search(text))
@@ -191,7 +209,7 @@ def _classify_single(text: str) -> tuple[AtomType, float, float | None]:
     has_relation = bool(_RELATION_PATTERNS.search(text))
     has_preference = bool(_PREFERENCE_PATTERNS.search(text))
 
-    event_time = _parse_event_time(text) if has_time else None
+    event_time = _parse_event_time(text, reference_time) if has_time else None
 
     # PLANNED: time indicator + action verb → future event
     if has_time and has_action:

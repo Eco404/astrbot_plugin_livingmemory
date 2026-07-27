@@ -33,6 +33,7 @@ from ..embedding_signature import (
     make_embedding_signature,
     signature_mismatch_reason,
 )
+from ..fact_temporal import aggregate_fact_temporal, normalize_fact_temporal
 from ..importance_policy import (
     IMPORTANCE_POLICY_VERSION,
     aggregate_source_importance,
@@ -2105,7 +2106,7 @@ class TopicBuildManager:
             ) -> tuple[
                 str,
                 dict[str, str],
-                dict[str, dict[str, str | None]],
+                dict[str, dict[str, Any]],
                 dict[str, dict[str, Any]],
                 str,
             ]:
@@ -5249,6 +5250,20 @@ class TopicBuildManager:
                 ),
                 supporting_timelines=len(atom_timeline_uids),
             )
+            atom_temporal = normalize_fact_temporal(
+                aggregate_fact_temporal(
+                    fact_map[fact_uid][1] for fact_uid in source_fact_uids
+                ),
+                fallback_started_at=topic.started_at,
+                fallback_ended_at=topic.ended_at,
+                fallback_basis="topic_window",
+            )
+            display_started_at = atom_temporal.get("event_started_at")
+            display_ended_at = atom_temporal.get("event_ended_at")
+            event_time_is_fallback = display_started_at is None
+            if display_started_at is None:
+                display_started_at = atom_temporal.get("evidence_started_at")
+                display_ended_at = atom_temporal.get("evidence_ended_at")
             atom = TopicMemoryAtom(
                 atom_uid=atom_uid,
                 topic_uid=topic_uid,
@@ -5259,13 +5274,15 @@ class TopicBuildManager:
                     atom_payload.get("importance"), semantic_importance
                 ),
                 confidence=atom_confidence,
-                event_started_at=topic.started_at,
-                event_ended_at=topic.ended_at,
+                event_started_at=display_started_at,
+                event_ended_at=display_ended_at,
                 metadata={
                     "source_fragment_uids": source_fragment_uids,
                     "source_fact_uids": source_fact_uids,
                     "index": atom_index,
                     "confidence_calibration": atom_confidence_audit,
+                    **atom_temporal,
+                    "event_time_is_fallback": event_time_is_fallback,
                 },
             )
             atoms.append(atom)
@@ -5582,6 +5599,26 @@ class TopicBuildManager:
                         if self._norm(atom_content) == self._norm(content)
                     }
                 )
+                temporal_candidates: list[dict[str, Any]] = []
+                for source_index, source_content in enumerate(candidate.atom_contents):
+                    if self._norm(source_content) == self._norm(content):
+                        temporal_candidates.append(
+                            candidate.atom_temporal[source_index]
+                            if source_index < len(candidate.atom_temporal)
+                            else {}
+                        )
+                for source_index, source_content in enumerate(candidate.key_facts):
+                    if self._norm(source_content) == self._norm(content):
+                        temporal_candidates.append(
+                            candidate.key_fact_temporal[source_index]
+                            if source_index < len(candidate.key_fact_temporal)
+                            else {}
+                        )
+                temporal = normalize_fact_temporal(
+                    aggregate_fact_temporal(temporal_candidates),
+                    fallback_started_at=candidate.started_at,
+                    fallback_ended_at=candidate.ended_at,
+                )
                 facts.append(
                     {
                         "fact_uid": str(
@@ -5613,6 +5650,7 @@ class TopicBuildManager:
                             fingerprint: [candidate.memory_uid]
                             for fingerprint in fingerprints
                         },
+                        **temporal,
                     }
                 )
             fallback_repairs = [
@@ -5920,6 +5958,25 @@ class TopicBuildManager:
                             for value in fact.get("actor_refs", [])
                             if isinstance(value, dict)
                         ],
+                        **normalize_fact_temporal(
+                            fact,
+                            fallback_started_at=min(
+                                (
+                                    allowed[uid].started_at
+                                    for uid in fact_sources
+                                    if allowed[uid].started_at is not None
+                                ),
+                                default=None,
+                            ),
+                            fallback_ended_at=max(
+                                (
+                                    allowed[uid].ended_at
+                                    for uid in fact_sources
+                                    if allowed[uid].ended_at is not None
+                                ),
+                                default=None,
+                            ),
+                        ),
                     }
                 )
             uncovered_timelines = sorted(
@@ -7611,13 +7668,13 @@ INPUT:
     ) -> tuple[
         dict[str, Any],
         dict[str, str],
-        dict[str, dict[str, str | None]],
+        dict[str, dict[str, Any]],
         dict[str, dict[str, Any]],
     ]:
         """Build a compact prompt payload with batch-local, reversible refs."""
         timelines: list[dict[str, Any]] = []
         timeline_refs: dict[str, str] = {}
-        source_refs: dict[str, dict[str, str | None]] = {}
+        source_refs: dict[str, dict[str, Any]] = {}
         for timeline_index, item in enumerate(inputs, 1):
             timeline_ref = f"T{timeline_index}"
             timeline_refs[timeline_ref] = item.memory_uid
@@ -7636,23 +7693,48 @@ INPUT:
                 if not content or not fingerprint:
                     continue
                 source_ref = f"{timeline_ref}.A{atom_index}"
+                temporal = normalize_fact_temporal(
+                    item.atom_temporal[atom_index - 1]
+                    if atom_index - 1 < len(item.atom_temporal)
+                    else {},
+                    fallback_started_at=item.started_at,
+                    fallback_ended_at=item.ended_at,
+                )
                 source_facts.append(
-                    {"ref": source_ref, "kind": "atom", "content": content}
+                    {
+                        "ref": source_ref,
+                        "kind": "atom",
+                        "content": content,
+                        "temporal": temporal,
+                    }
                 )
                 source_refs[source_ref] = {
                     "timeline_uid": item.memory_uid,
                     "fingerprint": fingerprint,
                     "source_key": f"{item.memory_uid}:atom:{fingerprint}",
+                    "temporal": temporal,
                 }
             key_index = 0
-            for content in item.key_facts:
+            for fact_index, content in enumerate(item.key_facts):
                 content = str(content or "").strip()
                 if not content or self._norm(content) in atom_contents:
                     continue
                 key_index += 1
                 source_ref = f"{timeline_ref}.K{key_index}"
+                temporal = normalize_fact_temporal(
+                    item.key_fact_temporal[fact_index]
+                    if fact_index < len(item.key_fact_temporal)
+                    else {},
+                    fallback_started_at=item.started_at,
+                    fallback_ended_at=item.ended_at,
+                )
                 source_facts.append(
-                    {"ref": source_ref, "kind": "key_fact", "content": content}
+                    {
+                        "ref": source_ref,
+                        "kind": "key_fact",
+                        "content": content,
+                        "temporal": temporal,
+                    }
                 )
                 source_refs[source_ref] = {
                     "timeline_uid": item.memory_uid,
@@ -7663,6 +7745,7 @@ INPUT:
                             self._norm(content).encode("utf-8")
                         ).hexdigest()
                     ),
+                    "temporal": temporal,
                 }
             timelines.append(
                 {
@@ -7721,7 +7804,7 @@ INPUT:
         self,
         parsed: dict[str, Any],
         timeline_refs: dict[str, str],
-        source_refs: dict[str, dict[str, str | None]],
+        source_refs: dict[str, dict[str, Any]],
         actor_refs: dict[str, dict[str, Any]],
         *,
         require_source_accounting: bool = False,
@@ -7787,9 +7870,13 @@ INPUT:
                         if source_refs[ref].get("fingerprint")
                     )
                 )
+                temporal = aggregate_fact_temporal(
+                    source_refs[ref].get("temporal", {}) for ref in cited_refs
+                )
                 facts.append(
                     {
                         **fact,
+                        **temporal,
                         "source_timeline_uids": fact_timeline_uids,
                         "source_atom_fingerprints": fingerprints,
                         "source_fact_keys": sorted(

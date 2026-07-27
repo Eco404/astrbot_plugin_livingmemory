@@ -299,6 +299,100 @@ def get_now_datetime_from_context(context: Context) -> datetime:
         return get_now_datetime()
 
 
+def _format_fact_temporal_anchor(temporal: dict[str, Any]) -> str:
+    """Render a compact fact time while distinguishing evidence from event time."""
+    evidence_start = temporal.get("evidence_started_at")
+    evidence_end = temporal.get("evidence_ended_at") or evidence_start
+    if evidence_start is None and evidence_end is None:
+        return ""
+    try:
+        evidence_start_value = validate_timestamp(evidence_start or evidence_end)
+        evidence_end_value = validate_timestamp(evidence_end or evidence_start)
+        start_text = datetime.fromtimestamp(evidence_start_value).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        end_text = datetime.fromtimestamp(evidence_end_value).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    basis = str(temporal.get("time_basis") or "")
+    label = "记录于" if basis == "message_evidence" else "记忆时间"
+    evidence_text = (
+        f"{label} {start_text}"
+        if start_text == end_text
+        else f"{label} {start_text} 至 {end_text}"
+    )
+
+    event_start = temporal.get("event_started_at")
+    event_end = temporal.get("event_ended_at") or event_start
+    if event_start is None:
+        return f"[{evidence_text}]"
+    try:
+        event_start_text = datetime.fromtimestamp(
+            validate_timestamp(event_start)
+        ).strftime("%Y-%m-%d %H:%M")
+        event_end_text = datetime.fromtimestamp(
+            validate_timestamp(event_end)
+        ).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OverflowError):
+        return f"[{evidence_text}]"
+    event_text = (
+        event_start_text
+        if event_start_text == event_end_text
+        else f"{event_start_text} 至 {event_end_text}"
+    )
+    return f"[事件时间 {event_text}；{evidence_text}]"
+
+
+def bind_temporal_key_facts(
+    content: Any,
+    metadata: Any,
+) -> tuple[str, list[str]]:
+    """Bind each key fact to its aligned time anchor without duplicating facts.
+
+    The returned list contains facts that were not already present in ``content``.
+    Callers can render those facts in the format that fits their transport.
+    """
+    content_text = str(content or "")
+    metadata_value = metadata if isinstance(metadata, dict) else {}
+    key_facts = metadata_value.get("key_facts", [])
+    if not isinstance(key_facts, list):
+        return content_text, []
+    temporal_rows = metadata_value.get("key_fact_temporal", [])
+    if not isinstance(temporal_rows, list):
+        temporal_rows = []
+
+    missing_facts: list[str] = []
+    for fact_index, fact_value in enumerate(key_facts):
+        fact = str(fact_value or "").strip()
+        if not fact:
+            continue
+        temporal = (
+            temporal_rows[fact_index]
+            if fact_index < len(temporal_rows)
+            and isinstance(temporal_rows[fact_index], dict)
+            else {}
+        )
+        anchor = _format_fact_temporal_anchor(temporal)
+        rendered_fact = f"{anchor} {fact}" if anchor else fact
+        if fact in content_text:
+            if anchor:
+                content_text = content_text.replace(fact, rendered_fact, 1)
+        else:
+            missing_facts.append(rendered_fact)
+    return content_text, missing_facts
+
+
+def content_with_temporal_key_facts(content: Any, metadata: Any) -> str:
+    """Return transport-neutral content with all timestamped key facts included."""
+    content_text, missing_facts = bind_temporal_key_facts(content, metadata)
+    if not missing_facts:
+        return content_text
+    separator = "\n" if content_text else ""
+    return f"{content_text}{separator}Key facts: {'; '.join(missing_facts)}"
+
+
 def format_memories_for_injection(memories: list) -> str:
     """
     将检索到的记忆列表格式化为单个字符串，以便注入到 System Prompt。
@@ -409,20 +503,11 @@ def format_memories_for_injection(memories: list) -> str:
                 if participants_str:
                     metadata_parts.append(f"Participants: {participants_str}")
 
-            # 添加关键事实
-            key_facts = metadata.get("key_facts", [])
-            if key_facts and isinstance(key_facts, list) and len(key_facts) > 0:
-                # v2 canonical content 通常已经由 summary + key_facts 组成。
-                # 只补充 content 中尚未出现的事实，避免每条记忆把相同事实注入两遍。
-                content_text = str(content or "")
-                missing_facts = [
-                    str(fact)
-                    for fact in key_facts
-                    if fact and str(fact) not in content_text
-                ]
-                facts_str = "; ".join(missing_facts)
-                if facts_str:
-                    metadata_parts.append(f"Key facts: {facts_str}")
+            # v2 canonical content 通常已经由 summary + key_facts 组成。
+            # 只补充 content 中尚未出现的事实，避免每条记忆把相同事实注入两遍。
+            content, missing_facts = bind_temporal_key_facts(content, metadata)
+            if missing_facts:
+                metadata_parts.append(f"Key facts: {'; '.join(missing_facts)}")
 
             # 组装元数据行
             if metadata_parts:
@@ -525,6 +610,9 @@ def format_memories_for_fake_tool_call(
                 else metadata_raw
             )
 
+        if not isinstance(metadata, dict):
+            metadata = {}
+        content = content_with_temporal_key_facts(content, metadata)
         serialized_results.append(
             {
                 "id": memory_id,
@@ -638,6 +726,8 @@ def format_memories_for_fake_tool_call_deepseek_v4(
 
 __all__ = [
     "StopwordsManager",
+    "bind_temporal_key_facts",
+    "content_with_temporal_key_facts",
     "get_stopwords_manager",
     "TextProcessor",
     "safe_parse_metadata",

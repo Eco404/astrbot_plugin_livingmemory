@@ -13,6 +13,7 @@ from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import TextPart
 
+from ..fact_temporal import normalize_fact_temporal
 from ..models.conversation_models import stable_actor_id
 from ..retrieval.unified_recall import (
     UnifiedRecallCoordinator,
@@ -480,11 +481,31 @@ class MemoryRecall:
         keywords = [
             str(value) for value in metadata.get("keywords", []) if str(value).strip()
         ]
-        facts = [
-            str(atom.get("content") or "").strip()
+        selected_atoms = [
+            atom
             for atom in item.atoms[:4]
             if str(atom.get("content") or "").strip()
         ]
+        facts = [str(atom.get("content") or "").strip() for atom in selected_atoms]
+        fact_temporal = []
+        for atom in selected_atoms:
+            atom_metadata = (
+                atom.get("metadata", {})
+                if isinstance(atom.get("metadata"), dict)
+                else {}
+            )
+            if atom_metadata.get("evidence_started_at") is not None:
+                temporal = normalize_fact_temporal(atom_metadata)
+            else:
+                temporal = normalize_fact_temporal(
+                    {},
+                    fallback_started_at=atom.get("event_started_at")
+                    or item.topic.started_at,
+                    fallback_ended_at=atom.get("event_ended_at")
+                    or item.topic.ended_at,
+                    fallback_basis="topic_window",
+                )
+            fact_temporal.append(temporal)
         return {
             "id": item.topic_uid,
             "content": f"Topic: {item.content}".strip(),
@@ -497,6 +518,7 @@ class MemoryRecall:
                 "status": item.topic.status.value,
                 "topics": [item.topic.title, *keywords[:5]],
                 "key_facts": facts,
+                "key_fact_temporal": fact_temporal,
                 "source_timeline_count": len(item.sources),
                 "affect_match_score": item.affect_match_score,
                 "affect_match_boost": item.affect_match_boost,
@@ -511,6 +533,28 @@ class MemoryRecall:
     @staticmethod
     def _timeline_memory_dict(item, *, as_supplement: bool) -> dict:
         metadata = dict(item.metadata) if isinstance(item.metadata, dict) else {}
+        source_window = (
+            metadata.get("source_window", {})
+            if isinstance(metadata.get("source_window"), dict)
+            else {}
+        )
+        fallback_start = source_window.get("started_at") or metadata.get("create_time")
+        fallback_end = source_window.get("ended_at") or fallback_start
+        key_facts = metadata.get("key_facts", [])
+        temporal_rows = metadata.get("key_fact_temporal", [])
+        if isinstance(key_facts, list):
+            metadata["key_fact_temporal"] = [
+                normalize_fact_temporal(
+                    temporal_rows[index]
+                    if isinstance(temporal_rows, list)
+                    and index < len(temporal_rows)
+                    else {},
+                    fallback_started_at=fallback_start,
+                    fallback_ended_at=fallback_end,
+                    fallback_basis="timeline_window",
+                )
+                for index in range(len(key_facts))
+            ]
         metadata["memory_layer"] = "timeline_supplement" if as_supplement else "timeline"
         return {
             "id": getattr(item, "doc_id", None),
@@ -522,6 +566,21 @@ class MemoryRecall:
 
     @staticmethod
     def _fragment_memory_dict(item) -> dict:
+        facts_by_content = {
+            str(fact.get("content") or "").strip(): fact
+            for fact in item.fragment.facts
+            if isinstance(fact, dict) and str(fact.get("content") or "").strip()
+        }
+        selected_facts = [str(value) for value in item.fact_contents if str(value)]
+        fact_temporal = [
+            normalize_fact_temporal(
+                facts_by_content.get(content, {}),
+                fallback_started_at=item.fragment.started_at,
+                fallback_ended_at=item.fragment.ended_at,
+                fallback_basis="fragment_window",
+            )
+            for content in selected_facts
+        ]
         return {
             "id": item.fragment_uid,
             "content": item.content,
@@ -534,6 +593,8 @@ class MemoryRecall:
                 "confidence": item.fragment.confidence,
                 "fragment_body_suppressed": item.body_suppressed,
                 "fragment_fact_count": len(item.fact_contents),
+                "key_facts": selected_facts,
+                "key_fact_temporal": fact_temporal,
                 "affect_match_score": item.affect_match_score,
                 "affect_match_boost": item.affect_match_boost,
                 "affect_event_count": len(item.selected_affect_events),

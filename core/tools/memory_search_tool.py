@@ -13,13 +13,14 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 from pydantic.dataclasses import dataclass
 
 from ..base.config_manager import ConfigManager
+from ..fact_temporal import normalize_fact_temporal
 from ..models.conversation_models import stable_actor_id
 from ..retrieval.temporal_constraint import TemporalConstraint
 from ..retrieval.unified_recall import (
     UnifiedRecallCoordinator,
     UnifiedRecallRequest,
 )
-from ..utils import get_persona_id
+from ..utils import content_with_temporal_key_facts, get_persona_id
 
 
 def _json_result(data: dict[str, Any]) -> str:
@@ -214,63 +215,151 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
             fragment_outcome = unified_outcome.fragment_outcome
             fragment_results = unified_outcome.fragment_results
             memories = unified_outcome.timeline_results
-            serialized_results = [
-                {
-                    "id": item.topic_uid,
-                    "content": f"Topic: {item.content}".strip(),
-                    "score": item.final_score,
-                    "importance": item.topic.importance,
-                    "memory_layer": "topic",
-                    "source_timeline_count": len(item.sources),
-                    "affect_match_score": item.affect_match_score,
-                    "affect_match_boost": item.affect_match_boost,
-                    "affect_event_count": len(item.selected_affect_events),
-                    **(
-                        {
-                            "event_started_at": getattr(item, "event_started_at", None),
-                            "event_ended_at": getattr(item, "event_ended_at", None),
-                            "time_basis": getattr(item, "time_basis", "unavailable"),
-                            "time_fallback": getattr(item, "time_fallback", True),
-                            "matched_source_uids": getattr(item, "matched_source_uids", []),
-                        }
-                        if temporal_constraint is not None
-                        else {}
-                    ),
+            serialized_results = []
+            for item in topic_results:
+                topic_started_at = getattr(item.topic, "started_at", None)
+                topic_ended_at = getattr(item.topic, "ended_at", None)
+                selected_atoms = [
+                    atom
+                    for atom in list(getattr(item, "atoms", []) or [])[:4]
+                    if isinstance(atom, dict)
+                    and str(atom.get("content") or "").strip()
+                ]
+                topic_facts = [
+                    str(atom.get("content") or "").strip()
+                    for atom in selected_atoms
+                ]
+                topic_fact_temporal = [
+                    normalize_fact_temporal(
+                        atom.get("metadata", {})
+                        if isinstance(atom.get("metadata"), dict)
+                        else {},
+                        fallback_started_at=atom.get("event_started_at")
+                        or topic_started_at,
+                        fallback_ended_at=atom.get("event_ended_at")
+                        or topic_ended_at,
+                        fallback_basis="topic_window",
+                    )
+                    for atom in selected_atoms
+                ]
+                topic_content = content_with_temporal_key_facts(
+                    f"Topic: {item.content}".strip(),
+                    {
+                        "key_facts": topic_facts,
+                        "key_fact_temporal": topic_fact_temporal,
+                    },
+                )
+                serialized_results.append(
+                    {
+                        "id": item.topic_uid,
+                        "content": topic_content,
+                        "score": item.final_score,
+                        "importance": item.topic.importance,
+                        "memory_layer": "topic",
+                        "source_timeline_count": len(item.sources),
+                        "affect_match_score": item.affect_match_score,
+                        "affect_match_boost": item.affect_match_boost,
+                        "affect_event_count": len(item.selected_affect_events),
+                        **(
+                            {
+                                "event_started_at": getattr(item, "event_started_at", None),
+                                "event_ended_at": getattr(item, "event_ended_at", None),
+                                "time_basis": getattr(item, "time_basis", "unavailable"),
+                                "time_fallback": getattr(item, "time_fallback", True),
+                                "matched_source_uids": getattr(item, "matched_source_uids", []),
+                            }
+                            if temporal_constraint is not None
+                            else {}
+                        ),
+                    }
+                )
+            for item in fragment_results:
+                facts_by_content = {
+                    str(fact.get("content") or "").strip(): fact
+                    for fact in item.fragment.facts
+                    if isinstance(fact, dict)
+                    and str(fact.get("content") or "").strip()
                 }
-                for item in topic_results
-            ]
-            serialized_results.extend(
-                {
-                    "id": item.fragment_uid,
-                    "content": item.content,
-                    "score": item.final_score,
-                    "importance": item.fragment.importance,
-                    "memory_layer": "topic_fragment",
-                    "parent_topic_uid": item.topic_uid,
-                    "fragment_body_suppressed": item.body_suppressed,
-                    "fragment_fact_count": len(item.fact_contents),
-                    "source_timeline_count": len(item.fragment.timeline_uids),
-                    "narrative_perspective": "first_person_assistant",
-                    **(
-                        {
-                            "event_started_at": getattr(item, "event_started_at", None),
-                            "event_ended_at": getattr(item, "event_ended_at", None),
-                            "time_basis": getattr(item, "time_basis", "unavailable"),
-                            "time_fallback": getattr(item, "time_fallback", True),
-                            "matched_source_uids": getattr(item, "matched_source_uids", []),
-                        }
-                        if temporal_constraint is not None
-                        else {}
-                    ),
-                }
-                for item in fragment_results
-            )
+                fragment_facts = [
+                    str(value).strip()
+                    for value in item.fact_contents
+                    if str(value).strip()
+                ]
+                fragment_fact_temporal = [
+                    normalize_fact_temporal(
+                        facts_by_content.get(content, {}),
+                        fallback_started_at=item.fragment.started_at,
+                        fallback_ended_at=item.fragment.ended_at,
+                        fallback_basis="fragment_window",
+                    )
+                    for content in fragment_facts
+                ]
+                fragment_content = content_with_temporal_key_facts(
+                    item.content,
+                    {
+                        "key_facts": fragment_facts,
+                        "key_fact_temporal": fragment_fact_temporal,
+                    },
+                )
+                serialized_results.append(
+                    {
+                        "id": item.fragment_uid,
+                        "content": fragment_content,
+                        "score": item.final_score,
+                        "importance": item.fragment.importance,
+                        "memory_layer": "topic_fragment",
+                        "parent_topic_uid": item.topic_uid,
+                        "fragment_body_suppressed": item.body_suppressed,
+                        "fragment_fact_count": len(item.fact_contents),
+                        "source_timeline_count": len(item.fragment.timeline_uids),
+                        "narrative_perspective": "first_person_assistant",
+                        **(
+                            {
+                                "event_started_at": getattr(item, "event_started_at", None),
+                                "event_ended_at": getattr(item, "event_ended_at", None),
+                                "time_basis": getattr(item, "time_basis", "unavailable"),
+                                "time_fallback": getattr(item, "time_fallback", True),
+                                "matched_source_uids": getattr(item, "matched_source_uids", []),
+                            }
+                            if temporal_constraint is not None
+                            else {}
+                        ),
+                    }
+                )
             for memory in memories:
-                metadata = memory.metadata if isinstance(memory.metadata, dict) else {}
+                metadata = (
+                    dict(memory.metadata) if isinstance(memory.metadata, dict) else {}
+                )
+                source_window = (
+                    metadata.get("source_window", {})
+                    if isinstance(metadata.get("source_window"), dict)
+                    else {}
+                )
+                key_facts = metadata.get("key_facts", [])
+                temporal_rows = metadata.get("key_fact_temporal", [])
+                if isinstance(key_facts, list):
+                    fallback_start = source_window.get("started_at") or metadata.get(
+                        "create_time"
+                    )
+                    fallback_end = source_window.get("ended_at") or fallback_start
+                    metadata["key_fact_temporal"] = [
+                        normalize_fact_temporal(
+                            temporal_rows[index]
+                            if isinstance(temporal_rows, list)
+                            and index < len(temporal_rows)
+                            else {},
+                            fallback_started_at=fallback_start,
+                            fallback_ended_at=fallback_end,
+                            fallback_basis="timeline_window",
+                        )
+                        for index in range(len(key_facts))
+                    ]
                 serialized_results.append(
                     {
                         "id": memory.doc_id,
-                        "content": memory.content,
+                        "content": content_with_temporal_key_facts(
+                            memory.content, metadata
+                        ),
                         "score": memory.final_score,
                         "importance": metadata.get("importance"),
                         "session_id": metadata.get("session_id"),
