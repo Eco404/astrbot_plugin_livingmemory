@@ -168,6 +168,9 @@ class MemoryProcessor:
             "补充人物资料只在稳定账号匹配且来源含糊时辅助消歧，不能覆盖消息中的明确事实；"
             "未提供匹配资料且来源未明确时，"
             "请重复具体昵称，不要自行选择性别代词。改写时不得改变来源中已经明确的人物指代。"
+            "消息前缀中的speaker与role是发送者事实。称呼语不会自动成为后续省略主语动作的主语；"
+            "Bot消息中省略主语的自述、计划和感受默认属于Bot。提醒、建议或请求只证明发送者"
+            "发出了该行为，不能证明接收者已经执行。"
         )
 
         if not persona_id:
@@ -436,6 +439,48 @@ class MemoryProcessor:
                 "minItems": 0 if allow_no_memory else 1,
                 "maxItems": 5,
             },
+            "key_fact_attributions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "fact_index": {"type": "integer", "minimum": 0, "maximum": 4},
+                        "subject_refs": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "actor_ref": {
+                                        "type": "string",
+                                        "pattern": "^(A[1-9][0-9]*|unresolved|none)$",
+                                    },
+                                    "display_name_snapshot": {"type": "string"},
+                                },
+                                "required": ["actor_ref", "display_name_snapshot"],
+                                "additionalProperties": False,
+                            },
+                            "minItems": 1,
+                        },
+                        "claim_type": {
+                            "type": "string",
+                            "enum": [
+                                "speaker_self",
+                                "speaker_reports_other",
+                                "speaker_requests_other",
+                                "direct_observation",
+                                "uncertain",
+                            ],
+                        },
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    },
+                    "required": [
+                        "fact_index", "subject_refs", "claim_type", "confidence",
+                    ],
+                    "additionalProperties": False,
+                },
+                "minItems": 0 if allow_no_memory else 1,
+                "maxItems": 5,
+            },
             "message_coverage": {
                 "type": "array",
                 "items": {
@@ -472,6 +517,7 @@ class MemoryProcessor:
             "topics",
             "key_facts",
             "key_fact_evidence",
+            "key_fact_attributions",
             "message_coverage",
             "sentiment",
             "importance",
@@ -562,8 +608,13 @@ class MemoryProcessor:
         if not messages:
             raise ValueError("消息列表不能为空")
 
+        # Identity anchors must exist before prompting so every fact can bind its
+        # semantic subject to the same actors later persisted with the Timeline.
+        role_bindings = build_role_bindings(messages, persona_id)
+        actor_prompt_block, actor_refs = self._actor_prompt_block(role_bindings)
+
         # 1. 格式化对话历史
-        conversation_text = self._format_conversation(messages)
+        conversation_text = self._format_conversation(messages, role_bindings)
 
         # 2. 选择合适的提示词模板
         # 使用 replace 而非 format，避免对话内容中的大括号导致解析错误
@@ -576,6 +627,7 @@ class MemoryProcessor:
             )
         # 注入当前日期，让 LLM 能将相对时间转换为绝对日期
         prompt = prompt.replace("{current_date}", current_date)
+        prompt = actor_prompt_block + "\n\n" + prompt
         matched_identities = self._identity_profiles_for_messages(messages)
         if matched_identities:
             prompt = self._identity_prompt_block(matched_identities) + "\n\n" + prompt
@@ -621,6 +673,8 @@ class MemoryProcessor:
                     self.config.get("timeline_require_source_grounding", False)
                 ),
                 allow_no_memory=allow_no_memory,
+                role_bindings=role_bindings,
+                actor_refs=actor_refs,
             )
             repair_attempted = False
             if not quality_report.acceptable:
@@ -645,6 +699,8 @@ class MemoryProcessor:
                         self.config.get("timeline_require_source_grounding", False)
                     ),
                     allow_no_memory=allow_no_memory,
+                    role_bindings=role_bindings,
+                    actor_refs=actor_refs,
                 )
             if quality_report.acceptable:
                 structured_data["_quality"] = (
@@ -687,8 +743,12 @@ class MemoryProcessor:
             content, metadata = self._build_storage_format(
                 fallback_excerpt, structured_data, is_group_chat
             )
-            role_bindings = build_role_bindings(messages, persona_id)
             metadata["role_bindings"] = role_bindings
+            metadata["key_fact_attributions"] = self._resolve_fact_attributions(
+                structured_data.get("key_fact_attributions", []),
+                actor_refs,
+                verified=quality_report.acceptable,
+            )
             metadata["narrative_perspective"] = "first_person_assistant"
             source_message_refs = [
                 {
@@ -765,7 +825,63 @@ class MemoryProcessor:
                 result.append(display_name)
         return result
 
-    def _format_conversation(self, messages: list[Message]) -> str:
+    @staticmethod
+    def _actor_prompt_block(
+        role_bindings: dict[str, Any],
+    ) -> tuple[str, dict[str, dict[str, Any]]]:
+        """Expose opaque, source-bound actor refs without asking the LLM to infer IDs."""
+        actor_refs: dict[str, dict[str, Any]] = {}
+        payload: list[dict[str, Any]] = []
+        narrator_actor_id = str(role_bindings.get("narrator_actor_id") or "")
+        actors = [
+            actor
+            for actor in role_bindings.get("actors", [])
+            if isinstance(actor, dict)
+        ]
+        actors.sort(
+            key=lambda actor: (
+                str(actor.get("actor_id") or "") != narrator_actor_id,
+                str(actor.get("actor_id") or ""),
+            )
+        )
+        for actor in actors:
+            actor_id = str(actor.get("actor_id") or "").strip()
+            if not actor_id:
+                continue
+            actor_ref = f"A{len(payload) + 1}"
+            normalized = dict(actor)
+            normalized["actor_ref"] = actor_ref
+            normalized["is_narrator"] = actor_id == narrator_actor_id
+            actor_refs[actor_ref] = normalized
+            payload.append(
+                {
+                    "actor_ref": actor_ref,
+                    "actor_type": normalized.get("actor_type"),
+                    "display_names": normalized.get("observed_names", []),
+                    "is_narrator": normalized["is_narrator"],
+                }
+            )
+        return (
+            "# 对话人物锚点（代码提供，禁止自行改写或合并）\n"
+            "key_fact_attributions 只能引用下列 actor_ref。仅在正文明确提到但此处没有稳定身份的第三人，"
+            "才使用 unresolved 并保留来源称谓；事实没有人物主语时使用 none。\n"
+            + json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            actor_refs,
+        )
+
+    @staticmethod
+    def _actor_ref_by_id(actor_refs: dict[str, dict[str, Any]]) -> dict[str, str]:
+        return {
+            str(actor.get("actor_id") or ""): ref
+            for ref, actor in actor_refs.items()
+            if str(actor.get("actor_id") or "")
+        }
+
+    def _format_conversation(
+        self,
+        messages: list[Message],
+        role_bindings: dict[str, Any] | None = None,
+    ) -> str:
         """
         格式化对话历史为文本
 
@@ -777,6 +893,10 @@ class MemoryProcessor:
         """
 
         formatted_lines = []
+        role_bindings = role_bindings or build_role_bindings(messages)
+        _, actor_refs = self._actor_prompt_block(role_bindings)
+        actor_ref_by_id = self._actor_ref_by_id(actor_refs)
+        message_actor_ids = role_bindings.get("message_actor_ids", {})
         for i, msg in enumerate(messages):
             logger.debug(
                 f"[_format_conversation] 消息#{i}: "
@@ -786,7 +906,14 @@ class MemoryProcessor:
 
             content_text = self._message_content_to_text(msg.content)
             sender_info = self._format_sender_info(msg)
-            formatted_line = f"[M{i + 1}] {sender_info} {content_text}".rstrip()
+            message_ref = f"M{i + 1}"
+            actor_id = str(message_actor_ids.get(message_ref) or "")
+            actor_ref = actor_ref_by_id.get(actor_id, "unresolved")
+            role = "assistant" if msg.role == "assistant" else "human"
+            formatted_line = (
+                f"[{message_ref}] [speaker={actor_ref} | role={role}] "
+                f"{sender_info} {content_text}"
+            ).rstrip()
             formatted_lines.append(formatted_line)
             if msg.group_id:
                 logger.debug(
@@ -797,6 +924,58 @@ class MemoryProcessor:
                     f"[_format_conversation] 消息#{i} 格式化结果(私聊): {sender_info[:50]}..."
                 )
         return "\n".join(formatted_lines)
+
+    @staticmethod
+    def _resolve_fact_attributions(
+        rows: Any,
+        actor_refs: dict[str, dict[str, Any]],
+        *,
+        verified: bool,
+    ) -> list[dict[str, Any]]:
+        resolved_by_index: dict[int, dict[str, Any]] = {}
+        for raw in rows if isinstance(rows, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            try:
+                fact_index = int(raw.get("fact_index"))
+            except (TypeError, ValueError):
+                continue
+            subjects: list[dict[str, Any]] = []
+            for subject in raw.get("subject_refs", []):
+                if not isinstance(subject, dict):
+                    continue
+                actor_ref = str(subject.get("actor_ref") or "").strip()
+                actor = actor_refs.get(actor_ref, {})
+                subjects.append(
+                    {
+                        "actor_ref": actor_ref,
+                        "actor_id": (
+                            str(actor.get("actor_id") or "")
+                            if actor_ref not in {"unresolved", "none"}
+                            else None
+                        ),
+                        "actor_type": actor.get("actor_type"),
+                        "display_name_snapshot": str(
+                            subject.get("display_name_snapshot")
+                            or next(iter(actor.get("observed_names", [])), "")
+                        ).strip(),
+                    }
+                )
+            claim_type = str(raw.get("claim_type") or "uncertain")
+            resolved_by_index[fact_index] = {
+                "fact_index": fact_index,
+                "subject_refs": subjects,
+                "claim_type": claim_type,
+                "confidence": raw.get("confidence", 0.0),
+                "attribution_status": (
+                    "unverified"
+                    if not verified
+                    else "uncertain"
+                    if claim_type == "uncertain"
+                    else "verified"
+                ),
+            }
+        return [resolved_by_index[index] for index in sorted(resolved_by_index)]
 
     def _identity_profiles_for_messages(
         self, messages: list[Message]
@@ -856,7 +1035,10 @@ class MemoryProcessor:
 
 ## 来源引用规则
 - 每条消息前的 M1、M2... 是唯一可用证据引用。
+- 每条消息还带 speaker=A1/A2...；这是代码绑定的实际发送者，不得按称呼、语气或句意改写。
 - key_fact_evidence 必须逐一覆盖 key_facts 的每个索引，且只能引用真实支持该事实的消息。
+- key_fact_attributions 必须逐一覆盖 key_facts。speaker_self 的主语必须是证据消息的发送者；speaker_requests_other 表示请求对象，不代表对方已经执行。
+- 一条消息中的称呼语不会自动成为后续省略主语动作的主语。Bot 消息中的第一人称或省略主语的自述、计划、感受默认属于 Bot，除非原句有明确语法证据指向别人。
 - message_coverage 必须逐一且仅一次覆盖全部来源消息。
 - disposition=fact 时 fact_indexes 至少一项；context 可不关联事实；omitted 必须写明省略理由。
 - 不得根据昵称、语气、兴趣或人格设定猜测身份、性别、代词或人物关系。
@@ -894,7 +1076,7 @@ class MemoryProcessor:
 - 有任何可持续事实、偏好、需求、计划、决定、承诺、人际互动、情绪变化或值得回忆的共同经历时，memory_decision 必须为 store。对话短、日常或轻松不是丢弃理由。
 - 只有整个窗口均是纯问候、无信息确认、测试/噪声、纯表情/无语义媒体，或不含任何可持续信息时，才允许 memory_decision=no_memory。
 - no_memory_reason 只能是：{reasons}。store 时必须为 none。
-- no_memory 时必须精确输出：summary=""，topics=[]，key_facts=[]，key_fact_evidence=[]，importance<=0.2。
+- no_memory 时必须精确输出：summary=""，topics=[]，key_facts=[]，key_fact_evidence=[]，key_fact_attributions=[]，importance<=0.2。
 - no_memory 时 message_coverage 仍必须不重不漏地覆盖每个 M 引用，disposition 只能为 context 或 omitted，fact_indexes=[]，并说明理由。
 - 不确定时选择 store，禁止为了减少记忆而省略有意义的内容。"""
 
@@ -1023,6 +1205,9 @@ class MemoryProcessor:
 
             data["key_fact_evidence"] = self._ensure_dict_list(
                 data.get("key_fact_evidence", [])
+            )
+            data["key_fact_attributions"] = self._ensure_dict_list(
+                data.get("key_fact_attributions", [])
             )
             data["message_coverage"] = self._ensure_dict_list(
                 data.get("message_coverage", [])
@@ -1214,13 +1399,16 @@ class MemoryProcessor:
             "topics": structured_data.get("topics", []),
             "key_facts": key_facts,
             "key_fact_evidence": structured_data.get("key_fact_evidence", []),
+            "key_fact_attributions": structured_data.get(
+                "key_fact_attributions", []
+            ),
             "message_coverage": structured_data.get("message_coverage", []),
             "sentiment": structured_data.get("sentiment", "neutral"),
             "interaction_type": "group_chat" if is_group_chat else "private_chat",
             # 双通道：canonical 用于检索，persona_summary 保留原始人格风格摘要
             "canonical_summary": canonical_summary,
             "persona_summary": summary,
-            "summary_schema_version": "v4-memory-decision",
+            "summary_schema_version": "v5-actor-attribution",
             # summary_quality 由 process_conversation 中的 SummaryValidator 覆盖写入
         }
 
@@ -1261,6 +1449,9 @@ class MemoryProcessor:
         data["key_facts"] = self._ensure_list(data.get("key_facts", []))[:5]
         data["key_fact_evidence"] = self._ensure_dict_list(
             data.get("key_fact_evidence", [])
+        )
+        data["key_fact_attributions"] = self._ensure_dict_list(
+            data.get("key_fact_attributions", [])
         )
         data["message_coverage"] = self._ensure_dict_list(
             data.get("message_coverage", [])
@@ -1333,6 +1524,9 @@ class MemoryProcessor:
             "summary": "",
             "topics": [],
             "key_facts": [],
+            "key_fact_evidence": [],
+            "key_fact_attributions": [],
+            "message_coverage": [],
             "participants": [],
             "sentiment": "neutral",
             "importance": 0.5,
@@ -1345,6 +1539,9 @@ class MemoryProcessor:
             "summary": "对话记录",
             "topics": [],
             "key_facts": [],
+            "key_fact_evidence": [],
+            "key_fact_attributions": [],
+            "message_coverage": [],
             "sentiment": "neutral",
             "importance": 0.5,
         }
@@ -1360,6 +1557,8 @@ class MemoryProcessor:
         is_group_chat: bool = False,
         require_source_grounding: bool = False,
         allow_no_memory: bool = False,
+        role_bindings: dict[str, Any] | None = None,
+        actor_refs: dict[str, dict[str, Any]] | None = None,
     ) -> TimelineQualityReport:
         """Evaluate a summary with deterministic, source-reference-aware rules."""
 
@@ -1521,6 +1720,8 @@ class MemoryProcessor:
         grounded_fact_count = 0
         covered_message_count = 0
         source_messages = list(messages or [])
+        role_bindings = role_bindings or {}
+        actor_refs = actor_refs or {}
         if require_source_grounding or no_memory:
             expected_refs = {f"M{index + 1}" for index in range(len(source_messages))}
             evidence_rows = self._ensure_dict_list(
@@ -1576,6 +1777,160 @@ class MemoryProcessor:
                     "incomplete_fact_evidence",
                     "Every key fact must have exactly one evidence row",
                     "key_fact_evidence",
+                )
+
+            attribution_rows = self._ensure_dict_list(
+                structured_data.get("key_fact_attributions", [])
+            )
+            if no_memory and attribution_rows:
+                add(
+                    "no_memory_has_fact_attributions",
+                    "no_memory must not retain fact attributions",
+                    "key_fact_attributions",
+                )
+            attribution_by_index: dict[int, dict[str, Any]] = {}
+            valid_claim_types = {
+                "speaker_self",
+                "speaker_reports_other",
+                "speaker_requests_other",
+                "direct_observation",
+                "uncertain",
+            }
+            actor_id_to_ref = self._actor_ref_by_id(actor_refs)
+            message_actor_ids = role_bindings.get("message_actor_ids", {})
+            for row in attribution_rows:
+                try:
+                    fact_index = int(row.get("fact_index"))
+                except (TypeError, ValueError):
+                    add(
+                        "invalid_fact_attribution_index",
+                        "Fact attribution contains a non-integer fact index",
+                        "key_fact_attributions",
+                    )
+                    continue
+                if fact_index in attribution_by_index:
+                    add(
+                        "duplicate_fact_attribution",
+                        f"Fact {fact_index} has duplicate attribution rows",
+                        "key_fact_attributions",
+                    )
+                    continue
+                attribution_by_index[fact_index] = row
+                claim_type = str(row.get("claim_type") or "").strip()
+                if claim_type not in valid_claim_types:
+                    add(
+                        "invalid_fact_claim_type",
+                        f"Fact {fact_index} has an invalid claim type",
+                        "key_fact_attributions",
+                    )
+                confidence = row.get("confidence")
+                if (
+                    not isinstance(confidence, (int, float))
+                    or isinstance(confidence, bool)
+                    or not 0.0 <= float(confidence) <= 1.0
+                ):
+                    add(
+                        "invalid_fact_attribution_confidence",
+                        f"Fact {fact_index} attribution confidence must be in [0, 1]",
+                        "key_fact_attributions",
+                    )
+                subjects = [
+                    item
+                    for item in row.get("subject_refs", [])
+                    if isinstance(item, dict)
+                ]
+                if not subjects:
+                    add(
+                        "missing_fact_subject",
+                        f"Fact {fact_index} has no semantic subject",
+                        "key_fact_attributions",
+                    )
+                    continue
+                subject_refs: set[str] = set()
+                for subject in subjects:
+                    actor_ref = str(subject.get("actor_ref") or "").strip()
+                    display_name = str(
+                        subject.get("display_name_snapshot") or ""
+                    ).strip()
+                    if actor_ref == "unresolved":
+                        if not display_name:
+                            add(
+                                "unresolved_fact_subject_without_name",
+                                f"Fact {fact_index} unresolved subject has no source label",
+                                "key_fact_attributions",
+                            )
+                    elif actor_ref == "none":
+                        if display_name:
+                            add(
+                                "non_actor_subject_has_name",
+                                f"Fact {fact_index} non-actor subject must not carry a person name",
+                                "key_fact_attributions",
+                            )
+                    elif actor_ref not in actor_refs:
+                        add(
+                            "unknown_fact_subject",
+                            f"Fact {fact_index} references unknown actor {actor_ref or '<empty>'}",
+                            "key_fact_attributions",
+                        )
+                    subject_refs.add(actor_ref)
+
+                evidence_refs = {
+                    str(value).strip()
+                    for value in evidence_by_index.get(fact_index, {}).get(
+                        "message_refs", []
+                    )
+                    if str(value).strip()
+                }
+                speaker_refs = {
+                    actor_id_to_ref.get(
+                        str(message_actor_ids.get(message_ref) or ""), ""
+                    )
+                    for message_ref in evidence_refs
+                } - {""}
+                stable_subject_refs = subject_refs - {"unresolved", "none", ""}
+                if claim_type == "speaker_self" and (
+                    not stable_subject_refs
+                    or not stable_subject_refs <= speaker_refs
+                    or "unresolved" in subject_refs
+                ):
+                    add(
+                        "speaker_self_subject_mismatch",
+                        f"Fact {fact_index} assigns a speaker self-report to a non-speaker",
+                        "key_fact_attributions",
+                    )
+                if (
+                    claim_type == "speaker_reports_other"
+                    and stable_subject_refs
+                    and stable_subject_refs <= speaker_refs
+                ):
+                    add(
+                        "other_claim_subject_is_speaker",
+                        f"Fact {fact_index} marks an other-directed claim but only cites speakers as subjects",
+                        "key_fact_attributions",
+                    )
+                if claim_type == "speaker_requests_other" and (
+                    not stable_subject_refs
+                    or not stable_subject_refs <= speaker_refs
+                    or "unresolved" in subject_refs
+                    or "none" in subject_refs
+                ):
+                    add(
+                        "speaker_request_subject_mismatch",
+                        f"Fact {fact_index} request must remain attributed to the requesting speaker",
+                        "key_fact_attributions",
+                    )
+                if claim_type == "uncertain":
+                    add(
+                        "uncertain_fact_attribution",
+                        f"Fact {fact_index} subject attribution remains uncertain",
+                        "key_fact_attributions",
+                        "warning",
+                    )
+            if not no_memory and set(attribution_by_index) != expected_fact_indexes:
+                add(
+                    "incomplete_fact_attributions",
+                    "Every key fact must have exactly one subject attribution row",
+                    "key_fact_attributions",
                 )
 
             coverage_rows = self._ensure_dict_list(

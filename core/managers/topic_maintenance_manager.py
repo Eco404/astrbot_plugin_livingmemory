@@ -614,6 +614,11 @@ class TopicMaintenanceManager:
         )
         topics = self._string_list(metadata.get("topics"))
         key_facts = self._string_list(metadata.get("key_facts"))
+        key_fact_attributions = [
+            dict(item)
+            for item in metadata.get("key_fact_attributions", [])
+            if isinstance(item, dict)
+        ]
         atoms = [
             atom
             for atom in atom_map.get(int(row["document_id"]), [])
@@ -711,6 +716,7 @@ class TopicMaintenanceManager:
             topics=topics,
             key_facts=key_facts,
             key_fact_temporal=key_fact_temporal,
+            key_fact_attributions=key_fact_attributions,
             atom_fingerprints=atom_fingerprints,
             atom_contents=atom_contents,
             atom_temporal=atom_temporal,

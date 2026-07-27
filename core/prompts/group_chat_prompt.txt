@@ -7,6 +7,7 @@
 # 消息格式说明
 对话历史中的每条消息都包含以下信息:
 - **[M1]、[M2]...**: 当前来源窗口内的稳定消息引用，只用于本次输出的证据绑定
+- **[speaker=A1 | role=human/assistant]**: 代码绑定的实际发送者引用，人物归属以此为准
 - **[昵称 | ID: 账号 | 时间]**: 表示群成员发送的消息，昵称位于方括号开头
 - **[Bot: 昵称 | ID: 账号 | 时间]**: 表示**你自己**发送的消息，以"Bot:"开头
 - **[图片]**: 表示消息中包含图片
@@ -21,6 +22,8 @@
 3. 在总结时,必须明确区分**你说了什么**和**其他人说了什么**
 4. 如果你参与了对话,务必在summary中体现**你的回复内容和作用**
 5. **忽略系统标识**: 如果消息中包含"Error"、"Warning"等系统标识,这些是平台信息,不是对话内容,请忽略这些系统标识,只关注实际的对话内容
+6. 先逐句确定动作、想法、感受和请求的主语，再改写事实；称呼语不会自动成为后续省略主语动作的主语
+7. Bot 消息中的第一人称或省略主语自述默认属于 Bot；提醒、建议或请求不证明被提醒者已经执行
 
 # 对话历史
 {conversation}
@@ -73,6 +76,10 @@
     {"fact_index": 0, "message_refs": ["M1"]},
     {"fact_index": 1, "message_refs": ["M2", "M3"]}
   ],
+  "key_fact_attributions": [
+    {"fact_index": 0, "subject_refs": [{"actor_ref": "A2", "display_name_snapshot": "张三"}], "claim_type": "speaker_self", "confidence": 1.0},
+    {"fact_index": 1, "subject_refs": [{"actor_ref": "A3", "display_name_snapshot": "李四"}], "claim_type": "speaker_self", "confidence": 1.0}
+  ],
   "message_coverage": [
     {"message_ref": "M1", "disposition": "fact", "fact_indexes": [0], "reason": "直接支持事实0"},
     {"message_ref": "M2", "disposition": "context", "fact_indexes": [], "reason": "确认上下文"},
@@ -120,6 +127,13 @@
     {"fact_index": 3, "message_refs": ["M2", "M3"]},
     {"fact_index": 4, "message_refs": ["M7"]}
   ],
+  "key_fact_attributions": [
+    {"fact_index": 0, "subject_refs": [{"actor_ref": "A2", "display_name_snapshot": "张三"}], "claim_type": "speaker_self", "confidence": 1.0},
+    {"fact_index": 1, "subject_refs": [{"actor_ref": "A2", "display_name_snapshot": "张三"}], "claim_type": "speaker_self", "confidence": 1.0},
+    {"fact_index": 2, "subject_refs": [{"actor_ref": "none", "display_name_snapshot": ""}], "claim_type": "direct_observation", "confidence": 0.95},
+    {"fact_index": 3, "subject_refs": [{"actor_ref": "A3", "display_name_snapshot": "李四"}, {"actor_ref": "A4", "display_name_snapshot": "王五"}], "claim_type": "speaker_self", "confidence": 1.0},
+    {"fact_index": 4, "subject_refs": [{"actor_ref": "A1", "display_name_snapshot": ""}], "claim_type": "speaker_self", "confidence": 1.0}
+  ],
   "message_coverage": [
     {"message_ref": "M1", "disposition": "fact", "fact_indexes": [0], "reason": "发起团建"},
     {"message_ref": "M2", "disposition": "fact", "fact_indexes": [3], "reason": "李四确认参加"},
@@ -152,6 +166,9 @@
 - 确保JSON格式正确可解析
 - topics和key_facts最多各5项,应全面涵盖讨论要点
 - key_fact_evidence必须逐项覆盖key_facts；每项只能引用真正支持该事实的M编号
+- key_fact_attributions必须逐项覆盖key_facts；subject_refs只能引用代码提供的A编号，来源只提到但未绑定的第三人使用unresolved并保留原称谓，没有人物主语时使用none
+- claim_type=speaker_self时主语必须是证据消息的发送者；speaker_requests_other表示证据消息发送者提出了请求，不得把请求对象写成已经完成动作
+- 每次输出前逐条核对“事实主语—动作—证据消息发送者”，不确定时使用uncertain并降低confidence，不得猜测
 - message_coverage必须逐一且仅一次覆盖所有M编号；省略消息时必须说明理由
 - sentiment反映群体整体氛围
 - importance必须在0.0-1.0之间,保留1-2位小数

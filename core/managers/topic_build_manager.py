@@ -7519,13 +7519,20 @@ Semantic rules:
    never by its persona display name as a third-person subject or object. A persona
    name may remain only when the fact is explicitly about that name or quotes it.
    Assistant display names are identity anchors, not words to find and replace. Inspect
-   the actor meaning before choosing perspective. For an assistant named `唯`,
-   `空雨请唯估算，唯回复了结果` is wrong and must become
-   `空雨请我估算，我回复了结果`; ordinary text such as `唯一方案`
-   must remain unchanged. An identity fact such as `我说明自己是唯` also keeps the name.
+   the actor meaning before choosing perspective. A rendering such as
+   `对方请<Bot昵称>估算，<Bot昵称>回复了结果` is wrong and must become
+   `对方请我估算，我回复了结果`; ordinary text that merely contains the
+   same characters must remain unchanged. An explicit identity fact such as
+   `我说明了自己的名字` also keeps the source name.
 16. Before returning, verify actor-by-actor that every action, opinion, feeling and
    relationship remains attached to the same source actor. If attribution is unclear,
    preserve the source wording and lower confidence instead of guessing.
+   A source_fact attribution with status=verified is authoritative: map its actor_id
+   to the matching supplied actor_ref and never transfer the predicate to another
+   actor. speaker_requests_other means the cited speaker made a request; it does not
+   prove the requested person performed the action. status=unverified or
+   claim_type=uncertain must remain explicitly uncertain and must not be upgraded into
+   a confident actor relation.
 17. raw_evidence, when present, is auxiliary evidence only for speaker identity,
    pronoun resolution, chronology and local context. The current Timeline revision
    decides what should be remembered. Never add a fact absent from source_facts and
@@ -7883,11 +7890,18 @@ INPUT:
         for timeline_index, item in enumerate(inputs, 1):
             timeline_ref = f"T{timeline_index}"
             timeline_refs[timeline_ref] = item.memory_uid
-            source_facts: list[dict[str, str]] = []
+            source_facts: list[dict[str, Any]] = []
             atom_contents = {
                 self._norm(content)
                 for content in item.atom_contents
                 if self._norm(content)
+            }
+            attribution_by_fact = {
+                self._norm(content): item.key_fact_attributions[fact_index]
+                for fact_index, content in enumerate(item.key_facts)
+                if self._norm(content)
+                and fact_index < len(item.key_fact_attributions)
+                and isinstance(item.key_fact_attributions[fact_index], dict)
             }
             for atom_index, (content, fingerprint) in enumerate(
                 zip(item.atom_contents, item.atom_fingerprints, strict=False),
@@ -7905,12 +7919,14 @@ INPUT:
                     fallback_started_at=item.started_at,
                     fallback_ended_at=item.ended_at,
                 )
+                attribution = attribution_by_fact.get(self._norm(content), {})
                 source_facts.append(
                     {
                         "ref": source_ref,
                         "kind": "atom",
                         "content": content,
                         "temporal": temporal,
+                        "attribution": attribution,
                     }
                 )
                 source_refs[source_ref] = {
@@ -7918,6 +7934,7 @@ INPUT:
                     "fingerprint": fingerprint,
                     "source_key": f"{item.memory_uid}:atom:{fingerprint}",
                     "temporal": temporal,
+                    "attribution": attribution,
                 }
             key_index = 0
             for fact_index, content in enumerate(item.key_facts):
@@ -7933,12 +7950,19 @@ INPUT:
                     fallback_started_at=item.started_at,
                     fallback_ended_at=item.ended_at,
                 )
+                attribution = (
+                    item.key_fact_attributions[fact_index]
+                    if fact_index < len(item.key_fact_attributions)
+                    and isinstance(item.key_fact_attributions[fact_index], dict)
+                    else {}
+                )
                 source_facts.append(
                     {
                         "ref": source_ref,
                         "kind": "key_fact",
                         "content": content,
                         "temporal": temporal,
+                        "attribution": attribution,
                     }
                 )
                 source_refs[source_ref] = {
@@ -7951,6 +7975,7 @@ INPUT:
                         ).hexdigest()
                     ),
                     "temporal": temporal,
+                    "attribution": attribution,
                 }
             timelines.append(
                 {
@@ -9113,6 +9138,7 @@ INPUT:
             "summary": item.summary,
             "topics": item.topics,
             "key_facts": item.key_facts,
+            "key_fact_attributions": item.key_fact_attributions,
             "atoms": [
                 {"content": content, "fingerprint": fingerprint}
                 for content, fingerprint in zip(
