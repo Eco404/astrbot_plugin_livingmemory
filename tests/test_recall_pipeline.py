@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pytest
 
 from astrbot_plugin_livingmemory.core.retrieval.hybrid_retriever import HybridResult
 from astrbot_plugin_livingmemory.core.retrieval.recall_pipeline import RecallPipeline
-from astrbot_plugin_livingmemory.core.utils import format_memories_for_injection
+from astrbot_plugin_livingmemory.core.utils import (
+    format_memories_for_fake_tool_call,
+    format_memories_for_injection,
+)
 
 
 def _result(
@@ -208,3 +212,56 @@ def test_injection_does_not_repeat_key_fact_already_in_content():
         ]
     )
     assert rendered.count(fact) == 1
+
+
+def test_injection_binds_temporal_anchor_without_repeating_fact():
+    fact = "空雨下单了奶茶"
+    recorded_at = 1722168000.0
+    rendered = format_memories_for_injection(
+        [
+            {
+                "content": f"我记得这件事。{fact}",
+                "metadata": {
+                    "importance": 0.7,
+                    "key_facts": [fact],
+                    "key_fact_temporal": [
+                        {
+                            "evidence_started_at": recorded_at,
+                            "evidence_ended_at": recorded_at,
+                            "time_basis": "message_evidence",
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+
+    assert rendered.count(fact) == 1
+    assert "[记录于 2024-07-28" in rendered
+
+
+def test_fake_tool_call_binds_temporal_anchor_without_repeating_fact():
+    fact = "空雨下单了奶茶"
+    messages = format_memories_for_fake_tool_call(
+        [
+            {
+                "id": 1,
+                "content": f"我记得这件事。{fact}",
+                "metadata": {
+                    "key_facts": [fact],
+                    "key_fact_temporal": [
+                        {
+                            "evidence_started_at": 1722168000.0,
+                            "evidence_ended_at": 1722168000.0,
+                            "time_basis": "message_evidence",
+                        }
+                    ],
+                },
+            }
+        ],
+        query="奶茶",
+    )
+    result = json.loads(messages[1]["content"])
+    content = result["results"][0]["content"]
+    assert content.count(fact) == 1
+    assert "[记录于 2024-07-28" in content

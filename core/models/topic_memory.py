@@ -252,8 +252,10 @@ class TimelineTopicCandidate:
     importance_revision: int = 1
     topics: list[str] = field(default_factory=list)
     key_facts: list[str] = field(default_factory=list)
+    key_fact_temporal: list[dict[str, Any]] = field(default_factory=list)
     atom_fingerprints: list[str] = field(default_factory=list)
     atom_contents: list[str] = field(default_factory=list)
+    atom_temporal: list[dict[str, Any]] = field(default_factory=list)
     started_at: float | None = None
     ended_at: float | None = None
     time_cluster_key: str = ""

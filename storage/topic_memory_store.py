@@ -4748,8 +4748,10 @@ class TopicMemoryStore:
             "importance_revision": candidate.importance_revision,
             "topics": candidate.topics,
             "key_facts": candidate.key_facts,
+            "key_fact_temporal": candidate.key_fact_temporal,
             "atom_fingerprints": candidate.atom_fingerprints,
             "atom_contents": candidate.atom_contents,
+            "atom_temporal": candidate.atom_temporal,
             "started_at": candidate.started_at,
             "ended_at": candidate.ended_at,
             "time_cluster_key": candidate.time_cluster_key,
@@ -4815,10 +4817,20 @@ class TopicMemoryStore:
             ),
             topics=[str(item) for item in payload.get("topics", [])],
             key_facts=[str(item) for item in payload.get("key_facts", [])],
+            key_fact_temporal=[
+                dict(item)
+                for item in payload.get("key_fact_temporal", [])
+                if isinstance(item, dict)
+            ],
             atom_fingerprints=[
                 str(item) for item in payload.get("atom_fingerprints", [])
             ],
             atom_contents=[str(item) for item in payload.get("atom_contents", [])],
+            atom_temporal=[
+                dict(item)
+                for item in payload.get("atom_temporal", [])
+                if isinstance(item, dict)
+            ],
             started_at=payload.get("started_at"),
             ended_at=payload.get("ended_at"),
             time_cluster_key=str(payload.get("time_cluster_key") or ""),

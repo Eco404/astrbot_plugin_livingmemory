@@ -372,9 +372,9 @@ async def test_source_grounding_contract_repairs_once_and_persists_report():
             "importance":0.7
         }""",
         """{
-            "summary":"张三说明天下午三点开会，我确认会进行提醒",
+            "summary":"张三说明2026年7月28日下午三点开会，我确认会进行提醒",
             "topics":["会议提醒"],
-            "key_facts":["张三明天下午三点开会"],
+            "key_facts":["张三2026年7月28日下午三点开会"],
             "key_fact_evidence":[{"fact_index":0,"message_refs":["M1"]}],
             "message_coverage":[
                 {"message_ref":"M1","disposition":"fact","fact_indexes":[0],"reason":"会议时间来源"},
@@ -400,6 +400,45 @@ async def test_source_grounding_contract_repairs_once_and_persists_report():
     assert metadata["key_fact_evidence"] == [
         {"fact_index": 0, "message_refs": ["M1"]}
     ]
+    assert metadata["key_fact_temporal"][0]["time_basis"] == "message_evidence"
+    assert metadata["key_fact_temporal"][0]["evidence_started_at"] == pytest.approx(
+        _make_messages()[0].timestamp
+    )
+    assert metadata["key_fact_temporal"][0]["event_started_at"] is not None
+
+
+def test_summary_quality_rejects_unanchored_relative_fact_when_grounding_required():
+    processor = MemoryProcessor(llm_provider=Mock(), context=None)
+    report = processor.assess_summary_quality(
+        {
+            "summary": "我记录了张三的会议安排",
+            "topics": ["会议"],
+            "key_facts": ["张三两小时前确认了会议"],
+            "key_fact_evidence": [{"fact_index": 0, "message_refs": ["M1"]}],
+            "message_coverage": [
+                {
+                    "message_ref": "M1",
+                    "disposition": "fact",
+                    "fact_indexes": [0],
+                    "reason": "会议来源",
+                },
+                {
+                    "message_ref": "M2",
+                    "disposition": "context",
+                    "fact_indexes": [],
+                    "reason": "确认回复",
+                },
+            ],
+            "sentiment": "neutral",
+            "importance": 0.6,
+        },
+        messages=_make_messages(),
+        require_source_grounding=True,
+    )
+
+    assert "relative_fact_time_without_absolute_anchor" in {
+        issue.code for issue in report.errors
+    }
 
 
 @pytest.mark.asyncio

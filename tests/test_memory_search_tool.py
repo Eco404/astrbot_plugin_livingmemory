@@ -155,6 +155,48 @@ async def test_memory_search_tool_serializes_results(memory_engine, astr_context
 
 
 @pytest.mark.asyncio
+async def test_memory_search_tool_binds_timeline_fact_time(memory_engine, astr_context):
+    tool = MemorySearchTool(
+        context=astr_context,
+        config_manager=ConfigManager(),
+        memory_engine=memory_engine,
+    )
+    fact = "空雨下单了奶茶"
+    memory_engine.search_memories = AsyncMock(
+        return_value=[
+            Mock(
+                doc_id=7,
+                content=f"我记得这件事。{fact}",
+                final_score=0.91,
+                metadata={
+                    "importance": 0.8,
+                    "create_time": 1722168000.0,
+                    "key_facts": [fact],
+                    "key_fact_temporal": [
+                        {
+                            "evidence_started_at": 1722168000.0,
+                            "evidence_ended_at": 1722168000.0,
+                            "time_basis": "message_evidence",
+                        }
+                    ],
+                },
+            )
+        ]
+    )
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.tools.memory_search_tool.get_persona_id",
+        new_callable=AsyncMock,
+    ) as get_persona:
+        get_persona.return_value = "persona_a"
+        raw_result = await tool.call(_make_run_context(), query="奶茶")
+
+    content = json.loads(raw_result)["results"][0]["content"]
+    assert content.count(fact) == 1
+    assert "[记录于 2024-07-28" in content
+
+
+@pytest.mark.asyncio
 async def test_memory_search_tool_records_topic_access_after_serializing_result(
     memory_engine, astr_context
 ):
