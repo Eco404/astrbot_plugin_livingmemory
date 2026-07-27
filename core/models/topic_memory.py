@@ -42,6 +42,7 @@ class TopicActorResolutionStatus(str, Enum):
     RESOLVED = "resolved"
     EVIDENCE_CONFIRMED = "evidence_confirmed"
     TIMELINE_BOUND = "timeline_bound"
+    SESSION_INFERRED = "session_inferred"
     PROFILE_INFERRED = "profile_inferred"
     INFERRED = "inferred"
     UNRESOLVED = "unresolved"
