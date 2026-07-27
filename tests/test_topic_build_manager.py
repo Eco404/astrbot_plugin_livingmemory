@@ -2919,6 +2919,210 @@ def test_fragment_actor_refs_are_constrained_and_unresolved_ids_are_fragment_loc
     assert fragment.facts[0]["actor_refs"][0]["actor_id"] == unresolved["actor_id"]
 
 
+def _pending_actor(name: str, relation_type: str = "subject") -> dict:
+    return {
+        "actor_id": "unresolved-pending:"
+        + hashlib.sha256(name.encode("utf-8")).hexdigest()[:16],
+        "actor_type": "unknown",
+        "relation_type": relation_type,
+        "display_name_snapshot": name,
+        "confidence": 0.9,
+        "resolution_status": "unresolved",
+    }
+
+
+def test_private_unbound_timeline_inherits_matching_role_binding_from_peer_timeline():
+    manager = TopicBuildManager(":memory:", None, None)
+    bound = TimelineTopicCandidate(
+        memory_uid="timeline-bound",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="QQ20000001:FriendMessage:10000001",
+        content="我和示例甲讨论咖啡",
+        summary="我和示例甲讨论咖啡",
+        role_bindings={
+            "actors": [
+                {
+                    "actor_id": "aiocqhttp:human:10000001",
+                    "actor_type": "human",
+                    "platform": "aiocqhttp",
+                    "sender_id": "10000001",
+                    "observed_names": ["示例甲"],
+                }
+            ]
+        },
+    )
+    legacy = replace(
+        bound,
+        memory_uid="timeline-legacy",
+        role_bindings={},
+        content="示例甲想喝我的咖啡",
+        summary="示例甲想喝我的咖啡",
+    )
+    context = manager._private_session_identity_context([bound, legacy])
+    actor = _pending_actor("示例甲")
+    facts = [{"actor_refs": [actor]}]
+
+    manager._scope_unresolved_actor_ids(
+        "fragment-legacy",
+        [],
+        [],
+        facts,
+        source_items=[legacy],
+        private_identity_context=context,
+    )
+
+    assert actor["actor_id"] == "qq:human:10000001"
+    assert actor["actor_type"] == "human"
+    assert actor["resolution_status"] == "timeline_bound"
+    assert actor["resolution_sources"] == ["timeline_role_bindings"]
+    roles = manager._conversation_role_payload([bound, legacy])
+    assert [item["actor_id"] for item in roles["human_participants"]] == [
+        "qq:human:10000001"
+    ]
+
+
+def test_private_unbound_same_name_is_session_scoped_across_fragments():
+    manager = TopicBuildManager(":memory:", None, None)
+    first = TimelineTopicCandidate(
+        memory_uid="timeline-legacy-1",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:FriendMessage:u1",
+        content="示例甲讨论咖啡",
+        summary="示例甲讨论咖啡",
+    )
+    second = replace(first, memory_uid="timeline-legacy-2")
+    context = manager._private_session_identity_context([first, second])
+    first_actor = _pending_actor("示例甲", "subject")
+    second_actor = _pending_actor("示例甲", "requester")
+
+    manager._scope_unresolved_actor_ids(
+        "fragment-1",
+        [],
+        [],
+        [{"actor_refs": [first_actor]}],
+        source_items=[first],
+        private_identity_context=context,
+    )
+    manager._scope_unresolved_actor_ids(
+        "fragment-2",
+        [],
+        [],
+        [{"actor_refs": [second_actor]}],
+        source_items=[second],
+        private_identity_context=context,
+    )
+
+    assert first_actor["actor_id"] == second_actor["actor_id"]
+    assert first_actor["actor_id"].startswith("unresolved:session:")
+    assert first_actor["relation_type"] == "subject"
+    assert second_actor["relation_type"] == "requester"
+
+
+def test_private_profile_name_resolves_legacy_actor_to_session_peer():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        identity_profile_store=SupplementalIdentityStore(
+            profiles=[
+                {
+                    "platform": "qq",
+                    "user_id": "10000001",
+                    "display_name": "示例甲",
+                    "aliases": ["小雨"],
+                }
+            ]
+        ),
+    )
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-profile-legacy",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="QQ20000001:FriendMessage:10000001",
+        content="示例甲说想喝我的咖啡",
+        summary="示例甲说想喝我的咖啡",
+    )
+    context = manager._private_session_identity_context([candidate])
+    actor = _pending_actor("示例甲")
+
+    manager._scope_unresolved_actor_ids(
+        "fragment-profile",
+        [],
+        [],
+        [{"actor_refs": [actor]}],
+        source_items=[candidate],
+        private_identity_context=context,
+    )
+
+    assert actor["actor_id"] == "qq:human:10000001"
+    assert actor["resolution_status"] == "session_inferred"
+    roles = manager._conversation_role_payload([candidate])
+    assert roles["human_participants"][0]["observed_names"] == ["示例甲", "小雨"]
+    assert manager._candidate_identity_payload([candidate])[0]["display_name"] == "示例甲"
+
+
+def test_group_and_conflicting_private_bindings_keep_fragment_local_identity():
+    manager = TopicBuildManager(":memory:", None, None)
+    group = TimelineTopicCandidate(
+        memory_uid="group-legacy",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="qq:GroupMessage:g1",
+        content="示例甲讨论咖啡",
+        summary="示例甲讨论咖啡",
+    )
+    first = replace(
+        group,
+        memory_uid="private-bound-1",
+        session_id="qq:FriendMessage:u1",
+        role_bindings={
+            "actors": [
+                {
+                    "actor_id": "qq:human:u1",
+                    "actor_type": "human",
+                    "observed_names": ["示例甲"],
+                }
+            ]
+        },
+    )
+    second = replace(
+        first,
+        memory_uid="private-bound-2",
+        role_bindings={
+            "actors": [
+                {
+                    "actor_id": "qq:human:u2",
+                    "actor_type": "human",
+                    "observed_names": ["示例甲"],
+                }
+            ]
+        },
+    )
+    context = manager._private_session_identity_context([first, second])
+    assert next(iter(context.values()))["conflict"] is True
+
+    for fragment_uid, source_items, identity_context in (
+        ("fragment-group", [group], {}),
+        ("fragment-conflict", [first], context),
+    ):
+        actor = _pending_actor("示例甲")
+        manager._scope_unresolved_actor_ids(
+            fragment_uid,
+            [],
+            [],
+            [{"actor_refs": [actor]}],
+            source_items=source_items,
+            private_identity_context=identity_context,
+        )
+        assert actor["actor_id"].startswith(f"unresolved:{fragment_uid}:")
+
+
 def test_fragment_affect_events_are_source_and_actor_grounded():
     manager = TopicBuildManager(":memory:", None, None)
     candidate = TimelineTopicCandidate(

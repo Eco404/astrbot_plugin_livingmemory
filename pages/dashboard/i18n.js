@@ -563,6 +563,7 @@
     "topic.resolution.resolved": { zh: "已解析", en: "Resolved", ru: "Определено" },
     "topic.resolution.evidence_confirmed": { zh: "原始证据确认", en: "Evidence confirmed", ru: "Подтверждено источником" },
     "topic.resolution.timeline_bound": { zh: "Timeline 身份绑定", en: "Timeline-bound", ru: "Связано с Timeline" },
+    "topic.resolution.session_inferred": { zh: "私聊会话身份推断", en: "Private-session inferred", ru: "Определено по личному чату" },
     "topic.resolution.profile_inferred": { zh: "旧版人物资料推断", en: "Legacy profile-inferred", ru: "Определено старым профилем" },
     "topic.resolution.inferred": { zh: "语义推断", en: "Inferred", ru: "Выведено" },
     "topic.resolution.unresolved": { zh: "未解析（仅当前片段）", en: "Unresolved (fragment-local)", ru: "Не определено" },

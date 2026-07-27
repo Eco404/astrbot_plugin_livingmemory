@@ -79,7 +79,7 @@ from .topic_maintenance_manager import TopicMaintenanceManager
 from .topic_relation_builder import vector_neighbor_rankings
 
 
-_FRAGMENT_PROMPT_VERSION = "topic-fragment-v18-first-person-assistant"
+_FRAGMENT_PROMPT_VERSION = "topic-fragment-v19-private-session-actors"
 _SYNTHESIS_PROMPT_VERSION = "topic-synthesis-v13-first-person-assistant"
 _COMPONENT_REVIEW_PROMPT_VERSION = "topic-component-review-v2-structured-output"
 _NARRATIVE_SCHEMA_VERSION = "first_person_assistant_roles_v5"
@@ -5908,6 +5908,7 @@ class TopicBuildManager:
         }
         covered: set[str] = set()
         result: list[TopicFragmentDraft] = []
+        private_identity_context = self._private_session_identity_context(inputs)
         for local_index, raw in enumerate(raw_fragments):
             index = fragment_index_offset + local_index
             if not isinstance(raw, dict):
@@ -6077,11 +6078,6 @@ class TopicBuildManager:
                     + ":".join(timeline_uids),
                 )
             )
-            deterministic_participants = self._deterministic_fragment_participants(
-                source_items,
-                facts=normalized_facts,
-            )
-            participant_refs = deterministic_participants
             mentioned_actor_refs = self._dedupe_actor_relations(
                 [
                     dict(actor)
@@ -6094,9 +6090,15 @@ class TopicBuildManager:
             )
             self._scope_unresolved_actor_ids(
                 fragment_uid,
-                participant_refs,
+                [],
                 mentioned_actor_refs,
                 normalized_facts,
+                source_items=source_items,
+                private_identity_context=private_identity_context,
+            )
+            participant_refs = self._deterministic_fragment_participants(
+                source_items,
+                facts=normalized_facts,
             )
             actors_by_name: dict[str, set[str]] = {}
             for value in [
@@ -6338,13 +6340,23 @@ class TopicBuildManager:
                     "reason": "shared_source_split_into_multiple_fragments",
                 }
 
-    @staticmethod
     def _scope_unresolved_actor_ids(
+        self,
         fragment_uid: str,
         participant_refs: list[dict[str, Any]],
         mentioned_actor_refs: list[dict[str, Any]],
         facts: list[dict[str, Any]],
+        *,
+        source_items: list[TimelineTopicCandidate],
+        private_identity_context: dict[str, dict[str, Any]],
     ) -> None:
+        """Resolve private-chat peers before falling back to local identities.
+
+        Stable role bindings remain authoritative.  When all source Timelines lack
+        bindings, same-name unresolved actors share a deterministic session-local ID
+        instead of being split by physical fragment.  Group chats and conflicting
+        private bindings retain the safer fragment-local behavior.
+        """
         values = [*participant_refs, *mentioned_actor_refs]
         values.extend(
             actor
@@ -6352,20 +6364,165 @@ class TopicBuildManager:
             for actor in fact.get("actor_refs", [])
             if isinstance(actor, dict)
         )
+        source_scopes = {
+            scope
+            for item in source_items
+            if (scope := self._private_session_scope(item.session_id)) is not None
+        }
+        private_context: dict[str, Any] | None = None
+        if len(source_scopes) == 1:
+            private_context = private_identity_context.get(next(iter(source_scopes)))
         replacements: dict[str, str] = {}
         for actor in values:
             actor_id = str(actor.get("actor_id") or "")
             if not actor_id.startswith("unresolved-pending:"):
                 continue
-            replacements.setdefault(
-                actor_id,
-                "unresolved:"
-                + fragment_uid
-                + ":"
-                + actor_id.removeprefix("unresolved-pending:"),
+            name_key = self._norm(actor.get("display_name_snapshot"))
+            resolved_to_private_peer = bool(
+                private_context
+                and not private_context.get("conflict")
+                and name_key
+                and name_key in private_context.get("name_keys", set())
             )
+            if resolved_to_private_peer:
+                replacements.setdefault(actor_id, str(private_context["actor_id"]))
+                actor["actor_type"] = "human"
+                actor["resolution_status"] = str(
+                    private_context.get("resolution_status") or "session_inferred"
+                )
+                actor["resolution_sources"] = list(
+                    private_context.get("resolution_sources", [])
+                )
+            elif (
+                private_context
+                and not private_context.get("conflict")
+                and not private_context.get("has_role_binding")
+            ):
+                scope_hash = hashlib.sha256(
+                    str(private_context["scope"]).encode("utf-8")
+                ).hexdigest()[:16]
+                replacements.setdefault(
+                    actor_id,
+                    "unresolved:session:"
+                    + scope_hash
+                    + ":"
+                    + actor_id.removeprefix("unresolved-pending:"),
+                )
+                actor["resolution_status"] = "unresolved"
+                actor["resolution_sources"] = ["private_session_name_scope"]
+            else:
+                replacements.setdefault(
+                    actor_id,
+                    "unresolved:"
+                    + fragment_uid
+                    + ":"
+                    + actor_id.removeprefix("unresolved-pending:"),
+                )
+                actor["resolution_status"] = "unresolved"
             actor["actor_id"] = replacements[actor_id]
-            actor["resolution_status"] = "unresolved"
+
+    @staticmethod
+    def _private_session_scope(session_id: str | None) -> str | None:
+        parts = str(session_id or "").split(":", 2)
+        if len(parts) != 3:
+            return None
+        message_type = parts[1].strip().casefold()
+        if "friend" not in message_type and "private" not in message_type:
+            return None
+        peer_id = parts[2].strip()
+        if not peer_id:
+            return None
+        platform_token = parts[0].strip()
+        if re.fullmatch(r"qq\d+", platform_token, re.IGNORECASE):
+            platform = "qq"
+        else:
+            platform = canonical_platform(platform_token) or "unknown"
+        return f"{platform}\0{peer_id}"
+
+    def _private_session_identity_context(
+        self,
+        inputs: list[TimelineTopicCandidate],
+    ) -> dict[str, dict[str, Any]]:
+        """Build deterministic private-peer identities across participating Timelines."""
+        contexts: dict[str, dict[str, Any]] = {}
+        for item in inputs:
+            scope = self._private_session_scope(item.session_id)
+            if scope is None:
+                continue
+            platform, peer_id = scope.split("\0", 1)
+            context = contexts.setdefault(
+                scope,
+                {
+                    "scope": scope,
+                    "platform": platform,
+                    "peer_id": peer_id,
+                    "bound_actors": {},
+                },
+            )
+            bindings = item.role_bindings if isinstance(item.role_bindings, dict) else {}
+            for actor in bindings.get("actors", []):
+                if not isinstance(actor, dict):
+                    continue
+                actor_type = str(actor.get("actor_type") or "human")
+                if actor_type == "assistant":
+                    continue
+                sender_id = str(actor.get("sender_id") or "").strip()
+                actor_platform = canonical_platform(actor.get("platform")) or platform
+                normalized_actor_id = (
+                    stable_actor_id(actor_platform, sender_id, "human")
+                    if sender_id
+                    else str(actor.get("actor_id") or "").strip()
+                )
+                if not normalized_actor_id:
+                    continue
+                bound = context["bound_actors"].setdefault(
+                    normalized_actor_id,
+                    {"names": [], "actor_id": normalized_actor_id},
+                )
+                for name in actor.get("observed_names", []):
+                    display_name = str(name or "").strip()
+                    if display_name and display_name not in bound["names"]:
+                        bound["names"].append(display_name)
+
+        for context in contexts.values():
+            bound_actors = context.pop("bound_actors")
+            context["has_role_binding"] = bool(bound_actors)
+            context["conflict"] = len(bound_actors) > 1
+            if len(bound_actors) == 1:
+                bound = next(iter(bound_actors.values()))
+                actor_id = str(bound["actor_id"])
+                names = list(bound["names"])
+                resolution_sources = ["timeline_role_bindings"]
+                resolution_status = "timeline_bound"
+                confidence = 0.95
+            else:
+                actor_id = stable_actor_id(
+                    context["platform"], context["peer_id"], "human"
+                )
+                names = []
+                resolution_sources = ["private_session_peer"]
+                resolution_status = "session_inferred"
+                confidence = 0.82
+            if not context["conflict"]:
+                for profile in self._active_identity_profiles():
+                    if not profile.matches_actor_id(actor_id):
+                        continue
+                    for name in profile.names:
+                        if name not in names:
+                            names.append(name)
+            context.update(
+                {
+                    "actor_id": actor_id,
+                    "names": names,
+                    "name_keys": {
+                        self._norm(name) for name in names if self._norm(name)
+                    },
+                    "resolution_sources": resolution_sources,
+                    "resolution_status": resolution_status,
+                    "identity_confidence": confidence,
+                }
+            )
+        return contexts
 
     def _deterministic_fragment_participants(
         self,
@@ -7414,8 +7571,9 @@ Reference rules:
   stable identity.
 - When the source clearly mentions a person who has no supplied stable actor ref, use
   actor_ref "unresolved" and copy only the local source label into
-  display_name_snapshot. The application will create a fragment-local identity; never
-  reuse it as if it were a stable account.
+  display_name_snapshot. The application may scope equal names to one private session
+  when the source identity permits it; otherwise it creates a fragment-local identity.
+  Never reuse an unresolved identity as if it were a stable account.
 - Actor relations are only for people, assistant personas, or explicitly described
   groups of people capable of speaking, acting, requesting, or feeling. Weather,
   seasons, dates, times, places, objects, products, organizations, policies, and
@@ -8329,11 +8487,8 @@ INPUT:
     ) -> list[dict[str, Any]]:
         actor_ids = {
             str(actor.get("actor_id") or "").strip()
-            for item in inputs
-            for actor in (
-                item.role_bindings.get("actors", [])
-                if isinstance(item.role_bindings, dict)
-                else []
+            for actor in self._conversation_role_payload(inputs).get(
+                "human_participants", []
             )
             if isinstance(actor, dict) and str(actor.get("actor_id") or "").strip()
         }
@@ -8368,6 +8523,7 @@ INPUT:
         humans: list[dict[str, Any]] = []
         assistants: list[dict[str, Any]] = []
         timeline_narrators: dict[str, str] = {}
+        private_identity_context = self._private_session_identity_context(inputs)
 
         def append_unique(target: list[dict[str, Any]], value: dict[str, Any]) -> None:
             actor_id = str(value.get("actor_id") or "")
@@ -8425,7 +8581,13 @@ INPUT:
                 }
                 actor_type = str(actor.get("actor_type") or "human")
                 sender_id = str(actor.get("sender_id") or "").strip()
-                platform = canonical_platform(actor.get("platform"))
+                private_scope = self._private_session_scope(item.session_id)
+                session_platform = (
+                    private_scope.split("\0", 1)[0] if private_scope else ""
+                )
+                platform = (
+                    canonical_platform(actor.get("platform")) or session_platform
+                )
                 if actor_type == "assistant" and item.persona_id:
                     normalized_actor_id = f"assistant-persona:{item.persona_id}"
                 elif sender_id:
@@ -8468,6 +8630,30 @@ INPUT:
                 )
             timeline_narrators[item.memory_uid] = narrator
 
+        for private_context in private_identity_context.values():
+            if private_context.get("conflict"):
+                continue
+            append_unique(
+                humans,
+                {
+                    "actor_id": private_context["actor_id"],
+                    "actor_type": "human",
+                    "platform": private_context["platform"],
+                    "sender_id": private_context["peer_id"],
+                    "observed_names": list(private_context.get("names", [])),
+                    "resolution_sources": list(
+                        private_context.get("resolution_sources", [])
+                    ),
+                    "identity_confidence": float(
+                        private_context.get("identity_confidence", 0.82)
+                    ),
+                    "resolution_status": str(
+                        private_context.get("resolution_status")
+                        or "session_inferred"
+                    ),
+                },
+            )
+
         profile_by_actor_id = {
             str(actor.get("actor_id") or ""): profile.to_prompt_dict()
             for actor in humans
@@ -8478,6 +8664,15 @@ INPUT:
             identity = profile_by_actor_id.get(str(actor.get("actor_id") or ""))
             if identity:
                 actor["supplemental_identity_hint"] = identity
+                for name in (
+                    identity.get("display_name"),
+                    *(identity.get("aliases") or []),
+                ):
+                    display_name = str(name or "").strip()
+                    if display_name and display_name not in actor.setdefault(
+                        "observed_names", []
+                    ):
+                        actor["observed_names"].append(display_name)
         return {
             "timeline_narration": "first_person_assistant",
             "output_perspective": "preserve_first_person_assistant",
