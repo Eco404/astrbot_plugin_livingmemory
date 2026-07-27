@@ -15,6 +15,8 @@ export class MaintenancePage {
     this.timelineRebuildItems = [];
     this.timelineRebuildPoller = null;
     this.databaseHealth = null;
+    this.databaseRepairPoller = null;
+    this.databaseRepairTaskUid = null;
   }
 
   initEventListeners() {
@@ -92,7 +94,7 @@ export class MaintenancePage {
     if (this.tab === "sessions") this.loadSessionAudit();
     if (this.tab === "recent-recall") this.loadRecentRecalls();
     if (this.tab === "timeline-rebuild") this.loadTimelineRebuildTasks();
-    if (this.tab === "database") this.loadDatabaseHealth();
+    if (this.tab === "database") this.resumeDatabaseRepair();
   }
 
   selectTab(tab) {
@@ -113,7 +115,7 @@ export class MaintenancePage {
     if (tab === "sessions") this.loadSessionAudit();
     if (tab === "recent-recall") this.loadRecentRecalls();
     if (tab === "timeline-rebuild") this.loadTimelineRebuildTasks();
-    if (tab === "database" && !this.databaseHealth) this.loadDatabaseHealth();
+    if (tab === "database" && !this.databaseHealth) this.resumeDatabaseRepair();
   }
 
   selectedDatabaseIssues() {
@@ -125,7 +127,7 @@ export class MaintenancePage {
   updateDatabaseSelection() {
     const selected = this.selectedDatabaseIssues();
     const button = document.getElementById("database-health-repair");
-    if (button) button.disabled = selected.length === 0;
+    if (button) button.disabled = selected.length === 0 || Boolean(this.databaseRepairTaskUid);
     const label = document.getElementById("database-health-selection");
     if (label) label.textContent = selected.length
       ? window.t("maintenance.databaseSelected", selected.length)
@@ -189,6 +191,16 @@ export class MaintenancePage {
     const issues = document.getElementById("database-health-issues");
     if (!button || !summary || !issues) return;
     button.disabled = true;
+    this.renderDatabaseProgress({
+      status: "running",
+      stage: "checking",
+      current: 0,
+      total: 0,
+      percent: 0,
+      current_step: window.t("maintenance.databaseChecking"),
+      created_at: Date.now() / 1000,
+      indeterminate: true,
+    });
     summary.innerHTML = `<div class="identity-state">${esc(window.t("maintenance.databaseChecking"))}</div>`;
     issues.innerHTML = "";
     try {
@@ -199,7 +211,108 @@ export class MaintenancePage {
       this.showToast(error.message, true);
     } finally {
       button.disabled = false;
+      if (!this.databaseRepairTaskUid) {
+        document.getElementById("database-repair-progress")?.classList.add("hidden");
+      }
     }
+  }
+
+  formatElapsed(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds || 0)));
+    const minutes = Math.floor(total / 60);
+    const rest = total % 60;
+    return minutes ? `${minutes}m ${rest}s` : `${rest}s`;
+  }
+
+  renderDatabaseProgress(job) {
+    const panel = document.getElementById("database-repair-progress");
+    if (!panel || !job) return;
+    panel.classList.remove("hidden");
+    const percent = Math.max(0, Math.min(100, Number(job.percent || 0)));
+    const stage = String(job.stage || "pending");
+    const stageLabels = {
+      checking: window.t("maintenance.databaseStageChecking"),
+      validating: window.t("maintenance.databaseStageValidating"),
+      repairing: window.t("maintenance.databaseStageRepairing"),
+      verifying: window.t("maintenance.databaseStageVerifying"),
+      completed: window.t("maintenance.databaseStageCompleted"),
+      failed: window.t("maintenance.databaseStageFailed"),
+      cancelled: window.t("maintenance.databaseStageCancelled"),
+    };
+    const stageElement = document.getElementById("database-repair-progress-stage");
+    const percentElement = document.getElementById("database-repair-progress-percent");
+    const bar = document.getElementById("database-repair-progress-bar");
+    const track = bar?.parentElement;
+    const step = document.getElementById("database-repair-progress-step");
+    const count = document.getElementById("database-repair-progress-count");
+    const elapsed = document.getElementById("database-repair-progress-elapsed");
+    const error = document.getElementById("database-repair-progress-error");
+    if (stageElement) stageElement.textContent = stageLabels[stage] || window.t("maintenance.databaseRepairProgress");
+    if (percentElement) percentElement.textContent = job.indeterminate ? "" : `${percent.toFixed(1)}%`;
+    if (bar) bar.style.width = job.indeterminate ? "35%" : `${percent}%`;
+    track?.classList.toggle("is-indeterminate", Boolean(job.indeterminate));
+    if (step) step.textContent = job.current_step || "";
+    if (count) count.textContent = job.total ? `${Number(job.current || 0)} / ${Number(job.total || 0)}` : "";
+    if (elapsed) {
+      const now = Date.now() / 1000;
+      elapsed.textContent = window.t("maintenance.operationElapsed", this.formatElapsed(now - Number(job.created_at || now)));
+    }
+    if (error) error.textContent = job.error || "";
+  }
+
+  async resumeDatabaseRepair() {
+    try {
+      const job = await this.topicPage.api.get("database/repair/progress");
+      if (["pending", "running"].includes(job.status)) {
+        this.databaseRepairTaskUid = job.job_uid;
+        this.renderDatabaseProgress(job);
+        this.pollDatabaseRepair(job.job_uid);
+        return;
+      }
+      if (job.health) {
+        this.databaseHealth = job.health;
+        this.renderDatabaseHealth();
+        this.renderDatabaseProgress(job);
+      } else {
+        await this.loadDatabaseHealth();
+      }
+    } catch (_) {
+      await this.loadDatabaseHealth();
+    }
+  }
+
+  pollDatabaseRepair(jobUid) {
+    clearTimeout(this.databaseRepairPoller);
+    this.databaseRepairTaskUid = jobUid;
+    const poll = async () => {
+      try {
+        const job = await this.topicPage.api.get("database/repair/progress", { job_uid: jobUid });
+        this.renderDatabaseProgress(job);
+        const terminal = ["completed", "completed_with_errors", "failed", "cancelled"].includes(job.status);
+        if (!terminal) {
+          this.databaseRepairPoller = setTimeout(poll, 800);
+          return;
+        }
+        this.databaseRepairTaskUid = null;
+        this.databaseRepairPoller = null;
+        if (job.health) {
+          this.databaseHealth = job.health;
+          this.renderDatabaseHealth();
+        }
+        const failed = Number((job.failed || []).length);
+        if (job.status === "failed") this.showToast(job.error || window.t("maintenance.databaseRepairFailed"), true);
+        else this.showToast(failed
+          ? window.t("maintenance.databaseRepairPartial", failed)
+          : window.t("maintenance.databaseRepairComplete"), failed > 0);
+        const button = document.getElementById("database-health-repair");
+        if (button) button.disabled = this.selectedDatabaseIssues().length === 0;
+      } catch (error) {
+        this.databaseRepairTaskUid = null;
+        this.databaseRepairPoller = null;
+        this.showToast(error.message, true);
+      }
+    };
+    this.databaseRepairPoller = setTimeout(poll, 250);
   }
 
   async repairDatabaseIssues() {
@@ -216,16 +329,11 @@ export class MaintenancePage {
     const button = document.getElementById("database-health-repair");
     button.disabled = true;
     try {
-      const result = await this.topicPage.api.post("database/repair", {
+      const job = await this.topicPage.api.post("database/repair", {
         issues: issueUids.map(issue_uid => ({ issue_uid })),
       });
-      this.databaseHealth = result.health || null;
-      if (this.databaseHealth) this.renderDatabaseHealth();
-      else await this.loadDatabaseHealth();
-      const failed = Number((result.failed || []).length);
-      this.showToast(failed
-        ? window.t("maintenance.databaseRepairPartial", failed)
-        : window.t("maintenance.databaseRepairComplete"), failed > 0);
+      this.renderDatabaseProgress(job);
+      this.pollDatabaseRepair(job.job_uid);
     } catch (error) {
       this.showToast(error.message, true);
       button.disabled = false;
@@ -326,11 +434,12 @@ export class MaintenancePage {
         const total = Number(task.total_count || 0);
         const done = Number(task.completed_count || 0);
         const failed = Number(task.failed_count || 0);
+        const progress = total ? Math.max(0, Math.min(100, done / total * 100)) : 0;
         const terminal = ["completed", "completed_with_errors", "failed", "cancelled"].includes(task.status);
         const resumable = ["failed", "completed_with_errors"].includes(task.status);
         const cancellable = ["queued", "running", "cancelling"].includes(task.status);
         return `<div class="session-task-row timeline-rebuild-task-row">
-          <span class="session-task-main"><strong>${esc(task.topic_mode === "full" ? window.t("maintenance.topicSyncFull") : window.t("maintenance.topicSyncLocal"))}</strong><small>${done} / ${total} · ${esc(window.t("maintenance.failedCount", failed))}</small></span>
+          <span class="session-task-main"><strong>${esc(task.topic_mode === "full" ? window.t("maintenance.topicSyncFull") : window.t("maintenance.topicSyncLocal"))}</strong><small>${done} / ${total} · ${esc(window.t("maintenance.failedCount", failed))}</small><span class="maintenance-task-progress" aria-label="${progress.toFixed(0)}%"><span style="width:${progress}%"></span></span></span>
           <span class="status-badge status-${esc(task.status)}">${esc(task.status)}</span>
           <small class="session-task-detail">${esc(task.current_step || "")}${task.error ? ` · ${esc(task.error)}` : ""}</small>
           <span class="session-task-actions">
@@ -461,12 +570,17 @@ export class MaintenancePage {
   renderSessionTasks(tasks) {
     const target = document.getElementById("session-task-list");
     if (!target) return;
-    target.innerHTML = tasks.length ? tasks.map(task => `<div class="session-task-row">
-      <span class="session-task-main"><strong>${esc(window.t(`maintenance.operation.${task.operation}`))}</strong><small>${(task.source_session_ids || []).map(esc).join(" · ")}</small></span>
+    target.innerHTML = tasks.length ? tasks.map(task => {
+      const total = Math.max(1, Number((task.source_session_ids || []).length));
+      const done = Math.min(total, Number((task.result?.completed_sessions || []).length));
+      const progress = task.status === "completed" ? 100 : Math.max(0, Math.min(100, done / total * 100));
+      return `<div class="session-task-row">
+      <span class="session-task-main"><strong>${esc(window.t(`maintenance.operation.${task.operation}`))}</strong><small>${(task.source_session_ids || []).map(esc).join(" · ")}</small><span class="maintenance-task-progress" aria-label="${progress.toFixed(0)}%"><span style="width:${progress}%"></span></span></span>
       <span class="status-badge status-${esc(task.status)}">${esc(task.status)}</span>
       <small class="session-task-detail">${esc(task.current_step || "")}${task.error ? ` · ${esc(task.error)}` : ""}</small>
       <span class="session-task-actions">${["completed", "failed", "cancelled"].includes(task.status) ? `<button class="session-task-delete" type="button" data-session-task-delete="${esc(task.task_uid)}" title="${esc(window.t("common.delete"))}" aria-label="${esc(window.t("common.delete"))}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 10v6m4-6v6"/></svg></button>` : ""}</span>
-    </div>`).join("") : `<span class="text-tertiary">${esc(window.t("maintenance.noTasks"))}</span>`;
+    </div>`;
+    }).join("") : `<span class="text-tertiary">${esc(window.t("maintenance.noTasks"))}</span>`;
   }
 
   async deleteSessionTask(taskUid, button) {
@@ -680,7 +794,10 @@ export class MaintenancePage {
   async pollSessionTask(taskUid) {
     for (let attempt = 0; attempt < 300; attempt += 1) {
       const task = await this.topicPage.api.get("sessions/maintenance/task", { task_uid: taskUid });
-      document.getElementById("session-maintenance-preview").innerHTML = `<strong>${esc(window.t("maintenance.taskRunning"))}</strong><p>${esc(task.current_step || task.status)}</p>${task.error ? `<div class="session-preview-blocked">${esc(task.error)}</div>` : ""}`;
+      const total = Math.max(1, Number((task.source_session_ids || []).length));
+      const done = Math.min(total, Number((task.result?.completed_sessions || []).length));
+      const progress = task.status === "completed" ? 100 : Math.max(0, Math.min(100, done / total * 100));
+      document.getElementById("session-maintenance-preview").innerHTML = `<strong>${esc(window.t("maintenance.taskRunning"))}</strong><p>${esc(task.current_step || task.status)} · ${done} / ${total}</p><div class="topic-progress-track"><span style="width:${progress}%"></span></div>${task.error ? `<div class="session-preview-blocked">${esc(task.error)}</div>` : ""}`;
       if (task.status === "completed") return task;
       if (task.status === "failed") throw new Error(task.error || window.t("maintenance.taskFailed"));
       await new Promise(resolve => setTimeout(resolve, 1000));

@@ -69,6 +69,9 @@ class TopicHandler:
         "revector_fragments": (0.0, 55.0),
         "revector_topics": (55.0, 80.0),
         "revector_relations": (80.0, 100.0),
+        "relation_loading": (0.0, 10.0),
+        "relation_deriving": (10.0, 80.0),
+        "relation_publishing": (80.0, 100.0),
         "completed": (100.0, 100.0),
     }
 
@@ -585,16 +588,85 @@ class TopicHandler:
             return self.utils.error("memory_space_id 不能为空")
         if self.has_active_jobs() or memory_engine.topic_build_manager.has_active_builds():
             return self.utils.error("Topic 构建正在运行，暂时不能重算相关话题")
-        try:
-            result = await memory_engine.topic_build_manager.recompute_topic_relations(
-                memory_space_id
+        job_uid = str(uuid.uuid4())
+        now = time.time()
+        self._jobs[job_uid] = {
+            "job_uid": job_uid,
+            "operation": "recompute_relations",
+            "memory_space_id": memory_space_id,
+            "status": "pending",
+            "stage": "relation_loading",
+            "current": 0,
+            "total": 1,
+            "overall_percent": 0.0,
+            "created_at": now,
+            "last_progress_at": now,
+        }
+
+        async def progress(event: dict[str, Any]) -> None:
+            job = self._jobs[job_uid]
+            stage = str(event.get("stage") or "relation_loading")
+            current = int(event.get("current") or 0)
+            total = int(event.get("total") or 0)
+            job.update(
+                {
+                    "status": "running",
+                    "stage": stage,
+                    "current": current,
+                    "total": total,
+                    "overall_percent": self._overall_percent(stage, current, total),
+                    "last_progress_at": time.time(),
+                }
             )
-            return self.utils.ok(result)
-        except (TypeError, ValueError, RuntimeError) as exc:
-            return self.utils.error(str(exc))
-        except Exception as exc:
-            logger.error("[PageAPI] 重算 Topic 关系失败", exc_info=True)
-            return self.utils.error(str(exc))
+
+        async def run() -> None:
+            self._jobs[job_uid]["status"] = "running"
+            try:
+                result = await memory_engine.topic_build_manager.recompute_topic_relations(
+                    memory_space_id,
+                    progress_callback=progress,
+                )
+                self._jobs[job_uid].update(
+                    {
+                        "status": "completed",
+                        "stage": "completed",
+                        "current": 1,
+                        "total": 1,
+                        "overall_percent": 100.0,
+                        "result": result,
+                        "completed_at": time.time(),
+                        "last_progress_at": time.time(),
+                    }
+                )
+            except asyncio.CancelledError:
+                self._jobs[job_uid].update(
+                    {
+                        "status": "cancelled",
+                        "stage": "cancelled",
+                        "completed_at": time.time(),
+                    }
+                )
+                raise
+            except Exception as exc:  # noqa: BLE001 - background task boundary.
+                failed_stage = str(self._jobs[job_uid].get("stage") or "")
+                self._jobs[job_uid].update(
+                    {
+                        "status": "failed",
+                        "stage": "failed",
+                        "failed_stage": failed_stage,
+                        "error": str(exc),
+                        "completed_at": time.time(),
+                        "last_progress_at": time.time(),
+                    }
+                )
+                logger.error("[PageAPI] 重算 Topic 关系失败", exc_info=True)
+
+        task = asyncio.create_task(
+            run(), name=f"livingmemory-topic-relations-{job_uid[:8]}"
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return self.utils.ok(dict(self._jobs[job_uid]))
 
     async def start_revectorization(self, memory_engine) -> dict[str, Any]:
         payload = await request.get_json(silent=True) or {}

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -22,6 +24,9 @@ class DatabaseHandler:
 
     def __init__(self, utils: PageApiUtils) -> None:
         self.utils = utils
+        self._repair_jobs: dict[str, dict[str, Any]] = {}
+        self._repair_tasks: dict[str, asyncio.Task] = {}
+        self._latest_repair_job_uid: str | None = None
 
     @staticmethod
     async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
@@ -318,101 +323,330 @@ class DatabaseHandler:
             logger.error("[PageAPI] 数据库健康检查失败", exc_info=True)
             return self.utils.error(str(exc))
 
+    def _active_repair_job(self) -> dict[str, Any] | None:
+        return next(
+            (
+                job
+                for job in self._repair_jobs.values()
+                if job.get("status") in {"pending", "running"}
+            ),
+            None,
+        )
+
+    def _prune_repair_jobs(self, *, keep: int = 20) -> None:
+        terminal = sorted(
+            (
+                job
+                for job in self._repair_jobs.values()
+                if job.get("status")
+                in {"completed", "completed_with_errors", "failed", "cancelled"}
+            ),
+            key=lambda job: float(job.get("completed_at") or 0),
+            reverse=True,
+        )
+        for job in terminal[keep:]:
+            self._repair_jobs.pop(str(job["job_uid"]), None)
+
+    async def start_repair(
+        self,
+        memory_engine: MemoryEngine,
+        conversation_manager: ConversationManager | None,
+    ) -> dict[str, Any]:
+        """Start a selected repair in the background and return its task state."""
+        payload = await request.get_json(silent=True) or {}
+        selected = payload.get("issues") or []
+        if not isinstance(selected, list) or not selected:
+            return self.utils.error("请选择需要修复的数据库问题")
+        active = self._active_repair_job()
+        if active is not None:
+            return self.utils.error("已有数据库修复任务正在运行")
+
+        selected_uids = list(
+            dict.fromkeys(
+                str(raw.get("issue_uid") if isinstance(raw, dict) else raw).strip()
+                for raw in selected
+                if str(raw.get("issue_uid") if isinstance(raw, dict) else raw).strip()
+            )
+        )
+        if not selected_uids:
+            return self.utils.error("请选择需要修复的数据库问题")
+
+        job_uid = str(uuid.uuid4())
+        now = time.time()
+        job: dict[str, Any] = {
+            "job_uid": job_uid,
+            "status": "pending",
+            "stage": "validating",
+            "current": 0,
+            "total": len(selected_uids) + 2,
+            "percent": 0.0,
+            "current_step": "正在重新检查所选问题",
+            "selected_issue_uids": selected_uids,
+            "repaired": [],
+            "failed": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._repair_jobs[job_uid] = job
+        self._latest_repair_job_uid = job_uid
+        self._prune_repair_jobs()
+        task = asyncio.create_task(
+            self._run_repair_job(
+                job_uid,
+                memory_engine,
+                conversation_manager,
+            ),
+            name=f"livingmemory-database-repair-{job_uid[:8]}",
+        )
+        self._repair_tasks[job_uid] = task
+        task.add_done_callback(lambda _task: self._repair_tasks.pop(job_uid, None))
+        return self.utils.ok(dict(job))
+
+    def _update_repair_job(
+        self,
+        job_uid: str,
+        *,
+        stage: str,
+        current: int,
+        current_step: str,
+    ) -> None:
+        job = self._repair_jobs[job_uid]
+        total = max(1, int(job.get("total") or 1))
+        job.update(
+            {
+                "status": "running",
+                "stage": stage,
+                "current": max(0, min(total, int(current))),
+                "percent": round(max(0.0, min(100.0, current / total * 100)), 1),
+                "current_step": current_step,
+                "updated_at": time.time(),
+            }
+        )
+
+    async def _run_repair_job(
+        self,
+        job_uid: str,
+        memory_engine: MemoryEngine,
+        conversation_manager: ConversationManager | None,
+    ) -> None:
+        job = self._repair_jobs[job_uid]
+        try:
+            self._update_repair_job(
+                job_uid,
+                stage="validating",
+                current=0,
+                current_step="正在重新检查所选问题",
+            )
+            current_response = await self.check_health(
+                memory_engine, conversation_manager
+            )
+            if current_response.get("status") != "ok":
+                raise RuntimeError(
+                    str(current_response.get("message") or "数据库健康检查失败")
+                )
+            current_issues = {
+                str(issue["issue_uid"]): issue
+                for issue in current_response["data"].get("issues", [])
+                if issue.get("repairable")
+            }
+            selected_issues = [
+                current_issues[issue_uid]
+                for issue_uid in job["selected_issue_uids"]
+                if issue_uid in current_issues
+            ]
+            missing = [
+                issue_uid
+                for issue_uid in job["selected_issue_uids"]
+                if issue_uid not in current_issues
+            ]
+            for issue_uid in missing:
+                job["failed"].append(
+                    {"issue_uid": issue_uid, "error": "该问题已不存在或不支持自动修复"}
+                )
+            # Validation and the final health check are explicit progress steps.
+            job["total"] = len(selected_issues) + 2
+            self._update_repair_job(
+                job_uid,
+                stage="repairing",
+                current=1,
+                current_step=(
+                    f"检查完成，将处理 {len(selected_issues)} 项修复"
+                    if selected_issues
+                    else "所选问题已不存在"
+                ),
+            )
+
+            rebuilt_memory_ids: set[int] = set()
+            for index, issue in enumerate(selected_issues, 1):
+                self._update_repair_job(
+                    job_uid,
+                    stage="repairing",
+                    current=index,
+                    current_step=f"正在修复 {issue.get('title') or issue['issue_uid']} ({index}/{len(selected_issues)})",
+                )
+                try:
+                    result = await self._repair_issue(
+                        issue,
+                        memory_engine,
+                        rebuilt_memory_ids,
+                    )
+                    if result is not None:
+                        job["repaired"].append(result)
+                except Exception as exc:  # noqa: BLE001 - continue selected repairs.
+                    logger.error(
+                        "[PageAPI] 数据库手动修复失败: %s",
+                        issue.get("issue_uid"),
+                        exc_info=True,
+                    )
+                    job["failed"].append(
+                        {"issue_uid": issue.get("issue_uid"), "error": str(exc)}
+                    )
+                self._update_repair_job(
+                    job_uid,
+                    stage="repairing",
+                    current=index + 1,
+                    current_step=f"已处理 {index}/{len(selected_issues)} 项修复",
+                )
+
+            if hasattr(memory_engine, "_invalidate_search_cache"):
+                memory_engine._invalidate_search_cache()
+            self._update_repair_job(
+                job_uid,
+                stage="verifying",
+                current=max(1, int(job["total"]) - 1),
+                current_step="正在验证修复后的数据库状态",
+            )
+            health = await self.check_health(memory_engine, conversation_manager)
+            if health.get("status") != "ok":
+                raise RuntimeError(str(health.get("message") or "修复后验证失败"))
+            now = time.time()
+            job.update(
+                {
+                    "status": (
+                        "completed_with_errors" if job["failed"] else "completed"
+                    ),
+                    "stage": "completed",
+                    "current": int(job["total"]),
+                    "percent": 100.0,
+                    "current_step": "数据库修复与验证已完成",
+                    "health": health["data"],
+                    "updated_at": now,
+                    "completed_at": now,
+                }
+            )
+        except asyncio.CancelledError:
+            now = time.time()
+            job.update(
+                {
+                    "status": "cancelled",
+                    "stage": "cancelled",
+                    "current_step": "插件停止，数据库修复任务已取消",
+                    "updated_at": now,
+                    "completed_at": now,
+                }
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001 - task boundary records failures.
+            logger.error("[PageAPI] 数据库修复任务失败", exc_info=True)
+            now = time.time()
+            job.update(
+                {
+                    "status": "failed",
+                    "stage": "failed",
+                    "error": str(exc),
+                    "current_step": "数据库修复任务失败",
+                    "updated_at": now,
+                    "completed_at": now,
+                }
+            )
+
+    async def _repair_issue(
+        self,
+        issue: dict[str, Any],
+        memory_engine: MemoryEngine,
+        rebuilt_memory_ids: set[int],
+    ) -> dict[str, Any] | None:
+        """Apply one validated repair issue."""
+        action = issue.get("repair_action")
+        if action == "rebuild_graph_memory":
+            memory_id = int(issue["memory_id"])
+            if memory_id in rebuilt_memory_ids:
+                return None
+            memory = await memory_engine.get_memory(memory_id)
+            if memory is None:
+                raise RuntimeError(f"Timeline {memory_id} 已不存在")
+            metadata = memory.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                metadata = self.utils.normalize_metadata(metadata)
+            atoms = None
+            atom_store = getattr(memory_engine, "atom_store", None)
+            if atom_store is not None:
+                atoms = await atom_store.get_by_parent(memory_id)
+            manager = getattr(memory_engine, "graph_memory_manager", None)
+            if manager is None:
+                raise RuntimeError("图谱记忆未启用")
+            await manager.index_memory(
+                memory_id,
+                str(memory.get("text") or ""),
+                metadata,
+                atoms or None,
+            )
+            rebuilt_memory_ids.add(memory_id)
+            return {
+                "issue_uid": issue["issue_uid"],
+                "action": action,
+                "memory_id": memory_id,
+            }
+        if action == "delete_orphan_graph_entries":
+            manager = getattr(memory_engine, "graph_memory_manager", None)
+            if manager is None:
+                raise RuntimeError("图谱记忆未启用")
+            entry_ids = [int(item) for item in issue.get("entry_ids", [])]
+            await manager.delete_orphaned_entries(entry_ids)
+            return {
+                "issue_uid": issue["issue_uid"],
+                "action": action,
+                "deleted_entry_count": len(entry_ids),
+            }
+        raise RuntimeError(f"不支持的数据库修复操作: {action}")
+
+    async def get_repair_progress(self) -> dict[str, Any]:
+        job_uid = str(request.args.get("job_uid") or "").strip()
+        if not job_uid:
+            job_uid = self._latest_repair_job_uid or ""
+        if not job_uid or job_uid not in self._repair_jobs:
+            return self.utils.ok({"status": "idle"})
+        return self.utils.ok(dict(self._repair_jobs[job_uid]))
+
+    async def shutdown(self) -> None:
+        tasks = [task for task in self._repair_tasks.values() if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._repair_tasks.clear()
+
     async def repair(
         self,
         memory_engine: MemoryEngine,
         conversation_manager: ConversationManager | None,
     ) -> dict[str, Any]:
-        """Apply only user-selected repairs that still match current issues."""
-        payload = await request.get_json(silent=True) or {}
-        selected = payload.get("issues") or []
-        if not isinstance(selected, list) or not selected:
-            return self.utils.error("请选择需要修复的数据库问题")
-
-        current_response = await self.check_health(memory_engine, conversation_manager)
-        if current_response.get("status") != "ok":
-            return current_response
-        current_issues = {
-            str(issue["issue_uid"]): issue
-            for issue in current_response["data"].get("issues", [])
-            if issue.get("repairable")
-        }
-
-        selected_issues: list[dict[str, Any]] = []
-        for raw in selected:
-            issue_uid = str(raw.get("issue_uid") if isinstance(raw, dict) else raw)
-            issue = current_issues.get(issue_uid)
-            if issue is not None:
-                selected_issues.append(issue)
-        if not selected_issues:
-            return self.utils.error("所选问题已不存在或不支持自动修复")
-
-        repaired: list[dict[str, Any]] = []
-        failed: list[dict[str, Any]] = []
-        rebuilt_memory_ids: set[int] = set()
-        for issue in selected_issues:
-            try:
-                action = issue.get("repair_action")
-                if action == "rebuild_graph_memory":
-                    memory_id = int(issue["memory_id"])
-                    if memory_id in rebuilt_memory_ids:
-                        continue
-                    memory = await memory_engine.get_memory(memory_id)
-                    if memory is None:
-                        raise RuntimeError(f"Timeline {memory_id} 已不存在")
-                    metadata = memory.get("metadata") or {}
-                    if not isinstance(metadata, dict):
-                        metadata = self.utils.normalize_metadata(metadata)
-                    atoms = None
-                    atom_store = getattr(memory_engine, "atom_store", None)
-                    if atom_store is not None:
-                        atoms = await atom_store.get_by_parent(memory_id)
-                    manager = getattr(memory_engine, "graph_memory_manager", None)
-                    if manager is None:
-                        raise RuntimeError("图谱记忆未启用")
-                    await manager.index_memory(
-                        memory_id,
-                        str(memory.get("text") or ""),
-                        metadata,
-                        atoms or None,
-                    )
-                    rebuilt_memory_ids.add(memory_id)
-                    repaired.append(
-                        {
-                            "issue_uid": issue["issue_uid"],
-                            "action": action,
-                            "memory_id": memory_id,
-                        }
-                    )
-                elif action == "delete_orphan_graph_entries":
-                    manager = getattr(memory_engine, "graph_memory_manager", None)
-                    if manager is None:
-                        raise RuntimeError("图谱记忆未启用")
-                    entry_ids = [int(item) for item in issue.get("entry_ids", [])]
-                    await manager.delete_orphaned_entries(entry_ids)
-                    repaired.append(
-                        {
-                            "issue_uid": issue["issue_uid"],
-                            "action": action,
-                            "deleted_entry_count": len(entry_ids),
-                        }
-                    )
-            except Exception as exc:  # noqa: BLE001 - continue other selected repairs.
-                logger.error(
-                    "[PageAPI] 数据库手动修复失败: %s",
-                    issue.get("issue_uid"),
-                    exc_info=True,
-                )
-                failed.append({"issue_uid": issue.get("issue_uid"), "error": str(exc)})
-
-        if hasattr(memory_engine, "_invalidate_search_cache"):
-            memory_engine._invalidate_search_cache()
-        health = await self.check_health(memory_engine, conversation_manager)
+        """Compatibility helper: run selected repairs and wait for completion."""
+        response = await self.start_repair(memory_engine, conversation_manager)
+        if response.get("status") != "ok":
+            return response
+        job_uid = str(response["data"]["job_uid"])
+        task = self._repair_tasks.get(job_uid)
+        if task is not None:
+            await task
+        job = self._repair_jobs[job_uid]
+        if job.get("status") == "failed":
+            return self.utils.error(str(job.get("error") or "数据库修复失败"))
         return self.utils.ok(
             {
-                "repaired": repaired,
-                "failed": failed,
-                "health": health.get("data") if health.get("status") == "ok" else None,
+                "repaired": job.get("repaired", []),
+                "failed": job.get("failed", []),
+                "health": job.get("health"),
             }
         )
 

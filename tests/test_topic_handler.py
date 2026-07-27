@@ -121,24 +121,32 @@ async def test_recomputes_only_topic_relations(monkeypatch):
         "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
         request,
     )
-    manager = SimpleNamespace(
-        has_active_builds=lambda: False,
-        recompute_topic_relations=AsyncMock(
-            return_value={
+    async def recompute(memory_space_id, *, progress_callback):
+        await progress_callback(
+            {"stage": "relation_publishing", "current": 2, "total": 2}
+        )
+        return {
                 "memory_space_id": "space-1",
                 "topic_count": 64,
                 "relation_count": 42,
                 "algorithm_version": 5,
             }
-        ),
+
+    manager = SimpleNamespace(
+        has_active_builds=lambda: False,
+        recompute_topic_relations=AsyncMock(side_effect=recompute),
     )
     engine = SimpleNamespace(topic_build_manager=manager)
+    handler = TopicHandler(PageApiUtils())
 
-    response = await TopicHandler(PageApiUtils()).recompute_relations(engine)
+    response = await handler.recompute_relations(engine)
+    job_uid = response["data"]["job_uid"]
+    await next(iter(handler._tasks))
 
     assert response["status"] == "ok"
-    assert response["data"]["relation_count"] == 42
-    manager.recompute_topic_relations.assert_awaited_once_with("space-1")
+    assert handler._jobs[job_uid]["status"] == "completed"
+    assert handler._jobs[job_uid]["result"]["relation_count"] == 42
+    manager.recompute_topic_relations.assert_awaited_once()
 
 
 @pytest.mark.asyncio

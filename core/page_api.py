@@ -310,6 +310,12 @@ class PluginPageApi:
             "LivingMemory Page selected database repair",
         )
         register(
+            f"{PAGE_API_PREFIX}/database/repair/progress",
+            self.get_database_repair_progress,
+            ["GET"],
+            "LivingMemory Page database repair progress",
+        )
+        register(
             f"{PAGE_API_PREFIX}/topics/overview",
             self.get_topic_overview,
             ["GET"],
@@ -745,9 +751,12 @@ class PluginPageApi:
         ready, error = await self._ensure_plugin_ready()
         if error:
             return error
-        return await self.database_handler.repair(
+        return await self.database_handler.start_repair(
             ready["memory_engine"], ready.get("conversation_manager")
         )
+
+    async def get_database_repair_progress(self):
+        return await self.database_handler.get_repair_progress()
 
     async def get_topic_overview(self):
         ready, error = await self._ensure_plugin_ready()
@@ -903,6 +912,7 @@ class PluginPageApi:
 
     async def shutdown(self) -> None:
         """Stop page-owned background work before runtime components are closed."""
+        await self.database_handler.shutdown()
         await self.topic_handler.shutdown()
 
     # ==================== 辅助方法 ====================

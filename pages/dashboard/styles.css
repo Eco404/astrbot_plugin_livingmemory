@@ -2732,6 +2732,53 @@ body {
   background: var(--danger);
 }
 
+.global-operation-progress {
+  position: fixed;
+  top: 14px;
+  right: 18px;
+  z-index: 210;
+  width: min(360px, calc(100vw - 36px));
+  display: grid;
+  gap: 9px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-normal);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: translateY(-12px);
+  pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease;
+}
+.global-operation-progress.visible { opacity: 1; transform: translateY(0); }
+.global-operation-copy { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.global-operation-copy strong { min-width: 0; font-size: 13px; font-weight: 600; }
+.global-operation-copy span { flex: 0 0 auto; color: var(--text-tertiary); font-size: 12px; }
+.global-operation-track {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--bg-hover);
+}
+.global-operation-track span {
+  position: absolute;
+  inset-block: 0;
+  width: 38%;
+  border-radius: inherit;
+  background: var(--primary);
+  animation: operation-progress-slide 1.2s ease-in-out infinite;
+}
+@keyframes operation-progress-slide {
+  0% { transform: translateX(-110%); }
+  50% { transform: translateX(95%); }
+  100% { transform: translateX(290%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .global-operation-track span,
+  .topic-progress-track.is-indeterminate span { animation-duration: 2.4s; }
+}
+
 /* ----- Modal --------------------------------------------------- */
 .modal-overlay {
   position: fixed;
@@ -3290,6 +3337,25 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .maintenance-panel.active { display: block; }
 
 .database-health-summary { margin-top: var(--space-4); }
+.database-repair-progress {
+  display: grid;
+  gap: 10px;
+  margin-top: var(--space-3);
+  padding: 14px;
+  border: 1px solid var(--border-normal);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+.database-repair-progress.hidden { display: none; }
+.database-repair-progress-head,
+.database-repair-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.database-repair-progress-meta { color: var(--text-secondary); font-size: 13px; }
+.database-repair-progress-error:empty { display: none; }
 .database-health-state {
   display: flex;
   align-items: center;
@@ -3377,6 +3443,20 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .session-task-history h3 { margin-bottom: var(--space-3); }
 .session-task-row { display: grid; grid-template-columns: minmax(260px, 1fr) auto minmax(220px, .7fr) 32px; gap: var(--space-4); align-items: center; padding: 10px 0; border-top: 1px solid var(--border-color); }
 .session-task-main { display: grid; gap: 3px; min-width: 0; }
+.maintenance-task-progress {
+  width: min(240px, 100%);
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--bg-input);
+}
+.maintenance-task-progress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  transition: width .2s ease;
+}
 .session-task-row small { color: var(--text-tertiary); overflow-wrap: anywhere; }
 .session-task-detail { min-width: 0; }
 .session-task-actions { display: flex; justify-content: flex-end; }
@@ -4062,6 +4142,10 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .topic-progress-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); font-size: 12px; }
 .topic-progress-track { height: 6px; margin: var(--space-2) 0 var(--space-3); border-radius: 999px; overflow: hidden; background: var(--bg-hover); }
 .topic-progress-track span { display: block; height: 100%; background: var(--text-tertiary); transition: width .2s ease; }
+.topic-progress-track.is-indeterminate span {
+  width: 35% !important;
+  animation: operation-progress-slide 1.2s ease-in-out infinite;
+}
 .topic-progress-track.topic-progress-overall { height: 10px; }
 .topic-progress-track.topic-progress-overall span { background: var(--accent); }
 .topic-progress-detail { margin: var(--space-2) 0; font-size: 13px; color: var(--text-primary); overflow-wrap: anywhere; }

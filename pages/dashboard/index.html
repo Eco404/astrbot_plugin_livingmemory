@@ -417,6 +417,19 @@
               <div id="database-health-summary" class="database-health-summary">
                 <div class="identity-state" data-i18n="maintenance.databaseNotChecked">尚未检查数据库</div>
               </div>
+              <div id="database-repair-progress" class="database-repair-progress hidden" aria-live="polite">
+                <div class="database-repair-progress-head">
+                  <strong id="database-repair-progress-stage" data-i18n="maintenance.databaseRepairProgress">数据库修复进度</strong>
+                  <span id="database-repair-progress-percent">0.0%</span>
+                </div>
+                <div class="topic-progress-track"><span id="database-repair-progress-bar" style="width:0%"></span></div>
+                <div class="database-repair-progress-meta">
+                  <span id="database-repair-progress-step"></span>
+                  <span id="database-repair-progress-count">0 / 0</span>
+                </div>
+                <small id="database-repair-progress-elapsed" class="text-tertiary"></small>
+                <div id="database-repair-progress-error" class="text-danger"></div>
+              </div>
               <div id="database-health-databases" class="database-health-databases"></div>
               <div class="maintenance-history-heading database-health-issues-heading">
                 <h3 data-i18n="maintenance.databaseIssues">发现的问题</h3>

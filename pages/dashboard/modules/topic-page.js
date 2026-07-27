@@ -815,12 +815,14 @@ export class TopicPage {
     if (button) button.disabled = true;
     if (status) status.textContent = window.t("topic.recomputingRelations");
     try {
-      const result = await this.api.post("topics/relations/recompute", {
+      const job = await this.api.post("topics/relations/recompute", {
         memory_space_id: this.currentSpace(),
       });
-      if (status) status.textContent = window.t("topic.recomputedRelations", Number(result.relation_count || 0));
-      this.showToast(window.t("topic.recomputedRelations", Number(result.relation_count || 0)));
-      await this.fetch();
+      this.closeMaintenance({ restoreFocus: false });
+      this.renderProgress(job);
+      this.resumePolling(job.job_uid);
+      this.setBuildButtonsDisabled(true);
+      this.showToast(window.t("topic.recomputingRelations"));
     } catch (error) {
       if (status) status.textContent = error.message || window.t("topic.recomputeRelationsFailed");
       this.showToast(error.message || window.t("topic.recomputeRelationsFailed"), true);
@@ -1152,7 +1154,12 @@ export class TopicPage {
       if (["completed", "failed", "cancelled"].includes(job.status)) {
         this.stopPolling();
         this.setBuildButtonsDisabled(!this.currentSpace() || !this.buildEnabled);
-        if (job.status === "completed" || job.reset_topics) await this.fetch();
+        if (job.status === "completed" || job.reset_topics) {
+          await this.fetch();
+          if (job.operation === "recompute_relations") {
+            this.showToast(window.t("topic.recomputedRelations", Number(job.result?.relation_count || 0)));
+          }
+        }
         if (job.status === "failed") this.showToast(job.error || "Topic 构建失败", true);
         return;
       }

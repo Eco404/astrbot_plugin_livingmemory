@@ -424,7 +424,12 @@ class TopicBuildManager:
         """Return whether a build currently holds one of this manager's space locks."""
         return any(lock.locked() for lock in self._space_locks.values())
 
-    async def recompute_topic_relations(self, memory_space_id: str) -> dict[str, Any]:
+    async def recompute_topic_relations(
+        self,
+        memory_space_id: str,
+        *,
+        progress_callback=None,
+    ) -> dict[str, Any]:
         """Replace only the derived relation graph using persisted Topic data."""
         if not memory_space_id:
             raise ValueError("memory_space_id is required")
@@ -432,16 +437,58 @@ class TopicBuildManager:
         if lock.locked():
             raise RuntimeError("Topic build is already running for this memory space")
         async with lock:
+            if progress_callback is not None:
+                result = progress_callback(
+                    {"stage": "relation_loading", "current": 0, "total": 1}
+                )
+                if asyncio.iscoroutine(result):
+                    await result
             topics = await self.store.list_all_topics(
                 memory_space_id,
                 status=TopicMemoryStatus.ACTIVE,
             )
+            if progress_callback is not None:
+                result = progress_callback(
+                    {
+                        "stage": "relation_deriving",
+                        "current": 0,
+                        "total": max(1, len(topics)),
+                    }
+                )
+                if asyncio.iscoroutine(result):
+                    await result
             run_uid = f"relation-recompute:{uuid.uuid4()}"
-            relations = self._derive_topic_relations(run_uid, topics)
+            # Relation derivation is CPU-bound. Keep it off the event loop so
+            # WebUI progress polling remains responsive for large Topic sets.
+            relations = await asyncio.to_thread(
+                self._derive_topic_relations,
+                run_uid,
+                topics,
+            )
+            if progress_callback is not None:
+                result = progress_callback(
+                    {
+                        "stage": "relation_publishing",
+                        "current": 0,
+                        "total": max(1, len(relations)),
+                    }
+                )
+                if asyncio.iscoroutine(result):
+                    await result
             relation_count = await self.store.replace_topic_relations(
                 memory_space_id,
                 relations,
             )
+            if progress_callback is not None:
+                result = progress_callback(
+                    {
+                        "stage": "relation_publishing",
+                        "current": max(1, relation_count),
+                        "total": max(1, relation_count),
+                    }
+                )
+                if asyncio.iscoroutine(result):
+                    await result
             return {
                 "memory_space_id": memory_space_id,
                 "topic_count": len(topics),
