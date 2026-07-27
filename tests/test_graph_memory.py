@@ -1,8 +1,10 @@
 """Tests for graph-memory indexing and dual-route retrieval."""
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import aiosqlite
 import pytest
 from astrbot_plugin_livingmemory.core.managers.graph_memory_manager import (
     GraphMemoryManager,
@@ -145,6 +147,156 @@ async def test_graph_memory_manager_indexes_nodes_edges_and_entries(tmp_path: Pa
     assert stats["graph_nodes"] >= 4
     assert stats["graph_edges"] >= 3
     assert stats["graph_entries"] >= 4
+
+
+@pytest.mark.asyncio
+async def test_shared_graph_edge_survives_deleting_one_source_memory(tmp_path: Path):
+    db_path = tmp_path / "shared_graph_edge.db"
+    store = GraphStore(str(db_path))
+    await store.initialize()
+
+    nodes = [
+        GraphNode("person", "示例甲", "示例甲"),
+        GraphNode("topic", "记忆插件", "记忆插件"),
+    ]
+    node_ids = await store.upsert_nodes(nodes)
+    edges = [
+        GraphEdge(
+            source_key="person:示例甲",
+            target_key="topic:记忆插件",
+            relation_type="discusses",
+            source_memory_id=101,
+            weight=0.8,
+            confidence=0.9,
+            metadata={"source": "first"},
+        ),
+        GraphEdge(
+            source_key="person:示例甲",
+            target_key="topic:记忆插件",
+            relation_type="discusses",
+            source_memory_id=202,
+            weight=0.7,
+            confidence=0.8,
+            metadata={"source": "remaining"},
+        ),
+    ]
+    edge_ids = await store.add_edges(edges, node_ids)
+    assert len(set(edge_ids.values())) == 1
+
+    await store.add_entries(
+        [
+            GraphEntry(
+                entry_key=f"shared-entry-{memory_id}",
+                source_memory_id=memory_id,
+                session_id="session-1",
+                persona_id="persona-1",
+                entry_type="relationship",
+                relation_type="discusses",
+                content=f"memory {memory_id} discusses the plugin",
+                node_keys=["person:示例甲", "topic:记忆插件"],
+            )
+            for memory_id in (101, 202)
+        ],
+        node_ids,
+        edge_ids,
+    )
+
+    async with aiosqlite.connect(db_path) as db:
+        assert (
+            await (await db.execute("SELECT COUNT(*) FROM graph_edges")).fetchone()
+        )[0] == 1
+        assert (
+            await (
+                await db.execute("SELECT COUNT(*) FROM graph_edge_sources")
+            ).fetchone()
+        )[0] == 2
+        assert await (await db.execute("PRAGMA foreign_key_check")).fetchall() == []
+
+    await store.delete_memory(101)
+
+    async with aiosqlite.connect(db_path) as db:
+        assert (
+            await (await db.execute("SELECT COUNT(*) FROM graph_edges")).fetchone()
+        )[0] == 1
+        assert (
+            await (
+                await db.execute("SELECT COUNT(*) FROM graph_edge_sources")
+            ).fetchone()
+        )[0] == 1
+        remaining_source = await (
+            await db.execute("SELECT source_memory_id FROM graph_edge_sources")
+        ).fetchone()
+        assert remaining_source[0] == 202
+        edge_metadata = await (
+            await db.execute("SELECT metadata FROM graph_edges")
+        ).fetchone()
+        assert json.loads(edge_metadata[0]) == {"source": "remaining"}
+        assert (
+            await (await db.execute("SELECT COUNT(*) FROM graph_entries")).fetchone()
+        )[0] == 1
+        assert await (await db.execute("PRAGMA foreign_key_check")).fetchall() == []
+
+    subgraph = await store.get_subgraph_for_memories([202])
+    assert len(subgraph["edges"]) == 1
+
+    await store.delete_memory(202)
+    async with aiosqlite.connect(db_path) as db:
+        assert (
+            await (await db.execute("SELECT COUNT(*) FROM graph_edges")).fetchone()
+        )[0] == 0
+        assert (
+            await (await db.execute("SELECT COUNT(*) FROM graph_entries")).fetchone()
+        )[0] == 0
+        assert await (await db.execute("PRAGMA foreign_key_check")).fetchall() == []
+
+
+@pytest.mark.asyncio
+async def test_graph_store_keeps_orphans_until_explicitly_deleted(tmp_path: Path):
+    db_path = tmp_path / "manual_orphan_repair.db"
+    store = GraphStore(str(db_path))
+    await store.initialize()
+
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys = OFF")
+        await db.execute(
+            """
+            INSERT INTO graph_entries(
+                entry_key, source_memory_id, session_id, persona_id,
+                entry_type, relation_type, content, metadata,
+                edge_id, vector_doc_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "orphan-entry",
+                77,
+                "session-1",
+                "persona-1",
+                "relationship",
+                "discusses",
+                "orphan graph entry",
+                "{}",
+                999,
+                1234,
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+            ),
+        )
+        entry_id = int(
+            (await (await db.execute("SELECT last_insert_rowid()")).fetchone())[0]
+        )
+        await db.execute(
+            "INSERT INTO livingmemory_graph_entries_fts(entry_id, content) VALUES (?, ?)",
+            (entry_id, "orphan graph entry"),
+        )
+        await db.commit()
+
+    await store.initialize()
+    orphans = await store.list_orphaned_edge_entries()
+    assert [item["id"] for item in orphans] == [entry_id]
+
+    vector_doc_ids = await store.delete_orphaned_edge_entries([entry_id])
+    assert vector_doc_ids == [1234]
+    assert await store.list_orphaned_edge_entries() == []
 
 
 @pytest.mark.asyncio

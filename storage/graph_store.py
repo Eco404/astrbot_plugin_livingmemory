@@ -24,11 +24,13 @@ class GraphStore:
 
     @asynccontextmanager
     async def _connect(self):
-        """创建新的SQLite连接并启用WAL模式和busy_timeout。"""
+        """创建新的 SQLite 连接并启用一致性保护。"""
         db = await aiosqlite.connect(self.db_path)
         try:
             await db.execute("PRAGMA journal_mode = WAL")
             await db.execute("PRAGMA busy_timeout = 10000")
+            # SQLite foreign-key enforcement is connection-local.
+            await db.execute("PRAGMA foreign_keys = ON")
             yield db
         finally:
             await db.close()
@@ -115,6 +117,22 @@ class GraphStore:
             )
             await db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS graph_edge_sources (
+                    edge_id INTEGER NOT NULL,
+                    source_memory_id INTEGER NOT NULL,
+                    weight REAL NOT NULL DEFAULT 1.0,
+                    confidence REAL NOT NULL DEFAULT 0.8,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    metadata TEXT DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(edge_id, source_memory_id),
+                    FOREIGN KEY(edge_id) REFERENCES graph_edges(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS graph_entry_nodes (
                     entry_id INTEGER NOT NULL,
                     node_id INTEGER NOT NULL,
@@ -143,6 +161,12 @@ class GraphStore:
                 "CREATE INDEX IF NOT EXISTS idx_graph_edges_memory_id ON graph_edges(source_memory_id)"
             )
             await db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_graph_edge_sources_memory
+                ON graph_edge_sources(source_memory_id, edge_id)
+                """
+            )
+            await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_graph_entries_memory_id ON graph_entries(source_memory_id)"
             )
             await db.execute(
@@ -159,6 +183,36 @@ class GraphStore:
             )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_graph_entry_nodes_node ON graph_entry_nodes(node_id)"
+            )
+            now = self._now_iso()
+            # Only valid parent edges are backfilled. Existing orphan entries
+            # remain visible to the explicit database-maintenance workflow.
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO graph_edge_sources(
+                    edge_id, source_memory_id, weight, confidence, status,
+                    metadata, created_at, updated_at
+                )
+                SELECT id, source_memory_id, weight, confidence, status,
+                       json_object('backfill', 'edge_owner'), ?, ?
+                FROM graph_edges
+                """,
+                (now, now),
+            )
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO graph_edge_sources(
+                    edge_id, source_memory_id, weight, confidence, status,
+                    metadata, created_at, updated_at
+                )
+                SELECT DISTINCT entry.edge_id, entry.source_memory_id,
+                       1.0, edge.confidence, edge.status,
+                       json_object('backfill', 'graph_entry'), ?, ?
+                FROM graph_entries AS entry
+                JOIN graph_edges AS edge ON edge.id = entry.edge_id
+                WHERE entry.edge_id IS NOT NULL
+                """,
+                (now, now),
             )
             await db.commit()
 
@@ -288,6 +342,7 @@ class GraphStore:
         )
         row = await cursor.fetchone()
         if row:
+            edge_id = int(row[0])
             await db.execute(
                 """
                 UPDATE graph_edges
@@ -300,10 +355,12 @@ class GraphStore:
                     edge.status,
                     self._to_json(edge.metadata),
                     now,
-                    row[0],
+                    edge_id,
                 ),
             )
-            return int(row[0])
+            await self._upsert_edge_source(db, edge_id, edge, now)
+            await self._refresh_edge_aggregate(db, edge_id, now)
+            return edge_id
 
         # Cross-memory semantic merge: find same relation between same nodes.
         semantic_cursor = await db.execute(
@@ -319,18 +376,8 @@ class GraphStore:
 
         if semantic_row:
             existing_id = int(semantic_row[0])
-            old_conf = float(semantic_row[1] or 0.8)
-            old_weight = float(semantic_row[2] or 1.0)
-            merged_confidence = old_conf * 0.7 + edge.confidence * 0.3
-            merged_weight = old_weight + 0.15
-            await db.execute(
-                """
-                UPDATE graph_edges
-                SET confidence = ?, weight = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (merged_confidence, merged_weight, now, existing_id),
-            )
+            await self._upsert_edge_source(db, existing_id, edge, now)
+            await self._refresh_edge_aggregate(db, existing_id, now)
             return existing_id
 
         cursor = await db.execute(
@@ -355,7 +402,92 @@ class GraphStore:
                 now,
             ),
         )
-        return int(cursor.lastrowid)
+        edge_id = int(cursor.lastrowid)
+        await self._upsert_edge_source(db, edge_id, edge, now)
+        return edge_id
+
+    async def _upsert_edge_source(
+        self,
+        db: aiosqlite.Connection,
+        edge_id: int,
+        edge: GraphEdge,
+        now: str,
+    ) -> None:
+        """Record one memory's evidence for a canonical semantic edge."""
+        await db.execute(
+            """
+            INSERT INTO graph_edge_sources(
+                edge_id, source_memory_id, weight, confidence, status,
+                metadata, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(edge_id, source_memory_id) DO UPDATE SET
+                weight = excluded.weight,
+                confidence = excluded.confidence,
+                status = excluded.status,
+                metadata = excluded.metadata,
+                updated_at = excluded.updated_at
+            """,
+            (
+                edge_id,
+                edge.source_memory_id,
+                edge.weight,
+                edge.confidence,
+                edge.status,
+                self._to_json(edge.metadata),
+                now,
+                now,
+            ),
+        )
+
+    async def _refresh_edge_aggregate(
+        self,
+        db: aiosqlite.Connection,
+        edge_id: int,
+        now: str,
+    ) -> bool:
+        """Recompute a canonical edge from its remaining source evidence."""
+        cursor = await db.execute(
+            """
+            SELECT source_memory_id, weight, confidence, status, metadata
+            FROM graph_edge_sources
+            WHERE edge_id = ?
+            ORDER BY source_memory_id ASC
+            """,
+            (edge_id,),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            await db.execute("DELETE FROM graph_edges WHERE id = ?", (edge_id,))
+            return False
+
+        representative_memory_id = min(int(row[0]) for row in rows)
+        representative_metadata = str(rows[0][4] or "{}")
+        source_weights = [max(0.0, float(row[1] or 0.0)) for row in rows]
+        confidence = sum(float(row[2] or 0.0) for row in rows) / len(rows)
+        weight = max(source_weights, default=1.0) + 0.15 * max(0, len(rows) - 1)
+        status = (
+            "active"
+            if any(str(row[3]) == "active" for row in rows)
+            else str(rows[0][3])
+        )
+        await db.execute(
+            """
+            UPDATE graph_edges
+            SET source_memory_id = ?, weight = ?, confidence = ?,
+                status = ?, metadata = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                representative_memory_id,
+                weight,
+                confidence,
+                status,
+                representative_metadata,
+                now,
+                edge_id,
+            ),
+        )
+        return True
 
     async def add_entry(
         self,
@@ -517,6 +649,14 @@ class GraphStore:
         """Delete graph artifacts belonging to one source memory."""
         vector_doc_ids: list[int] = []
         async with self._connect() as db:
+            source_cursor = await db.execute(
+                """
+                SELECT edge_id FROM graph_edge_sources
+                WHERE source_memory_id = ?
+                """,
+                (source_memory_id,),
+            )
+            affected_edge_ids = [int(row[0]) for row in await source_cursor.fetchall()]
             cursor = await db.execute(
                 "SELECT id, vector_doc_id FROM graph_entries WHERE source_memory_id = ?",
                 (source_memory_id,),
@@ -541,9 +681,12 @@ class GraphStore:
                 )
 
             await db.execute(
-                "DELETE FROM graph_edges WHERE source_memory_id = ?",
+                "DELETE FROM graph_edge_sources WHERE source_memory_id = ?",
                 (source_memory_id,),
             )
+            now = self._now_iso()
+            for edge_id in affected_edge_ids:
+                await self._refresh_edge_aggregate(db, edge_id, now)
             await db.execute(
                 """
                 DELETE FROM graph_nodes
@@ -569,8 +712,20 @@ class GraphStore:
 
         normalized_ids = sorted({int(item) for item in source_memory_ids})
         async with self._connect() as db:
+            affected_edge_ids: set[int] = set()
             for batch in self._chunked(normalized_ids, self._SQLITE_BATCH_SIZE):
                 memory_placeholders = ",".join("?" * len(batch))
+
+                source_cursor = await db.execute(
+                    f"""
+                    SELECT edge_id FROM graph_edge_sources
+                    WHERE source_memory_id IN ({memory_placeholders})
+                    """,
+                    batch,
+                )
+                affected_edge_ids.update(
+                    int(row[0]) for row in await source_cursor.fetchall()
+                )
 
                 cursor = await db.execute(
                     f"""
@@ -610,9 +765,13 @@ class GraphStore:
                         )
 
                 await db.execute(
-                    f"DELETE FROM graph_edges WHERE source_memory_id IN ({memory_placeholders})",
+                    f"DELETE FROM graph_edge_sources WHERE source_memory_id IN ({memory_placeholders})",
                     batch,
                 )
+
+            now = self._now_iso()
+            for edge_id in sorted(affected_edge_ids):
+                await self._refresh_edge_aggregate(db, edge_id, now)
 
             await db.execute(
                 """
@@ -628,6 +787,89 @@ class GraphStore:
             )
             await db.commit()
         return result
+
+    async def list_orphaned_edge_entries(
+        self,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        """Return graph entries whose referenced canonical edge is missing."""
+        limit = max(1, min(int(limit), 10000))
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT entry.id, entry.source_memory_id, entry.edge_id,
+                       entry.relation_type, entry.content, entry.vector_doc_id,
+                       entry.created_at, entry.updated_at
+                FROM graph_entries AS entry
+                LEFT JOIN graph_edges AS edge ON edge.id = entry.edge_id
+                WHERE entry.edge_id IS NOT NULL AND edge.id IS NULL
+                ORDER BY entry.source_memory_id ASC, entry.id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def delete_orphaned_edge_entries(
+        self,
+        entry_ids: list[int],
+    ) -> list[int]:
+        """Delete only selected entries that are still orphaned at commit time."""
+        normalized_ids = sorted({int(item) for item in entry_ids})
+        if not normalized_ids:
+            return []
+
+        vector_doc_ids: list[int] = []
+        async with self._connect() as db:
+            for batch in self._chunked(normalized_ids, self._SQLITE_BATCH_SIZE):
+                placeholders = ",".join("?" * len(batch))
+                cursor = await db.execute(
+                    f"""
+                    SELECT entry.id, entry.vector_doc_id
+                    FROM graph_entries AS entry
+                    LEFT JOIN graph_edges AS edge ON edge.id = entry.edge_id
+                    WHERE entry.id IN ({placeholders})
+                      AND entry.edge_id IS NOT NULL
+                      AND edge.id IS NULL
+                    """,
+                    batch,
+                )
+                rows = await cursor.fetchall()
+                confirmed_ids = [int(row[0]) for row in rows]
+                vector_doc_ids.extend(int(row[1]) for row in rows if row[1] is not None)
+                if not confirmed_ids:
+                    continue
+                confirmed_placeholders = ",".join("?" * len(confirmed_ids))
+                await db.execute(
+                    f"DELETE FROM livingmemory_graph_entries_fts "
+                    f"WHERE entry_id IN ({confirmed_placeholders})",
+                    confirmed_ids,
+                )
+                await db.execute(
+                    f"DELETE FROM graph_entry_nodes "
+                    f"WHERE entry_id IN ({confirmed_placeholders})",
+                    confirmed_ids,
+                )
+                await db.execute(
+                    f"DELETE FROM graph_entries WHERE id IN ({confirmed_placeholders})",
+                    confirmed_ids,
+                )
+            await db.execute(
+                """
+                DELETE FROM graph_nodes
+                WHERE id NOT IN (
+                    SELECT source_node_id FROM graph_edges
+                    UNION
+                    SELECT target_node_id FROM graph_edges
+                    UNION
+                    SELECT node_id FROM graph_entry_nodes
+                )
+                """
+            )
+            await db.commit()
+        return vector_doc_ids
 
     async def search_entries_by_bm25(
         self,
@@ -948,14 +1190,19 @@ class GraphStore:
                 node_placeholders = ",".join("?" * len(node_ids))
                 edge_cursor = await db.execute(
                     f"""
-                    SELECT id, edge_key, source_node_id, target_node_id,
-                           relation_type, source_memory_id, weight,
-                           confidence, status, metadata
-                    FROM graph_edges
-                    WHERE source_memory_id IN ({memory_placeholders})
-                      AND source_node_id IN ({node_placeholders})
-                      AND target_node_id IN ({node_placeholders})
-                    ORDER BY id DESC
+                    SELECT edge.id, edge.edge_key, edge.source_node_id,
+                           edge.target_node_id, edge.relation_type,
+                           edge.source_memory_id, edge.weight,
+                           edge.confidence, edge.status, edge.metadata
+                    FROM graph_edges AS edge
+                    WHERE EXISTS (
+                        SELECT 1 FROM graph_edge_sources AS source
+                        WHERE source.edge_id = edge.id
+                          AND source.source_memory_id IN ({memory_placeholders})
+                    )
+                      AND edge.source_node_id IN ({node_placeholders})
+                      AND edge.target_node_id IN ({node_placeholders})
+                    ORDER BY edge.id DESC
                     LIMIT ?
                     """,
                     (

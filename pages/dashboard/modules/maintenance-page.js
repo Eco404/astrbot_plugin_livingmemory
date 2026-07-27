@@ -14,6 +14,7 @@ export class MaintenancePage {
     this.sessionPreview = null;
     this.timelineRebuildItems = [];
     this.timelineRebuildPoller = null;
+    this.databaseHealth = null;
   }
 
   initEventListeners() {
@@ -60,6 +61,9 @@ export class MaintenancePage {
       const button = event.target.closest("[data-recent-recall-action]");
       if (button) this.handleRecentRecallAction(button.dataset.recentRecallAction, button.dataset.traceUid, button);
     });
+    document.getElementById("database-health-refresh")?.addEventListener("click", () => this.loadDatabaseHealth());
+    document.getElementById("database-health-repair")?.addEventListener("click", () => this.repairDatabaseIssues());
+    document.getElementById("database-health-issues")?.addEventListener("change", () => this.updateDatabaseSelection());
     document.getElementById("session-maintenance-operation")?.addEventListener("change", () => this.resetSessionPreview());
     document.getElementById("session-maintenance-close")?.addEventListener("click", () => this.closeSessionMaintenance());
     document.getElementById("session-maintenance-cancel")?.addEventListener("click", () => this.closeSessionMaintenance());
@@ -88,6 +92,7 @@ export class MaintenancePage {
     if (this.tab === "sessions") this.loadSessionAudit();
     if (this.tab === "recent-recall") this.loadRecentRecalls();
     if (this.tab === "timeline-rebuild") this.loadTimelineRebuildTasks();
+    if (this.tab === "database") this.loadDatabaseHealth();
   }
 
   selectTab(tab) {
@@ -108,6 +113,123 @@ export class MaintenancePage {
     if (tab === "sessions") this.loadSessionAudit();
     if (tab === "recent-recall") this.loadRecentRecalls();
     if (tab === "timeline-rebuild") this.loadTimelineRebuildTasks();
+    if (tab === "database" && !this.databaseHealth) this.loadDatabaseHealth();
+  }
+
+  selectedDatabaseIssues() {
+    return Array.from(document.querySelectorAll("[data-database-issue]:checked"))
+      .map(input => input.value)
+      .filter(Boolean);
+  }
+
+  updateDatabaseSelection() {
+    const selected = this.selectedDatabaseIssues();
+    const button = document.getElementById("database-health-repair");
+    if (button) button.disabled = selected.length === 0;
+    const label = document.getElementById("database-health-selection");
+    if (label) label.textContent = selected.length
+      ? window.t("maintenance.databaseSelected", selected.length)
+      : "";
+  }
+
+  formatDatabaseBytes(value) {
+    const bytes = Math.max(0, Number(value || 0));
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  renderDatabaseHealth() {
+    const data = this.databaseHealth;
+    const summary = document.getElementById("database-health-summary");
+    const databases = document.getElementById("database-health-databases");
+    const issues = document.getElementById("database-health-issues");
+    if (!summary || !databases || !issues || !data) return;
+
+    const healthy = data.summary?.status === "healthy";
+    summary.innerHTML = `<div class="database-health-state ${healthy ? "is-healthy" : "has-issues"}">
+      <span class="database-health-indicator" aria-hidden="true"></span>
+      <span><strong>${esc(healthy ? window.t("maintenance.databaseHealthy") : window.t("maintenance.databaseNeedsAttention"))}</strong>
+      <small>${esc(window.t("maintenance.databaseSummary", Number(data.summary?.issue_group_count || 0), Number(data.summary?.issue_count || 0), Number(data.summary?.repairable_count || 0)))}</small></span>
+    </div>`;
+
+    databases.innerHTML = (data.databases || []).map(database => {
+      const ok = database.integrity === "ok" && !(database.foreign_key_violations || []).length;
+      return `<div class="database-health-database">
+        <span><strong>${esc(database.label || database.filename)}</strong><small>${esc(database.filename || "--")} · ${esc(this.formatDatabaseBytes(database.size_bytes))}${database.schema_version ? ` · v${esc(database.schema_version)}` : ""}</small></span>
+        <span class="status-badge ${ok ? "status-completed" : "status-failed"}">${esc(ok ? window.t("maintenance.databaseIntegrityOk") : window.t("maintenance.databaseIntegrityIssue"))}</span>
+        <small>${esc(window.t("maintenance.databaseForeignKeys", Number((database.foreign_key_violations || []).length)))}</small>
+      </div>`;
+    }).join("");
+
+    const rows = data.issues || [];
+    issues.innerHTML = rows.length ? rows.map(issue => {
+      const action = issue.repair_action === "rebuild_graph_memory"
+        ? window.t("maintenance.databaseRepairRebuild")
+        : issue.repair_action === "delete_orphan_graph_entries"
+          ? window.t("maintenance.databaseRepairDelete")
+          : window.t("maintenance.databaseManualOnly");
+      return `<label class="database-health-issue ${issue.repairable ? "is-repairable" : "is-manual"}">
+        <input type="checkbox" data-database-issue value="${esc(issue.issue_uid)}" ${issue.repairable ? "" : "disabled"}>
+        <span class="database-health-issue-copy">
+          <span><strong>${esc(issue.title)}</strong><span class="status-badge status-failed">${Number(issue.count || 1)}</span></span>
+          <small>${esc(issue.description || "")}</small>
+          ${issue.excerpt ? `<p>${esc(issue.excerpt)}</p>` : ""}
+          <code>${esc(issue.issue_uid)}</code>
+        </span>
+        <span class="database-health-action">${esc(action)}</span>
+      </label>`;
+    }).join("") : `<div class="identity-state database-health-empty">${esc(window.t("maintenance.databaseNoIssues"))}</div>`;
+    this.updateDatabaseSelection();
+  }
+
+  async loadDatabaseHealth() {
+    const button = document.getElementById("database-health-refresh");
+    const summary = document.getElementById("database-health-summary");
+    const issues = document.getElementById("database-health-issues");
+    if (!button || !summary || !issues) return;
+    button.disabled = true;
+    summary.innerHTML = `<div class="identity-state">${esc(window.t("maintenance.databaseChecking"))}</div>`;
+    issues.innerHTML = "";
+    try {
+      this.databaseHealth = await this.topicPage.api.get("database/health");
+      this.renderDatabaseHealth();
+    } catch (error) {
+      summary.innerHTML = `<div class="identity-state identity-state-error">${esc(error.message)}</div>`;
+      this.showToast(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async repairDatabaseIssues() {
+    const issueUids = this.selectedDatabaseIssues();
+    if (!issueUids.length) return;
+    const confirmed = await this.confirmDialog.show({
+      title: window.t("maintenance.confirmDatabaseRepair"),
+      message: window.t("maintenance.confirmDatabaseRepairMessage", issueUids.length),
+      confirmLabel: window.t("maintenance.repairSelected"),
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    const button = document.getElementById("database-health-repair");
+    button.disabled = true;
+    try {
+      const result = await this.topicPage.api.post("database/repair", {
+        issues: issueUids.map(issue_uid => ({ issue_uid })),
+      });
+      this.databaseHealth = result.health || null;
+      if (this.databaseHealth) this.renderDatabaseHealth();
+      else await this.loadDatabaseHealth();
+      const failed = Number((result.failed || []).length);
+      this.showToast(failed
+        ? window.t("maintenance.databaseRepairPartial", failed)
+        : window.t("maintenance.databaseRepairComplete"), failed > 0);
+    } catch (error) {
+      this.showToast(error.message, true);
+      button.disabled = false;
+    }
   }
 
   syncTopicSpaces() {
