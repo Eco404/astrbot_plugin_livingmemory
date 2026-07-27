@@ -3497,6 +3497,59 @@ select.timeline-setting-input { width: min(220px, 100%); }
 }
 .maintenance-tool-band h2 { margin: 0 0 var(--space-2); font-size: 18px; letter-spacing: 0; }
 .maintenance-tool-band p { margin: 0; max-width: 720px; }
+.topic-maintenance-page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-6);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--border-normal);
+}
+.topic-maintenance-page-head h2 { margin: 0 0 var(--space-1); font-size: 18px; letter-spacing: 0; }
+.topic-maintenance-page-head p { margin: 0; max-width: 720px; line-height: 1.55; }
+.topic-maintenance-space-field {
+  display: grid;
+  flex: 0 1 560px;
+  gap: 6px;
+  min-width: min(420px, 50%);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+#maintenance-topic-empty { margin-top: var(--space-5); }
+.maintenance-topic-progress { margin-top: var(--space-5); }
+.maintenance-topic-action-list { border-bottom: 1px solid var(--border-normal); }
+.maintenance-topic-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-6);
+  min-height: 84px;
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--border-normal);
+}
+.maintenance-topic-action-row > div { min-width: 0; }
+.maintenance-topic-action-row strong { display: block; font-size: 14px; }
+.maintenance-topic-action-row p {
+  max-width: 760px;
+  margin: 5px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.maintenance-topic-action-row > .btn { min-width: 132px; }
+.maintenance-topic-action-danger strong { color: var(--danger); }
+.maintenance-count-button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; }
+.maintenance-action-count {
+  min-width: 24px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
+  text-align: center;
+}
 .maintenance-topic-controls {
   display: flex;
   align-items: center;
@@ -3613,6 +3666,21 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .maintenance-review-candidates p { margin: 0; color: var(--text-secondary); line-height: 1.5; }
 .maintenance-review-candidates details { margin-top: 3px; color: var(--text-secondary); font-size: 12px; }
 .maintenance-review-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-5); }
+.modal-subtitle { margin: 5px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.modal.topic-review-modal {
+  width: min(1400px, calc(100vw - 64px));
+  max-width: none;
+  height: calc(100dvh - 64px);
+  max-height: none;
+}
+.topic-review-body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+.topic-review-body .maintenance-panel-actions { flex: 0 0 auto; }
+.topic-review-body .maintenance-review-layout { flex: 1; min-height: 0; margin-top: 0; }
 .modal.topic-governance-modal {
   width: min(980px, calc(100vw - 56px));
   height: min(820px, calc(100dvh - 56px));
@@ -3664,6 +3732,8 @@ select.timeline-setting-input { width: min(220px, 100%); }
 @media (max-width: 900px) {
   .settings-page-row { grid-template-columns: 1fr; gap: var(--space-3); }
   .maintenance-tool-band { align-items: stretch; flex-direction: column; }
+  .topic-maintenance-page-head { align-items: stretch; flex-direction: column; gap: var(--space-4); }
+  .topic-maintenance-space-field { flex-basis: auto; min-width: 0; width: 100%; }
   .maintenance-topic-controls { min-width: 0; width: 100%; }
   .maintenance-review-toolbar { align-items: stretch; flex-direction: column; }
   .maintenance-review-layout { grid-template-columns: 1fr; }
@@ -4282,10 +4352,15 @@ select.timeline-setting-input { width: min(220px, 100%); }
     max-height: calc(100dvh - 24px);
   }
   .topic-governance-overlay,
-  .modal.topic-governance-modal {
+  .modal.topic-governance-modal,
+  .modal.topic-review-modal {
     width: calc(100vw - 24px);
     height: calc(100dvh - 24px);
   }
+  .topic-review-overlay { width: 100vw; height: 100dvh; }
+  .topic-review-body { padding: var(--space-3); }
+  .maintenance-topic-action-row { gap: var(--space-3); }
+  .maintenance-topic-action-row > .btn { min-width: 112px; }
   .governance-fragment-list > label { grid-template-columns: 1fr; }
 
   .peek-panel {

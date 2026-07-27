@@ -292,47 +292,57 @@
           <div class="page-body maintenance-page-body">
             <div class="maintenance-tabs" role="tablist">
               <button class="maintenance-tab active" type="button" data-maintenance-tab="topic" role="tab" aria-selected="true" data-i18n="maintenance.topicTab">Topic 维护</button>
-              <button class="maintenance-tab" type="button" data-maintenance-tab="timeline-rebuild" role="tab" aria-selected="false" data-i18n="maintenance.timelineRebuildTab">Timeline 重构</button>
-              <button class="maintenance-tab" type="button" data-maintenance-tab="review" role="tab" aria-selected="false" data-i18n="maintenance.reviewTab">Topic 待审查</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="timeline-rebuild" role="tab" aria-selected="false" data-i18n="maintenance.timelineRebuildTab">Timeline 维护</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="sessions" role="tab" aria-selected="false" data-i18n="maintenance.sessionsTab">会话审计</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="database" role="tab" aria-selected="false" data-i18n="maintenance.databaseTab">数据库</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="recent-recall" role="tab" aria-selected="false" data-i18n="maintenance.recentRecallTab">最近召回</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="recall" role="tab" aria-selected="false" data-i18n="nav.recall">召回测试</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="models" role="tab" aria-selected="false" data-i18n="nav.models">模型测试</button>
             </div>
-            <div class="maintenance-panel" id="maintenance-panel-review">
-              <div class="maintenance-review-toolbar">
-                <div>
-                  <h2 data-i18n="maintenance.reviewTitle">Topic 待审查</h2>
-                  <p class="text-secondary" data-i18n="maintenance.reviewIntro">核对歧义片段与候选 Topic，再决定合并、新建、暂缓或忽略。</p>
-                </div>
-                <div class="maintenance-topic-controls">
-                  <select id="maintenance-review-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
-                  <button class="btn btn-secondary btn-sm" id="maintenance-review-refresh" type="button" data-i18n="common.refresh">刷新</button>
-                  <button class="btn btn-primary btn-sm" id="maintenance-open-governance" type="button" data-i18n="maintenance.governance">合并 / 拆分</button>
-                </div>
-              </div>
-              <div class="maintenance-review-layout">
-                <div class="maintenance-review-list" id="maintenance-review-list"><div class="identity-state" data-i18n="maintenance.chooseReviewSpace">请选择记忆空间</div></div>
-                <div class="maintenance-review-detail" id="maintenance-review-detail"><div class="identity-state" data-i18n="maintenance.chooseReview">请选择待审查项</div></div>
-              </div>
-            </div>
             <div class="maintenance-panel active" id="maintenance-panel-topic">
-              <div class="maintenance-tool-band">
+              <div class="topic-maintenance-page-head">
                 <div>
                   <h2 data-i18n="topic.maintenanceTitle">Topic 维护</h2>
-                  <p class="text-secondary" data-i18n="maintenance.topicIntro">选择记忆空间后打开维护面板，执行增量补建、重新向量化、关系重算或清空 Topic。</p>
+                  <p class="text-secondary" data-i18n="maintenance.topicIntro">选择记忆空间后管理 Topic 派生数据、补建任务和人工审查。</p>
                 </div>
-                <div class="maintenance-topic-controls">
+                <label class="topic-maintenance-space-field">
+                  <span data-i18n="maintenance.topicSpaceLabel">记忆空间</span>
                   <select id="maintenance-topic-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
-                  <button class="btn btn-primary" id="maintenance-open-topic" type="button" data-i18n="maintenance.openTopic">打开维护面板</button>
+                </label>
+              </div>
+              <div class="topic-progress hidden maintenance-topic-progress" id="maintenance-topic-progress" aria-live="polite"></div>
+              <div class="identity-state" id="maintenance-topic-empty" data-i18n="maintenance.chooseTopicSpace">请选择记忆空间后查看维护功能</div>
+              <div class="maintenance-topic-action-list hidden" id="maintenance-topic-actions">
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="topic.revectorizeTitle">重新向量化并重算关系</strong><p data-i18n="topic.revectorizeIntro">使用当前 Embedding 模型更新正式片段和 Topic 向量，并重算相关话题；不调用 LLM。</p></div>
+                  <button class="btn btn-secondary" id="topic-revectorize" type="button" data-i18n="topic.revectorize">开始</button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="topic.recomputeRelationsTitle">重新计算相关话题</strong><p data-i18n="topic.recomputeRelationsIntro">使用现有 Topic 向量和参数替换关系图，不重新构建 Topic，也不调用 LLM。</p></div>
+                  <button class="btn btn-secondary" id="topic-recompute-relations" type="button" data-i18n="topic.recomputeRelations">立即重算</button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.incrementalTitle">增量补建</strong><p data-i18n="maintenance.incrementalIntro">检查尚未被活跃 Topic 索引的 Timeline，并按选择范围补建。</p></div>
+                  <button class="btn btn-secondary maintenance-count-button" id="maintenance-open-topic" type="button"><span data-i18n="maintenance.openIncremental">查看</span><span class="maintenance-action-count" id="maintenance-topic-unindexed-count">0</span></button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.reviewTitle">Topic 待审查</strong><p data-i18n="maintenance.reviewIntro">核对歧义片段与候选 Topic，再决定合并、新建、暂缓或忽略。</p></div>
+                  <button class="btn btn-secondary maintenance-count-button" id="maintenance-open-reviews" type="button"><span data-i18n="maintenance.openReviews">查看</span><span class="maintenance-action-count" id="maintenance-topic-review-count">0</span></button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.governanceTitle">Topic 拆分 / 合并</strong><p data-i18n="maintenance.governanceIntro">按正式片段预览并执行 Topic 合并或拆分，操作失败时保持原数据不变。</p></div>
+                  <button class="btn btn-secondary" id="maintenance-open-governance" type="button" data-i18n="maintenance.governance">拆分 / 合并</button>
+                </div>
+                <div class="maintenance-topic-action-row maintenance-topic-action-danger">
+                  <div><strong data-i18n="topic.clearTopicsTitle">清空 Topic 记忆</strong><p data-i18n="topic.clearTopicsIntro">永久删除当前空间的全部 Topic、正式片段、人物索引、关系和构建断点，不影响 Timeline 记忆。</p></div>
+                  <button class="btn btn-danger" id="topic-clear-topics" type="button" data-i18n="topic.clearTopics">清空</button>
                 </div>
               </div>
             </div>
             <div class="maintenance-panel" id="maintenance-panel-timeline-rebuild">
               <div class="maintenance-review-toolbar">
                 <div>
-                  <h2 data-i18n="maintenance.timelineRebuildTitle">Timeline 来源重构</h2>
+                  <h2 data-i18n="maintenance.timelineRebuildTitle">Timeline 记忆维护</h2>
                   <p class="text-secondary" data-i18n="maintenance.timelineRebuildIntro">先检查原始消息证据是否完整，再选择需要同 ID 重构的 Timeline。重构后会同步修复 Topic。</p>
                 </div>
                 <div class="maintenance-topic-controls">
@@ -358,7 +368,7 @@
               <div id="timeline-rebuild-list" class="timeline-rebuild-list"><div class="identity-state" data-i18n="maintenance.rebuildNotChecked">尚未检测</div></div>
               <div class="session-task-history">
                 <div class="maintenance-history-heading">
-                  <h3 data-i18n="maintenance.rebuildTasks">Timeline 重构任务</h3>
+                  <h3 data-i18n="maintenance.rebuildTasks">Timeline 维护任务</h3>
                   <div>
                     <button class="btn btn-secondary btn-sm" id="timeline-rebuild-task-refresh" type="button" data-i18n="common.refresh">刷新</button>
                     <button class="btn btn-secondary btn-sm" id="timeline-rebuild-task-clear" type="button" data-i18n="common.clear">清空</button>
@@ -685,7 +695,7 @@
     <div class="modal-overlay topic-governance-overlay" id="topic-governance-overlay" aria-hidden="true">
       <div class="modal topic-governance-modal" role="dialog" aria-modal="true" aria-labelledby="topic-governance-title">
         <div class="modal-header">
-          <div class="modal-title" id="topic-governance-title" data-i18n="maintenance.governance">合并 / 拆分</div>
+          <div class="modal-title" id="topic-governance-title" data-i18n="maintenance.governance">拆分 / 合并</div>
           <button class="modal-close" id="topic-governance-close" type="button" data-i18n-aria="common.close" aria-label="Close">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
           </button>
@@ -694,6 +704,30 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" id="topic-governance-cancel" type="button" data-i18n="common.cancel">取消</button>
           <button class="btn btn-primary" id="topic-governance-submit" type="button" data-i18n="maintenance.previewChanges">预览变更</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pending Topic Reviews Modal -->
+    <div class="modal-overlay topic-review-overlay" id="topic-review-overlay" aria-hidden="true">
+      <div class="modal topic-review-modal" role="dialog" aria-modal="true" aria-labelledby="topic-review-title">
+        <div class="modal-header">
+          <div>
+            <div class="modal-title" id="topic-review-title" data-i18n="maintenance.reviewTitle">Topic 待审查</div>
+            <p class="modal-subtitle" data-i18n="maintenance.reviewIntro">核对歧义片段与候选 Topic，再决定合并、新建、暂缓或忽略。</p>
+          </div>
+          <button class="modal-close" id="topic-review-close" type="button" data-i18n-aria="common.close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body topic-review-body">
+          <div class="maintenance-panel-actions">
+            <button class="btn btn-secondary btn-sm" id="maintenance-review-refresh" type="button" data-i18n="common.refresh">刷新</button>
+          </div>
+          <div class="maintenance-review-layout">
+            <div class="maintenance-review-list" id="maintenance-review-list"><div class="identity-state" data-i18n="maintenance.chooseReviewSpace">请选择记忆空间</div></div>
+            <div class="maintenance-review-detail" id="maintenance-review-detail"><div class="identity-state" data-i18n="maintenance.chooseReview">请选择待审查项</div></div>
+          </div>
         </div>
       </div>
     </div>
@@ -726,36 +760,15 @@
       </div>
     </div>
 
-    <!-- Topic Maintenance Panel -->
+    <!-- Incremental Topic Maintenance Panel -->
     <div class="modal-overlay" id="topic-maintenance-overlay" aria-hidden="true">
       <div class="modal topic-maintenance-modal" role="dialog" aria-modal="true" aria-labelledby="topic-maintenance-title" aria-describedby="topic-maintenance-intro">
         <div class="modal-header">
-          <div class="modal-title" id="topic-maintenance-title" data-i18n="topic.maintenanceTitle">Topic 维护</div>
+          <div class="modal-title" id="topic-maintenance-title" data-i18n="maintenance.incrementalTitle">增量补建</div>
           <button class="modal-close" id="topic-maintenance-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
         </div>
         <div class="modal-body">
           <p class="topic-maintenance-intro text-secondary" id="topic-maintenance-intro" data-i18n="topic.maintenanceIntro">检查尚未被活跃 Topic 以当前版本索引的 Timeline，确认后仅补建所选条目。</p>
-          <div class="topic-maintenance-action">
-            <div>
-              <strong data-i18n="topic.revectorizeTitle">重新向量化并重算关系</strong>
-              <p class="text-secondary" data-i18n="topic.revectorizeIntro">使用当前 Embedding 模型更新正式片段和 Topic 向量，并重算相关话题；不调用 LLM。</p>
-            </div>
-            <button class="btn btn-secondary btn-sm" id="topic-revectorize" type="button" data-i18n="topic.revectorize">开始</button>
-          </div>
-          <div class="topic-maintenance-action">
-            <div>
-              <strong data-i18n="topic.recomputeRelationsTitle">重新计算相关话题</strong>
-              <p class="text-secondary" data-i18n="topic.recomputeRelationsIntro">使用现有 Topic 向量和参数替换关系图，不重新构建 Topic，也不调用 LLM。</p>
-            </div>
-            <button class="btn btn-secondary btn-sm" id="topic-recompute-relations" type="button" data-i18n="topic.recomputeRelations">立即重算</button>
-          </div>
-          <div class="topic-maintenance-action topic-maintenance-danger-action">
-            <div>
-              <strong data-i18n="topic.clearTopicsTitle">清空 Topic 记忆</strong>
-              <p class="text-secondary" data-i18n="topic.clearTopicsIntro">永久删除当前空间的全部 Topic、正式片段、人物索引、关系和构建断点，不影响 Timeline 记忆。</p>
-            </div>
-            <button class="btn btn-danger btn-sm" id="topic-clear-topics" type="button" data-i18n="topic.clearTopics">清空</button>
-          </div>
           <div class="topic-maintenance-toolbar">
             <div id="topic-maintenance-status" class="text-secondary" aria-live="polite"></div>
             <button class="btn btn-secondary btn-sm" id="topic-maintenance-detect" type="button" data-i18n="topic.detectUnindexed">重新检查</button>
