@@ -310,7 +310,7 @@ async def test_dual_channel_summary_stores_canonical_and_persona():
     assert content == metadata["canonical_summary"]
 
     # schema 版本标记
-    assert metadata.get("summary_schema_version") == "v4-memory-decision"
+    assert metadata.get("summary_schema_version") == "v5-actor-attribution"
 
 
 @pytest.mark.asyncio
@@ -376,6 +376,9 @@ async def test_source_grounding_contract_repairs_once_and_persists_report():
             "topics":["会议提醒"],
             "key_facts":["张三2026年7月28日下午三点开会"],
             "key_fact_evidence":[{"fact_index":0,"message_refs":["M1"]}],
+            "key_fact_attributions":[
+                {"fact_index":0,"subject_refs":[{"actor_ref":"A2","display_name_snapshot":"张三"}],"claim_type":"speaker_self","confidence":1.0}
+            ],
             "message_coverage":[
                 {"message_ref":"M1","disposition":"fact","fact_indexes":[0],"reason":"会议时间来源"},
                 {"message_ref":"M2","disposition":"context","fact_indexes":[],"reason":"Bot确认提醒"}
@@ -405,6 +408,88 @@ async def test_source_grounding_contract_repairs_once_and_persists_report():
         _make_messages()[0].timestamp
     )
     assert metadata["key_fact_temporal"][0]["event_started_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_proactive_bot_self_action_is_not_transferred_to_private_peer():
+    messages = [
+        Message(
+            id=1,
+            session_id="s1",
+            role="user",
+            content="刚理完头发，准备找点吃的",
+            sender_id="u1",
+            sender_name="示例甲",
+            platform="test",
+        ),
+        Message(
+            id=2,
+            session_id="s1",
+            role="assistant",
+            content="脑子总算回来一点了，想开电脑写一小段，把散乱念头理顺。你也别忘了晚饭。",
+            sender_id="bot",
+            sender_name="测试助手",
+            platform="test",
+            metadata={"is_bot_message": True, "persona_name": "测试助手"},
+        ),
+        Message(
+            id=3,
+            session_id="s1",
+            role="user",
+            content="嗯，准备附近转一转",
+            sender_id="u1",
+            sender_name="示例甲",
+            platform="test",
+        ),
+    ]
+    llm = _SequenceLLMProvider(
+        """{
+            "memory_decision":"store","no_memory_reason":"none",
+            "summary":"示例甲打算开电脑写一小段，我提醒他吃晚饭",
+            "topics":["晚间安排"],
+            "key_facts":["示例甲打算开电脑写一小段"],
+            "key_fact_evidence":[{"fact_index":0,"message_refs":["M2"]}],
+            "key_fact_attributions":[{"fact_index":0,"subject_refs":[{"actor_ref":"A2","display_name_snapshot":"示例甲"}],"claim_type":"speaker_self","confidence":0.9}],
+            "message_coverage":[
+                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason":"晚间背景"},
+                {"message_ref":"M2","disposition":"fact","fact_indexes":[0],"reason":"计划来源"},
+                {"message_ref":"M3","disposition":"context","fact_indexes":[],"reason":"后续安排"}
+            ],
+            "sentiment":"positive","importance":0.5
+        }""",
+        """{
+            "memory_decision":"store","no_memory_reason":"none",
+            "summary":"我打算开电脑写一小段整理念头，也提醒示例甲别忘了吃晚饭",
+            "topics":["晚间安排"],
+            "key_facts":["我打算开电脑写一小段整理念头"],
+            "key_fact_evidence":[{"fact_index":0,"message_refs":["M2"]}],
+            "key_fact_attributions":[{"fact_index":0,"subject_refs":[{"actor_ref":"A1","display_name_snapshot":"测试助手"}],"claim_type":"speaker_self","confidence":1.0}],
+            "message_coverage":[
+                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason":"晚间背景"},
+                {"message_ref":"M2","disposition":"fact","fact_indexes":[0],"reason":"Bot自述计划"},
+                {"message_ref":"M3","disposition":"context","fact_indexes":[],"reason":"后续安排"}
+            ],
+            "sentiment":"positive","importance":0.5
+        }""",
+    )
+    processor = MemoryProcessor(
+        llm_provider=llm,
+        context=None,
+        config={"timeline_require_source_grounding": True},
+    )
+
+    _, metadata, _ = await processor.process_conversation(
+        messages,
+        persona_id="persona-1",
+    )
+
+    assert metadata["summary_quality"] == "repaired"
+    assert metadata["key_fact_attributions"][0]["subject_refs"][0][
+        "actor_id"
+    ] == "test:assistant:bot"
+    prompt = llm.text_chat.await_args_list[1].kwargs["prompt"]
+    assert "[speaker=A1 | role=assistant]" in prompt
+    assert "称呼语只表示被称呼者" in prompt
 
 
 def test_summary_quality_rejects_unanchored_relative_fact_when_grounding_required():
@@ -610,7 +695,7 @@ def test_build_memory_from_structured_data_uses_standard_storage_format():
     assert metadata["key_facts"] == ["主动记忆应复用 MemoryProcessor 格式化流程"]
     assert metadata["sentiment"] == "neutral"
     assert metadata["interaction_type"] == "private_chat"
-    assert metadata["summary_schema_version"] == "v4-memory-decision"
+    assert metadata["summary_schema_version"] == "v5-actor-attribution"
     assert metadata["summary_quality"] == "normal"
     assert importance == 0.8
 
@@ -761,7 +846,7 @@ async def test_process_group_chat_dual_channel_summary():
 
     assert "canonical_summary" in metadata
     assert "persona_summary" in metadata
-    assert metadata.get("summary_schema_version") == "v4-memory-decision"
+    assert metadata.get("summary_schema_version") == "v5-actor-attribution"
     # canonical_summary 应包含 key_facts
     assert "私有化 LLM" in metadata["canonical_summary"]
     # content 应等于 canonical_summary

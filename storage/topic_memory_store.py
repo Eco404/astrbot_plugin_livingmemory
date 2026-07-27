@@ -4749,6 +4749,7 @@ class TopicMemoryStore:
             "topics": candidate.topics,
             "key_facts": candidate.key_facts,
             "key_fact_temporal": candidate.key_fact_temporal,
+            "key_fact_attributions": candidate.key_fact_attributions,
             "atom_fingerprints": candidate.atom_fingerprints,
             "atom_contents": candidate.atom_contents,
             "atom_temporal": candidate.atom_temporal,
@@ -4820,6 +4821,11 @@ class TopicMemoryStore:
             key_fact_temporal=[
                 dict(item)
                 for item in payload.get("key_fact_temporal", [])
+                if isinstance(item, dict)
+            ],
+            key_fact_attributions=[
+                dict(item)
+                for item in payload.get("key_fact_attributions", [])
                 if isinstance(item, dict)
             ],
             atom_fingerprints=[

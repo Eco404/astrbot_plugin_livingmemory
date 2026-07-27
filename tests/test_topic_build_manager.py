@@ -2673,6 +2673,22 @@ def test_fragment_prompt_uses_local_refs_and_restores_exact_provenance():
         content="用户喜欢黑咖啡",
         summary="用户讨论咖啡偏好",
         key_facts=["用户喜欢黑咖啡", "用户不加糖"],
+        key_fact_attributions=[
+            {
+                "fact_index": index,
+                "subject_refs": [
+                    {
+                        "actor_ref": "A1",
+                        "actor_id": "qq:human:user-1",
+                        "display_name_snapshot": "用户",
+                    }
+                ],
+                "claim_type": "speaker_self",
+                "confidence": 1.0,
+                "attribution_status": "verified",
+            }
+            for index in range(2)
+        ],
         atom_contents=["用户喜欢黑咖啡"],
         atom_fingerprints=[fingerprint],
     )
@@ -2689,6 +2705,10 @@ def test_fragment_prompt_uses_local_refs_and_restores_exact_provenance():
         "T1.A1",
         "T1.K1",
     ]
+    assert payload["timelines"][0]["source_facts"][0]["attribution"][
+        "attribution_status"
+    ] == "verified"
+    assert source_refs["T1.K1"]["attribution"]["claim_type"] == "speaker_self"
 
     decoded = manager._decode_fragment_refs(
         {
