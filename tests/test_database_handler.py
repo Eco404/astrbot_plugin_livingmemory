@@ -1,5 +1,6 @@
 """Tests for explicit database inspection and selected repairs."""
 
+import asyncio
 from pathlib import Path
 
 import aiosqlite
@@ -115,3 +116,36 @@ async def test_database_repair_only_processes_explicit_selection(tmp_path: Path)
     assert result["data"]["health"]["summary"]["status"] == "healthy"
     assert engine.graph_memory_manager.indexed == [7]
     assert engine.cache_invalidated is True
+
+
+@pytest.mark.asyncio
+async def test_database_repair_exposes_background_progress(tmp_path: Path):
+    db_path = tmp_path / "repair-progress.db"
+    await _create_database_with_graph_orphan(db_path)
+    handler = DatabaseHandler(PageApiUtils())
+    engine = _FakeMemoryEngine(str(db_path))
+    app = Quart(__name__)
+
+    async with app.test_request_context(
+        "/",
+        method="POST",
+        json={"issues": ["graph_orphan_entries:7"]},
+    ):
+        started = await handler.start_repair(engine, None)
+
+    assert started["status"] == "ok"
+    job_uid = started["data"]["job_uid"]
+    for _ in range(100):
+        async with app.test_request_context(
+            f"/?job_uid={job_uid}", method="GET"
+        ):
+            progress = await handler.get_repair_progress()
+        if progress["data"]["status"] not in {"pending", "running"}:
+            break
+        await asyncio.sleep(0.01)
+
+    assert progress["data"]["status"] == "completed"
+    assert progress["data"]["percent"] == 100.0
+    assert progress["data"]["current"] == progress["data"]["total"]
+    assert progress["data"]["health"]["summary"]["status"] == "healthy"
+    await handler.shutdown()
