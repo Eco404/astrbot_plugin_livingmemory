@@ -3,6 +3,7 @@ Page API 模块化子模块
 """
 
 from .backup_handler import BackupHandler
+from .database_handler import DatabaseHandler
 from .graph_handler import GraphHandler
 from .identity_handler import IdentityHandler
 from .memory_handler import MemoryHandler
@@ -25,6 +26,7 @@ __all__ = [
     "GraphHandler",
     "IdentityHandler",
     "BackupHandler",
+    "DatabaseHandler",
     "TopicHandler",
     "TimelineHandler",
     "PageApiUtils",

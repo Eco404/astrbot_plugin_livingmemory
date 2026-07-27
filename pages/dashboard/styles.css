@@ -3289,6 +3289,63 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .maintenance-panel { display: none; }
 .maintenance-panel.active { display: block; }
 
+.database-health-summary { margin-top: var(--space-4); }
+.database-health-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 12px 14px;
+  border: 1px solid var(--border-normal);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+.database-health-state > span:last-child { display: grid; gap: 3px; }
+.database-health-state small { color: var(--text-tertiary); }
+.database-health-indicator { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+.database-health-state.is-healthy .database-health-indicator { background: var(--success); }
+.database-health-state.has-issues .database-health-indicator { background: var(--danger); }
+.database-health-databases {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.database-health-database {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-normal);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+.database-health-database > span:first-child { display: grid; gap: 3px; min-width: 0; }
+.database-health-database small { color: var(--text-tertiary); overflow-wrap: anywhere; }
+.database-health-database > small { grid-column: 1 / -1; }
+.database-health-issues-heading { margin-top: var(--space-6); }
+.database-health-issues { display: grid; gap: var(--space-2); }
+.database-health-issue {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(150px, auto);
+  align-items: start;
+  gap: var(--space-3);
+  padding: 12px 14px;
+  border: 1px solid var(--border-normal);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+.database-health-issue.is-repairable { cursor: pointer; }
+.database-health-issue.is-repairable:hover { border-color: var(--primary); }
+.database-health-issue input { margin-top: 3px; }
+.database-health-issue-copy { display: grid; gap: 5px; min-width: 0; }
+.database-health-issue-copy > span { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.database-health-issue-copy small { color: var(--text-secondary); }
+.database-health-issue-copy p { margin: 0; color: var(--text-secondary); line-height: 1.5; }
+.database-health-issue-copy code { color: var(--text-tertiary); overflow-wrap: anywhere; }
+.database-health-action { color: var(--text-secondary); font-size: 13px; text-align: right; }
+.database-health-empty { min-height: 160px; }
+
 .session-audit-list {
   display: grid;
   gap: 8px;
@@ -3946,6 +4003,9 @@ select.timeline-setting-input { width: min(220px, 100%); }
     justify-content: flex-start;
     gap: var(--space-3) var(--space-5);
   }
+
+  .database-health-issue { grid-template-columns: auto minmax(0, 1fr); }
+  .database-health-action { grid-column: 2; text-align: left; }
 }
 .topic-timeline-identifiers { margin-top: 0; }
 .modal.topic-full-build-confirm-modal { width: min(620px, calc(100vw - 48px)); }

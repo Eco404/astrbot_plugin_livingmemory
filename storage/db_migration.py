@@ -28,7 +28,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.20"
+    CURRENT_VERSION = "9.21"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -61,6 +61,7 @@ class DBMigration:
         "9.18": "Source-grounded affect events and Topic affect profiles",
         "9.19": "Source-verified and resumable Timeline reconstruction",
         "9.20": "Collision-safe Topic fragment identity and affect provenance repair",
+        "9.21": "Multi-source graph edges and user-controlled database repair",
     }
 
     def __init__(self, db_path: str):
@@ -376,6 +377,8 @@ class DBMigration:
                     migration_steps.append(self._migrate_v9_18_to_v9_19)
                 if current_key <= self.version_key("9.19"):
                     migration_steps.append(self._migrate_v9_19_to_v9_20)
+                if current_key <= self.version_key("9.20"):
+                    migration_steps.append(self._migrate_v9_20_to_v9_21)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -1931,6 +1934,76 @@ class DBMigration:
             f"(fragment_identities={repaired_identities}, "
             f"affect_events={repaired_affect_events})"
         )
+
+    async def _migrate_v9_20_to_v9_21(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Normalize graph-edge evidence without mutating existing orphans."""
+        logger.info(
+            "执行迁移步骤: v9.20 -> v9.21 "
+            "(multi-source graph edges and manual database repair)"
+        )
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            if await self._table_exists(db, "graph_edges"):
+                await db.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS graph_edge_sources (
+                        edge_id INTEGER NOT NULL,
+                        source_memory_id INTEGER NOT NULL,
+                        weight REAL NOT NULL DEFAULT 1.0,
+                        confidence REAL NOT NULL DEFAULT 0.8,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        metadata TEXT DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(edge_id, source_memory_id),
+                        FOREIGN KEY(edge_id) REFERENCES graph_edges(id) ON DELETE CASCADE
+                    )
+                    """
+                )
+                await db.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_graph_edge_sources_memory
+                    ON graph_edge_sources(source_memory_id, edge_id)
+                    """
+                )
+                now = datetime.now(timezone.utc).isoformat()
+                await db.execute(
+                    """
+                    INSERT OR IGNORE INTO graph_edge_sources(
+                        edge_id, source_memory_id, weight, confidence, status,
+                        metadata, created_at, updated_at
+                    )
+                    SELECT id, source_memory_id, weight, confidence, status,
+                           json_object('backfill', 'edge_owner'), ?, ?
+                    FROM graph_edges
+                    """,
+                    (now, now),
+                )
+                if await self._table_exists(db, "graph_entries"):
+                    # Broken edge references remain for explicit user repair.
+                    await db.execute(
+                        """
+                        INSERT OR IGNORE INTO graph_edge_sources(
+                            edge_id, source_memory_id, weight, confidence, status,
+                            metadata, created_at, updated_at
+                        )
+                        SELECT DISTINCT entry.edge_id, entry.source_memory_id,
+                               1.0, edge.confidence, edge.status,
+                               json_object('backfill', 'graph_entry'), ?, ?
+                        FROM graph_entries AS entry
+                        JOIN graph_edges AS edge ON edge.id = entry.edge_id
+                        WHERE entry.edge_id IS NOT NULL
+                        """,
+                        (now, now),
+                    )
+            await db.commit()
+        if progress_callback:
+            progress_callback("建立图谱边的多来源索引", 1, 1)
+        logger.info("v9.20 -> v9.21 迁移完成（孤立引用未自动修复）")
 
     @staticmethod
     def _migration_json_object(value: Any) -> dict[str, Any]:

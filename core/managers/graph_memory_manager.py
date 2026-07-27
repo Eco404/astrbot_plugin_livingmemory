@@ -85,5 +85,12 @@ class GraphMemoryManager:
             for vector_doc_id in vector_doc_ids:
                 await self.graph_vector_retriever.delete_entry(vector_doc_id)
 
+    async def delete_orphaned_entries(self, entry_ids: list[int]) -> int:
+        """Delete selected orphan graph entries and their vector artifacts."""
+        vector_doc_ids = await self.graph_store.delete_orphaned_edge_entries(entry_ids)
+        for vector_doc_id in vector_doc_ids:
+            await self.graph_vector_retriever.delete_entry(vector_doc_id)
+        return len(vector_doc_ids)
+
 
 __all__ = ["GraphMemoryManager"]

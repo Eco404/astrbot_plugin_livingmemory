@@ -13,6 +13,7 @@ from typing import Any
 
 from .page_api_modules import (
     BackupHandler,
+    DatabaseHandler,
     GraphHandler,
     IdentityHandler,
     MemoryHandler,
@@ -50,6 +51,7 @@ class PluginPageApi:
         self.identity_handler = IdentityHandler(self.utils)
         self.topic_handler = TopicHandler(self.utils)
         self.timeline_handler = TimelineHandler(self.utils)
+        self.database_handler = DatabaseHandler(self.utils)
 
         # BackupHandler 需要 data_dir，延迟初始化
         self._backup_handler = None
@@ -294,6 +296,18 @@ class PluginPageApi:
             self.list_backups,
             ["GET"],
             "LivingMemory Page backup list",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/database/health",
+            self.check_database_health,
+            ["GET"],
+            "LivingMemory Page database health check",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/database/repair",
+            self.repair_database_issues,
+            ["POST"],
+            "LivingMemory Page selected database repair",
         )
         register(
             f"{PAGE_API_PREFIX}/topics/overview",
@@ -718,6 +732,22 @@ class PluginPageApi:
     async def list_backups(self):
         """列出所有版本备份及其元数据"""
         return await self.backup_handler.list_backups()
+
+    async def check_database_health(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.database_handler.check_health(
+            ready["memory_engine"], ready.get("conversation_manager")
+        )
+
+    async def repair_database_issues(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.database_handler.repair(
+            ready["memory_engine"], ready.get("conversation_manager")
+        )
 
     async def get_topic_overview(self):
         ready, error = await self._ensure_plugin_ready()

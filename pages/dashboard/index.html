@@ -295,6 +295,7 @@
               <button class="maintenance-tab" type="button" data-maintenance-tab="timeline-rebuild" role="tab" aria-selected="false" data-i18n="maintenance.timelineRebuildTab">Timeline 重构</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="review" role="tab" aria-selected="false" data-i18n="maintenance.reviewTab">Topic 待审查</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="sessions" role="tab" aria-selected="false" data-i18n="maintenance.sessionsTab">会话审计</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="database" role="tab" aria-selected="false" data-i18n="maintenance.databaseTab">数据库</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="recent-recall" role="tab" aria-selected="false" data-i18n="maintenance.recentRecallTab">最近召回</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="recall" role="tab" aria-selected="false" data-i18n="nav.recall">召回测试</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="models" role="tab" aria-selected="false" data-i18n="nav.models">模型测试</button>
@@ -401,6 +402,29 @@
                 </div>
               </div>
               <div id="recent-recall-list" class="recall-history-list"></div>
+            </div>
+            <div class="maintenance-panel" id="maintenance-panel-database">
+              <div class="maintenance-review-toolbar">
+                <div>
+                  <h2 data-i18n="maintenance.databaseTitle">数据库健康检查</h2>
+                  <p class="text-secondary" data-i18n="maintenance.databaseIntro">检查 SQLite 完整性、外键和记忆来源关系。检查不会修改数据，修复只处理手动勾选的项目。</p>
+                </div>
+                <div class="maintenance-topic-controls">
+                  <button class="btn btn-secondary btn-sm" id="database-health-refresh" type="button" data-i18n="maintenance.runDatabaseCheck">开始检查</button>
+                  <button class="btn btn-danger btn-sm" id="database-health-repair" type="button" disabled data-i18n="maintenance.repairSelected">修复所选项</button>
+                </div>
+              </div>
+              <div id="database-health-summary" class="database-health-summary">
+                <div class="identity-state" data-i18n="maintenance.databaseNotChecked">尚未检查数据库</div>
+              </div>
+              <div id="database-health-databases" class="database-health-databases"></div>
+              <div class="maintenance-history-heading database-health-issues-heading">
+                <h3 data-i18n="maintenance.databaseIssues">发现的问题</h3>
+                <span id="database-health-selection" class="text-secondary"></span>
+              </div>
+              <div id="database-health-issues" class="database-health-issues">
+                <div class="identity-state" data-i18n="maintenance.databaseCheckHint">点击“开始检查”获取当前状态</div>
+              </div>
             </div>
             <div class="maintenance-panel" id="maintenance-panel-recall">
             <div class="recall-form-section">

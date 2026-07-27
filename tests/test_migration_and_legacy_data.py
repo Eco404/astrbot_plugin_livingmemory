@@ -444,6 +444,80 @@ async def test_migrate_v9_19_to_v9_20_repairs_fragment_and_affect_identity(
 
 
 @pytest.mark.asyncio
+async def test_migrate_v9_20_to_v9_21_backfills_sources_without_repairing_orphans(
+    tmp_path,
+):
+    db_path = str(tmp_path / "legacy-v9.20-graph.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE graph_edges (
+                id INTEGER PRIMARY KEY,
+                edge_key TEXT NOT NULL UNIQUE,
+                source_node_id INTEGER NOT NULL,
+                target_node_id INTEGER NOT NULL,
+                relation_type TEXT NOT NULL,
+                source_memory_id INTEGER NOT NULL,
+                weight REAL NOT NULL,
+                confidence REAL NOT NULL,
+                status TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE graph_entries (
+                id INTEGER PRIMARY KEY,
+                entry_key TEXT NOT NULL UNIQUE,
+                source_memory_id INTEGER NOT NULL,
+                edge_id INTEGER
+            )
+            """
+        )
+        await db.execute(
+            """
+            INSERT INTO graph_edges VALUES (
+                10, 'edge-10', 1, 2, 'related', 101,
+                0.8, 0.9, 'active', '{}', 'now', 'now'
+            )
+            """
+        )
+        await db.executemany(
+            "INSERT INTO graph_entries VALUES (?, ?, ?, ?)",
+            [
+                (1, "entry-owner", 101, 10),
+                (2, "entry-shared", 202, 10),
+                (3, "entry-orphan", 303, 999),
+            ],
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_20_to_v9_21(None)
+    await migration._migrate_v9_20_to_v9_21(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        sources = await (
+            await db.execute(
+                """
+                SELECT edge_id, source_memory_id
+                FROM graph_edge_sources
+                ORDER BY source_memory_id
+                """
+            )
+        ).fetchall()
+        orphan = await (
+            await db.execute("SELECT edge_id FROM graph_entries WHERE id = 3")
+        ).fetchone()
+
+    assert sources == [(10, 101), (10, 202)]
+    assert orphan == (999,)
+
+
+@pytest.mark.asyncio
 async def test_set_db_version_forces_text_in_legacy_integer_column(tmp_path):
     db_path = str(tmp_path / "version_affinity.db")
     async with aiosqlite.connect(db_path) as db:
