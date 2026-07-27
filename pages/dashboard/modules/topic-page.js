@@ -253,6 +253,7 @@ export class TopicPage {
         this.renderProgress(resumableRun);
       } else {
         document.getElementById("topic-progress")?.classList.add("hidden");
+        document.getElementById("maintenance-topic-progress")?.classList.add("hidden");
       }
     }
   }
@@ -772,6 +773,8 @@ export class TopicPage {
         memory_space_id: this.currentSpace(),
       });
       if (requestId !== this.maintenanceRequestId || !this.maintenanceIsOpen()) return;
+      const maintenanceCount = document.getElementById("maintenance-topic-unindexed-count");
+      if (maintenanceCount) maintenanceCount.textContent = String(Number(data.total || 0));
       this.maintenanceItems = data.items || [];
       status.textContent = window.t("topic.unindexedDetected", Number(data.total || 0));
       if (!this.maintenanceItems.length) {
@@ -899,6 +902,9 @@ export class TopicPage {
         Number(result.deleted_topics || 0),
       ));
       await this.fetch();
+      window.dispatchEvent(new CustomEvent("livingmemory:topic-maintenance-updated", {
+        detail: { memory_space_id: this.currentSpace() },
+      }));
     } catch (error) {
       this.showToast(error.message || window.t("topic.clearFailed"), true);
     } finally {
@@ -1110,6 +1116,7 @@ export class TopicPage {
       const result = await this.api.post("topics/build/discard", run);
       this.closeDiscardBuildConfirm({ restoreFocus: false });
       document.getElementById("topic-progress")?.classList.add("hidden");
+      document.getElementById("maintenance-topic-progress")?.classList.add("hidden");
       this.showToast(window.t(
         "topic.discardBuildSuccess",
         Number(result.deleted_intermediate_items || 0),
@@ -1138,7 +1145,16 @@ export class TopicPage {
   }
 
   setBuildButtonsDisabled(disabled) {
-    ["topic-build-full", "topic-maintenance", "topic-revectorize", "topic-recompute-relations", "topic-clear-topics"].forEach(id => {
+    [
+      "topic-build-full",
+      "topic-maintenance",
+      "maintenance-open-topic",
+      "maintenance-open-reviews",
+      "maintenance-open-governance",
+      "topic-revectorize",
+      "topic-recompute-relations",
+      "topic-clear-topics",
+    ].forEach(id => {
       const button = document.getElementById(id);
       if (button) button.disabled = Boolean(disabled);
     });
@@ -1156,6 +1172,9 @@ export class TopicPage {
         this.setBuildButtonsDisabled(!this.currentSpace() || !this.buildEnabled);
         if (job.status === "completed" || job.reset_topics) {
           await this.fetch();
+          window.dispatchEvent(new CustomEvent("livingmemory:topic-maintenance-updated", {
+            detail: { memory_space_id: job.memory_space_id || this.currentSpace() },
+          }));
           if (job.operation === "recompute_relations") {
             this.showToast(window.t("topic.recomputedRelations", Number(job.result?.relation_count || 0)));
           }
@@ -1175,7 +1194,6 @@ export class TopicPage {
   }
 
   renderProgress(job) {
-    const el = document.getElementById("topic-progress");
     const total = Number(job.total || 0);
     const current = Number(job.current || 0);
     const stagePercent = total ? Math.min(100, Math.round(current * 100 / total)) : 0;
@@ -1188,34 +1206,35 @@ export class TopicPage {
     const updatedAgo = this.formatDuration(Math.max(0, now - Number(job.last_progress_at || now)));
     const detail = this.progressDetail(job);
     const failureDescription = this.failureDescription(job);
-    el.classList.remove("hidden");
-    el.innerHTML = `
-      <div class="topic-progress-header"><strong>${esc(window.t("topic.overallProgress"))}</strong><strong>${overallPercent.toFixed(1)}%</strong></div>
-      <div class="topic-progress-track topic-progress-overall"><span style="width:${overallPercent}%"></span></div>
-      <div class="topic-progress-header"><span>${esc(stageLabel)}</span><span>${current} / ${total}</span></div>
-      <div class="topic-progress-track"><span style="width:${stagePercent}%"></span></div>
-      ${detail ? `<div class="topic-progress-detail">${esc(detail)}</div>` : ""}
-      ${job.status === "failed" ? `<div class="topic-progress-failure">
-        <strong>${esc(window.t("topic.progress.failedAt"))} ${esc(failedStageLabel)}</strong>
-        ${failureDescription ? `<div>${esc(failureDescription)}</div>` : ""}
-        ${job.error ? `<code>${esc(job.error)}</code>` : ""}
-      </div>` : ""}
-      <div class="text-tertiary">${esc(window.t("topic.progress.elapsed"))} ${esc(elapsed)} · ${esc(window.t("topic.progress.updated"))} ${esc(updatedAgo)}</div>
-      <div class="text-tertiary">${esc(job.status)} · ${esc(job.memory_space_id || "")}</div>
-      ${job.run_uid && ["failed", "cancelled", "pending"].includes(job.status)
-        ? `<div class="topic-progress-actions">
-            <button id="topic-resume-build" class="btn btn-primary">${esc(window.t("topic.resumeBuild"))}</button>
-            <button id="topic-discard-build" class="btn btn-danger">${esc(window.t("topic.discardBuild"))}</button>
-          </div>`
-        : ""}`;
-    document.getElementById("topic-resume-build")?.addEventListener(
-      "click",
-      () => this.resumeBuild(job.run_uid),
-    );
-    document.getElementById("topic-discard-build")?.addEventListener(
-      "click",
-      event => this.requestDiscardBuild(job, event.currentTarget),
-    );
+    const renderTarget = (element, prefix) => {
+      if (!element) return;
+      const resumeId = `${prefix}-resume-build`;
+      const discardId = `${prefix}-discard-build`;
+      element.classList.remove("hidden");
+      element.innerHTML = `
+        <div class="topic-progress-header"><strong>${esc(window.t("topic.overallProgress"))}</strong><strong>${overallPercent.toFixed(1)}%</strong></div>
+        <div class="topic-progress-track topic-progress-overall"><span style="width:${overallPercent}%"></span></div>
+        <div class="topic-progress-header"><span>${esc(stageLabel)}</span><span>${current} / ${total}</span></div>
+        <div class="topic-progress-track"><span style="width:${stagePercent}%"></span></div>
+        ${detail ? `<div class="topic-progress-detail">${esc(detail)}</div>` : ""}
+        ${job.status === "failed" ? `<div class="topic-progress-failure">
+          <strong>${esc(window.t("topic.progress.failedAt"))} ${esc(failedStageLabel)}</strong>
+          ${failureDescription ? `<div>${esc(failureDescription)}</div>` : ""}
+          ${job.error ? `<code>${esc(job.error)}</code>` : ""}
+        </div>` : ""}
+        <div class="text-tertiary">${esc(window.t("topic.progress.elapsed"))} ${esc(elapsed)} · ${esc(window.t("topic.progress.updated"))} ${esc(updatedAgo)}</div>
+        <div class="text-tertiary">${esc(job.status)} · ${esc(job.memory_space_id || "")}</div>
+        ${job.run_uid && ["failed", "cancelled", "pending"].includes(job.status)
+          ? `<div class="topic-progress-actions">
+              <button id="${resumeId}" class="btn btn-primary">${esc(window.t("topic.resumeBuild"))}</button>
+              <button id="${discardId}" class="btn btn-danger">${esc(window.t("topic.discardBuild"))}</button>
+            </div>`
+          : ""}`;
+      document.getElementById(resumeId)?.addEventListener("click", () => this.resumeBuild(job.run_uid));
+      document.getElementById(discardId)?.addEventListener("click", event => this.requestDiscardBuild(job, event.currentTarget));
+    };
+    renderTarget(document.getElementById("topic-progress"), "topic");
+    renderTarget(document.getElementById("maintenance-topic-progress"), "maintenance-topic");
   }
 
   progressDetail(job) {

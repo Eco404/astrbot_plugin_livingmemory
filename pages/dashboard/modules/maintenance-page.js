@@ -17,14 +17,16 @@ export class MaintenancePage {
     this.databaseHealth = null;
     this.databaseRepairPoller = null;
     this.databaseRepairTaskUid = null;
+    this.topicMaintenanceRequestId = 0;
   }
 
   initEventListeners() {
     document.querySelectorAll("[data-maintenance-tab]").forEach(button => {
       button.addEventListener("click", () => this.selectTab(button.dataset.maintenanceTab));
     });
+    document.getElementById("maintenance-topic-space")?.addEventListener("change", () => this.changeTopicSpace());
     document.getElementById("maintenance-open-topic")?.addEventListener("click", event => this.openTopicMaintenance(event.currentTarget));
-    document.getElementById("maintenance-review-space")?.addEventListener("change", () => this.loadReviews());
+    document.getElementById("maintenance-open-reviews")?.addEventListener("click", () => this.openReviews());
     document.getElementById("maintenance-review-refresh")?.addEventListener("click", () => this.loadReviews());
     document.getElementById("maintenance-review-list")?.addEventListener("click", event => {
       const item = event.target.closest("[data-review-uid]");
@@ -35,6 +37,10 @@ export class MaintenancePage {
       if (button) this.resolveReview(button.dataset.reviewAction);
     });
     document.getElementById("maintenance-open-governance")?.addEventListener("click", () => this.openGovernance());
+    document.getElementById("topic-review-close")?.addEventListener("click", () => this.closeReviews());
+    document.getElementById("topic-review-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeReviews();
+    });
     document.getElementById("session-audit-refresh")?.addEventListener("click", () => this.loadSessionAudit());
     document.getElementById("session-audit-filter")?.addEventListener("input", () => this.renderSessionAudit());
     document.getElementById("session-audit-action")?.addEventListener("click", () => this.openSessionMaintenance());
@@ -83,14 +89,25 @@ export class MaintenancePage {
     document.getElementById("topic-governance-body")?.addEventListener("click", event => {
       if (event.target.closest("[data-governance-add-group]")) this.addGovernanceGroup();
     });
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && document.getElementById("topic-review-overlay")?.classList.contains("visible")) {
+        this.closeReviews();
+      }
+    });
+    window.addEventListener("livingmemory:topic-maintenance-updated", event => {
+      const selected = this.reviewSpace();
+      if (this.tab === "topic" && (!event.detail?.memory_space_id || event.detail.memory_space_id === selected)) {
+        this.loadTopicMaintenanceCounts();
+      }
+    });
   }
 
   async activate() {
     await this.topicPage.fetch();
     this.syncTopicSpaces();
+    if (this.tab === "topic") this.loadTopicMaintenanceCounts();
     if (this.tab === "models") this.modelPage.fetch();
     if (this.tab === "recall") this.recallPage.fetchSessions();
-    if (this.tab === "review") this.loadReviews();
     if (this.tab === "sessions") this.loadSessionAudit();
     if (this.tab === "recent-recall") this.loadRecentRecalls();
     if (this.tab === "timeline-rebuild") this.loadTimelineRebuildTasks();
@@ -111,7 +128,7 @@ export class MaintenancePage {
       this.recallPage.fetchSessions();
       this.recallPage.loadHistory();
     }
-    if (tab === "review") this.loadReviews();
+    if (tab === "topic") this.loadTopicMaintenanceCounts();
     if (tab === "sessions") this.loadSessionAudit();
     if (tab === "recent-recall") this.loadRecentRecalls();
     if (tab === "timeline-rebuild") this.loadTimelineRebuildTasks();
@@ -344,13 +361,64 @@ export class MaintenancePage {
     const source = document.getElementById("topic-space");
     const target = document.getElementById("maintenance-topic-space");
     if (!source || !target) return;
-    [target, document.getElementById("maintenance-review-space"), document.getElementById("timeline-rebuild-space")].filter(Boolean).forEach(select => {
+    [target, document.getElementById("timeline-rebuild-space")].filter(Boolean).forEach(select => {
       const previous = select.value;
       select.innerHTML = source.innerHTML;
       select.value = previous && Array.from(select.options).some(option => option.value === previous)
         ? previous
         : source.value;
     });
+    this.renderTopicMaintenanceState();
+  }
+
+  renderTopicMaintenanceState() {
+    const selected = this.reviewSpace();
+    document.getElementById("maintenance-topic-empty")?.classList.toggle("hidden", Boolean(selected));
+    document.getElementById("maintenance-topic-actions")?.classList.toggle("hidden", !selected);
+  }
+
+  async changeTopicSpace() {
+    const selected = this.reviewSpace();
+    const topicSpace = document.getElementById("topic-space");
+    this.renderTopicMaintenanceState();
+    if (topicSpace) topicSpace.value = selected;
+    if (!selected) {
+      this.topicMaintenanceRequestId += 1;
+      this.setTopicMaintenanceCount("maintenance-topic-unindexed-count", 0);
+      this.setTopicMaintenanceCount("maintenance-topic-review-count", 0);
+      return;
+    }
+    await this.topicPage.fetch();
+    this.syncTopicSpaces();
+    await this.loadTopicMaintenanceCounts();
+  }
+
+  setTopicMaintenanceCount(id, value) {
+    const target = document.getElementById(id);
+    if (target) target.textContent = String(value);
+  }
+
+  async loadTopicMaintenanceCounts() {
+    const space = this.reviewSpace();
+    this.renderTopicMaintenanceState();
+    if (!space) return;
+    const requestId = ++this.topicMaintenanceRequestId;
+    this.setTopicMaintenanceCount("maintenance-topic-unindexed-count", "…");
+    this.setTopicMaintenanceCount("maintenance-topic-review-count", "…");
+    try {
+      const [unindexed, reviews] = await Promise.all([
+        this.topicPage.api.get("topics/maintenance/unindexed", { memory_space_id: space }),
+        this.topicPage.api.get("topics/reviews", { memory_space_id: space }),
+      ]);
+      if (requestId !== this.topicMaintenanceRequestId || space !== this.reviewSpace()) return;
+      this.setTopicMaintenanceCount("maintenance-topic-unindexed-count", Number(unindexed.total || 0));
+      this.setTopicMaintenanceCount("maintenance-topic-review-count", Number(reviews.total ?? reviews.items?.length ?? 0));
+    } catch (error) {
+      if (requestId !== this.topicMaintenanceRequestId) return;
+      this.setTopicMaintenanceCount("maintenance-topic-unindexed-count", "!");
+      this.setTopicMaintenanceCount("maintenance-topic-review-count", "!");
+      this.showToast(error.message, true);
+    }
   }
 
   selectedTimelineRebuildIds() {
@@ -806,7 +874,22 @@ export class MaintenancePage {
   }
 
   reviewSpace() {
-    return document.getElementById("maintenance-review-space")?.value || "";
+    return document.getElementById("maintenance-topic-space")?.value || "";
+  }
+
+  async openReviews() {
+    if (!this.reviewSpace()) return this.showToast(window.t("topic.chooseSpace"), true);
+    const overlay = document.getElementById("topic-review-overlay");
+    overlay?.classList.add("visible");
+    overlay?.setAttribute("aria-hidden", "false");
+    document.getElementById("topic-review-close")?.focus();
+    await this.loadReviews();
+  }
+
+  closeReviews() {
+    const overlay = document.getElementById("topic-review-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
   }
 
   async loadReviews() {
@@ -822,6 +905,7 @@ export class MaintenancePage {
     try {
       const data = await this.topicPage.api.get("topics/reviews", { memory_space_id: space });
       const items = data.items || [];
+      this.setTopicMaintenanceCount("maintenance-topic-review-count", Number(data.total ?? items.length));
       list.innerHTML = items.length ? items.map(item => {
         const details = item.details || {};
         const title = details.proposed_title
