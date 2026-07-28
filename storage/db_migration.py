@@ -8,6 +8,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -41,28 +42,6 @@ class DBMigration:
         7: "Storage indexes and FTS optimization for graph and atom data",
         8: "Write-operation log and access-aware metadata indexes",
         9: "Stable timeline identity registry and source-span provenance",
-        "9.1": "Derived topic-memory storage and Timeline provenance links",
-        "9.2": "Resumable deterministic Topic candidate discovery",
-        "9.3": "Automatic source-grounded Topic construction and maintenance",
-        "9.4": "Related-subtopic graph and decoupled Topic matching thresholds",
-        "9.5": "Runtime Topic settings and local incremental reconciliation",
-        "9.6": "Formal Topic fragments and revision-scoped fragment provenance",
-        "9.7": "Stable conversation actors and evidence-aware Topic fragments",
-        "9.8": "Fact-level Topic actor relations and evidence repair",
-        "9.9": "WebUI-managed Timeline runtime settings",
-        "9.10": "Topic embedding signatures and model-safe revectorization",
-        "9.11": "Bounded incremental Topic maintenance and stable fragment identity",
-        "9.12": "Unified runtime settings and resumable idle Timeline summaries",
-        "9.13": "Topic review decisions and identity governance",
-        "9.14": "Session audit, raw-message maintenance, and canonical aliases",
-        "9.15": "Recall audit history and source Timeline access reinforcement",
-        "9.16": "Supplemental identity hints and source-owned actor relations",
-        "9.17": "Unified Timeline-derived Topic importance projection and source repair",
-        "9.18": "Source-grounded affect events and Topic affect profiles",
-        "9.19": "Source-verified and resumable Timeline reconstruction",
-        "9.20": "Collision-safe Topic fragment identity and affect provenance repair",
-        "9.21": "Multi-source graph edges and user-controlled database repair",
-        "9.22": "Component-safe Topic reconciliation and staged Timeline edits",
         "10": "Stable Timeline and Topic memory architecture release",
     }
 
@@ -317,74 +296,15 @@ class DBMigration:
                 if current_key <= self.version_key("8"):
                     migration_steps.append(self._migrate_v8_to_v9)
 
-                # 从版本9升级到版本9.1
-                if current_key <= self.version_key("9"):
-                    migration_steps.append(self._migrate_v9_to_v9_1)
-
-                # 从版本9.1升级到版本9.2
-                if current_key <= self.version_key("9.1"):
-                    migration_steps.append(self._migrate_v9_1_to_v9_2)
-
-                # 从版本9.2升级到版本9.3
-                if current_key <= self.version_key("9.2"):
-                    migration_steps.append(self._migrate_v9_2_to_v9_3)
-
-                # 从版本9.3升级到版本9.4
-                if current_key <= self.version_key("9.3"):
-                    migration_steps.append(self._migrate_v9_3_to_v9_4)
-
-                # 从版本9.4升级到版本9.5
-                if current_key <= self.version_key("9.4"):
-                    migration_steps.append(self._migrate_v9_4_to_v9_5)
-
-                # 从版本9.5升级到版本9.6
-                if current_key <= self.version_key("9.5"):
-                    migration_steps.append(self._migrate_v9_5_to_v9_6)
-
-                # 从版本9.6升级到版本9.7
-                if current_key <= self.version_key("9.6"):
-                    migration_steps.append(self._migrate_v9_6_to_v9_7)
-
-                # 从版本9.7升级到版本9.8
-                if current_key <= self.version_key("9.7"):
-                    migration_steps.append(self._migrate_v9_7_to_v9_8)
-
-                # 从版本9.8升级到版本9.9
-                if current_key <= self.version_key("9.8"):
-                    migration_steps.append(self._migrate_v9_8_to_v9_9)
-
-                # 从版本9.9升级到版本9.10
-                if current_key <= self.version_key("9.9"):
-                    migration_steps.append(self._migrate_v9_9_to_v9_10)
-
-                if current_key <= self.version_key("9.10"):
-                    migration_steps.append(self._migrate_v9_10_to_v9_11)
-
-                if current_key <= self.version_key("9.11"):
-                    migration_steps.append(self._migrate_v9_11_to_v9_12)
-                if current_key <= self.version_key("9.12"):
-                    migration_steps.append(self._migrate_v9_12_to_v9_13)
-                if current_key <= self.version_key("9.13"):
-                    migration_steps.append(self._migrate_v9_13_to_v9_14)
-                if current_key <= self.version_key("9.14"):
-                    migration_steps.append(self._migrate_v9_14_to_v9_15)
-
-                if current_key <= self.version_key("9.15"):
-                    migration_steps.append(self._migrate_v9_15_to_v9_16)
-                if current_key <= self.version_key("9.16"):
-                    migration_steps.append(self._migrate_v9_16_to_v9_17)
-                if current_key <= self.version_key("9.17"):
-                    migration_steps.append(self._migrate_v9_17_to_v9_18)
-                if current_key <= self.version_key("9.18"):
-                    migration_steps.append(self._migrate_v9_18_to_v9_19)
-                if current_key <= self.version_key("9.19"):
-                    migration_steps.append(self._migrate_v9_19_to_v9_20)
-                if current_key <= self.version_key("9.20"):
-                    migration_steps.append(self._migrate_v9_20_to_v9_21)
-                if current_key <= self.version_key("9.21"):
-                    migration_steps.append(self._migrate_v9_21_to_v9_22)
-                if current_key <= self.version_key("9.22"):
-                    migration_steps.append(self._migrate_v9_22_to_v10)
+                # v9.x 仅存在于开发期。正式迁移边界保持为 v8 -> v9 -> v10；
+                # 对开发数据库仍按其实际小版本跳过已经执行过的内部阶段。
+                if current_key < self.version_key("10"):
+                    v10_start = (
+                        "9" if current_key <= self.version_key("8") else current_version
+                    )
+                    migration_steps.append(
+                        partial(self._migrate_v9_to_v10, from_version=v10_start)
+                    )
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -2049,15 +1969,50 @@ class DBMigration:
             progress_callback("建立 Timeline 暂存修改队列", 1, 1)
         logger.info("v9.21 -> v9.22 迁移完成")
 
-    async def _migrate_v9_22_to_v10(
+    async def _migrate_v9_to_v10(
         self,
         progress_callback: Callable[[str, int, int], None] | None,
+        *,
+        from_version: str = "9",
     ) -> None:
-        """Close the v9 incremental schema series without rewriting user data."""
-        logger.info("执行迁移步骤: v9.22 -> v10")
+        """Apply the unpublished v9.x schema work as one public v9 -> v10 step."""
+        start_version = self.normalize_version(from_version)
+        start_key = self.version_key(start_version)
+        if start_key < self.version_key("9") or start_key >= self.version_key("10"):
+            raise ValueError(f"v9 -> v10 迁移不支持起始版本: {from_version}")
+
+        logger.info(f"执行迁移步骤: v{start_version} -> v10")
+        internal_stages = (
+            ("9", self._migrate_v9_to_v9_1),
+            ("9.1", self._migrate_v9_1_to_v9_2),
+            ("9.2", self._migrate_v9_2_to_v9_3),
+            ("9.3", self._migrate_v9_3_to_v9_4),
+            ("9.4", self._migrate_v9_4_to_v9_5),
+            ("9.5", self._migrate_v9_5_to_v9_6),
+            ("9.6", self._migrate_v9_6_to_v9_7),
+            ("9.7", self._migrate_v9_7_to_v9_8),
+            ("9.8", self._migrate_v9_8_to_v9_9),
+            ("9.9", self._migrate_v9_9_to_v9_10),
+            ("9.10", self._migrate_v9_10_to_v9_11),
+            ("9.11", self._migrate_v9_11_to_v9_12),
+            ("9.12", self._migrate_v9_12_to_v9_13),
+            ("9.13", self._migrate_v9_13_to_v9_14),
+            ("9.14", self._migrate_v9_14_to_v9_15),
+            ("9.15", self._migrate_v9_15_to_v9_16),
+            ("9.16", self._migrate_v9_16_to_v9_17),
+            ("9.17", self._migrate_v9_17_to_v9_18),
+            ("9.18", self._migrate_v9_18_to_v9_19),
+            ("9.19", self._migrate_v9_19_to_v9_20),
+            ("9.20", self._migrate_v9_20_to_v9_21),
+            ("9.21", self._migrate_v9_21_to_v9_22),
+        )
+        for stage_version, stage in internal_stages:
+            if start_key <= self.version_key(stage_version):
+                await stage(progress_callback)
+
         if progress_callback:
             progress_callback("完成 v10 数据库版本收束", 1, 1)
-        logger.info("v9.22 -> v10 迁移完成")
+        logger.info(f"v{start_version} -> v10 迁移完成")
 
     @staticmethod
     def _migration_json_object(value: Any) -> dict[str, Any]:
