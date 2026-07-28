@@ -1515,6 +1515,7 @@ class TopicBuildManager(
                 run_mode is TopicMaintenanceMode.INCREMENTAL and seed_timeline_uids
             )
             used_existing: set[str] = set()
+            updated_existing_topic_uids: set[str] = set()
             component_outcomes: dict[str, dict[str, Any]] = {}
             pending_review_topic_uids: set[str] = set()
             component_fragment_sets = [
@@ -1602,6 +1603,7 @@ class TopicBuildManager(
                 ]
             )
 
+            assignments: list[dict[str, Any]] = []
             for position, (initial_fragments, synthesis) in enumerate(
                 zip(component_fragment_sets, initial_syntheses, strict=True),
                 1,
@@ -1616,6 +1618,7 @@ class TopicBuildManager(
                         existing,
                         affected_topic_uids,
                     )
+                match_diagnostics: dict[str, dict[str, Any]] = {}
                 (
                     matched,
                     match_scores,
@@ -1624,9 +1627,14 @@ class TopicBuildManager(
                     synthesis,
                     component_fragments,
                     match_pool,
-                    used_existing,
+                    (
+                        used_existing
+                        if run_mode is not TopicMaintenanceMode.INCREMENTAL
+                        else set()
+                    ),
                     require_source_overlap=False,
                     incremental=(run_mode is TopicMaintenanceMode.INCREMENTAL),
+                    diagnostics=match_diagnostics,
                 )
                 if ambiguous:
                     review_topic_uids = [item[1].topic_uid for item in match_scores[:2]]
@@ -1656,6 +1664,7 @@ class TopicBuildManager(
                                 {"topic_uid": item[1].topic_uid, "score": item[0]}
                                 for item in match_scores[:3]
                             ],
+                            "match_diagnostics": match_diagnostics,
                         },
                     )
                     component_outcomes[component_uid] = {
@@ -1689,6 +1698,52 @@ class TopicBuildManager(
                         ),
                     }
                     continue
+                assignments.append(
+                    {
+                        "position": position,
+                        "component_uid": component_uid,
+                        "fragments": component_fragments,
+                        "synthesis": synthesis,
+                        "matched": matched,
+                        "match_scores": match_scores,
+                        "match_diagnostics": match_diagnostics,
+                    }
+                )
+                if matched and run_mode is not TopicMaintenanceMode.INCREMENTAL:
+                    used_existing.add(matched.topic_uid)
+
+            # Incremental components are assigned before any Topic is materialized.
+            # This removes order dependence and lets several coherent deltas extend
+            # one existing Topic through a single synthesis and atomic snapshot.
+            assignment_groups: dict[str, list[dict[str, Any]]] = {}
+            for assignment in assignments:
+                matched = assignment["matched"]
+                key = (
+                    f"topic:{matched.topic_uid}"
+                    if run_mode is TopicMaintenanceMode.INCREMENTAL
+                    and matched is not None
+                    else f"component:{assignment['component_uid']}"
+                )
+                assignment_groups.setdefault(key, []).append(assignment)
+
+            completed_materializations = 0
+            for grouped_assignments in assignment_groups.values():
+                first_assignment = grouped_assignments[0]
+                matched = first_assignment["matched"]
+                position = int(first_assignment["position"])
+                initial_fragments = list(
+                    {
+                        fragment.fragment_uid: fragment
+                        for assignment in grouped_assignments
+                        for fragment in assignment["fragments"]
+                    }.values()
+                )
+                component_fragments = list(initial_fragments)
+                synthesis = first_assignment["synthesis"]
+                component_uids = [
+                    str(assignment["component_uid"])
+                    for assignment in grouped_assignments
+                ]
                 if matched is not None and run_mode is TopicMaintenanceMode.INCREMENTAL:
                     existing_fragment = await self._existing_topic_fragment(
                         run_uid,
@@ -1697,6 +1752,7 @@ class TopicBuildManager(
                     )
                     if existing_fragment is not None:
                         component_fragments = [existing_fragment, *component_fragments]
+                    if existing_fragment is not None or len(grouped_assignments) > 1:
                         synthesis = await self._synthesize_component_checkpointed(
                             run_uid,
                             component_fragments,
@@ -1732,27 +1788,41 @@ class TopicBuildManager(
                         "matched": matched,
                         "fragments": component_fragments,
                         "synthesis": synthesis,
-                        "component_uid": component_uid,
+                        "component_uid": self._component_uid(initial_fragments),
+                        "component_uids": component_uids,
+                        "match_diagnostics": {
+                            str(assignment["component_uid"]): assignment[
+                                "match_diagnostics"
+                            ]
+                            for assignment in grouped_assignments
+                        },
                     }
                 )
-                component_outcomes[component_uid] = {
-                    "status": "published_update" if matched else "published_create",
-                    "fragment_uids": self._component_fragment_uids(initial_fragments),
-                    "topic_uids": [matched.topic_uid] if matched else [],
-                }
                 if matched:
-                    used_existing.add(matched.topic_uid)
+                    updated_existing_topic_uids.add(matched.topic_uid)
+                for assignment in grouped_assignments:
+                    component_outcomes[str(assignment["component_uid"])] = {
+                        "status": (
+                            "published_update" if matched else "published_create"
+                        ),
+                        "fragment_uids": self._component_fragment_uids(
+                            assignment["fragments"]
+                        ),
+                        "topic_uids": [matched.topic_uid] if matched else [],
+                        "match_diagnostics": assignment["match_diagnostics"],
+                    }
+                completed_materializations += len(grouped_assignments)
                 await self.store.update_maintenance_run(
                     run_uid,
                     stage="topic_synthesis",
-                    current_group_index=position,
+                    current_group_index=completed_materializations,
                     total_groups=len(components),
                 )
                 await self._emit(
                     progress_callback,
                     run_uid,
                     "topic_synthesis",
-                    len(components),
+                    completed_materializations,
                     len(components),
                     activity="stage_progress",
                     item_kind="topic_component",
@@ -1765,7 +1835,7 @@ class TopicBuildManager(
                 for affected_topic in all_existing:
                     if (
                         affected_topic.topic_uid not in affected_topic_uids
-                        or affected_topic.topic_uid in used_existing
+                        or affected_topic.topic_uid in updated_existing_topic_uids
                     ):
                         continue
                     retained_plan = await self._retained_affected_topic_plan(
@@ -1777,7 +1847,7 @@ class TopicBuildManager(
                     if retained_plan is None:
                         continue
                     plans.append(retained_plan)
-                    used_existing.add(affected_topic.topic_uid)
+                    updated_existing_topic_uids.add(affected_topic.topic_uid)
 
             await self.store.update_maintenance_run(
                 run_uid,
@@ -1856,14 +1926,31 @@ class TopicBuildManager(
                                 key: value
                                 for key, value in scores.items()
                                 if any(uid in key for uid in fragment_uids)
+                            }
+                            | {
+                                f"existing:{component_uid}:{topic_uid}": float(
+                                    details.get("score") or 0.0
+                                )
+                                for component_uid, component_details in (
+                                    plan.get("match_diagnostics") or {}
+                                ).items()
+                                for topic_uid, details in component_details.items()
+                                if topic_uid != "_decision"
+                                and isinstance(details, dict)
                             },
                             "llm_output": plan["synthesis"],
                             "metadata": {
                                 "component_uid": str(plan.get("component_uid") or ""),
+                                "component_uids": list(
+                                    plan.get("component_uids") or []
+                                ),
                                 "component_outcome": (
                                     "published_update"
                                     if matched
                                     else "published_create"
+                                ),
+                                "existing_topic_match": dict(
+                                    plan.get("match_diagnostics") or {}
                                 ),
                             },
                         },
@@ -1962,6 +2049,9 @@ class TopicBuildManager(
                         "component_uid": component_uid,
                         "reason": str(outcome.get("reason") or ""),
                         "topic_uids": list(outcome.get("topic_uids") or []),
+                        "existing_topic_match": dict(
+                            outcome.get("match_diagnostics") or {}
+                        ),
                     },
                 }
                 for component_uid, outcome in component_outcomes.items()

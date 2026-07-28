@@ -21,7 +21,11 @@ from ..models.topic_memory import (
     TopicMemory,
     TopicRelation,
 )
-from ..topic_similarity import lexical_tokens, weighted_jaccard_similarity
+from ..topic_similarity import (
+    jaccard_similarity,
+    lexical_tokens,
+    weighted_jaccard_similarity,
+)
 from .topic_build_contracts import (
     _RELATION_ALGORITHM_VERSION,
 )
@@ -1240,6 +1244,7 @@ class TopicComponentMatcherMixin:
         *,
         require_source_overlap: bool = False,
         incremental: bool = False,
+        diagnostics: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[TopicMemory | None, list[tuple[float, TopicMemory]], bool]:
         source_uids = {uid for item in fragments for uid in item.timeline_uids}
         incoming_fingerprints = {
@@ -1259,18 +1264,85 @@ class TopicComponentMatcherMixin:
         }
         ranked: list[tuple[float, TopicMemory]] = []
         target_vector = self._average_vectors([item.embedding for item in fragments])
-        incoming_terms = {
-            self._norm(value)
+        incoming_text = " ".join(
+            str(value or "")
             for value in [
                 synthesis.get("title"),
+                synthesis.get("summary"),
                 *(synthesis.get("keywords") or []),
+                *(item.label for item in fragments),
             ]
-            if self._norm(value)
-        }
+        )
+        incoming_terms = lexical_tokens(incoming_text)
+        available = [topic for topic in existing if topic.topic_uid not in used]
+        threshold = float(
+            self.config.get(
+                "incremental_topic_match_threshold"
+                if incremental
+                else "existing_topic_match_threshold",
+                0.55,
+            )
+        )
+        formal_by_topic: dict[str, list[TopicFragmentDraft]] = {}
+        formal_loader = getattr(self.store, "list_active_fragments_for_topics", None)
+        if incremental and available and callable(formal_loader):
+            rows = await formal_loader([topic.topic_uid for topic in available])
+            for row in rows:
+                topic_uid = str(row.get("topic_uid") or "")
+                fragment = row.get("fragment")
+                if topic_uid and isinstance(fragment, TopicFragmentDraft):
+                    formal_by_topic.setdefault(topic_uid, []).append(fragment)
+
+        rerank_relative: dict[str, float] = {}
+        match_signals: dict[str, dict[str, Any]] = {}
+        if incremental and available and self.rerank_provider is not None:
+            documents = [
+                self._existing_topic_match_text(
+                    topic,
+                    formal_by_topic.get(topic.topic_uid, []),
+                )
+                for topic in available
+            ]
+            try:
+                async with self._rerank_semaphore:
+                    results = await self.rerank_provider.rerank(
+                        incoming_text,
+                        documents,
+                        top_n=len(documents),
+                    )
+                ordered: list[tuple[int, float]] = []
+                seen: set[int] = set()
+                for result in results:
+                    index = int(getattr(result, "index", -1))
+                    score = float(getattr(result, "relevance_score", 0.0))
+                    if index in seen or not 0 <= index < len(available):
+                        continue
+                    if not math.isfinite(score):
+                        continue
+                    seen.add(index)
+                    ordered.append((index, score))
+                ordered.sort(key=lambda item: (-item[1], available[item[0]].topic_uid))
+                relative_scores = self._relative_rank_scores(
+                    [item[1] for item in ordered]
+                )
+                for (index, _), relative_score in zip(
+                    ordered,
+                    relative_scores,
+                    strict=True,
+                ):
+                    rerank_relative[available[index].topic_uid] = relative_score
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if not bool(self.config.get("rerank_failure_fallback", True)):
+                    raise
+                logger.warning(
+                    "[TopicMemory] 既有 Topic 增量匹配 Rerank 失败，"
+                    "本轮保留 Embedding/正式片段判定",
+                    exc_info=True,
+                )
         provenance_loader = getattr(self.store, "get_topic_provenance", None)
-        for topic in existing:
-            if topic.topic_uid in used:
-                continue
+        for topic in available:
             metadata = topic.metadata
             previous_sources = set(metadata.get("source_timeline_uids", []))
             overlap = len(source_uids & previous_sources) / max(
@@ -1282,16 +1354,17 @@ class TopicComponentMatcherMixin:
             semantic = (
                 self._cosine(target_vector, stored_vector) if stored_vector else 0.0
             )
-            existing_terms = {
-                self._norm(value)
-                for value in [topic.title, *(metadata.get("keywords") or [])]
-                if self._norm(value)
-            }
-            lexical = (
-                len(incoming_terms & existing_terms) / max(1, len(incoming_terms))
-                if incoming_terms
-                else 0.0
+            existing_terms = lexical_tokens(
+                " ".join(
+                    str(value or "")
+                    for value in [
+                        topic.title,
+                        topic.summary,
+                        *(metadata.get("keywords") or []),
+                    ]
+                )
             )
+            lexical = jaccard_similarity(incoming_terms, existing_terms)
             provenance = (
                 await provenance_loader(topic.topic_uid)
                 if callable(provenance_loader)
@@ -1323,7 +1396,15 @@ class TopicComponentMatcherMixin:
                 0.5 * actor_affinity
                 + 0.5 * self._topic_fragment_time_affinity(topic, fragments)
             )
-            if incoming_fingerprints and existing_fingerprints:
+            representative = self._existing_topic_representative_support(
+                fragments,
+                formal_by_topic.get(topic.topic_uid, []),
+                fallback=semantic,
+            )
+            rerank_support = rerank_relative.get(topic.topic_uid, 0.0)
+            has_source_continuity = continuity > 0.0 or overlap > 0.0
+            if has_source_continuity:
+                lane = "source_continuity"
                 score = (
                     0.40 * continuity
                     + 0.40 * semantic
@@ -1332,25 +1413,71 @@ class TopicComponentMatcherMixin:
                     + 0.05 * overlap
                 )
             else:
-                # Legacy snapshots may not have fact provenance. Fall back to
-                # semantics without allowing a broad shared Timeline to dominate.
+                # A genuinely new Timeline cannot share fact fingerprints or a
+                # source UID with an existing Topic. Treating those unavailable
+                # signals as zero made the configured continuation threshold
+                # mathematically unreachable. Extension therefore uses the same
+                # semantic evidence as full-build grouping: Topic centroid,
+                # representative formal fragments, lexical detail, and actors.
+                lane = "semantic_extension"
                 score = (
-                    0.75 * semantic
-                    + 0.15 * lexical
-                    + 0.05 * actor_time
-                    + 0.05 * overlap
+                    0.55 * semantic
+                    + 0.30 * representative
+                    + 0.13 * lexical
+                    + 0.02 * rerank_support
                 )
+                if incoming_actors and existing_actors:
+                    score -= 0.05 * (1.0 - actor_affinity)
+                semantic_floor = float(
+                    self.config.get("fragment_similarity_threshold", 0.78)
+                )
+                representative_floor = float(
+                    self.config.get("component_min_average_similarity", 0.65)
+                )
+                rerank_floor = float(self.config.get("rerank_candidate_floor", 0.63))
+                extension_eligible = bool(
+                    semantic >= semantic_floor
+                    or representative >= representative_floor
+                    or (
+                        semantic >= rerank_floor
+                        and representative >= rerank_floor
+                        and rerank_support >= 0.75
+                    )
+                )
+                if not extension_eligible:
+                    score = min(score, max(0.0, threshold - 1e-6))
+            details = {
+                "lane": lane,
+                "score": round(score, 6),
+                "semantic": round(semantic, 6),
+                "representative": round(representative, 6),
+                "lexical": round(lexical, 6),
+                "actor_affinity": round(actor_affinity, 6),
+                "time_affinity": round(
+                    self._topic_fragment_time_affinity(topic, fragments), 6
+                ),
+                "source_continuity": round(continuity, 6),
+                "timeline_overlap": round(overlap, 6),
+                "rerank_relative": round(rerank_support, 6),
+                "formal_fragment_count": len(
+                    formal_by_topic.get(topic.topic_uid, [])
+                ),
+                "extension_eligible": (
+                    extension_eligible if lane == "semantic_extension" else None
+                ),
+            }
+            match_signals[topic.topic_uid] = details
+            if diagnostics is not None:
+                diagnostics[topic.topic_uid] = details
             ranked.append((score, topic))
         ranked.sort(key=lambda item: (-item[0], item[1].topic_uid))
-        threshold = float(
-            self.config.get(
-                "incremental_topic_match_threshold"
-                if incremental
-                else "existing_topic_match_threshold",
-                0.55,
-            )
-        )
         if not ranked or ranked[0][0] < threshold:
+            if diagnostics is not None:
+                diagnostics["_decision"] = {
+                    "action": "create",
+                    "reason": "below_match_threshold",
+                    "threshold": threshold,
+                }
             return None, ranked, False
         margin = float(self.config.get("incremental_topic_match_margin", 0.04))
         close_candidates = bool(
@@ -1370,8 +1497,91 @@ class TopicComponentMatcherMixin:
                 threshold,
                 float(self.config.get("incremental_topic_review_threshold", 0.72)),
             )
+            best_signals = match_signals.get(ranked[0][1].topic_uid, {})
+            second_signals = match_signals.get(ranked[1][1].topic_uid, {})
+            dominant_extension = bool(
+                ranked[0][0] >= review_threshold
+                and best_signals.get("lane") == "semantic_extension"
+                and second_signals.get("lane") == "semantic_extension"
+                and float(best_signals.get("semantic") or 0.0)
+                >= float(second_signals.get("semantic") or 0.0) + 0.02
+                and float(best_signals.get("representative") or 0.0)
+                >= float(second_signals.get("representative") or 0.0) + 0.015
+                and float(best_signals.get("lexical") or 0.0)
+                >= float(second_signals.get("lexical") or 0.0)
+            )
+            if dominant_extension:
+                if diagnostics is not None:
+                    diagnostics["_decision"] = {
+                        "action": "update",
+                        "reason": "dominant_semantic_extension",
+                        "threshold": threshold,
+                        "review_threshold": review_threshold,
+                        "margin": margin,
+                        "topic_uid": ranked[0][1].topic_uid,
+                    }
+                return ranked[0][1], ranked, False
+            if diagnostics is not None:
+                diagnostics["_decision"] = {
+                    "action": (
+                        "review" if ranked[1][0] >= review_threshold else "create"
+                    ),
+                    "reason": "close_candidates",
+                    "threshold": threshold,
+                    "review_threshold": review_threshold,
+                    "margin": margin,
+                }
             return None, ranked, ranked[1][0] >= review_threshold
+        if diagnostics is not None:
+            diagnostics["_decision"] = {
+                "action": "update",
+                "reason": str(
+                    diagnostics.get(ranked[0][1].topic_uid, {}).get("lane")
+                    or "matched"
+                ),
+                "threshold": threshold,
+                "topic_uid": ranked[0][1].topic_uid,
+            }
         return ranked[0][1], ranked, False
+
+    def _existing_topic_match_text(
+        self,
+        topic: TopicMemory,
+        fragments: list[TopicFragmentDraft],
+    ) -> str:
+        representative_text = "\n".join(
+            self._fragment_embedding_text(fragment) for fragment in fragments[:4]
+        )
+        return "\n".join(
+            value
+            for value in [
+                str(topic.title or "").strip(),
+                str(topic.summary or "").strip(),
+                " ".join(str(value) for value in topic.metadata.get("keywords", [])),
+                representative_text,
+            ]
+            if value
+        )
+
+    def _existing_topic_representative_support(
+        self,
+        incoming: list[TopicFragmentDraft],
+        existing: list[TopicFragmentDraft],
+        *,
+        fallback: float,
+    ) -> float:
+        if not incoming or not existing:
+            return max(0.0, min(1.0, float(fallback)))
+        best_per_incoming = [
+            max(
+                self._cosine(fragment.embedding, candidate.embedding)
+                for candidate in existing
+            )
+            for fragment in incoming
+        ]
+        mean_best = sum(best_per_incoming) / len(best_per_incoming)
+        weakest = min(best_per_incoming)
+        return max(0.0, min(1.0, 0.70 * mean_best + 0.30 * weakest))
 
     @classmethod
     def _component_fragment_uids(cls, fragments: list[TopicFragmentDraft]) -> list[str]:

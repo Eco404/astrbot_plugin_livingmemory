@@ -356,20 +356,34 @@
               </div>
             </div>
             <div class="maintenance-panel" id="maintenance-panel-timeline-rebuild">
-              <div class="maintenance-review-toolbar">
+              <div class="topic-maintenance-page-head">
                 <div>
                   <h2 data-i18n="maintenance.timelineRebuildTitle">Timeline 记忆维护</h2>
                   <p class="text-secondary" data-i18n="maintenance.timelineRebuildIntro">先检查原始消息证据是否完整，再选择需要同 ID 重构的 Timeline。重构后会同步修复 Topic。</p>
                 </div>
-                <div class="maintenance-topic-controls">
+                <label class="topic-maintenance-space-field">
+                  <span data-i18n="maintenance.topicSpaceLabel">记忆空间</span>
                   <select id="timeline-rebuild-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
-                  <select id="timeline-rebuild-quality" class="select input input-sm" aria-label="Timeline 质量筛选">
-                    <option value="all" data-i18n="maintenance.allTimelineQuality">全部质量</option>
-                    <option value="low" data-i18n="maintenance.lowQualityOnly">仅低质量</option>
-                  </select>
-                  <button class="btn btn-primary btn-sm" id="timeline-rebuild-preview" type="button" data-i18n="maintenance.detectRebuildable">检测可重构项</button>
-                  <button class="btn btn-secondary btn-sm" id="timeline-inactive-open" type="button" data-i18n="maintenance.inactiveTimelines">不活跃 Timeline</button>
-                  <button class="btn btn-secondary btn-sm maintenance-count-button" id="timeline-staged-open" type="button"><span data-i18n="maintenance.stagedEdits">查看暂存修改</span><span class="maintenance-action-count" id="timeline-staged-count">0</span></button>
+                </label>
+              </div>
+              <div class="maintenance-topic-action-list maintenance-timeline-action-list">
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.detectRebuildable">检测可重构项</strong><p data-i18n="maintenance.detectRebuildableIntro">核对原始消息证据与记忆质量，再由用户选择需要同 ID 重构的 Timeline。</p></div>
+                  <div class="maintenance-timeline-action-control">
+                    <select id="timeline-rebuild-quality" class="select input input-sm" aria-label="Timeline 质量筛选">
+                      <option value="all" data-i18n="maintenance.allTimelineQuality">全部质量</option>
+                      <option value="low" data-i18n="maintenance.lowQualityOnly">仅低质量</option>
+                    </select>
+                    <button class="btn btn-primary" id="timeline-rebuild-preview" type="button" data-i18n="maintenance.detect">检测</button>
+                  </div>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.stagedEdits">查看暂存修改</strong><p data-i18n="maintenance.stagedEditsActionIntro">批量应用已暂存的 Timeline 编辑，完成整批写入后再统一同步 Topic。</p></div>
+                  <button class="btn btn-secondary maintenance-count-button" id="timeline-staged-open" type="button"><span data-i18n="maintenance.openStagedEdits">查看</span><span class="maintenance-action-count" id="timeline-staged-count">0</span></button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.inactiveTimelines">不活跃 Timeline</strong><p data-i18n="maintenance.inactiveTimelinesActionIntro">查看已退出召回的 Timeline，并按需要恢复或永久删除。</p></div>
+                  <button class="btn btn-secondary" id="timeline-inactive-open" type="button" data-i18n="maintenance.manageInactive">查看 / 管理</button>
                 </div>
               </div>
               <div id="timeline-rebuild-summary" class="text-secondary"></div>
