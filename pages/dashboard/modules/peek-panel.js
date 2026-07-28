@@ -15,9 +15,10 @@ import {
 } from "./utils.js";
 
 export class PeekPanel {
-  constructor(state, apiClient) {
+  constructor(state, apiClient, topicPage = null) {
     this.state = state;
     this.api = apiClient;
+    this.topicPage = topicPage;
     this._confirmResolve = null;
     this._prevPeekContent = null;
     this._saveJobRunning = false;
@@ -94,6 +95,8 @@ export class PeekPanel {
         key_facts: Array.isArray(rawMeta.key_facts) ? rawMeta.key_facts : [],
         topics: Array.isArray(rawMeta.topics) ? rawMeta.topics : [],
         update_history: Array.isArray(rawMeta.update_history) ? rawMeta.update_history : [],
+        topic_count: 0,
+        related_topics: [],
         graph_context: null,
       };
     }
@@ -127,6 +130,7 @@ export class PeekPanel {
     const keyFacts = detail.key_facts || [];
     const topics = detail.topics || [];
     const editHistory = detail.update_history || [];
+    const relatedTopics = Array.isArray(detail.related_topics) ? detail.related_topics : [];
     const graphCtx = detail.graph_context;
 
     document.getElementById("peek-badge").innerHTML = "";
@@ -150,6 +154,20 @@ export class PeekPanel {
     // 内容区域
     html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.content") + '</div>';
     html += '<div class="memory-detail-content" id="detail-content-display">' + esc(content) + '</div></div>';
+
+    html += '<div class="peek-section"><div class="peek-section-title">' + window.t("detail.relatedTopics") + ' (' + relatedTopics.length + ')</div>';
+    if (relatedTopics.length) {
+      html += '<div class="memory-related-topic-list">';
+      relatedTopics.forEach(topic => {
+        html += '<button class="memory-related-topic" type="button" data-memory-topic-uid="' + esc(topic.topic_uid) + '" title="' + esc(window.t("detail.openTopic")) + '">';
+        html += '<span><strong>' + esc(topic.title || topic.topic_uid) + '</strong><small>' + esc(topic.summary || "") + '</small></span>';
+        html += '<span class="memory-related-topic-meta">r' + Number(topic.revision || 1) + '</span></button>';
+      });
+      html += '</div>';
+    } else {
+      html += '<div class="text-tertiary">' + esc(window.t("detail.noRelatedTopics")) + '</div>';
+    }
+    html += '</div>';
 
     // 图谱上下文小视图
     if (graphCtx && graphCtx.nodes && graphCtx.nodes.length) {
@@ -201,6 +219,14 @@ export class PeekPanel {
     const delBtn = document.getElementById("peek-delete-btn");
     if (editBtn) editBtn.addEventListener("click", () => this.renderEditView(detail));
     if (delBtn) delBtn.addEventListener("click", () => this.deleteSingleMemory(parseInt(id)));
+    document.querySelectorAll("[data-memory-topic-uid]").forEach(button => {
+      button.addEventListener("click", () => {
+        const topicUid = button.dataset.memoryTopicUid;
+        if (!topicUid || !this.topicPage) return;
+        this.close();
+        this.topicPage.showDetail(topicUid);
+      });
+    });
 
     // 加载图谱小视图
     const miniCanvas = document.getElementById("peek-mini-graph");
@@ -237,6 +263,7 @@ export class PeekPanel {
 
     html += '<div class="memory-detail-actions">';
     html += '<button class="btn btn-sm btn-primary" id="peek-save-btn">' + window.t("detail.saveBtn") + '</button>';
+    html += '<button class="btn btn-sm btn-secondary" id="peek-stage-btn">' + window.t("detail.stageBtn") + '</button>';
     html += '<button class="btn btn-sm btn-ghost" id="peek-cancel-btn">' + window.t("detail.cancelBtn") + '</button>';
     html += '</div>';
 
@@ -313,8 +340,10 @@ export class PeekPanel {
     });
 
     const saveBtn = document.getElementById("peek-save-btn");
+    const stageBtn = document.getElementById("peek-stage-btn");
     const cancelBtn = document.getElementById("peek-cancel-btn");
     if (saveBtn) saveBtn.addEventListener("click", () => this.saveEdit(detail));
+    if (stageBtn) stageBtn.addEventListener("click", () => this.stageEdit(detail, stageBtn));
     if (cancelBtn) cancelBtn.addEventListener("click", () => this.renderDetailView(detail));
   }
 
@@ -390,6 +419,12 @@ export class PeekPanel {
    * @param {Object} detail - 原始记忆详情
    */
   async saveEdit(detail) {
+    const updatePayload = this.collectEditPayload(detail);
+    if (!updatePayload) return;
+    this.openSaveDialog(updatePayload);
+  }
+
+  collectEditPayload(detail) {
     const newContent = document.getElementById("edit-content-area").value.trim();
     const topicEdit = this.collectEditableMemoryItems("edit-topics-list", "topics");
     const factEdit = this.collectEditableMemoryItems("edit-key-facts-list", "key_facts");
@@ -403,10 +438,9 @@ export class PeekPanel {
     const reason = document.getElementById("peek-edit-reason").value.trim();
     if (!newContent) {
       this.showToast(window.t("detail.contentRequired"), true);
-      return;
+      return null;
     }
-
-    this.openSaveDialog({
+    return {
       memory_id: detail.memory_id,
       value: {
         summary: newContent,
@@ -422,7 +456,26 @@ export class PeekPanel {
       },
       field_changes: topicEdit.changes.concat(factEdit.changes),
       reason: reason
-    });
+    };
+  }
+
+  async stageEdit(detail, button) {
+    const updatePayload = this.collectEditPayload(detail);
+    if (!updatePayload) return;
+    button.disabled = true;
+    try {
+      const result = await this.api.post("memories/update/stage", {
+        ...updatePayload,
+        field: "structured",
+        update_mode: "in_place"
+      });
+      this.showToast(result.message || window.t("detail.staged"));
+      this.close();
+      window.dispatchEvent(new CustomEvent("livingmemory:timeline-staged-updated"));
+    } catch (error) {
+      this.showToast(error.message || window.t("edit.updateFailed"), true);
+      button.disabled = false;
+    }
   }
 
   openSaveDialog(updatePayload) {

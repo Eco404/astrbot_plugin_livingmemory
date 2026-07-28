@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import time
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from ..managers.conversation_manager import ConversationManager
     from ..managers.memory_engine import MemoryEngine
     from ..processors.memory_processor import MemoryProcessor
+    from ..managers.timeline_summary_service import TimelineSummaryService
     from .message_utils import MessageUtils
 
 
@@ -35,6 +37,7 @@ class MemoryReflection:
         storage_tasks: set[asyncio.Task],
         storage_sessions_inflight: set[str],
         storage_state_lock: asyncio.Lock,
+        summary_service: "TimelineSummaryService | None" = None,
     ):
         """
         初始化记忆反思模块
@@ -60,6 +63,7 @@ class MemoryReflection:
         self._storage_sessions_inflight = storage_sessions_inflight
         self._storage_state_lock = storage_state_lock
         self._shutting_down = False
+        self.summary_service = summary_service
 
     async def handle_memory_reflection(
         self, event: AstrMessageEvent, resp: LLMResponse
@@ -125,11 +129,17 @@ class MemoryReflection:
                 )
                 return
 
-            # 添加助手响应
+            # 助手消息必须在写入前解析人格。触发事件携带的是用户身份，
+            # 人格名称才是 Bot 在记忆中的显示锚点。
+            persona_id = await get_persona_id(self.context, event)
+            persona_name = await self._resolve_persona_name(persona_id)
             await self.conversation_manager.add_message_from_event(
                 event=event,
                 role="assistant",
                 content=response_text,
+                persona_id=persona_id,
+                persona_name=persona_name,
+                event_source="llm_response",
             )
             logger.debug(f"[DEBUG-Reflection] [{session_id}] 已添加助手响应消息")
 
@@ -161,6 +171,27 @@ class MemoryReflection:
 
             # 使用实际消息数量
             total_messages = actual_message_count
+
+            if self.summary_service is not None:
+                await self.conversation_manager.update_session_metadata_values(
+                    session_id,
+                    {
+                        "last_persona_id": str(persona_id or "default"),
+                        "last_persona_observed_at": time.time(),
+                    },
+                )
+                trigger_rounds = int(
+                    self.config_manager.get(
+                        "reflection_engine.summary_trigger_rounds", 10
+                    )
+                )
+                self.summary_service.schedule_if_needed(
+                    session_id,
+                    persona_id=str(persona_id or "default"),
+                    trigger_type="round_limit",
+                    min_rounds=trigger_rounds,
+                )
+                return
 
             # 检查是否满足总结条件
             trigger_rounds = self.config_manager.get(
@@ -264,8 +295,6 @@ class MemoryReflection:
                     f"[{session_id}] 获取到 {len(history_messages)} 条消息用于总结"
                 )
 
-                persona_id = await get_persona_id(self.context, event)
-
                 # 创建后台任务进行存储（跟踪任务）
                 if not self._shutting_down:
                     async with self._storage_state_lock:
@@ -300,6 +329,28 @@ class MemoryReflection:
             raise
         except Exception as e:
             logger.error(f"处理记忆反思时发生错误: {e}", exc_info=True)
+
+    async def _resolve_persona_name(self, persona_id: str | None) -> str | None:
+        """Resolve a persona display name without making message writes depend on it."""
+        if not persona_id:
+            return None
+        persona_manager = getattr(self.context, "persona_manager", None)
+        resolver = getattr(persona_manager, "get_persona", None)
+        if callable(resolver):
+            try:
+                persona = await resolver(persona_id)
+                if isinstance(persona, dict):
+                    name = persona.get("name")
+                else:
+                    name = getattr(persona, "name", None)
+                if name and str(name).strip():
+                    return str(name).strip()
+            except Exception:
+                logger.debug(
+                    "[MemoryReflection] 解析人格显示名失败，回退人格标识",
+                    exc_info=True,
+                )
+        return str(persona_id)
 
     async def _storage_task(
         self,
@@ -382,6 +433,18 @@ class MemoryReflection:
                         "start_index": start_index,
                         "end_index": end_index,
                         "message_count": end_index - start_index,
+                        "first_message_id": (
+                            history_messages[0].id if history_messages else None
+                        ),
+                        "last_message_id": (
+                            history_messages[-1].id if history_messages else None
+                        ),
+                        "started_at": (
+                            history_messages[0].timestamp if history_messages else None
+                        ),
+                        "ended_at": (
+                            history_messages[-1].timestamp if history_messages else None
+                        ),
                     }
 
                     logger.info(

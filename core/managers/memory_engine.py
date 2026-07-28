@@ -10,7 +10,7 @@ import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterable
 
 import aiosqlite
 
@@ -18,9 +18,14 @@ from astrbot.api import logger
 
 from ...storage.atom_store import AtomStore
 from ...storage.graph_store import GraphStore
+from ...storage.memory_identity_store import MemoryIdentityStore
+from ...storage.topic_memory_store import TopicMemoryStore
 from ..managers.atom_lifecycle_manager import AtomLifecycleManager
 from ..managers.graph_memory_manager import GraphMemoryManager
 from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
+from ..models.memory_identity import resolve_memory_space
+from ..models.identity_profile import SupplementalIdentityStore
+from ..importance_policy import IMPORTANCE_POLICY_VERSION
 from ..processors.graph_extractor import GraphExtractor
 from ..processors.text_processor import TextProcessor
 from ..retrieval.atom_retriever import AtomRetriever
@@ -31,8 +36,20 @@ from ..retrieval.graph_retriever import GraphRetriever
 from ..retrieval.graph_vector_retriever import GraphVectorRetriever
 from ..retrieval.hybrid_retriever import HybridResult, HybridRetriever
 from ..retrieval.rrf_fusion import RRFFusion
+from ..retrieval.topic_recall_pipeline import TopicRecallPipeline
+from ..retrieval.topic_retriever import TopicRetriever
 from ..retrieval.vector_retriever import VectorRetriever
 from ..utils.number_utils import clamp_float, safe_float
+from ..topic_settings import (
+    TOPIC_SETTING_DEFINITIONS,
+    TOPIC_SETTINGS_REVISION,
+    effective_topic_settings,
+    topic_setting_defaults,
+    validate_topic_setting,
+)
+from ..topic_vector_index import TopicVectorIndex
+from .topic_build_manager import TopicBuildManager
+from .topic_maintenance_manager import TopicMaintenanceManager
 
 
 class MemoryEngine:
@@ -84,7 +101,10 @@ class MemoryEngine:
         faiss_db,
         graph_vector_db=None,
         llm_provider=None,
+        rerank_provider=None,
         config: dict[str, Any] | None = None,
+        identity_profile_store: SupplementalIdentityStore | None = None,
+        topic_provider_resolver: Callable[[], dict[str, Any]] | None = None,
     ):
         """
         初始化记忆引擎
@@ -106,6 +126,13 @@ class MemoryEngine:
         self.faiss_db = faiss_db
         self.graph_vector_db = graph_vector_db
         self.llm_provider = llm_provider
+        self.rerank_provider = rerank_provider
+        self.identity_profile_store = (
+            identity_profile_store or SupplementalIdentityStore()
+        )
+        self.topic_provider_resolver = topic_provider_resolver
+        self.recall_trace_store = None
+        self._session_scope_resolver: Callable[[str], Any] | None = None
         self.config = config or {}
         self.graph_enabled = bool(self.config.get("graph_memory_enabled", False))
         self.atom_enabled = bool(
@@ -120,6 +147,11 @@ class MemoryEngine:
 
         # 后台任务跟踪
         self._pending_tasks: set[asyncio.Task] = set()
+        # Runtime migration is durable in SQLite, but recall requests can arrive
+        # concurrently before the durable marker is written. Serialize the first
+        # check and remember completed sessions for this process lifetime.
+        self._session_migration_lock = asyncio.Lock()
+        self._session_migration_checked: set[str] = set()
 
         # 初始化组件(在initialize中完成)
         self.text_processor = None
@@ -137,6 +169,47 @@ class MemoryEngine:
         self.atom_store = None
         self.atom_lifecycle_manager = None
         self.atom_retriever = None
+        self.memory_identity_store = MemoryIdentityStore(self.db_path)
+        self.topic_memory_store = TopicMemoryStore(self.db_path)
+        self.topic_vector_index = TopicVectorIndex(self.topic_memory_store)
+        self.topic_maintenance_manager = TopicMaintenanceManager(
+            self.db_path,
+            self.topic_memory_store,
+        )
+        topic_build_config = dict(self.config.get("topic_memory", {}))
+        topic_build_config.setdefault(
+            "recall_decay_rate", float(self.config.get("decay_rate", 0.01))
+        )
+        self.topic_build_manager = TopicBuildManager(
+            self.db_path,
+            self.topic_memory_store,
+            self.topic_maintenance_manager,
+            llm_provider=self.llm_provider,
+            embedding_provider=getattr(self.faiss_db, "embedding_provider", None),
+            rerank_provider=self.rerank_provider,
+            config=topic_build_config,
+            identity_profile_store=self.identity_profile_store,
+            provider_resolver=self.topic_provider_resolver,
+            vector_index=self.topic_vector_index,
+        )
+        self.topic_retriever = TopicRetriever(
+            self.topic_memory_store,
+            embedding_provider=getattr(self.faiss_db, "embedding_provider", None),
+            rerank_provider=self.rerank_provider,
+            config=topic_build_config,
+            provider_resolver=self.topic_provider_resolver,
+            vector_index=self.topic_vector_index,
+        )
+        self.topic_recall_pipeline = TopicRecallPipeline(
+            self.topic_retriever,
+            topic_build_config,
+        )
+        self.topic_memory_enabled = bool(
+            self.config.get("topic_memory", {}).get("enabled", False)
+        )
+        self.topic_auto_maintenance = bool(
+            self.config.get("topic_memory", {}).get("auto_maintenance", True)
+        )
         self.db_connection = None
         self._search_cache_enabled = bool(self.config.get("search_cache_enabled", True))
         self._search_cache_ttl = float(
@@ -166,6 +239,9 @@ class MemoryEngine:
 
         # 2. 创建表结构
         await self._create_tables()
+        await self.memory_identity_store.initialize()
+        await self.topic_memory_store.initialize()
+        await self._initialize_topic_runtime_settings()
 
         # 3. 初始化文本处理器
         stopwords_path = self.config.get("stopwords_path")
@@ -233,9 +309,19 @@ class MemoryEngine:
 
         if self._write_op_repair_enabled:
             await self._repair_incomplete_write_ops()
+        if self.topic_memory_enabled and self.topic_auto_maintenance:
+            await self._resume_deleted_timeline_repairs()
 
     async def close(self):
         """关闭数据库连接和清理资源"""
+        await self.topic_build_manager.close()
+        rerank_config = getattr(self.rerank_provider, "provider_config", {}) or {}
+        close_rerank = getattr(self.rerank_provider, "aclose", None)
+        if (
+            rerank_config.get("id") == "cloudflare_workers_ai_rerank"
+            and callable(close_rerank)
+        ):
+            await close_rerank()
         if self.atom_lifecycle_manager is not None:
             await self.atom_lifecycle_manager.stop()
         if self._pending_tasks:
@@ -440,6 +526,420 @@ class MemoryEngine:
         """Invalidate cached retrieval results after memory writes."""
         self._search_cache_generation += 1
         self._search_cache.clear()
+
+    def set_session_scope_resolver(self, resolver: Callable[[str], Any] | None) -> None:
+        """Attach the explicit conversation-alias resolver after initialization."""
+        self._session_scope_resolver = resolver
+
+    async def resolve_session_scope(self, session_id: str | None) -> list[str]:
+        if not session_id or self._session_scope_resolver is None:
+            return [session_id] if session_id else []
+        resolved = await self._session_scope_resolver(str(session_id))
+        return list(dict.fromkeys(str(item) for item in (resolved or []) if str(item)))
+
+    async def invalidate_session_alias_cache(self) -> None:
+        self._invalidate_search_cache()
+
+    def _apply_stable_identity(
+        self,
+        metadata: dict[str, Any],
+        *,
+        session_id: str | None,
+        persona_id: str | None,
+    ) -> dict[str, Any]:
+        """Ensure every physical document carries a stable logical identity."""
+        normalized = dict(metadata)
+        normalized["memory_uid"] = str(
+            normalized.get("memory_uid") or uuid.uuid4()
+        )
+        try:
+            normalized["revision"] = max(1, int(normalized.get("revision", 1)))
+        except (TypeError, ValueError):
+            normalized["revision"] = 1
+        normalized["memory_layer"] = str(
+            normalized.get("memory_layer") or "timeline"
+        )
+        space = resolve_memory_space(session_id, persona_id)
+        normalized["memory_space_id"] = space.memory_space_id
+        normalized["memory_space_version"] = 1
+        return normalized
+
+    async def _register_memory_identity(
+        self,
+        document_id: int,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Persist the logical-to-physical mapping and optional source span."""
+        created_at = safe_float(metadata.get("create_time"), time.time())
+        updated_at = safe_float(metadata.get("updated_at"), created_at)
+        await self.memory_identity_store.upsert_memory(
+            memory_uid=str(metadata["memory_uid"]),
+            document_id=int(document_id),
+            memory_layer=str(metadata.get("memory_layer") or "timeline"),
+            memory_space_id=str(metadata["memory_space_id"]),
+            revision=int(metadata.get("revision", 1)),
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+        await self.memory_identity_store.upsert_source_span(
+            str(metadata["memory_uid"]),
+            metadata.get("source_window"),
+            fallback_session_id=metadata.get("session_id"),
+            fallback_time=created_at,
+        )
+
+    async def _mark_dependent_topics_stale(
+        self,
+        memory_uid: str | None,
+        *,
+        reason: str,
+    ) -> list[str]:
+        """Record affected Topics while preserving atomic replacement on edits."""
+        if not memory_uid:
+            return []
+        affected: list[str] = []
+        try:
+            if "deleted" in reason:
+                affected = await self.topic_memory_store.mark_timeline_stale(
+                    memory_uid
+                )
+            else:
+                affected = [
+                    str(row["topic_uid"])
+                    for row in await self.topic_memory_store.get_topics_for_timeline(
+                        memory_uid
+                    )
+                    if str(row.get("status") or "") == "active"
+                    and str(row.get("link_status") or "") == "active"
+                ]
+            if affected:
+                logger.info(
+                    f"[TopicMemory] Timeline 变化影响 {len(affected)} 个 Topic；"
+                    f"正式数据将在局部构建发布时原子替换 (reason={reason})"
+                )
+            return affected
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Topic is a derived layer. A bookkeeping failure must be visible but
+            # must not roll back a successfully persisted source memory.
+            logger.error(
+                f"[TopicMemory] 标记关联 Topic 失败 "
+                f"(memory_uid={memory_uid}, reason={reason})",
+                exc_info=True,
+            )
+            return []
+
+    async def _queue_deleted_timeline_repair(
+        self,
+        memory_space_id: str | None,
+        *,
+        deleted_timeline_uids: Iterable[str],
+        affected_topic_uids: Iterable[str],
+    ) -> str | None:
+        """Persist source repair and run it immediately only when auto maintenance is on."""
+        if not self.topic_memory_enabled or not memory_space_id:
+            return None
+        deleted = sorted(
+            {str(uid).strip() for uid in deleted_timeline_uids if str(uid).strip()}
+        )
+        affected = sorted(
+            {str(uid).strip() for uid in affected_topic_uids if str(uid).strip()}
+        )
+        if not deleted or not affected:
+            return None
+        review_uid = await self.topic_memory_store.enqueue_maintenance_review(
+            memory_space_id=str(memory_space_id),
+            review_type="deleted_timeline_source_repair",
+            timeline_uids=deleted,
+            topic_uids=affected,
+            details={
+                "automatic": bool(self.topic_auto_maintenance),
+                "reason": "Timeline source deleted",
+                "requires_llm": True,
+            },
+        )
+        if self.topic_auto_maintenance:
+            self._create_tracked_task(
+                self._run_deleted_timeline_repair(
+                    str(memory_space_id),
+                    affected_topic_uids=affected,
+                    deleted_timeline_uids=deleted,
+                    review_uid=review_uid,
+                )
+            )
+        return review_uid
+
+    async def _run_deleted_timeline_repair(
+        self,
+        memory_space_id: str,
+        *,
+        affected_topic_uids: list[str],
+        deleted_timeline_uids: list[str],
+        review_uid: str,
+    ) -> None:
+        try:
+            await self.topic_build_manager.repair_deleted_timeline_sources(
+                memory_space_id,
+                affected_topic_uids=affected_topic_uids,
+                deleted_timeline_uids=deleted_timeline_uids,
+                review_uid=review_uid,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "[TopicMemory] Timeline 删除后的 Topic 来源修复失败 "
+                "(memory_space_id=%s, review_uid=%s): %s",
+                memory_space_id,
+                review_uid,
+                exc,
+                exc_info=True,
+            )
+
+    async def _resume_deleted_timeline_repairs(self) -> None:
+        for item in await self.topic_memory_store.list_pending_source_repairs():
+            self._create_tracked_task(
+                self._run_deleted_timeline_repair(
+                    str(item["memory_space_id"]),
+                    affected_topic_uids=[
+                        str(uid) for uid in item.get("topic_uids", [])
+                    ],
+                    deleted_timeline_uids=[
+                        str(uid) for uid in item.get("timeline_uids", [])
+                    ],
+                    review_uid=str(item["review_uid"]),
+                )
+            )
+
+    def _schedule_topic_maintenance(
+        self,
+        memory_space_id: str | None,
+        *,
+        full: bool,
+        since: float | None = None,
+        timeline_uids: Iterable[str] | None = None,
+    ) -> None:
+        if (
+            not self.topic_memory_enabled
+            or not self.topic_auto_maintenance
+            or not memory_space_id
+        ):
+            return
+        self.topic_build_manager.schedule_space(
+            str(memory_space_id),
+            full=full,
+            since=since,
+            timeline_uids=timeline_uids,
+        )
+
+    async def _initialize_topic_runtime_settings(self) -> None:
+        """Load sparse overrides and import only genuinely customized legacy values."""
+        stored = await self.topic_memory_store.get_topic_setting_overrides()
+        if not stored.get("__legacy_imported_v1__"):
+            defaults = topic_setting_defaults()
+            legacy = self.config.get("topic_memory_legacy_overrides", {})
+            imported: dict[str, Any] = {}
+            if isinstance(legacy, dict):
+                for key, value in legacy.items():
+                    if key not in TOPIC_SETTING_DEFINITIONS:
+                        continue
+                    try:
+                        normalized = validate_topic_setting(key, value)
+                    except ValueError:
+                        continue
+                    # Schema-generated old defaults must not pin future defaults.
+                    if normalized != defaults[key]:
+                        imported[key] = normalized
+            imported["__legacy_imported_v1__"] = True
+            stored = await self.topic_memory_store.update_topic_setting_overrides(
+                imported,
+                settings_revision=TOPIC_SETTINGS_REVISION,
+            )
+        self.apply_topic_runtime_settings(stored)
+
+    def apply_topic_runtime_settings(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        """Apply one validated effective configuration to every Topic consumer."""
+        public_overrides = {
+            key: value
+            for key, value in overrides.items()
+            if key in TOPIC_SETTING_DEFINITIONS
+        }
+        effective = effective_topic_settings(public_overrides)
+        base = dict(self.config.get("topic_memory", {}))
+        base.update(effective)
+        self.config["topic_memory"] = base
+        self.topic_build_manager.apply_config(base)
+        self.topic_retriever.config = dict(base)
+        self.topic_recall_pipeline.config = dict(base)
+        self._invalidate_search_cache()
+        return effective
+
+    def apply_timeline_runtime_settings(self, effective: dict[str, Any]) -> None:
+        """Apply validated Timeline settings to long-lived retrieval consumers."""
+        mapping = {
+            "fusion_strategy.rrf_k": "rrf_k",
+            "importance_decay.decay_rate": "decay_rate",
+            "importance_decay.access_decay_window_days": "access_decay_window_days",
+            "importance_decay.access_decay_max_count": "access_decay_max_count",
+            "importance_decay.access_count_decay_multiplier": "access_count_decay_multiplier",
+            "recall_engine.importance_weight": "importance_weight",
+            "recall_engine.candidate_multiplier": "candidate_multiplier",
+            "recall_engine.min_relevance_score": "min_relevance_score",
+            "recall_engine.relative_score_floor": "relative_score_floor",
+            "recall_engine.mmr_lambda": "mmr_lambda",
+            "recall_engine.search_cache_enabled": "search_cache_enabled",
+            "recall_engine.search_cache_ttl_seconds": "search_cache_ttl_seconds",
+            "recall_engine.search_cache_max_size": "search_cache_max_size",
+            "recall_engine.fallback_to_vector": "fallback_enabled",
+            "forgetting_agent.cleanup_days_threshold": "cleanup_days_threshold",
+            "forgetting_agent.cleanup_importance_threshold": "cleanup_importance_threshold",
+            "forgetting_agent.auto_cleanup_enabled": "auto_cleanup_enabled",
+            "graph_memory.document_route_weight": "document_route_weight",
+            "graph_memory.graph_route_weight": "graph_route_weight",
+            "graph_memory.cross_route_bonus": "cross_route_bonus",
+            "graph_memory.expansion_limit": "graph_expansion_limit",
+            "graph_memory.expansion_hops": "graph_expansion_hops",
+            "graph_memory.second_hop_weight": "graph_second_hop_weight",
+            "graph_memory.dynamic_route_weighting": "dynamic_route_weighting",
+            "graph_memory.max_topics_per_memory": "graph_max_topics",
+            "graph_memory.max_participants_per_memory": "graph_max_participants",
+            "graph_memory.max_facts_per_memory": "graph_max_facts",
+            "graph_memory.atom_maintenance_interval_hours": "atom_maintenance_interval_hours",
+            "graph_memory.atom_forget_delay_days": "atom_forget_delay_days",
+            "graph_memory.atom_purge_delay_days": "atom_purge_delay_days",
+            "index_rebuild_settings.batch_size": "index_rebuild_batch_size",
+            "index_rebuild_settings.embedding_batch_size": "index_rebuild_embedding_batch_size",
+            "index_rebuild_settings.tasks_limit": "index_rebuild_tasks_limit",
+            "index_rebuild_settings.max_retries": "index_rebuild_max_retries",
+            "index_rebuild_settings.retry_base_delay": "index_rebuild_retry_base_delay",
+            "index_rebuild_settings.batch_delay": "index_rebuild_batch_delay",
+            "index_rebuild_settings.request_delay": "index_rebuild_request_delay",
+            "index_rebuild_settings.max_failure_ratio": "index_rebuild_max_failure_ratio",
+        }
+        for source, target in mapping.items():
+            if source in effective:
+                self.config[target] = effective[source]
+        if self.rrf_fusion is not None:
+            self.rrf_fusion.k = int(self.config.get("rrf_k", 60))
+        if self.hybrid_retriever is not None:
+            self.hybrid_retriever.decay_rate = float(
+                self.config.get("decay_rate", 0.01)
+            )
+            self.hybrid_retriever.importance_weight = float(
+                self.config.get("importance_weight", 1.0)
+            )
+            self.hybrid_retriever.fallback_enabled = bool(
+                self.config.get("fallback_enabled", True)
+            )
+            self.hybrid_retriever.mmr_lambda = float(
+                self.config.get("mmr_lambda", 0.72)
+            )
+        if self.graph_retriever is not None:
+            self.graph_retriever.decay_rate = float(
+                self.config.get("decay_rate", 0.01)
+            )
+        if self.dual_route_retriever is not None:
+            document_weight = float(self.config.get("document_route_weight", 0.65))
+            graph_weight = float(self.config.get("graph_route_weight", 0.35))
+            total_weight = document_weight + graph_weight
+            if total_weight <= 0:
+                document_weight, graph_weight = 0.65, 0.35
+            else:
+                document_weight /= total_weight
+                graph_weight /= total_weight
+            self.dual_route_retriever.document_route_weight = document_weight
+            self.dual_route_retriever.graph_route_weight = graph_weight
+            self.dual_route_retriever.cross_route_bonus = float(
+                self.config.get("cross_route_bonus", 0.08)
+            )
+            self.dual_route_retriever.dynamic_route_weighting = bool(
+                self.config.get("dynamic_route_weighting", True)
+            )
+        if self.graph_keyword_retriever is not None:
+            self.graph_keyword_retriever.expansion_limit = int(
+                self.config.get("graph_expansion_limit", 24)
+            )
+            self.graph_keyword_retriever.expansion_hops = int(
+                self.config.get("graph_expansion_hops", 1)
+            )
+            self.graph_keyword_retriever.second_hop_weight = float(
+                self.config.get("graph_second_hop_weight", 0.4)
+            )
+        if self.graph_extractor is not None:
+            self.graph_extractor.max_topics = int(
+                self.config.get("graph_max_topics", 6)
+            )
+            self.graph_extractor.max_participants = int(
+                self.config.get("graph_max_participants", 8)
+            )
+            self.graph_extractor.max_facts = int(
+                self.config.get("graph_max_facts", 8)
+            )
+        if self.atom_lifecycle_manager is not None:
+            self.atom_lifecycle_manager.apply_runtime_settings(self.config)
+        topic_config = dict(self.topic_recall_pipeline.config)
+        topic_config["recall_decay_rate"] = float(
+            self.config.get("decay_rate", 0.01)
+        )
+        self.topic_retriever.config = dict(topic_config)
+        self.topic_recall_pipeline.config = dict(topic_config)
+        self._search_cache_enabled = bool(
+            self.config.get("search_cache_enabled", True)
+        )
+        self._search_cache_ttl = float(
+            self.config.get("search_cache_ttl_seconds", 45.0)
+        )
+        self._search_cache_max_size = int(
+            self.config.get("search_cache_max_size", 256)
+        )
+        self._invalidate_search_cache()
+
+    async def get_topic_runtime_settings(self) -> dict[str, Any]:
+        stored = await self.topic_memory_store.get_topic_setting_overrides()
+        overrides = {
+            key: value
+            for key, value in stored.items()
+            if key in TOPIC_SETTING_DEFINITIONS
+        }
+        effective = effective_topic_settings(overrides)
+        definitions = {
+            key: {**value, "customized": key in overrides}
+            for key, value in TOPIC_SETTING_DEFINITIONS.items()
+        }
+        return {
+            "settings_revision": TOPIC_SETTINGS_REVISION,
+            "definitions": definitions,
+            "overrides": overrides,
+            "effective": effective,
+        }
+
+    async def update_topic_runtime_settings(
+        self,
+        changes: dict[str, Any],
+        *,
+        reset_keys: list[str] | None = None,
+        reset_all: bool = False,
+    ) -> dict[str, Any]:
+        if self.topic_build_manager.has_active_builds():
+            raise RuntimeError("Topic 构建正在运行，暂时不能修改参数")
+        normalized = {
+            str(key): validate_topic_setting(str(key), value)
+            for key, value in changes.items()
+        }
+        normalized_reset = [
+            str(key)
+            for key in (reset_keys or [])
+            if str(key) in TOPIC_SETTING_DEFINITIONS
+        ]
+        stored = await self.topic_memory_store.update_topic_setting_overrides(
+            normalized,
+            reset_keys=normalized_reset,
+            reset_all=bool(reset_all),
+            settings_revision=TOPIC_SETTINGS_REVISION,
+        )
+        self.apply_topic_runtime_settings(stored)
+        return await self.get_topic_runtime_settings()
 
     def _serialize_atom_for_repair(self, atom: Any) -> dict[str, Any]:
         """Convert a MemoryAtom-like object into JSON-safe repair payload."""
@@ -673,6 +1173,14 @@ class MemoryEngine:
             )
             await self._advance_write_op(op_id, "graph_repaired", memory_id=memory_id)
 
+        metadata = self._apply_stable_identity(
+            metadata,
+            session_id=session_id,
+            persona_id=persona_id,
+        )
+        await self._register_memory_identity(int(memory_id), metadata)
+        await self._advance_write_op(op_id, "identity_repaired", memory_id=memory_id)
+
         await self._advance_write_op(
             op_id,
             "completed",
@@ -699,6 +1207,7 @@ class MemoryEngine:
             await self.graph_memory_manager.delete_memory(int(memory_id))
         if self.atom_store is not None:
             await self.atom_store.delete_by_parent(int(memory_id))
+        await self.memory_identity_store.delete_by_document_id(int(memory_id))
 
         await self._advance_write_op(
             op_id,
@@ -741,6 +1250,7 @@ class MemoryEngine:
 
         await self._delete_document_indexes_for_batch(memory_ids)
         await self._delete_graph_and_atoms_for_batch(memory_ids)
+        await self.memory_identity_store.delete_by_document_ids(memory_ids)
         await self._advance_write_op(
             op_id,
             "completed",
@@ -899,12 +1409,14 @@ class MemoryEngine:
         """)
 
             await self._create_write_ops_table()
+            await MemoryIdentityStore.create_tables(self.db_connection)
+            await TopicMemoryStore.create_tables(self.db_connection)
 
             # 创建版本管理表
             await self.db_connection.execute("""
             CREATE TABLE IF NOT EXISTS db_version (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                version INTEGER NOT NULL,
+                version TEXT NOT NULL,
                 description TEXT,
                 migrated_at TEXT NOT NULL,
                 migration_duration_seconds REAL
@@ -939,7 +1451,7 @@ class MemoryEngine:
                     VALUES (?, ?, ?, ?)
                 """,
                     (
-                        DBMigration.CURRENT_VERSION,
+                        DBMigration.storage_version(DBMigration.CURRENT_VERSION),
                         "初始版本 - 当前架构",
                         datetime.now(timezone.utc).isoformat(),
                         0.0,
@@ -993,6 +1505,11 @@ class MemoryEngine:
         if not content or not content.strip():
             raise ValueError("记忆内容不能为空")
 
+        if session_id:
+            scope = await self.resolve_session_scope(session_id)
+            if scope:
+                session_id = scope[0]
+
         op_id = await self._start_write_op(
             "add",
             {
@@ -1023,6 +1540,34 @@ class MemoryEngine:
         if metadata:
             full_metadata.update(metadata)
 
+        effective_importance = clamp_float(
+            full_metadata.get("importance"), default=importance
+        )
+        full_metadata["importance"] = effective_importance
+        full_metadata["base_importance"] = clamp_float(
+            full_metadata.get("base_importance"),
+            default=effective_importance,
+        )
+        try:
+            importance_revision = int(full_metadata.get("importance_revision", 1))
+        except (TypeError, ValueError):
+            importance_revision = 1
+        full_metadata["importance_revision"] = max(1, importance_revision)
+        full_metadata.setdefault("importance_reason", "generated")
+        full_metadata.setdefault(
+            "importance_policy_version", IMPORTANCE_POLICY_VERSION
+        )
+
+        # A confirmed alias only broadens reads for legacy data. New Timeline
+        # records and their source spans must consistently use the canonical ID.
+        if session_id:
+            full_metadata["session_id"] = session_id
+            source_window = full_metadata.get("source_window")
+            if isinstance(source_window, dict):
+                source_window = dict(source_window)
+                source_window["session_id"] = session_id
+                full_metadata["source_window"] = source_window
+
         # 普通新增始终使用当前时间；结构化替换可保留原始时间轴位置。
         preserved_create_time = None
         if preserve_create_time and metadata:
@@ -1036,6 +1581,16 @@ class MemoryEngine:
             else current_time
         )
         full_metadata["last_access_time"] = current_time
+        full_metadata = self._apply_stable_identity(
+            full_metadata,
+            session_id=session_id,
+            persona_id=persona_id,
+        )
+        await self._advance_write_op(
+            op_id,
+            "identity_prepared",
+            payload_patch={"metadata": full_metadata},
+        )
 
         # 通过混合检索器添加(会同时添加到BM25和向量索引)
         if self.hybrid_retriever is None:
@@ -1064,7 +1619,7 @@ class MemoryEngine:
         if atoms and self.atom_store is not None and self.atom_enabled:
             prepared_atoms = []
             for atom in atoms:
-                atom.session_id = atom.session_id or session_id
+                atom.session_id = session_id or atom.session_id
                 atom.persona_id = atom.persona_id or persona_id
                 atom.parent_memory_id = doc_id
                 prepared_atoms.append(atom)
@@ -1147,6 +1702,30 @@ class MemoryEngine:
                 memory_id=doc_id,
             )
 
+        try:
+            await self._register_memory_identity(doc_id, full_metadata)
+            await self._advance_write_op(
+                op_id,
+                "identity_registered",
+                status="needs_repair" if needs_repair else "pending",
+                memory_id=doc_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            needs_repair = True
+            await self._advance_write_op(
+                op_id,
+                "identity_failed",
+                status="needs_repair",
+                memory_id=doc_id,
+                error=str(e),
+            )
+            logger.error(
+                f"[MemoryEngine] 逻辑身份注册失败，已标记待修复 (memory_id={doc_id})",
+                exc_info=True,
+            )
+
         if not needs_repair:
             await self._advance_write_op(
                 op_id,
@@ -1154,6 +1733,11 @@ class MemoryEngine:
                 status="completed",
                 memory_id=doc_id,
             )
+        self._schedule_topic_maintenance(
+            str(full_metadata.get("memory_space_id") or ""),
+            full=False,
+            since=current_time - 1.0,
+        )
         self._invalidate_search_cache()
         return doc_id
 
@@ -1164,6 +1748,7 @@ class MemoryEngine:
         session_id: str | None = None,
         persona_id: str | None = None,
         track_access: bool = True,
+        _expand_aliases: bool = True,
     ) -> list[HybridResult]:
         """
         检索相关记忆
@@ -1180,6 +1765,37 @@ class MemoryEngine:
         """
         if not query or not query.strip():
             return []
+
+        if session_id and _expand_aliases:
+            session_scope = await self.resolve_session_scope(session_id)
+            if len(session_scope) > 1:
+                batches = await asyncio.gather(
+                    *(
+                        self.search_memories(
+                            query,
+                            k=max(k, k * 2),
+                            session_id=scope_session_id,
+                            persona_id=persona_id,
+                            track_access=False,
+                            _expand_aliases=False,
+                        )
+                        for scope_session_id in session_scope
+                    )
+                )
+                merged: dict[int, HybridResult] = {}
+                for batch in batches:
+                    for result in batch:
+                        previous = merged.get(int(result.doc_id))
+                        if previous is None or result.final_score > previous.final_score:
+                            merged[int(result.doc_id)] = result
+                results = sorted(
+                    merged.values(), key=lambda item: item.final_score, reverse=True
+                )[:k]
+                if track_access:
+                    self.record_memory_access([item.doc_id for item in results])
+                return results
+            if session_scope:
+                session_id = session_scope[0]
 
         cache_key = self._search_cache_key(query, k, session_id, persona_id)
         cached_results = self._get_cached_search_results(cache_key)
@@ -1224,6 +1840,19 @@ class MemoryEngine:
 
         self._set_cached_search_results(cache_key, results)
         return results
+
+    def record_memory_access(self, memory_ids: list[int]) -> None:
+        """Record access only for memories that survived final recall filtering."""
+        seen: set[int] = set()
+        for raw_memory_id in memory_ids:
+            try:
+                memory_id = int(raw_memory_id)
+            except (TypeError, ValueError):
+                continue
+            if memory_id in seen:
+                continue
+            seen.add(memory_id)
+            self._create_tracked_task(self._update_access_time_internal(memory_id))
 
     async def get_memory(self, memory_id: int) -> dict[str, Any] | None:
         """
@@ -1345,8 +1974,24 @@ class MemoryEngine:
         metadata_updates = {}
 
         if "importance" in updates:
-            metadata_updates["importance"] = clamp_float(
+            explicit_importance = clamp_float(
                 updates["importance"], default=0.5
+            )
+            try:
+                current_importance_revision = int(
+                    current_metadata.get("importance_revision", 1)
+                )
+            except (TypeError, ValueError):
+                current_importance_revision = 1
+            metadata_updates.update(
+                {
+                    "importance": explicit_importance,
+                    "base_importance": explicit_importance,
+                    "importance_revision": current_importance_revision + 1,
+                    "importance_reason": "manual",
+                    "importance_anchor_at": time.time(),
+                    "importance_policy_version": IMPORTANCE_POLICY_VERSION,
+                }
             )
 
         if "metadata" in updates:
@@ -1369,6 +2014,21 @@ class MemoryEngine:
             # 合并元数据
             current_metadata.update(metadata_updates)
             current_metadata["updated_at"] = time.time()
+            current_metadata = self._apply_stable_identity(
+                current_metadata,
+                session_id=current_metadata.get("session_id"),
+                persona_id=current_metadata.get("persona_id"),
+            )
+            metadata_updates.update(
+                {
+                    "memory_uid": current_metadata["memory_uid"],
+                    "revision": current_metadata["revision"],
+                    "memory_layer": current_metadata["memory_layer"],
+                    "memory_space_id": current_metadata["memory_space_id"],
+                    "memory_space_version": current_metadata["memory_space_version"],
+                    "updated_at": current_metadata["updated_at"],
+                }
+            )
 
             # 【改进】使用增强的update_metadata确保三库同步
             if self.hybrid_retriever is None:
@@ -1386,6 +2046,25 @@ class MemoryEngine:
                         memory["text"],
                         current_metadata,
                     )
+                await self._register_memory_identity(memory_id, current_metadata)
+                topic_source_fields = {
+                    "canonical_summary",
+                    "persona_summary",
+                    "topics",
+                    "key_facts",
+                }
+                if topic_source_fields & metadata_updates.keys():
+                    await self._mark_dependent_topics_stale(
+                        str(current_metadata.get("memory_uid") or ""),
+                        reason="timeline_metadata_updated",
+                    )
+                    self._schedule_topic_maintenance(
+                        str(current_metadata.get("memory_space_id") or ""),
+                        full=False,
+                        timeline_uids=[
+                            str(current_metadata.get("memory_uid") or "")
+                        ],
+                    )
                 self._invalidate_search_cache()
             else:
                 logger.error(f"[更新] 元数据更新失败 (memory_id={memory_id})")
@@ -1402,6 +2081,7 @@ class MemoryEngine:
         metadata: dict[str, Any],
         importance: float,
         atoms: list | None = None,
+        schedule_topic_maintenance: bool = True,
     ) -> int:
         """Rebuild a memory and every derived index while preserving its ID."""
         current = await self.get_memory(memory_id)
@@ -1413,7 +2093,24 @@ class MemoryEngine:
             raise RuntimeError("混合检索器未初始化")
 
         current_metadata = self._safe_json_dict(current.get("metadata"))
+        current_metadata = self._apply_stable_identity(
+            current_metadata,
+            session_id=current_metadata.get("session_id"),
+            persona_id=current_metadata.get("persona_id"),
+        )
         replacement_metadata = dict(metadata or {})
+        for preserved_key in (
+            "session_id",
+            "persona_id",
+            "source_window",
+            "create_time",
+            "memory_layer",
+        ):
+            if (
+                preserved_key not in replacement_metadata
+                and preserved_key in current_metadata
+            ):
+                replacement_metadata[preserved_key] = current_metadata[preserved_key]
         replacement_metadata["memory_uid"] = current_metadata.get(
             "memory_uid"
         ) or str(uuid.uuid4())
@@ -1423,7 +2120,30 @@ class MemoryEngine:
             current_revision = 1
         replacement_metadata["revision"] = current_revision + 1
         replacement_metadata["updated_at"] = time.time()
-        replacement_metadata["importance"] = clamp_float(importance, default=0.5)
+        rebuilt_importance = clamp_float(importance, default=0.5)
+        try:
+            importance_revision = int(
+                current_metadata.get("importance_revision", 1)
+            )
+        except (TypeError, ValueError):
+            importance_revision = 1
+        replacement_metadata.update(
+            {
+                "importance": rebuilt_importance,
+                "base_importance": rebuilt_importance,
+                "importance_revision": importance_revision + 1,
+                "importance_reason": "timeline_rebuilt",
+                "importance_anchor_at": replacement_metadata["updated_at"],
+                "importance_policy_version": IMPORTANCE_POLICY_VERSION,
+            }
+        )
+        replacement_metadata = self._apply_stable_identity(
+            replacement_metadata,
+            session_id=replacement_metadata.get("session_id")
+            or current_metadata.get("session_id"),
+            persona_id=replacement_metadata.get("persona_id")
+            or current_metadata.get("persona_id"),
+        )
 
         old_content = str(current.get("text") or "")
         old_atoms: list = []
@@ -1452,6 +2172,7 @@ class MemoryEngine:
                         current_metadata,
                         old_atoms or None,
                     )
+                await self._register_memory_identity(memory_id, current_metadata)
             except Exception:
                 logger.error(
                     f"[原位更新] 回滚不完整 (memory_id={memory_id})",
@@ -1477,6 +2198,20 @@ class MemoryEngine:
                     content,
                     replacement_metadata,
                     atoms,
+                )
+
+            await self._register_memory_identity(memory_id, replacement_metadata)
+            await self._mark_dependent_topics_stale(
+                str(replacement_metadata.get("memory_uid") or ""),
+                reason="timeline_rewritten_in_place",
+            )
+            if schedule_topic_maintenance:
+                self._schedule_topic_maintenance(
+                    str(replacement_metadata.get("memory_space_id") or ""),
+                    full=False,
+                    timeline_uids=[
+                        str(replacement_metadata.get("memory_uid") or "")
+                    ],
                 )
 
             self._invalidate_search_cache()
@@ -1518,7 +2253,23 @@ class MemoryEngine:
             raise ValueError("记忆内容不能为空")
 
         current_metadata = self._safe_json_dict(current.get("metadata"))
+        current_metadata = self._apply_stable_identity(
+            current_metadata,
+            session_id=current_metadata.get("session_id"),
+            persona_id=current_metadata.get("persona_id"),
+        )
         replacement_metadata = dict(metadata or {})
+        for preserved_key in (
+            "session_id",
+            "persona_id",
+            "source_window",
+            "memory_layer",
+        ):
+            if (
+                preserved_key not in replacement_metadata
+                and preserved_key in current_metadata
+            ):
+                replacement_metadata[preserved_key] = current_metadata[preserved_key]
         replacement_metadata["memory_uid"] = current_metadata.get(
             "memory_uid"
         ) or str(uuid.uuid4())
@@ -1529,6 +2280,21 @@ class MemoryEngine:
         replacement_metadata["revision"] = current_revision + 1
         replacement_metadata["previous_id"] = memory_id
         replacement_metadata["updated_at"] = time.time()
+        replacement_importance = clamp_float(importance, default=0.5)
+        replacement_metadata["importance"] = replacement_importance
+        replacement_metadata["base_importance"] = replacement_importance
+        try:
+            importance_revision = int(
+                current_metadata.get("importance_revision", 1) or 1
+            )
+        except (TypeError, ValueError):
+            importance_revision = 1
+        replacement_metadata["importance_revision"] = importance_revision + 1
+        replacement_metadata["importance_reason"] = "memory_replaced"
+        replacement_metadata["importance_anchor_at"] = time.time()
+        replacement_metadata["importance_policy_version"] = (
+            IMPORTANCE_POLICY_VERSION
+        )
         # Physical replacement must keep the logical memory on its original
         # timeline even when callers only provide newly generated metadata.
         replacement_metadata["create_time"] = current_metadata.get("create_time")
@@ -1545,7 +2311,7 @@ class MemoryEngine:
                 content=content,
                 session_id=session_id,
                 persona_id=persona_id,
-                importance=importance,
+                importance=replacement_importance,
                 metadata=replacement_metadata,
                 atoms=atoms,
                 preserve_create_time=True,
@@ -1554,7 +2320,12 @@ class MemoryEngine:
                 raise RuntimeError("新记忆创建失败")
             if not await self.delete_memory(memory_id):
                 await self.delete_memory(new_memory_id)
+                await self._register_memory_identity(memory_id, current_metadata)
                 raise RuntimeError("旧记忆删除失败，已回滚新记忆")
+            await self._mark_dependent_topics_stale(
+                str(replacement_metadata.get("memory_uid") or ""),
+                reason="timeline_replaced",
+            )
             return new_memory_id
         except asyncio.CancelledError:
             raise
@@ -1568,6 +2339,8 @@ class MemoryEngine:
                         f"[替换] 回滚新记忆失败 (memory_id={new_memory_id})",
                         exc_info=True,
                     )
+            if await self.get_memory(memory_id):
+                await self._register_memory_identity(memory_id, current_metadata)
             raise
 
     async def delete_memory(self, memory_id: int) -> bool:
@@ -1581,6 +2354,7 @@ class MemoryEngine:
             bool: 是否删除成功
         """
 
+        registry_record = await self.memory_identity_store.get_by_document_id(memory_id)
         op_id = await self._start_write_op(
             "delete",
             {"memory_id": memory_id},
@@ -1650,12 +2424,42 @@ class MemoryEngine:
                 exc_info=True,
             )
 
+        affected_topic_uids: list[str] = []
+        try:
+            affected_topic_uids = await self._mark_dependent_topics_stale(
+                registry_record.memory_uid if registry_record else None,
+                reason="timeline_deleted",
+            )
+            await self.memory_identity_store.delete_by_document_id(memory_id)
+            await self._advance_write_op(op_id, "identity_deleted", memory_id=memory_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            await self._advance_write_op(
+                op_id,
+                "identity_delete_failed",
+                status="needs_repair",
+                memory_id=memory_id,
+                error=str(e),
+            )
+            needs_repair = True
+            logger.error(
+                f"[MemoryEngine] 逻辑身份删除失败，已标记待修复 (memory_id={memory_id})",
+                exc_info=True,
+            )
+
         if not needs_repair:
             await self._advance_write_op(
                 op_id,
                 "completed",
                 status="completed",
                 memory_id=memory_id,
+            )
+        if registry_record and affected_topic_uids:
+            await self._queue_deleted_timeline_repair(
+                registry_record.memory_space_id,
+                deleted_timeline_uids=[registry_record.memory_uid],
+                affected_topic_uids=affected_topic_uids,
             )
         self._invalidate_search_cache()
         return success
@@ -1997,6 +2801,18 @@ class MemoryEngine:
             batch_deleted = 0
 
             try:
+                registry_cursor = await self.db_connection.execute(
+                    f"SELECT memory_uid, memory_space_id FROM memory_registry "
+                    f"WHERE document_id IN ({placeholders})",
+                    batch,
+                )
+                registry_rows = await registry_cursor.fetchall()
+                batch_memory_uids = [str(row["memory_uid"]) for row in registry_rows]
+                deleted_by_space: dict[str, list[str]] = {}
+                for row in registry_rows:
+                    deleted_by_space.setdefault(
+                        str(row["memory_space_id"]), []
+                    ).append(str(row["memory_uid"]))
                 # 1. Batch delete from BM25 FTS
                 await self.db_connection.execute(
                     f"DELETE FROM livingmemory_memories_fts WHERE doc_id IN ({placeholders})",
@@ -2055,6 +2871,35 @@ class MemoryEngine:
                 await self._advance_write_op(
                     op_id,
                     "graph_atoms_deleted",
+                    payload_patch={"memory_ids": batch, "deleted_count": batch_deleted},
+                )
+
+                # 5. Remove logical identities that still point at deleted IDs.
+                affected_by_space: dict[str, set[str]] = {}
+                space_by_uid = {
+                    str(row["memory_uid"]): str(row["memory_space_id"])
+                    for row in registry_rows
+                }
+                for memory_uid in batch_memory_uids:
+                    affected = await self._mark_dependent_topics_stale(
+                        memory_uid,
+                        reason="timeline_batch_deleted",
+                    )
+                    affected_by_space.setdefault(
+                        space_by_uid[memory_uid], set()
+                    ).update(affected)
+                await self.memory_identity_store.delete_by_document_ids(batch)
+                for memory_space_id, deleted_uids in deleted_by_space.items():
+                    await self._queue_deleted_timeline_repair(
+                        memory_space_id,
+                        deleted_timeline_uids=deleted_uids,
+                        affected_topic_uids=affected_by_space.get(
+                            memory_space_id, set()
+                        ),
+                    )
+                await self._advance_write_op(
+                    op_id,
+                    "identities_deleted",
                     payload_patch={"memory_ids": batch, "deleted_count": batch_deleted},
                 )
             except asyncio.CancelledError:
@@ -2162,11 +3007,15 @@ class MemoryEngine:
                     metadata = doc["metadata"]
 
                     create_time = safe_float(metadata.get("create_time"), time.time())
+                    last_access_time = safe_float(
+                        metadata.get("last_access_time"), 0.0
+                    )
+                    age_anchor = max(create_time, last_access_time)
                     doc_importance = clamp_float(
                         metadata.get("importance"), default=0.5
                     )
 
-                    if create_time < cutoff_time and doc_importance < importance:
+                    if age_anchor < cutoff_time and doc_importance < importance:
                         to_delete_ids.append(doc["id"])
 
                 offset += len(batch_docs)
@@ -2211,13 +3060,31 @@ class MemoryEngine:
         """
 
         try:
+            async with self._session_migration_lock:
+                if unified_msg_origin in self._session_migration_checked:
+                    return
+                completed = await self._migrate_session_data_locked(
+                    unified_msg_origin
+                )
+                if completed:
+                    self._session_migration_checked.add(unified_msg_origin)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[自动迁移] 迁移失败: {e}", exc_info=True)
+
+    async def _migrate_session_data_locked(
+        self, unified_msg_origin: str
+    ) -> bool:
+        """Run one migration check while ``_session_migration_lock`` is held."""
+        try:
             # 1. 解析 unified_msg_origin
             parts = unified_msg_origin.split(":", 2)
             if len(parts) != 3:
                 logger.warning(
                     f"[自动迁移] unified_msg_origin 格式不正确: {unified_msg_origin}"
                 )
-                return
+                return True
 
             platform_id, message_type, full_session_id = parts
 
@@ -2233,19 +3100,22 @@ class MemoryEngine:
                 for i in range(1, len(parts_by_bang)):
                     candidates.append("!".join(parts_by_bang[i:]))
 
-            logger.info(f"[自动迁移] 开始检查会话，候选匹配: {candidates}")
-
             # 3. 检查是否已迁移（使用unified_msg_origin本身作为标记）
             migration_key = f"migrated_umo_{unified_msg_origin}"
             if self.db_connection is None:
-                return
+                return False
             cursor = await self.db_connection.execute(
                 "SELECT value FROM migration_status WHERE key = ?", (migration_key,)
             )
             row = await cursor.fetchone()
             if row and row[0] == "true":
                 # 已迁移过，跳过
-                return
+                return True
+
+            logger.debug(
+                "[自动迁移] 首次检查会话，候选匹配: %s",
+                candidates,
+            )
 
             # 4. 查找所有需要迁移的记录
             # 条件：session_id 匹配任一候选 且 不包含冒号（旧格式标识）
@@ -2269,7 +3139,7 @@ class MemoryEngine:
                     (migration_key, "true"),
                 )
                 await self.db_connection.commit()
-                return
+                return True
 
             logger.info(f"[自动迁移] 找到 {len(list(rows))} 条旧数据需要迁移")
 
@@ -2311,11 +3181,13 @@ class MemoryEngine:
             logger.info(
                 f"[自动迁移] 完成！已更新 {updated_count} 条记录 -> {unified_msg_origin}"
             )
+            return True
 
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"[自动迁移] 迁移失败: {e}", exc_info=True)
+            return False
 
     async def get_statistics(self) -> dict[str, Any]:
         """

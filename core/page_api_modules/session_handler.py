@@ -10,6 +10,7 @@ from astrbot.api import logger
 
 if TYPE_CHECKING:
     from ..managers.conversation_manager import ConversationManager
+    from ..managers.session_maintenance_manager import SessionMaintenanceManager
     from .utils import PageApiUtils
 
 
@@ -62,6 +63,7 @@ class SessionHandler:
         platform_id = self.utils.optional_text(args.get("platform_id"))
         chat_type = self.utils.optional_text(args.get("chat_type"))
         target_query = str(args.get("target_query", "")).strip().casefold()
+        flat = str(args.get("flat", "")).strip().casefold() in {"1", "true", "yes", "on"}
         try:
             updated_after = self._optional_timestamp(args.get("updated_after"))
             updated_before = self._optional_timestamp(args.get("updated_before"))
@@ -113,7 +115,7 @@ class SessionHandler:
             # Layered mode deliberately stops here until both mandatory levels
             # are selected. This avoids preparing a large target dropdown while
             # the user is still choosing an account or chat type.
-            if not platform_id or not chat_type:
+            if not flat and (not platform_id or not chat_type):
                 return self.utils.ok(
                     {
                         "items": [],
@@ -134,14 +136,18 @@ class SessionHandler:
 
             filtered: list[dict[str, Any]] = []
             for row in account_rows:
-                if chat_type and row["chat_type"] != chat_type:
+                if not flat and chat_type and row["chat_type"] != chat_type:
                     continue
                 last_active = float(row["last_active_at"] or 0.0)
                 if updated_after is not None and last_active < updated_after:
                     continue
                 if updated_before is not None and last_active > updated_before:
                     continue
-                if target_query and target_query not in str(row["target_id"]).casefold():
+                searchable = " ".join(
+                    str(row.get(key, ""))
+                    for key in ("session_id", "platform", "platform_id", "target_id", "message_type")
+                ).casefold()
+                if target_query and target_query not in searchable:
                     continue
                 filtered.append(row)
 
@@ -166,6 +172,103 @@ class SessionHandler:
         except Exception as exc:
             logger.error(f"[PageAPI] 获取会话目录失败: {exc}", exc_info=True)
             return self.utils.error(str(exc))
+
+    async def audit_sessions(
+        self, manager: "SessionMaintenanceManager | None"
+    ) -> dict[str, Any]:
+        if manager is None:
+            return self.utils.error("会话维护组件尚未初始化")
+        try:
+            limit = max(1, min(int(request.args.get("limit", 1000)), 5000))
+            return self.utils.ok(await manager.audit_sessions(limit=limit))
+        except (TypeError, ValueError) as exc:
+            return self.utils.error(str(exc))
+        except Exception as exc:
+            logger.error("[PageAPI] 会话审计失败", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def preview_maintenance(
+        self, manager: "SessionMaintenanceManager | None"
+    ) -> dict[str, Any]:
+        if manager is None:
+            return self.utils.error("会话维护组件尚未初始化")
+        payload = await request.get_json(silent=True) or {}
+        try:
+            result = await manager.preview(
+                str(payload.get("operation") or ""),
+                list(payload.get("session_ids") or []),
+                canonical_session_id=self.utils.optional_text(
+                    payload.get("canonical_session_id")
+                ),
+            )
+            return self.utils.ok(result)
+        except (TypeError, ValueError) as exc:
+            return self.utils.error(str(exc))
+
+    async def start_maintenance(
+        self, manager: "SessionMaintenanceManager | None"
+    ) -> dict[str, Any]:
+        if manager is None:
+            return self.utils.error("会话维护组件尚未初始化")
+        payload = await request.get_json(silent=True) or {}
+        if payload.get("confirmed") is not True:
+            return self.utils.error("必须先确认影响预览")
+        try:
+            result = await manager.start_task(
+                str(payload.get("operation") or ""),
+                list(payload.get("session_ids") or []),
+                canonical_session_id=self.utils.optional_text(
+                    payload.get("canonical_session_id")
+                ),
+                force=bool(payload.get("force", False)),
+            )
+            return self.utils.ok(result)
+        except (TypeError, ValueError) as exc:
+            return self.utils.error(str(exc))
+
+    async def get_maintenance_task(
+        self, manager: "SessionMaintenanceManager | None"
+    ) -> dict[str, Any]:
+        if manager is None:
+            return self.utils.error("会话维护组件尚未初始化")
+        task_uid = self.utils.optional_text(request.args.get("task_uid"))
+        if not task_uid:
+            return self.utils.error("缺少 task_uid")
+        task = await manager.get_task(task_uid)
+        return self.utils.ok(task) if task else self.utils.error("维护任务不存在")
+
+    async def list_maintenance_tasks(
+        self, manager: "SessionMaintenanceManager | None"
+    ) -> dict[str, Any]:
+        if manager is None:
+            return self.utils.error("会话维护组件尚未初始化")
+        try:
+            limit = max(1, min(int(request.args.get("limit", 30)), 100))
+        except (TypeError, ValueError):
+            return self.utils.error("limit 无效")
+        return self.utils.ok({"items": await manager.list_tasks(limit=limit)})
+
+    async def delete_maintenance_task(
+        self, manager: "SessionMaintenanceManager | None"
+    ) -> dict[str, Any]:
+        if manager is None:
+            return self.utils.error("会话维护组件尚未初始化")
+        payload = await request.get_json(silent=True) or {}
+        task_uid = self.utils.optional_text(payload.get("task_uid"))
+        if not task_uid:
+            return self.utils.error("缺少 task_uid")
+        try:
+            deleted = await manager.delete_task(task_uid)
+            return self.utils.ok({"deleted": deleted, "task_uid": task_uid})
+        except ValueError as exc:
+            return self.utils.error(str(exc))
+
+    async def clear_maintenance_tasks(
+        self, manager: "SessionMaintenanceManager | None"
+    ) -> dict[str, Any]:
+        if manager is None:
+            return self.utils.error("会话维护组件尚未初始化")
+        return self.utils.ok({"deleted_count": await manager.clear_finished_tasks()})
 
 
 __all__ = ["SessionHandler"]

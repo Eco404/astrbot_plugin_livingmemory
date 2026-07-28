@@ -13,12 +13,18 @@ from typing import Any
 
 from .page_api_modules import (
     BackupHandler,
+    DatabaseHandler,
     GraphHandler,
+    IdentityHandler,
     MemoryHandler,
+    ModelHandler,
     PageApiUtils,
     RecallHandler,
     SessionHandler,
+    SettingsHandler,
     StatsHandler,
+    TopicHandler,
+    TimelineHandler,
 )
 
 PLUGIN_NAME = "astrbot_plugin_livingmemory"
@@ -37,9 +43,15 @@ class PluginPageApi:
         # 初始化各个处理器
         self.stats_handler = StatsHandler(self.utils)
         self.memory_handler = MemoryHandler(self.utils)
+        self.model_handler = ModelHandler(self.utils)
         self.recall_handler = RecallHandler(self.utils)
         self.session_handler = SessionHandler(self.utils)
+        self.settings_handler = SettingsHandler(self.utils)
         self.graph_handler = GraphHandler(self.utils)
+        self.identity_handler = IdentityHandler(self.utils)
+        self.topic_handler = TopicHandler(self.utils)
+        self.timeline_handler = TimelineHandler(self.utils)
+        self.database_handler = DatabaseHandler(self.utils)
 
         # BackupHandler 需要 data_dir，延迟初始化
         self._backup_handler = None
@@ -70,6 +82,48 @@ class PluginPageApi:
             "LivingMemory Page session catalog",
         )
         register(
+            f"{PAGE_API_PREFIX}/sessions/audit",
+            self.audit_sessions,
+            ["GET"],
+            "LivingMemory Page session audit",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/preview",
+            self.preview_session_maintenance,
+            ["POST"],
+            "LivingMemory Page preview session maintenance",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/start",
+            self.start_session_maintenance,
+            ["POST"],
+            "LivingMemory Page start session maintenance",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/task",
+            self.get_session_maintenance_task,
+            ["GET"],
+            "LivingMemory Page session maintenance task",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/tasks",
+            self.list_session_maintenance_tasks,
+            ["GET"],
+            "LivingMemory Page session maintenance tasks",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/tasks/delete",
+            self.delete_session_maintenance_task,
+            ["POST"],
+            "LivingMemory Page delete session maintenance task",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/sessions/maintenance/tasks/clear",
+            self.clear_session_maintenance_tasks,
+            ["POST"],
+            "LivingMemory Page clear finished session maintenance tasks",
+        )
+        register(
             f"{PAGE_API_PREFIX}/memories",
             self.list_memories,
             ["GET"],
@@ -86,6 +140,12 @@ class PluginPageApi:
             self.update_memory,
             ["POST"],
             "LivingMemory Page update memory",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/memories/update/stage",
+            self.stage_memory_update,
+            ["POST"],
+            "LivingMemory Page stage Timeline edit",
         )
         register(
             f"{PAGE_API_PREFIX}/memories/related",
@@ -118,10 +178,142 @@ class PluginPageApi:
             "LivingMemory Page batch update memories",
         )
         register(
+            f"{PAGE_API_PREFIX}/timeline/settings",
+            self.get_timeline_settings,
+            ["GET"],
+            "LivingMemory Page Timeline settings",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/settings/update",
+            self.update_timeline_settings,
+            ["POST"],
+            "LivingMemory Page update Timeline settings",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/preview",
+            self.preview_timeline_rebuild,
+            ["POST"],
+            "LivingMemory Page preview Timeline reconstruction",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/start",
+            self.start_timeline_rebuild,
+            ["POST"],
+            "LivingMemory Page start Timeline reconstruction",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/task",
+            self.get_timeline_rebuild_task,
+            ["GET"],
+            "LivingMemory Page Timeline reconstruction task",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/tasks",
+            self.list_timeline_rebuild_tasks,
+            ["GET"],
+            "LivingMemory Page Timeline reconstruction tasks",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/resume",
+            self.resume_timeline_rebuild,
+            ["POST"],
+            "LivingMemory Page resume Timeline reconstruction",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/cancel",
+            self.cancel_timeline_rebuild,
+            ["POST"],
+            "LivingMemory Page cancel Timeline reconstruction",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/tasks/delete",
+            self.delete_timeline_rebuild_task,
+            ["POST"],
+            "LivingMemory Page delete Timeline reconstruction task",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/rebuild/tasks/clear",
+            self.clear_timeline_rebuild_tasks,
+            ["POST"],
+            "LivingMemory Page clear Timeline reconstruction tasks",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/staged-edits",
+            self.list_timeline_staged_edits,
+            ["GET"],
+            "LivingMemory Page staged Timeline edits",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/staged-edits/apply",
+            self.apply_timeline_staged_edits,
+            ["POST"],
+            "LivingMemory Page apply staged Timeline edits",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/staged-edits/delete",
+            self.delete_timeline_staged_edits,
+            ["POST"],
+            "LivingMemory Page delete staged Timeline edits",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/inactive",
+            self.list_inactive_timelines,
+            ["GET"],
+            "LivingMemory Page inactive Timeline memories",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/inactive/restore",
+            self.restore_inactive_timelines,
+            ["POST"],
+            "LivingMemory Page restore inactive Timeline memories",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/settings",
+            self.get_settings,
+            ["GET"],
+            "LivingMemory Page unified settings",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/settings/update",
+            self.update_settings,
+            ["POST"],
+            "LivingMemory Page update unified settings",
+        )
+        register(
             f"{PAGE_API_PREFIX}/recall/test",
             self.test_recall,
             ["POST"],
             "LivingMemory Page recall test",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/recall/traces",
+            self.list_recall_traces,
+            ["GET"],
+            "LivingMemory Page recall trace list",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/recall/traces/detail",
+            self.get_recall_trace,
+            ["GET"],
+            "LivingMemory Page recall trace detail",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/recall/traces/settings",
+            self.update_recall_trace_settings,
+            ["POST"],
+            "LivingMemory Page recall trace settings",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/recall/traces/delete",
+            self.delete_recall_trace,
+            ["POST"],
+            "LivingMemory Page delete recall trace",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/recall/traces/clear",
+            self.clear_recall_traces,
+            ["POST"],
+            "LivingMemory Page clear recall traces",
         )
         register(
             f"{PAGE_API_PREFIX}/graph/overview",
@@ -141,6 +333,162 @@ class PluginPageApi:
             ["GET"],
             "LivingMemory Page backup list",
         )
+        register(
+            f"{PAGE_API_PREFIX}/database/health",
+            self.check_database_health,
+            ["GET"],
+            "LivingMemory Page database health check",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/database/repair",
+            self.repair_database_issues,
+            ["POST"],
+            "LivingMemory Page selected database repair",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/database/repair/progress",
+            self.get_database_repair_progress,
+            ["GET"],
+            "LivingMemory Page database repair progress",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/overview",
+            self.get_topic_overview,
+            ["GET"],
+            "LivingMemory Page Topic overview",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics",
+            self.list_topics,
+            ["GET"],
+            "LivingMemory Page Topic list",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/detail",
+            self.get_topic_detail,
+            ["GET"],
+            "LivingMemory Page Topic detail",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/settings",
+            self.get_topic_settings,
+            ["GET"],
+            "LivingMemory Page Topic settings",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/settings/update",
+            self.update_topic_settings,
+            ["POST"],
+            "LivingMemory Page update Topic settings",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/maintenance/unindexed",
+            self.list_unindexed_topic_timelines,
+            ["GET"],
+            "LivingMemory Page unindexed Timeline list",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/maintenance/preview",
+            self.preview_topic_maintenance,
+            ["POST"],
+            "LivingMemory Page incremental Topic maintenance preview",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/reviews",
+            self.list_topic_reviews,
+            ["GET"],
+            "LivingMemory Page Topic review queue",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/reviews/detail",
+            self.get_topic_review_detail,
+            ["GET"],
+            "LivingMemory Page Topic review detail",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/reviews/resolve",
+            self.resolve_topic_review,
+            ["POST"],
+            "LivingMemory Page resolve Topic review",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/governance/preview",
+            self.preview_topic_governance,
+            ["POST"],
+            "LivingMemory Page preview Topic merge or split",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/governance/execute",
+            self.execute_topic_governance,
+            ["POST"],
+            "LivingMemory Page execute Topic merge or split",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/relations/recompute",
+            self.recompute_topic_relations,
+            ["POST"],
+            "LivingMemory Page recompute Topic relations",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/maintenance/revectorize",
+            self.revectorize_topic_memories,
+            ["POST"],
+            "LivingMemory Page revectorize Topic memories",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/maintenance/clear",
+            self.clear_topic_memories,
+            ["POST"],
+            "LivingMemory Page clear Topic memories",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/archived/delete",
+            self.delete_archived_topics,
+            ["POST"],
+            "LivingMemory Page permanently delete archived Topics",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/build/start",
+            self.start_topic_build,
+            ["POST"],
+            "LivingMemory Page start Topic build",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/build/progress",
+            self.get_topic_build_progress,
+            ["GET"],
+            "LivingMemory Page Topic build progress",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/topics/build/discard",
+            self.discard_topic_build,
+            ["POST"],
+            "LivingMemory Page discard Topic build checkpoint",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/models",
+            self.list_models,
+            ["GET"],
+            "LivingMemory Page model information",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/models/test",
+            self.test_model_connection,
+            ["POST"],
+            "LivingMemory Page model connection test",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/identities",
+            self.list_identity_profiles,
+            ["GET"],
+            "LivingMemory Page supplemental identity profiles",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/identities/save",
+            self.save_identity_profiles,
+            ["POST"],
+            "LivingMemory Page save supplemental identity profiles",
+        )
 
     # ==================== 路由处理方法 ====================
     # 所有方法都委托给相应的处理器
@@ -159,6 +507,62 @@ class PluginPageApi:
             return error
         return await self.session_handler.list_sessions(
             ready["conversation_manager"],
+        )
+
+    async def audit_sessions(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.audit_sessions(
+            ready["session_maintenance_manager"]
+        )
+
+    async def preview_session_maintenance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.preview_maintenance(
+            ready["session_maintenance_manager"]
+        )
+
+    async def start_session_maintenance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.start_maintenance(
+            ready["session_maintenance_manager"]
+        )
+
+    async def get_session_maintenance_task(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.get_maintenance_task(
+            ready["session_maintenance_manager"]
+        )
+
+    async def list_session_maintenance_tasks(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.list_maintenance_tasks(
+            ready["session_maintenance_manager"]
+        )
+
+    async def delete_session_maintenance_task(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.delete_maintenance_task(
+            ready["session_maintenance_manager"]
+        )
+
+    async def clear_session_maintenance_tasks(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.session_handler.clear_maintenance_tasks(
+            ready["session_maintenance_manager"]
         )
 
     async def list_memories(self):
@@ -182,6 +586,16 @@ class PluginPageApi:
             return error
         return await self.memory_handler.update_memory(
             ready["memory_engine"], ready["memory_processor"]
+        )
+
+    async def stage_memory_update(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.memory_handler.stage_memory_update(
+            ready["memory_engine"],
+            ready["memory_processor"],
+            ready["timeline_rebuild_manager"],
         )
 
     async def detect_related_memories(self):
@@ -223,12 +637,181 @@ class PluginPageApi:
             return error
         return await self.memory_handler.batch_update_memories(ready["memory_engine"])
 
+    async def get_timeline_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.get_settings(self.plugin.initializer)
+
+    async def update_timeline_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.update_settings(self.plugin.initializer)
+
+    async def preview_timeline_rebuild(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.preview_rebuild(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def start_timeline_rebuild(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.start_rebuild(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def get_timeline_rebuild_task(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.get_rebuild_task(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def list_timeline_rebuild_tasks(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.list_rebuild_tasks(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def resume_timeline_rebuild(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.resume_rebuild_task(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def cancel_timeline_rebuild(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.cancel_rebuild_task(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def delete_timeline_rebuild_task(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.delete_rebuild_task(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def clear_timeline_rebuild_tasks(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.clear_rebuild_tasks(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def list_timeline_staged_edits(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.list_staged_edits(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def apply_timeline_staged_edits(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.apply_staged_edits(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def delete_timeline_staged_edits(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.delete_staged_edits(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def list_inactive_timelines(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.list_inactive(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def restore_inactive_timelines(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.restore_inactive(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def get_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.settings_handler.get_settings(
+            ready["memory_engine"], self.plugin.initializer
+        )
+
+    async def update_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.settings_handler.update_settings(
+            ready["memory_engine"], self.plugin.initializer
+        )
+
     async def test_recall(self):
         """测试记忆召回功能"""
         ready, error = await self._ensure_plugin_ready()
         if error:
             return error
-        return await self.recall_handler.test_recall(ready["memory_engine"])
+        return await self.recall_handler.test_recall(
+            ready["memory_engine"],
+            getattr(self.plugin.initializer, "config_manager", None),
+            ready.get("conversation_manager"),
+            ready.get("recall_trace_store"),
+        )
+
+    async def list_recall_traces(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.recall_handler.list_traces(ready.get("recall_trace_store"))
+
+    async def get_recall_trace(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.recall_handler.get_trace(ready.get("recall_trace_store"))
+
+    async def update_recall_trace_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.recall_handler.update_trace_settings(
+            ready.get("recall_trace_store")
+        )
+
+    async def delete_recall_trace(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.recall_handler.delete_trace(ready.get("recall_trace_store"))
+
+    async def clear_recall_traces(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.recall_handler.clear_traces(ready.get("recall_trace_store"))
 
     async def get_graph_overview(self):
         """获取图谱概览"""
@@ -247,6 +830,190 @@ class PluginPageApi:
     async def list_backups(self):
         """列出所有版本备份及其元数据"""
         return await self.backup_handler.list_backups()
+
+    async def check_database_health(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.database_handler.check_health(
+            ready["memory_engine"], ready.get("conversation_manager")
+        )
+
+    async def repair_database_issues(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.database_handler.start_repair(
+            ready["memory_engine"], ready.get("conversation_manager")
+        )
+
+    async def get_database_repair_progress(self):
+        return await self.database_handler.get_repair_progress()
+
+    async def get_topic_overview(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.get_overview(ready["memory_engine"])
+
+    async def list_topics(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.list_topics(ready["memory_engine"])
+
+    async def get_topic_detail(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.get_topic_detail(ready["memory_engine"])
+
+    async def get_topic_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.get_settings(
+            ready["memory_engine"], self.plugin.initializer
+        )
+
+    async def update_topic_settings(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.update_settings(
+            ready["memory_engine"], self.plugin.initializer
+        )
+
+    async def list_unindexed_topic_timelines(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.list_unindexed_timelines(
+            ready["memory_engine"]
+        )
+
+    async def preview_topic_maintenance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.preview_incremental_maintenance(
+            ready["memory_engine"]
+        )
+
+    async def list_topic_reviews(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.list_reviews(ready["memory_engine"])
+
+    async def get_topic_review_detail(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.get_review_detail(ready["memory_engine"])
+
+    async def resolve_topic_review(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.resolve_review(ready["memory_engine"])
+
+    async def preview_topic_governance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.preview_governance(ready["memory_engine"])
+
+    async def execute_topic_governance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.execute_governance(ready["memory_engine"])
+
+    async def start_topic_build(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.start_build(ready["memory_engine"])
+
+    async def get_topic_build_progress(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.get_build_progress()
+
+    async def discard_topic_build(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.discard_build(ready["memory_engine"])
+
+    async def clear_topic_memories(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.clear_topics(ready["memory_engine"])
+
+    async def delete_archived_topics(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.delete_archived_topics(
+            ready["memory_engine"]
+        )
+
+    async def list_models(self):
+        """列出插件运行时实际使用的模型，包括默认回退来源。"""
+        return await self.model_handler.list_models(self.plugin.initializer)
+
+    async def test_model_connection(self):
+        """测试指定模型角色当前解析到的 Provider。"""
+        return await self.model_handler.test_connection(self.plugin.initializer)
+
+    async def list_identity_profiles(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        store = ready.get("identity_profile_store")
+        if store is None:
+            return self.utils.error("补充人物资料存储尚未初始化")
+        return await self.identity_handler.list_profiles(
+            store,
+            platform_manager=getattr(self.plugin.context, "platform_manager", None),
+            conversation_manager=ready.get("conversation_manager"),
+        )
+
+    async def recompute_topic_relations(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.recompute_relations(ready["memory_engine"])
+
+    async def revectorize_topic_memories(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.start_revectorization(
+            ready["memory_engine"]
+        )
+
+    async def save_identity_profiles(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        store = ready.get("identity_profile_store")
+        if store is None:
+            return self.utils.error("补充人物资料存储尚未初始化")
+        return await self.identity_handler.save_profiles(
+            store,
+            platform_manager=getattr(self.plugin.context, "platform_manager", None),
+            conversation_manager=ready.get("conversation_manager"),
+        )
+
+    async def shutdown(self) -> None:
+        """Stop page-owned background work before runtime components are closed."""
+        await self.database_handler.shutdown()
+        await self.topic_handler.shutdown()
 
     # ==================== 辅助方法 ====================
 
@@ -274,4 +1041,16 @@ class PluginPageApi:
                 self.plugin.initializer, "memory_processor", None
             ),
             "index_validator": self.plugin.initializer.index_validator,
+            "identity_profile_store": getattr(
+                self.plugin.initializer, "identity_profile_store", None
+            ),
+            "session_maintenance_manager": getattr(
+                self.plugin.initializer, "session_maintenance_manager", None
+            ),
+            "timeline_rebuild_manager": getattr(
+                self.plugin.initializer, "timeline_rebuild_manager", None
+            ),
+            "recall_trace_store": getattr(
+                self.plugin.initializer, "recall_trace_store", None
+            ),
         }, None

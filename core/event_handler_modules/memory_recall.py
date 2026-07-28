@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import time
 from typing import TYPE_CHECKING
 
 from astrbot.api import logger
@@ -12,6 +13,12 @@ from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import TextPart
 
+from ..fact_temporal import normalize_fact_temporal
+from ..models.conversation_models import stable_actor_id
+from ..retrieval.unified_recall import (
+    UnifiedRecallCoordinator,
+    UnifiedRecallRequest,
+)
 from ..utils import (
     OperationContext,
     format_memories_for_fake_tool_call,
@@ -38,6 +45,7 @@ class MemoryRecall:
         conversation_manager: "ConversationManager",
         message_utils: "MessageUtils",
         injection_adapter: "InjectionAdapter",
+        persona_resolver=None,
     ):
         """
         初始化记忆召回模块
@@ -56,13 +64,22 @@ class MemoryRecall:
         self.conversation_manager = conversation_manager
         self.message_utils = message_utils
         self.injection_adapter = injection_adapter
+        self.persona_resolver = persona_resolver or get_persona_id
+        self.recall_coordinator = UnifiedRecallCoordinator(
+            memory_engine, config_manager
+        )
+        # Compatibility for tests and callers that inspect query branches.
+        self.recall_pipeline = self.recall_coordinator.timeline_pipeline
 
     async def handle_memory_recall(
         self, event: AstrMessageEvent, req: ProviderRequest
     ):
         """Query and inject long-term memory before LLM request"""
+        trace_started = time.time()
         try:
-            session_id = event.unified_msg_origin
+            raw_session_id = event.unified_msg_origin
+            session_scope = await self.memory_engine.resolve_session_scope(raw_session_id)
+            session_id = session_scope[0] if session_scope else raw_session_id
             logger.debug(f"[DEBUG-Recall] 获取到 unified_msg_origin: {session_id}")
 
             # 检测异常session_id
@@ -100,8 +117,13 @@ class MemoryRecall:
                             f"[{session_id}] 已清理 {removed} 处历史记忆注入片段"
                         )
 
-                # 先提取用户消息（消息存储和召回都需要）
-                actual_query = await self.message_utils.get_event_message_str(event)
+                # 先提取用户消息（消息存储和召回都需要）。组件提取保留
+                # 图片、文件等非纯文本消息，避免它们从原始证据链中消失。
+                raw_query = await self.message_utils.get_event_message_str(event)
+                extracted_query = await self.message_utils.extract_message_content(
+                    event, req
+                )
+                actual_query = raw_query or extracted_query
 
                 request_query = (
                     prompt_text.strip() if isinstance(prompt_text, str) else ""
@@ -110,17 +132,14 @@ class MemoryRecall:
                 # 存储用户消息（仅私聊），无论是否启用召回都需要
                 is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
                 if not is_group and actual_query:
-                    message_to_store = request_query
-                    if not message_to_store:
-                        message_to_store = (
-                            await self.message_utils.extract_message_content(event, req)
-                        )
-                    if not message_to_store:
-                        message_to_store = actual_query.strip()
+                    # 原始事件内容优先于 ProviderRequest.prompt，后者可能已被
+                    # 其他插件改写，不适合作为可追溯的原始对话证据。
+                    message_to_store = extracted_query or raw_query or request_query
                     await self.conversation_manager.add_message_from_event(
                         event=event,
                         role="user",
                         content=message_to_store,
+                        event_source="incoming_private_message",
                     )
                     await self.message_utils.enforce_message_limit(session_id)
 
@@ -151,77 +170,143 @@ class MemoryRecall:
                 # 3. 全局默认人格（最低）
                 # 注意：on_llm_request 钩子在 _ensure_persona_and_skills 之前触发，
                 # 因此不能直接依赖 req.system_prompt 已注入人格，需自行走完整优先级。
-                persona_id = await get_persona_id(self.context, event)
+                persona_id = await self.persona_resolver(self.context, event)
 
                 recall_session_id = session_id if use_session_filtering else None
                 recall_persona_id = persona_id if use_persona_filtering else None
 
-                # 使用原始用户输入作为召回关键字
-                query_for_search = actual_query
-
-                # 上下文扩展：拼接最近2轮对话作为查询，提升检索精准度
-                if self.config_manager.get(
-                    "recall_engine.inject_with_recent_context", False
-                ):
+                expansion_enabled = bool(
+                    self.config_manager.get(
+                        "recall_engine.inject_with_recent_context", False
+                    )
+                )
+                recent_messages: list[dict] = []
+                if expansion_enabled:
                     try:
-                        recent_messages = (
-                            await self.conversation_manager.get_context(
-                                session_id, max_messages=5
-                            )
+                        # get_context 实际按时间升序返回。使用原始结构保留 role，
+                        # RecallPipeline 会移除刚写入数据库的当前用户消息。
+                        recent_messages = await self.conversation_manager.get_context(
+                            session_id,
+                            max_messages=5,
+                            format_for_llm=False,
                         )
-                        if recent_messages and len(recent_messages) > 1:
-                            # recent_messages 按 timestamp DESC 排列（最新在前）
-                            # 跳过索引0（当前消息），取后续消息作为扩展上下文
-                            context_parts = []
-                            for msg in reversed(recent_messages[1:]):
-                                content = msg.get("content", "")
-                                if content and content.strip():
-                                    context_parts.append(content.strip())
-                            if context_parts:
-                                expanded = " | ".join(context_parts)
-                                query_for_search = expanded + " " + actual_query
-                                logger.info(
-                                    f"[{session_id}] 上下文扩展查询: "
-                                    f"{len(context_parts)}条历史消息 + 当前消息"
-                                )
                     except Exception as e:
                         logger.warning(f"[{session_id}] 获取上下文扩展失败: {e}")
 
-                # 执行记忆召回
+                visible_start, visible_end = await self._visible_context_range(
+                    req,
+                    session_id,
+                    current_message_stored=bool(not is_group and actual_query),
+                )
+                assistant_mode = self.config_manager.get(
+                    "recall_engine.assistant_context_mode", "exclude"
+                )
+                topic_enabled = self.recall_coordinator.topic_enabled()
+                current_actor_ids: set[str] = set()
+                if topic_enabled:
+                    topic_config = getattr(
+                        self.memory_engine.topic_recall_pipeline, "config", {}
+                    ) or {}
+                    sender_id = (
+                        event.get_sender_id()
+                        if hasattr(event, "get_sender_id")
+                        else getattr(event, "sender_id", "")
+                    )
+                    platform = (
+                        event.get_platform_name()
+                        if hasattr(event, "get_platform_name")
+                        else "unknown"
+                    )
+                    current_actor_ids = {
+                        stable_actor_id(platform, str(sender_id), "human")
+                    } if sender_id else set()
+                    if (
+                        is_group
+                        and not bool(
+                            topic_config.get(
+                                "recall_group_current_sender_only", True
+                            )
+                        )
+                    ):
+                        current_actor_ids = await self._visible_group_actor_ids(
+                            session_id=session_id,
+                            visible_start=visible_start,
+                            visible_end=visible_end,
+                            current_actor_ids=current_actor_ids,
+                            fallback_platform=platform,
+                        )
+                unified_outcome = await self.recall_coordinator.search(
+                    UnifiedRecallRequest(
+                        query=actual_query,
+                        final_k=top_k,
+                        session_id=session_id,
+                        persona_id=persona_id,
+                        recall_session_id=recall_session_id,
+                        recall_persona_id=recall_persona_id,
+                        session_scope=list(session_scope or [session_id]),
+                        recent_messages=recent_messages,
+                        expansion_enabled=expansion_enabled,
+                        assistant_mode=assistant_mode,
+                        visible_message_start_index=visible_start,
+                        visible_message_end_index=visible_end,
+                        current_actor_ids=current_actor_ids,
+                        topic_enabled=topic_enabled,
+                    )
+                )
+                recall_outcome = unified_outcome.timeline_outcome
+                topic_outcome = unified_outcome.topic_outcome
+                fragment_outcome = unified_outcome.fragment_outcome
+                recalled_memories = unified_outcome.timeline_results
+                topic_results = unified_outcome.topic_results
+                fragment_results = unified_outcome.fragment_results
+                branch_summary = ", ".join(
+                    f"{item.name}:{item.weight:.2f}"
+                    for item in recall_outcome.branches
+                )
                 logger.info(
-                    f"[{session_id}] 开始记忆召回，查询='{query_for_search[:80]}...'"
+                    f"[{session_id}] 结构化记忆召回完成: 查询分支=[{branch_summary}], "
+                    f"候选={len(recall_outcome.candidates)}, "
+                    f"入选={len(recalled_memories)}, "
+                    f"阈值={recall_outcome.applied_threshold:.3f}, "
+                    f"上下文重叠过滤={recall_outcome.overlap_suppressed}"
                 )
-
-                recalled_memories = await self.memory_engine.search_memories(
-                    query=query_for_search,
-                    k=self.config_manager.get("recall_engine.top_k", 5),
-                    session_id=recall_session_id,
-                    persona_id=recall_persona_id,
-                )
-
-                if recalled_memories:
+                if topic_outcome is not None:
                     logger.info(
-                        f"[{session_id}] 检索到 {len(recalled_memories)} 条记忆"
+                        f"[{session_id}] Topic 召回完成: "
+                        f"候选={len(topic_outcome.candidates)}, "
+                        f"入选={len(topic_results)}, "
+                        f"阈值={topic_outcome.applied_threshold:.3f}, "
+                        f"上下文高覆盖过滤={topic_outcome.context_suppressed}, "
+                        f"片段补充={len(fragment_results)}, "
+                        f"兼容 Timeline 补充={len(recalled_memories)}"
+                    )
+
+                if topic_results or fragment_results or recalled_memories:
+                    logger.info(
+                        f"[{session_id}] 检索到 {len(topic_results)} 条 Topic、"
+                        f"{len(fragment_results)} 条片段、"
+                        f"{len(recalled_memories)} 条 Timeline"
                     )
 
                     # 格式化并注入记忆
                     memory_list = [
-                        {
-                            "id": getattr(mem, "doc_id", None),
-                            "content": mem.content,
-                            "score": mem.final_score,
-                            "metadata": mem.metadata,
-                            "timestamp": mem.metadata.get("create_time"),
-                        }
-                        for mem in recalled_memories
+                        self._topic_memory_dict(item) for item in topic_results
+                    ] + [
+                        self._fragment_memory_dict(item)
+                        for item in fragment_results
+                    ] + [
+                        self._timeline_memory_dict(
+                            item, as_supplement=bool(topic_results)
+                        )
+                        for item in recalled_memories
                     ]
 
                     # 输出详细记忆信息
-                    for i, mem in enumerate(recalled_memories, 1):
+                    for i, mem in enumerate(memory_list, 1):
                         logger.debug(
-                            f"[{session_id}] 记忆 #{i}: 得分={mem.final_score:.3f}, "
-                            f"重要性={mem.metadata.get('importance', 0.5):.2f}, "
-                            f"内容={mem.content[:100]}..."
+                            f"[{session_id}] 记忆 #{i}: 得分={mem['score']:.3f}, "
+                            f"层={mem['metadata'].get('memory_layer', 'timeline')}, "
+                            f"内容={mem['content'][:100]}..."
                         )
 
                     # 根据配置选择注入方式（含 Provider 兼容降级）
@@ -250,16 +335,20 @@ class MemoryRecall:
                         )
 
                     memory_str = format_memories_for_injection(memory_list)
+                    injection_succeeded = False
+                    injected_messages = None
 
                     if injection_method == "user_message_before":
                         req.prompt = memory_str + "\n\n" + (req.prompt or "")
+                        injection_succeeded = True
                         logger.info(
-                            f"[{session_id}] 成功向用户消息前注入 {len(recalled_memories)} 条记忆"
+                            f"[{session_id}] 成功向用户消息前注入 {len(memory_list)} 条记忆"
                         )
                     elif injection_method == "user_message_after":
                         req.prompt = (req.prompt or "") + "\n\n" + memory_str
+                        injection_succeeded = True
                         logger.info(
-                            f"[{session_id}] 成功向用户消息后注入 {len(recalled_memories)} 条记忆"
+                            f"[{session_id}] 成功向用户消息后注入 {len(memory_list)} 条记忆"
                         )
                     elif injection_method == "fake_tool_call":
                         fake_messages = format_memories_for_fake_tool_call(
@@ -271,9 +360,11 @@ class MemoryRecall:
                         )
                         if fake_messages:
                             req.contexts.extend(fake_messages)
+                            injected_messages = fake_messages
+                            injection_succeeded = True
                             logger.info(
                                 f"[{session_id}] 成功以伪造工具调用方式注入 "
-                                f"{len(recalled_memories)} 条记忆"
+                                f"{len(memory_list)} 条记忆"
                             )
                     else:
                         # extra_user_content（推荐）：追加到用户消息末尾，
@@ -281,17 +372,322 @@ class MemoryRecall:
                         req.extra_user_content_parts.append(
                             TextPart(text=memory_str).mark_as_temp()
                         )
+                        injection_succeeded = True
                         logger.info(
                             f"[{session_id}] 成功向用户消息末尾注入 "
-                            f"{len(recalled_memories)} 条记忆"
+                            f"{len(memory_list)} 条记忆"
+                        )
+                    if injection_succeeded:
+                        try:
+                            await self.recall_coordinator.record_access(
+                                unified_outcome
+                            )
+                        except Exception:
+                            logger.warning(
+                                f"[{session_id}] 记忆注入已成功，但访问统计更新失败",
+                                exc_info=True,
+                            )
+                        await self._record_production_trace(
+                            status="injected",
+                            query_text=actual_query,
+                            session_id=session_id,
+                            persona_id=persona_id,
+                            elapsed_ms=(time.time() - trace_started) * 1000,
+                            request_data={
+                                "query_text": actual_query,
+                                "top_k": top_k,
+                                "session_filter": recall_session_id,
+                                "persona_filter": recall_persona_id,
+                                "query_branches": [
+                                    {
+                                        "name": item.name,
+                                        "role": item.role,
+                                        "weight": item.weight,
+                                        "text": item.text,
+                                    }
+                                    for item in recall_outcome.branches
+                                ],
+                            },
+                            result_data={"items": memory_list},
+                            diagnostics={
+                                "timeline": recall_outcome.diagnostics(),
+                                "topic": topic_outcome.diagnostics()
+                                if topic_outcome is not None
+                                else None,
+                                "topic_fragments": fragment_outcome.diagnostics()
+                                if fragment_outcome is not None
+                                else None,
+                            },
+                            injection={
+                                "configured_method": configured_method,
+                                "actual_method": injection_method,
+                                "fallback_reason": fallback_reason,
+                                "content": memory_str,
+                                "messages": injected_messages,
+                            },
                         )
                 else:
                     logger.info(f"[{session_id}] 未找到相关记忆")
+                    await self._record_production_trace(
+                        status="no_match",
+                        query_text=actual_query,
+                        session_id=session_id,
+                        persona_id=persona_id,
+                        elapsed_ms=(time.time() - trace_started) * 1000,
+                        request_data={"query_text": actual_query, "top_k": top_k},
+                        diagnostics={
+                            "timeline": recall_outcome.diagnostics(),
+                            "topic": topic_outcome.diagnostics()
+                            if topic_outcome is not None
+                            else None,
+                        },
+                    )
 
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error(f"处理 on_llm_request 钩子时发生错误: {e}", exc_info=True)
+            await self._record_production_trace(
+                status="failed",
+                query_text=str(locals().get("actual_query") or ""),
+                session_id=str(locals().get("session_id") or "") or None,
+                persona_id=str(locals().get("persona_id") or "") or None,
+                elapsed_ms=(time.time() - trace_started) * 1000,
+                error=str(e),
+            )
+
+    async def _record_production_trace(self, **payload) -> None:
+        """Best-effort diagnostics: recording must never affect a chat request."""
+        store = getattr(self.memory_engine, "recall_trace_store", None)
+        if store is None:
+            return
+        try:
+            if not await store.production_enabled():
+                return
+            result_data = payload.get("result_data") or {}
+            items = result_data.get("items", []) if isinstance(result_data, dict) else []
+            await store.record(
+                trace_type="production",
+                mode="current",
+                result_count=len(items) if isinstance(items, list) else 0,
+                **payload,
+            )
+        except Exception:
+            logger.warning("保存实际召回记录失败，已忽略", exc_info=True)
+
+    @staticmethod
+    def _topic_memory_dict(item) -> dict:
+        metadata = item.topic.metadata if isinstance(item.topic.metadata, dict) else {}
+        keywords = [
+            str(value) for value in metadata.get("keywords", []) if str(value).strip()
+        ]
+        selected_atoms = [
+            atom
+            for atom in item.atoms[:4]
+            if str(atom.get("content") or "").strip()
+        ]
+        facts = [str(atom.get("content") or "").strip() for atom in selected_atoms]
+        fact_temporal = []
+        for atom in selected_atoms:
+            atom_metadata = (
+                atom.get("metadata", {})
+                if isinstance(atom.get("metadata"), dict)
+                else {}
+            )
+            if atom_metadata.get("evidence_started_at") is not None:
+                temporal = normalize_fact_temporal(atom_metadata)
+            else:
+                temporal = normalize_fact_temporal(
+                    {},
+                    fallback_started_at=atom.get("event_started_at")
+                    or item.topic.started_at,
+                    fallback_ended_at=atom.get("event_ended_at")
+                    or item.topic.ended_at,
+                    fallback_basis="topic_window",
+                )
+            fact_temporal.append(temporal)
+        return {
+            "id": item.topic_uid,
+            "content": f"Topic: {item.content}".strip(),
+            "score": item.final_score,
+            "metadata": {
+                "memory_layer": "topic",
+                "title": item.topic.title,
+                "importance": item.topic.importance,
+                "confidence": item.topic.confidence,
+                "status": item.topic.status.value,
+                "topics": [item.topic.title, *keywords[:5]],
+                "key_facts": facts,
+                "key_fact_temporal": fact_temporal,
+                "source_timeline_count": len(item.sources),
+                "affect_match_score": item.affect_match_score,
+                "affect_match_boost": item.affect_match_boost,
+                "affect_event_count": len(item.selected_affect_events),
+                "context_coverage": item.context_coverage,
+                "started_at": item.topic.started_at,
+                "ended_at": item.topic.ended_at,
+            },
+            "timestamp": None,
+        }
+
+    @staticmethod
+    def _timeline_memory_dict(item, *, as_supplement: bool) -> dict:
+        metadata = dict(item.metadata) if isinstance(item.metadata, dict) else {}
+        source_window = (
+            metadata.get("source_window", {})
+            if isinstance(metadata.get("source_window"), dict)
+            else {}
+        )
+        fallback_start = source_window.get("started_at") or metadata.get("create_time")
+        fallback_end = source_window.get("ended_at") or fallback_start
+        key_facts = metadata.get("key_facts", [])
+        temporal_rows = metadata.get("key_fact_temporal", [])
+        if isinstance(key_facts, list):
+            metadata["key_fact_temporal"] = [
+                normalize_fact_temporal(
+                    temporal_rows[index]
+                    if isinstance(temporal_rows, list)
+                    and index < len(temporal_rows)
+                    else {},
+                    fallback_started_at=fallback_start,
+                    fallback_ended_at=fallback_end,
+                    fallback_basis="timeline_window",
+                )
+                for index in range(len(key_facts))
+            ]
+        metadata["memory_layer"] = "timeline_supplement" if as_supplement else "timeline"
+        return {
+            "id": getattr(item, "doc_id", None),
+            "content": item.content,
+            "score": item.final_score,
+            "metadata": metadata,
+            "timestamp": metadata.get("create_time"),
+        }
+
+    @staticmethod
+    def _fragment_memory_dict(item) -> dict:
+        facts_by_content = {
+            str(fact.get("content") or "").strip(): fact
+            for fact in item.fragment.facts
+            if isinstance(fact, dict) and str(fact.get("content") or "").strip()
+        }
+        selected_facts = [str(value) for value in item.fact_contents if str(value)]
+        fact_temporal = [
+            normalize_fact_temporal(
+                facts_by_content.get(content, {}),
+                fallback_started_at=item.fragment.started_at,
+                fallback_ended_at=item.fragment.ended_at,
+                fallback_basis="fragment_window",
+            )
+            for content in selected_facts
+        ]
+        return {
+            "id": item.fragment_uid,
+            "content": item.content,
+            "score": item.final_score,
+            "metadata": {
+                "memory_layer": "topic_fragment",
+                "parent_topic_uid": item.topic_uid,
+                "title": item.fragment.label,
+                "importance": item.fragment.importance,
+                "confidence": item.fragment.confidence,
+                "fragment_body_suppressed": item.body_suppressed,
+                "fragment_fact_count": len(item.fact_contents),
+                "key_facts": selected_facts,
+                "key_fact_temporal": fact_temporal,
+                "affect_match_score": item.affect_match_score,
+                "affect_match_boost": item.affect_match_boost,
+                "affect_event_count": len(item.selected_affect_events),
+                "source_timeline_count": len(item.fragment.timeline_uids),
+                "context_coverage": item.context_coverage,
+                "narrative_perspective": "first_person_assistant",
+                "narrator_actor_id": item.fragment.metadata.get(
+                    "conversation_roles", {}
+                ).get("timeline_narrators", {}),
+                "started_at": item.fragment.started_at,
+                "ended_at": item.fragment.ended_at,
+            },
+            "timestamp": item.fragment.started_at,
+        }
+
+    async def _visible_group_actor_ids(
+        self,
+        *,
+        session_id: str,
+        visible_start: int | None,
+        visible_end: int | None,
+        current_actor_ids: set[str],
+        fallback_platform: str,
+    ) -> set[str]:
+        """Resolve human speakers from the persisted range visible to this request.
+
+        The current sender is supplied separately because group capture ordering is
+        adapter-dependent and the current event may not have reached the store yet.
+        Missing or unreadable range data deliberately falls back to that sender only.
+        """
+        actor_ids = set(current_actor_ids)
+        if (
+            visible_start is None
+            or visible_end is None
+            or int(visible_end) <= int(visible_start)
+        ):
+            return actor_ids
+        try:
+            messages = await self.conversation_manager.get_messages_range(
+                session_id,
+                start_index=max(0, int(visible_start)),
+                end_index=max(0, int(visible_end)),
+            )
+        except Exception as exc:
+            logger.debug(
+                f"[{session_id}] 无法读取群聊可见参与者，退化为当前发言者: {exc}"
+            )
+            return actor_ids
+        for message in messages:
+            metadata = getattr(message, "metadata", {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            role = str(getattr(message, "role", "") or "").casefold()
+            actor_type = str(metadata.get("actor_type") or "").casefold()
+            if (
+                role == "assistant"
+                or actor_type == "assistant"
+                or bool(metadata.get("is_bot_message"))
+            ):
+                continue
+            sender_id = str(getattr(message, "sender_id", "") or "").strip()
+            if not sender_id:
+                continue
+            platform = str(
+                getattr(message, "platform", "") or fallback_platform or "unknown"
+            )
+            actor_ids.add(stable_actor_id(platform, sender_id, "human"))
+        return actor_ids
+
+    async def _visible_context_range(
+        self,
+        req: ProviderRequest,
+        session_id: str,
+        *,
+        current_message_stored: bool,
+    ) -> tuple[int | None, int | None]:
+        """Estimate the persisted message-index range already visible to the LLM."""
+        contexts = getattr(req, "contexts", None)
+        if not isinstance(contexts, list):
+            return None, None
+        visible_count = sum(
+            1
+            for item in contexts
+            if isinstance(item, dict) and item.get("role") in {"user", "assistant"}
+        )
+        if visible_count <= 0:
+            return None, None
+        try:
+            total = await self.conversation_manager.store.get_message_count(session_id)
+            end_index = max(0, int(total) - (1 if current_message_stored else 0))
+        except Exception as e:
+            logger.debug(f"[{session_id}] 无法计算当前上下文消息范围: {e}")
+            return None, None
+        return max(0, end_index - visible_count), end_index
 
     def _remove_injected_memories_from_context(
         self, req: ProviderRequest, session_id: str

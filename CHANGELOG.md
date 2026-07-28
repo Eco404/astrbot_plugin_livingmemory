@@ -5,7 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 并且遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+开发阶段的详细变更记录见 [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md)。正式发布时，仅在本文件新增对应版本的简要说明。
+
+## [3.0.0] - 2026-07-28
+
+- Topic 记忆正式可用：支持可溯源构建、增量维护、人物与情绪信息及 Topic 优先召回。
+- 重构 WebUI 设置与维护中心，补充 Timeline 重构、Topic 审查、会话审计和数据库健康检查。
+- 强化构建断点、原子发布、召回诊断、模型签名校验及全量/增量一致性。
+- 数据库正式迁移链收束为 `v8 → v9 → v10`，升级前自动备份。
 
 ## [2.3.6] - 2026-06-28
 
@@ -449,4 +456,4 @@
 
 ---
 
-注意：请在每次发版前更新此文件，将 [Unreleased] 部分的内容移动到新版本号下。
+注意：每次发版前，从 [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) 整理本次发布内容到具体版本条目，并移除已经发布的开发日志内容。

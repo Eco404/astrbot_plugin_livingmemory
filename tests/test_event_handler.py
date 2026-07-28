@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.event_handler import EventHandler
+from astrbot_plugin_livingmemory.core.models.conversation_models import Message
 
 from astrbot.api.platform import MessageType
 
@@ -16,6 +17,9 @@ def memory_engine():
     engine = Mock()
     engine.search_memories = AsyncMock(return_value=[])
     engine.add_memory = AsyncMock(return_value=1)
+    engine.resolve_session_scope = AsyncMock(side_effect=lambda session_id: [session_id])
+    engine.record_memory_access = Mock()
+    engine.recall_trace_store = None
     return engine
 
 
@@ -92,6 +96,27 @@ def _make_resp(text: str = "assistant reply"):
     return resp
 
 
+@pytest.mark.asyncio
+async def test_reflection_records_persona_display_name_before_assistant_write(
+    handler, conversation_manager
+):
+    event = _make_event(group=False)
+    persona = Mock()
+    persona.name = "测试助手"
+    handler.context.persona_manager.get_persona = AsyncMock(return_value=persona)
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.event_handler_modules.memory_reflection.get_persona_id",
+        new=AsyncMock(return_value="persona-id"),
+    ):
+        await handler.handle_memory_reflection(event, _make_resp())
+
+    assistant_call = conversation_manager.add_message_from_event.await_args
+    assert assistant_call.kwargs["persona_id"] == "persona-id"
+    assert assistant_call.kwargs["persona_name"] == "测试助手"
+    assert assistant_call.kwargs["event_source"] == "llm_response"
+
+
 def _make_event(group: bool = False):
     event = Mock()
     event.unified_msg_origin = "test:private:sid-1"
@@ -105,6 +130,84 @@ def _make_event(group: bool = False):
     event.get_messages = Mock(return_value=[])
     event.get_platform_name = Mock(return_value="test")
     return event
+
+
+@pytest.mark.asyncio
+async def test_group_topic_actor_scope_uses_only_visible_human_speakers(
+    handler, conversation_manager
+):
+    conversation_manager.get_messages_range = AsyncMock(
+        return_value=[
+            Message(
+                id=1,
+                session_id="group-1",
+                role="user",
+                content="甲发言",
+                sender_id="user-a",
+                sender_name="甲",
+                group_id="group-1",
+                platform="aiocqhttp",
+                metadata={"actor_type": "human"},
+            ),
+            Message(
+                id=2,
+                session_id="group-1",
+                role="assistant",
+                content="Bot 回复",
+                sender_id="bot-1",
+                sender_name="Bot",
+                group_id="group-1",
+                platform="aiocqhttp",
+                metadata={"actor_type": "assistant", "is_bot_message": True},
+            ),
+            Message(
+                id=3,
+                session_id="group-1",
+                role="user",
+                content="乙发言",
+                sender_id="user-b",
+                sender_name="乙",
+                group_id="group-1",
+                platform="qq",
+                metadata={},
+            ),
+        ]
+    )
+
+    actor_ids = await handler._memory_recall._visible_group_actor_ids(
+        session_id="group-1",
+        visible_start=10,
+        visible_end=13,
+        current_actor_ids={"qq:human:current"},
+        fallback_platform="qq",
+    )
+
+    assert actor_ids == {
+        "qq:human:current",
+        "qq:human:user-a",
+        "qq:human:user-b",
+    }
+    conversation_manager.get_messages_range.assert_awaited_once_with(
+        "group-1",
+        start_index=10,
+        end_index=13,
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_topic_actor_scope_falls_back_to_current_sender_without_range(
+    handler, conversation_manager
+):
+    actor_ids = await handler._memory_recall._visible_group_actor_ids(
+        session_id="group-1",
+        visible_start=None,
+        visible_end=None,
+        current_actor_ids={"qq:human:current"},
+        fallback_platform="qq",
+    )
+
+    assert actor_ids == {"qq:human:current"}
+    conversation_manager.get_messages_range.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -419,6 +522,10 @@ async def test_storage_task_writes_source_window(
     assert sw["start_index"] == 0
     assert sw["end_index"] == 2
     assert sw["message_count"] == 2
+    assert sw["first_message_id"] == 1
+    assert sw["last_message_id"] == 2
+    assert sw["started_at"] == messages[0].timestamp
+    assert sw["ended_at"] == messages[-1].timestamp
 
 
 @pytest.mark.asyncio
@@ -872,6 +979,75 @@ async def test_handle_memory_recall_fake_tool_call_fallback_on_gemini(
     assert "用户喜欢吃火锅" in text_part.text
     assert "<RAG-Faiss-Memory>" in text_part.text
     assert getattr(text_part, "_no_save", False) is True
+
+
+@pytest.mark.asyncio
+async def test_topic_access_is_recorded_only_after_successful_injection(
+    handler, memory_engine
+):
+    event = _make_event(group=False)
+    req = _make_req("工资怎么核对")
+    topic = Mock(
+        title="工资核对",
+        summary="核对工资天数和补发记录",
+        importance=0.8,
+        confidence=0.9,
+        status=Mock(value="active"),
+        metadata={"keywords": ["工资"]},
+        started_at=None,
+        ended_at=None,
+    )
+    topic_result = Mock(
+        topic_uid="topic-wage",
+        topic=topic,
+        content="工资核对\n核对工资天数和补发记录",
+        final_score=0.8,
+        atoms=[],
+        sources=[],
+        affect_match_score=0.0,
+        affect_match_boost=0.0,
+        selected_affect_events=[],
+        context_coverage=0.0,
+    )
+    topic_outcome = Mock(
+        results=[topic_result],
+        candidates=[topic_result],
+        applied_threshold=0.32,
+        context_suppressed=0,
+    )
+    fragment_outcome = Mock(results=[], available_count=0)
+
+    async def record_after_injection(results):
+        assert results == [topic_result]
+        assert len(req.extra_user_content_parts) == 1
+        return 1
+
+    topic_pipeline = Mock()
+    topic_pipeline.config = {"recall_top_k": 1, "timeline_supplement_k": 0}
+    topic_pipeline.search_spaces = AsyncMock(return_value=topic_outcome)
+    topic_pipeline.search_fragment_supplements = AsyncMock(
+        return_value=fragment_outcome
+    )
+    topic_pipeline.record_topic_access = AsyncMock(
+        side_effect=record_after_injection
+    )
+    topic_pipeline.source_timeline_document_ids = AsyncMock(return_value=[77])
+    memory_engine.topic_memory_enabled = True
+    memory_engine.topic_recall_pipeline = topic_pipeline
+    memory_engine.search_memories = AsyncMock(return_value=[])
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.event_handler.get_persona_id",
+        new_callable=AsyncMock,
+    ) as get_persona:
+        get_persona.return_value = "persona_1"
+        await handler.handle_memory_recall(event, req)
+
+    topic_pipeline.record_topic_access.assert_awaited_once_with([topic_result])
+    topic_pipeline.source_timeline_document_ids.assert_awaited_once_with(
+        [topic_result], []
+    )
+    memory_engine.record_memory_access.assert_called_once_with([77])
 
 
 @pytest.mark.asyncio
@@ -1410,7 +1586,38 @@ async def test_top_k_0_still_stores_private_message(
 
     conversation_manager.add_message_from_event.assert_awaited_once()
     conversation_manager.add_message_from_event.assert_awaited_with(
-        event=event, role="user", content="private message"
+        event=event,
+        role="user",
+        content="hello",
+        event_source="incoming_private_message",
+    )
+
+
+@pytest.mark.asyncio
+async def test_media_only_private_message_is_preserved_as_raw_evidence(
+    memory_engine, memory_processor, conversation_manager
+):
+    from astrbot.core.message.components import Image
+
+    handler = _make_handler_with_top_k_0(
+        memory_engine, memory_processor, conversation_manager
+    )
+    event = _make_event(group=False)
+    event.get_message_str.return_value = ""
+    event.get_messages.return_value = [Image()]
+    req = _make_req("")
+    # A caption may be added by AstrBot after the raw message was received.
+    req.extra_user_content_parts = [
+        Mock(text="<image_caption>一张工资单截图</image_caption>")
+    ]
+
+    await handler.handle_memory_recall(event, req)
+
+    conversation_manager.add_message_from_event.assert_awaited_once_with(
+        event=event,
+        role="user",
+        content="[图片: 一张工资单截图]",
+        event_source="incoming_private_message",
     )
 
 
@@ -1514,12 +1721,12 @@ async def test_context_expansion_enriches_query(
     cm_mock.get_session_metadata = AsyncMock(return_value=0)
     cm_mock.update_session_metadata = AsyncMock()
     cm_mock.invalidate_cache = AsyncMock()
-    # 模拟返回 3 条消息（最新在前）: [当前消息, bot 回复, 用户上条]
+    # get_context 按时间升序返回；最后一条是刚存入的当前消息。
     cm_mock.get_context = AsyncMock(
         return_value=[
-            {"content": "当前用户消息"},
-            {"content": "Bot 的上一条回复"},
-            {"content": "用户之前说的事情"},
+            {"role": "user", "content": "用户之前说的事情"},
+            {"role": "assistant", "content": "Bot 的上一条回复"},
+            {"role": "user", "content": "当前用户消息"},
         ]
     )
 
@@ -1542,7 +1749,14 @@ async def test_context_expansion_enriches_query(
     )
 
     recalled = Mock(
-        content="mem_context", final_score=0.8, metadata={"importance": 0.9}
+        doc_id=1,
+        content="mem_context",
+        final_score=0.8,
+        rrf_score=0.03,
+        bm25_score=0.8,
+        vector_score=0.8,
+        score_breakdown={},
+        metadata={"importance": 0.9},
     )
     memory_engine.search_memories = AsyncMock(return_value=[recalled])
 
@@ -1557,10 +1771,12 @@ async def test_context_expansion_enriches_query(
         get_persona.return_value = "persona_1"
         await h.handle_memory_recall(event, req)
 
-    # 验证 search_memories 收到的 query 包含扩展内容
-    call_kwargs = memory_engine.search_memories.await_args.kwargs
-    assert "用户之前说的事情" in call_kwargs["query"]
-    assert "Bot 的上一条回复" in call_kwargs["query"]
+    # 默认忽略 Bot 回复，当前消息与历史用户消息分别检索。
+    queries = [
+        call.kwargs["query"]
+        for call in memory_engine.search_memories.await_args_list
+    ]
+    assert queries == ["当前用户消息", "用户之前说的事情"]
 
 
 @pytest.mark.asyncio
@@ -1593,11 +1809,20 @@ async def test_context_expansion_skips_when_empty(
     # 只返回一条消息（只有当前消息，无历史）
     h.conversation_manager.get_context = AsyncMock(
         return_value=[
-            {"content": "唯一一条消息"},
+            {"role": "user", "content": "唯一一条消息"},
         ]
     )
 
-    recalled = Mock(content="mem_skip", final_score=0.8, metadata={"importance": 0.9})
+    recalled = Mock(
+        doc_id=1,
+        content="mem_skip",
+        final_score=0.8,
+        rrf_score=0.03,
+        bm25_score=0.8,
+        vector_score=0.8,
+        score_breakdown={},
+        metadata={"importance": 0.9},
+    )
     memory_engine.search_memories = AsyncMock(return_value=[recalled])
 
     event = _make_event(group=False)

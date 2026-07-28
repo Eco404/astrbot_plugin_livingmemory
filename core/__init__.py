@@ -1,87 +1,55 @@
-"""
-LivingMemory核心模块
-提供统一的记忆管理引擎
+"""LivingMemory public core API with cycle-safe lazy imports."""
 
-目录结构:
-- base/: 基础组件（异常、配置、常量）
-- models/: 数据模型
-- managers/: 管理器（会话管理、记忆引擎）
-- processors/: 处理器（记忆处理、文本处理）
-- validators/: 验证器（索引验证）
-- retrieval/: 检索系统
-- utils/: 工具函数
-"""
+from __future__ import annotations
 
-# 基础组件
-from .base import (
-    ConfigManager,
-    ConfigurationError,
-    DatabaseError,
-    InitializationError,
-    LivingMemoryException,
-    MemoryProcessingError,
-    ProviderNotReadyError,
-    RetrievalError,
-    ValidationError,
-)
+from importlib import import_module
+from typing import Any
 
-# 管理器
-from .managers import ConversationManager, GraphMemoryManager, MemoryEngine
 
-# 数据模型
-from .models import (
-    ExtractedGraph,
-    GraphEdge,
-    GraphEntry,
-    GraphNode,
-    MemoryEvent,
-    Message,
-    Session,
-)
+_EXPORTS = {
+    "ConfigManager": (".base", "ConfigManager"),
+    "ConfigurationError": (".base", "ConfigurationError"),
+    "DatabaseError": (".base", "DatabaseError"),
+    "InitializationError": (".base", "InitializationError"),
+    "LivingMemoryException": (".base", "LivingMemoryException"),
+    "MemoryProcessingError": (".base", "MemoryProcessingError"),
+    "ProviderNotReadyError": (".base", "ProviderNotReadyError"),
+    "RetrievalError": (".base", "RetrievalError"),
+    "ValidationError": (".base", "ValidationError"),
+    "ConversationManager": (".managers.conversation_manager", "ConversationManager"),
+    "GraphMemoryManager": (".managers.graph_memory_manager", "GraphMemoryManager"),
+    "MemoryEngine": (".managers.memory_engine", "MemoryEngine"),
+    "ExtractedGraph": (".models", "ExtractedGraph"),
+    "GraphEdge": (".models", "GraphEdge"),
+    "GraphEntry": (".models", "GraphEntry"),
+    "GraphNode": (".models", "GraphNode"),
+    "MemoryEvent": (".models", "MemoryEvent"),
+    "Message": (".models", "Message"),
+    "Session": (".models", "Session"),
+    "ChatroomContextParser": (".processors.chatroom_parser", "ChatroomContextParser"),
+    "EntityResolver": (".processors.entity_resolver", "EntityResolver"),
+    "GraphExtractor": (".processors.graph_extractor", "GraphExtractor"),
+    "MemoryProcessor": (".processors.memory_processor", "MemoryProcessor"),
+    "TextProcessor": (".processors.text_processor", "TextProcessor"),
+    "store_round_with_length_check": (
+        ".processors.message_utils",
+        "store_round_with_length_check",
+    ),
+    "IndexValidator": (".validators.index_validator", "IndexValidator"),
+}
 
-# 处理器
-from .processors import (
-    ChatroomContextParser,
-    EntityResolver,
-    GraphExtractor,
-    MemoryProcessor,
-    TextProcessor,
-    store_round_with_length_check,
-)
+__all__ = list(_EXPORTS)
 
-# 验证器
-from .validators import IndexValidator
 
-__all__ = [
-    # 基础组件
-    "ConfigManager",
-    "ConfigurationError",
-    "DatabaseError",
-    "InitializationError",
-    "LivingMemoryException",
-    "MemoryProcessingError",
-    "ProviderNotReadyError",
-    "RetrievalError",
-    "ValidationError",
-    # 数据模型
-    "MemoryEvent",
-    "Message",
-    "Session",
-    "GraphNode",
-    "GraphEdge",
-    "GraphEntry",
-    "ExtractedGraph",
-    # 管理器
-    "ConversationManager",
-    "GraphMemoryManager",
-    "MemoryEngine",
-    # 处理器
-    "ChatroomContextParser",
-    "EntityResolver",
-    "GraphExtractor",
-    "MemoryProcessor",
-    "TextProcessor",
-    "store_round_with_length_check",
-    # 验证器
-    "IndexValidator",
-]
+def __getattr__(name: str) -> Any:
+    target = _EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(name)
+    module_name, attribute = target
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

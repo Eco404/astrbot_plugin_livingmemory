@@ -49,6 +49,8 @@ export class MemoryPage {
         summary: item.text || item.content || "",
         content: item.text || item.content,
         memory_type: (item.metadata && item.metadata.memory_type) || "GENERAL",
+        topic_count: Number(item.topic_count || 0),
+        summary_quality: String((item.metadata && item.metadata.summary_quality) || "unknown"),
         importance: normalizeImportance(item.metadata && item.metadata.importance),
         status: (item.metadata && item.metadata.status) || "active",
         created_at: (item.metadata && item.metadata.create_time)
@@ -111,7 +113,11 @@ export class MemoryPage {
 
         html += '<tr data-key="' + key + '" style="height:' + this.ROW_HEIGHT + 'px">';
         html += '<td class="cell-mono cell-id">' + item.memory_id + '</td>';
-        html += '<td class="cell-summary"><div class="memory-summary-text">' + esc(item.summary || "") + '</div><div class="memory-summary-meta">' + esc(window.t("table.updated", item.updated_at || "--")) + '</div></td>';
+        const qualityFlag = item.summary_quality === "low"
+          ? '<span class="timeline-quality-flag" title="' + esc(window.t("memory.lowQualityHint")) + '" aria-label="' + esc(window.t("memory.lowQuality")) + '"></span>'
+          : '';
+        html += '<td class="cell-summary"><div class="memory-summary-text">' + esc(item.summary || "") + '</div><div class="memory-summary-meta">' + esc(window.t("table.updated", item.updated_at || "--")) + qualityFlag + '</div></td>';
+        html += '<td class="cell-topics"><span class="timeline-topic-count">' + item.topic_count + '</span></td>';
         html += '<td class="cell-type"><span class="type-tag">' + esc(typeLabel(item.memory_type)) + '</span></td>';
         html += '<td class="cell-importance"><div class="importance-bar"><div class="importance-bar-track">';
         html += '<div class="importance-bar-fill ' + impCls + '" style="width:' + (impNum * 10) + '%"></div></div>';
@@ -142,7 +148,7 @@ export class MemoryPage {
    */
   renderEmpty() {
     const tbody = document.getElementById("memories-body");
-    tbody.innerHTML = '<tr><td colspan="6" class="table-empty">' + window.t("table.noData") + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="table-empty">' + window.t("table.noData") + '</td></tr>';
     tbody.style.paddingTop = "0";
     tbody.style.paddingBottom = "0";
   }

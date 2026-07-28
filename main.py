@@ -88,7 +88,7 @@ elif _version_lt(_CURRENT_ASTRBOT_VERSION, _MIN_ASTRBOT_VERSION):
     "LivingMemory",
     "lxfight",
     "An intelligent long-term memory plugin with a dynamic lifecycle for AstrBot.",
-    "2.3.6",
+    "3.0.0",
     "https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory",
 )
 class LivingMemoryPlugin(Star):
@@ -205,6 +205,7 @@ class LivingMemoryPlugin(Star):
                     memory_engine=self.initializer.memory_engine,  # type: ignore[arg-type]
                     memory_processor=self.initializer.memory_processor,  # type: ignore[arg-type]
                     conversation_manager=self.initializer.conversation_manager,  # type: ignore[arg-type]
+                    timeline_summary_service=self.initializer.timeline_summary_service,
                 )
 
             # 创建命令处理器（幂等）
@@ -217,6 +218,7 @@ class LivingMemoryPlugin(Star):
                     index_validator=self.initializer.index_validator,
                     memory_processor=self.initializer.memory_processor,
                     initialization_status_callback=self._get_initialization_status_message,
+                    timeline_summary_service=self.initializer.timeline_summary_service,
                 )
 
             self._register_agent_tools_if_needed()
@@ -574,6 +576,16 @@ class LivingMemoryPlugin(Star):
         if get_active_plugin() is self:
             set_active_plugin(None)
 
+        # Page API build jobs own independent asyncio tasks. Drain them before
+        # closing MemoryEngine stores so a reloaded plugin cannot race the old one.
+        if self.page_api is not None:
+            shutdown_page_api = getattr(self.page_api, "shutdown", None)
+            if callable(shutdown_page_api):
+                try:
+                    await shutdown_page_api()
+                except Exception:
+                    logger.error("停止 LivingMemory Page API 后台任务失败", exc_info=True)
+
         # 取消所有后台任务
         if self._background_tasks:
             logger.info(f"正在取消 {len(self._background_tasks)} 个后台任务...")
@@ -592,6 +604,15 @@ class LivingMemoryPlugin(Star):
 
         # 停止衰减调度器
         await self.initializer.stop_scheduler()
+
+        if self.initializer.session_maintenance_manager:
+            await self.initializer.session_maintenance_manager.shutdown()
+
+        timeline_rebuild_manager = getattr(
+            self.initializer, "timeline_rebuild_manager", None
+        )
+        if timeline_rebuild_manager:
+            await timeline_rebuild_manager.shutdown()
 
         # 关闭 ConversationManager
         if (

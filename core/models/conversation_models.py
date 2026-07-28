@@ -4,12 +4,169 @@
 """
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from astrbot.api import logger
+
+from .platform_identity import canonical_platform
+
+
+def stable_actor_id(platform: str | None, sender_id: str, actor_type: str) -> str:
+    """Return a platform-scoped identity that is independent from display names."""
+    platform_key = canonical_platform(platform) or "unknown"
+    type_key = "assistant" if actor_type == "assistant" else "human"
+    sender_key = str(sender_id or "unknown").strip() or "unknown"
+    return f"{platform_key}:{type_key}:{sender_key}"
+
+
+def build_role_bindings(
+    messages: list["Message"], persona_id: str | None = None
+) -> dict[str, Any]:
+    """Build a deterministic speaker map for one Timeline source window.
+
+    Names are snapshots only. ``actor_id`` and the structured message role remain the
+    identity anchors, so nickname changes cannot silently create a different person.
+    """
+    actors: dict[str, dict[str, Any]] = {}
+    assistant_ids: list[str] = []
+    ambiguity_flags: list[str] = []
+    message_actor_ids: dict[str, str] = {}
+    private_chat = bool(messages) and all(message.group_id is None for message in messages)
+    human_sender_keys = {
+        (
+            canonical_platform(message.platform) or "unknown",
+            str(message.sender_id or "").strip(),
+        )
+        for message in messages
+        if message.role != "assistant"
+        and not bool(message.metadata.get("is_bot_message"))
+        and str(message.sender_id or "").strip()
+    }
+    for message_index, message in enumerate(messages, 1):
+        actor_type = (
+            "assistant"
+            if message.role == "assistant"
+            or bool(message.metadata.get("is_bot_message"))
+            else "human"
+        )
+        # Recompute legacy IDs so adapter aliases such as ``aiocqhttp`` and
+        # profile platform ``qq`` resolve to one logical participant.
+        platform_key = canonical_platform(message.platform) or "unknown"
+        sender_id = str(message.sender_id or "").strip()
+        if (
+            actor_type == "assistant"
+            and private_chat
+            and (platform_key, sender_id) in human_sender_keys
+        ):
+            # Historical proactive-message writers could copy the private peer's
+            # account into an assistant row.  The structured role is authoritative;
+            # anchor the narrator to the persona instead of creating one actor with
+            # both human and assistant semantics.
+            sender_id = f"persona:{persona_id or 'default'}"
+            ambiguity_flags.append("assistant_sender_matches_private_peer")
+        actor_id = stable_actor_id(message.platform, sender_id, actor_type)
+        message_actor_ids[f"M{message_index}"] = actor_id
+        actor = actors.setdefault(
+            actor_id,
+            {
+                "actor_id": actor_id,
+                "actor_type": actor_type,
+                "platform": platform_key,
+                "sender_id": sender_id,
+                "observed_names": [],
+            },
+        )
+        display_name = str(message.sender_name or "").strip()
+        if actor_type == "assistant":
+            if persona_id:
+                actor["persona_id"] = str(persona_id)
+            persona_name = str(message.metadata.get("persona_name") or "").strip()
+            if persona_name:
+                actor["persona_name"] = persona_name
+                if persona_name not in actor["observed_names"]:
+                    actor["observed_names"].append(persona_name)
+            if actor_id not in assistant_ids:
+                assistant_ids.append(actor_id)
+        readable_display_name = bool(
+            display_name
+            and display_name != str(message.sender_id or "").strip()
+            and not re.fullmatch(r"[0-9]+", display_name)
+        )
+        if (
+            display_name
+            and (actor_type != "assistant" or readable_display_name)
+            and display_name not in actor["observed_names"]
+        ):
+            actor["observed_names"].append(display_name)
+
+    human_names = {
+        name.casefold()
+        for actor in actors.values()
+        if actor["actor_type"] == "human"
+        for name in actor.get("observed_names", [])
+    }
+    for actor in actors.values():
+        if actor["actor_type"] != "assistant":
+            continue
+        retained = [
+            name
+            for name in actor.get("observed_names", [])
+            if name.casefold() not in human_names
+        ]
+        if len(retained) != len(actor.get("observed_names", [])):
+            ambiguity_flags.append("assistant_name_collides_with_human")
+        persona_name = str(actor.get("persona_name") or "").strip()
+        actor["observed_names"] = (
+            ([persona_name] if persona_name else [])
+            + [name for name in retained if name != persona_name]
+        ) or [
+            str(persona_id)
+            if persona_id and not re.fullmatch(r"[0-9]+", str(persona_id))
+            else "助手"
+        ]
+    if len(assistant_ids) > 1:
+        ambiguity_flags.append("multiple_assistant_actors")
+    narrator_actor_id = assistant_ids[0] if len(assistant_ids) == 1 else None
+    if narrator_actor_id is None:
+        platform = messages[0].platform if messages else "unknown"
+        persona_name = next(
+            (
+                str(message.metadata.get("persona_name") or "").strip()
+                for message in messages
+                if str(message.metadata.get("persona_name") or "").strip()
+            ),
+            "",
+        )
+        narrator_sender_id = f"persona:{persona_id or 'default'}"
+        narrator_actor_id = stable_actor_id(
+            platform, narrator_sender_id, "assistant"
+        )
+        actors.setdefault(
+            narrator_actor_id,
+            {
+                "actor_id": narrator_actor_id,
+                "actor_type": "assistant",
+                "platform": str(platform or "unknown"),
+                "sender_id": narrator_sender_id,
+                "observed_names": [persona_name or str(persona_id or "助手")],
+                "persona_id": str(persona_id or "default"),
+                "persona_name": persona_name or None,
+                "synthetic_narrator": True,
+            },
+        )
+
+    return {
+        "schema_version": 2,
+        "narrative_perspective": "first_person_assistant",
+        "narrator_actor_id": narrator_actor_id,
+        "actors": list(actors.values()),
+        "message_actor_ids": message_actor_ids,
+        "ambiguity_flags": ambiguity_flags,
+    }
 
 
 @dataclass

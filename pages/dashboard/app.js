@@ -5,11 +5,18 @@
 
 import {
   ApiClient,
+  ConfirmDialog,
+  IdentityPage,
   PeekPanel,
   MemoryPage,
+  MaintenancePage,
+  ModelPage,
   RecallPage,
   SessionPicker,
+  SettingsPage,
   SystemPage,
+  TopicPage,
+  TimelinePage,
   esc,
   statusPill,
   nodeBadge,
@@ -48,11 +55,18 @@ import {
      Initialize Modules
      ================================================================ */
   const api = new ApiClient();
-  const peekPanel = new PeekPanel(state, api);
+  const confirmDialog = new ConfirmDialog();
+  const topicPage = new TopicPage(api, showToast);
+  const peekPanel = new PeekPanel(state, api, topicPage);
   const memoryPage = new MemoryPage(state, api, peekPanel);
-  const recallPage = new RecallPage(state, api, peekPanel);
+  const identityPage = new IdentityPage(api, showToast);
+  const modelPage = new ModelPage(api, showToast);
   const systemPage = new SystemPage(state, api);
   const sessionPicker = new SessionPicker(api, showToast);
+  const recallPage = new RecallPage(state, api, topicPage, confirmDialog, showToast);
+  const timelinePage = new TimelinePage(api, showToast);
+  const settingsPage = new SettingsPage(api, showToast);
+  const maintenancePage = new MaintenancePage(topicPage, recallPage, modelPage, showToast, confirmDialog);
 
   /* ================================================================
      Theme Management
@@ -134,7 +148,10 @@ import {
       if (window.ensureGraphScene) window.ensureGraphScene();
     }
     if (name === "memory") memoryPage.fetch();
-    if (name === "recall") { /* 召回页面按需加载 */ }
+    if (name === "topic") topicPage.fetch();
+    if (name === "identities") identityPage.fetch();
+    if (name === "settings") settingsPage.fetch();
+    if (name === "maintenance") maintenancePage.activate();
     if (name === "system") systemPage.fetch();
   }
 
@@ -211,12 +228,16 @@ import {
       memoryPage.renderVirtual();
       memoryPage.updatePagination();
     }
-    if (state.page === "recall" && state._recallCache) {
+    if (state.page === "maintenance" && state._recallCache) {
       recallPage.renderResults(state._recallCache.data, state._recallCache.elapsed);
     }
     if (state.page === "system" && state._systemCache) {
       systemPage.render(state._systemCache.data);
     }
+    if (state.page === "topic") topicPage.fetch();
+    if (state.page === "settings" && settingsPage.data) settingsPage.render();
+    if (state.page === "maintenance") modelPage.render();
+    if (state.page === "identities") identityPage.render();
 
     const peekPanelEl = document.getElementById("peek-panel");
     const peekVisible = peekPanelEl && peekPanelEl.classList.contains("visible");
@@ -274,10 +295,17 @@ import {
     applyTheme(initialTheme);
 
     initSidebar();
+    confirmDialog.initEventListeners();
 
     memoryPage.initEventListeners();
     recallPage.initEventListeners();
     sessionPicker.init();
+    topicPage.initEventListeners();
+    timelinePage.initEventListeners();
+    settingsPage.initEventListeners();
+    maintenancePage.initEventListeners();
+    modelPage.initEventListeners();
+    identityPage.initEventListeners();
 
     document.getElementById("peek-close").addEventListener("click", () => peekPanel.close());
     document.getElementById("peek-overlay").addEventListener("click", () => peekPanel.close());

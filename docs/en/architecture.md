@@ -46,6 +46,63 @@ Document memories and graph memories are searched through two routes:
 | Graph nodes and edges | Entities and relationships extracted from memories, with cross-memory merging |
 | Memory atoms | Independent fact units with type, TTL, decay, and access reinforcement |
 
+### Timeline identity and source spans
+
+Every new memory receives a stable `memory_uid`, a monotonic `revision`, and a
+deterministic `memory_space_id`. The physical `documents.id` may change during a
+new-ID replacement, while `memory_registry` keeps the same logical UID mapped to
+the current document.
+
+`memory_source_spans` stores the session, message IDs, message indexes, and time
+range separately. Legacy memories without stable message evidence are marked as
+partially or not traceable instead of receiving fabricated provenance. These
+records remain in the `timeline` layer and do not change existing generation or
+retrieval behavior.
+
+### Derived Topic-memory storage (v9.1, phase-two foundation)
+
+Topic memories are automatically derived from Timeline memories. This phase only
+introduces storage and provenance; generation and retrieval remain disabled.
+`topic_memories` stores generated snapshots and independent importance state,
+while `topic_memory_atoms` stores Topic-owned atoms without reusing or mutating
+Timeline atoms in `memory_atoms`.
+
+`topic_timeline_links` forms a bidirectional many-to-many index using stable UIDs
+and records source revisions, time clusters, semantic similarity, temporal
+affinity, and contribution weight. Nearby Timeline fragments can share one time
+cluster, so a long conversation is not treated as several independent votes.
+
+`topic_atom_sources` maps each Topic atom to a Timeline atom ID or content
+fingerprint. Editing a Timeline marks only dependent Topics stale for later
+targeted rebuilding. `topic_maintenance_runs` stores resumable cursors and live
+progress for full, incremental, and repair jobs. Topic snapshots use optimistic
+revisions and transactional replacement and have no manual WebUI editing path.
+
+### Topic candidate discovery (v9.2, phase-three preview)
+
+`TopicMaintenanceManager` performs read-only Timeline scans within one strict
+`memory_space_id`. It extracts normalized topics, fact fingerprints, independent
+atom fingerprints, and lexical features; assigns source-time clusters; and then
+builds broad candidate groups from topic, fact, atom, lexical, and temporal
+overlap. Deterministic output is stored only in `topic_candidate_groups` with
+`preview` status. It neither writes final Topics nor participates in retrieval.
+A time cluster is kept as one broad review window even when it may contain
+several subjects; a later LLM must split it, and the window is never treated as
+a final Topic decision.
+
+`topic_maintenance_items` persists each source UID and revision together with a
+batch cursor and progress. Interrupted runs resume without duplicating work, and
+a Timeline revised during a pause is read again instead of reusing stale input.
+Candidate IDs remain deterministic within one run. This layer narrows the input
+for later LLM review and is not treated as a final semantic decision.
+
+Topic development advances the database schema through minor versions: v9 is
+the stable-identity layer, v9.1 adds Topic storage, and v9.2 adds deterministic
+candidate scanning. The schema reaches v10 only after Topic generation,
+maintenance, and retrieval form a complete feature. Minor versions are stored
+as prefixed text such as `v9.2`, preventing SQLite's legacy INTEGER affinity
+from collapsing a future v9.10 into the floating-point value 9.1.
+
 ## Data safety
 
 | Scenario | Protection |

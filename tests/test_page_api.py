@@ -18,6 +18,9 @@ from astrbot_plugin_livingmemory.core.page_api import (
     PLUGIN_NAME,
     PluginPageApi,
 )
+from astrbot_plugin_livingmemory.core.models.identity_profile import (
+    SupplementalIdentityStore,
+)
 
 # ---------------------------------------------------------------------------
 # Fake / stub helpers
@@ -80,6 +83,12 @@ class FakeInitializer:
         self.conversation_manager = None
         self.memory_processor = SimpleNamespace()
         self.index_validator = None
+        self.config_manager = MagicMock()
+        self.config_manager.get.side_effect = lambda _key, default=None: default
+        self.llm_provider = None
+        self.embedding_provider = None
+        self.rerank_provider = None
+        self.identity_profile_store = SupplementalIdentityStore()
         self.data_dir = "/tmp/test_plugin"
 
 
@@ -141,9 +150,21 @@ def _patch_page_request(req: MagicMock):
     import astrbot_plugin_livingmemory.core.page_api_modules.memory_handler as memory_mod
     import astrbot_plugin_livingmemory.core.page_api_modules.recall_handler as recall_mod
     import astrbot_plugin_livingmemory.core.page_api_modules.session_handler as session_mod
+    import astrbot_plugin_livingmemory.core.page_api_modules.settings_handler as settings_mod
+    import astrbot_plugin_livingmemory.core.page_api_modules.timeline_handler as timeline_mod
+    import astrbot_plugin_livingmemory.core.page_api_modules.topic_handler as topic_mod
 
     # Patch all modules that use request
-    modules = [mod, memory_mod, recall_mod, graph_mod, session_mod]
+    modules = [
+        mod,
+        memory_mod,
+        recall_mod,
+        graph_mod,
+        session_mod,
+        settings_mod,
+        timeline_mod,
+        topic_mod,
+    ]
     old_values = []
 
     for module in modules:
@@ -497,6 +518,37 @@ class TestGetStats:
         assert "尚未就绪" in result["message"]
 
 
+class TestTopicList:
+    @pytest.mark.asyncio
+    async def test_defaults_to_active_and_reports_unfiltered_space_total(self, api):
+        engine = api.plugin.initializer.memory_engine
+
+        async def count_topics(_space_id, *, status=None):
+            return 0 if status == "active" else 4
+
+        engine.topic_memory_store = SimpleNamespace(
+            list_topics=AsyncMock(return_value=[]),
+            count_topics=AsyncMock(side_effect=count_topics),
+            list_topic_actors=AsyncMock(return_value=[]),
+        )
+        req = _mock_page_request(args={"memory_space_id": "space-1"})
+
+        with _patch_page_request(req):
+            result = await api.list_topics()
+
+        assert result["status"] == "ok"
+        assert result["data"]["status"] == "active"
+        assert result["data"]["total"] == 0
+        assert result["data"]["space_total"] == 4
+        engine.topic_memory_store.list_topics.assert_awaited_once_with(
+            "space-1",
+            status="active",
+            limit=100,
+            offset=0,
+            actor_id=None,
+        )
+
+
 class TestSessionCatalog:
     @pytest.mark.asyncio
     async def test_layered_filters(self, api):
@@ -564,6 +616,25 @@ class TestSessionCatalog:
         assert result["status"] == "ok"
         assert result["data"]["facets"]["platform_ids"] == ["bot-a"]
         assert result["data"]["items"] == []
+
+    @pytest.mark.asyncio
+    async def test_flat_catalog_returns_sessions_without_layer_selection(self, api):
+        sessions = [
+            SimpleNamespace(
+                session_id="bot-a:FriendMessage:user-1",
+                platform="qq",
+                created_at=10.0,
+                last_active_at=200.0,
+                message_count=3,
+            )
+        ]
+        store = SimpleNamespace(get_recent_sessions=AsyncMock(return_value=sessions))
+        api.plugin.initializer.conversation_manager = SimpleNamespace(store=store)
+        req = _mock_page_request(args={"flat": "true", "target_query": "user-1"})
+        with _patch_page_request(req):
+            result = await api.list_sessions()
+        assert result["status"] == "ok"
+        assert result["data"]["items"][0]["session_id"] == sessions[0].session_id
 
 
 class TestListMemories:
@@ -702,6 +773,135 @@ class TestListMemories:
         assert result["data"]["filters"]["type"] == "PREFERENCE"
         assert result["data"]["sort"] == "importance_desc"
         assert [item["id"] for item in result["data"]["items"]] == [2, 1]
+
+    @pytest.mark.asyncio
+    async def test_includes_batch_topic_counts(self, api, tmp_path):
+        db_path = tmp_path / "memory-topic-counts.db"
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                """
+                CREATE TABLE documents (
+                    id INTEGER PRIMARY KEY,
+                    doc_id TEXT,
+                    text TEXT,
+                    metadata TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            await db.execute(
+                """
+                INSERT INTO documents
+                    (id, doc_id, text, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    1,
+                    "1",
+                    "Timeline content",
+                    json.dumps({"memory_uid": "timeline-1"}),
+                    "created",
+                    "updated",
+                ),
+            )
+            await db.commit()
+
+        topic_store = SimpleNamespace(
+            get_topic_counts_for_timelines=AsyncMock(
+                return_value={"timeline-1": 3}
+            )
+        )
+        engine = api.plugin.initializer.memory_engine
+        engine.db_path = str(db_path)
+        engine.topic_memory_store = topic_store
+        req = _mock_page_request(args={"page": "1", "page_size": "20"})
+
+        with _patch_page_request(req):
+            result = await api.list_memories()
+
+        assert result["status"] == "ok"
+        assert result["data"]["items"][0]["topic_count"] == 3
+        topic_store.get_topic_counts_for_timelines.assert_awaited_once_with(
+            ["timeline-1"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_memory_detail_includes_only_active_related_topics(
+        self, api, tmp_path
+    ):
+        db_path = tmp_path / "memory-topic-detail.db"
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                """
+                CREATE TABLE documents (
+                    id INTEGER PRIMARY KEY,
+                    doc_id TEXT,
+                    text TEXT,
+                    metadata TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            await db.execute(
+                """
+                INSERT INTO documents
+                    (id, doc_id, text, metadata, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    7,
+                    "7",
+                    "Timeline detail",
+                    json.dumps({"memory_uid": "timeline-7"}),
+                    "created",
+                    "updated",
+                ),
+            )
+            await db.commit()
+
+        topic_store = SimpleNamespace(
+            get_topics_for_timeline=AsyncMock(
+                return_value=[
+                    {
+                        "topic_uid": "topic-active",
+                        "title": "Active Topic",
+                        "summary": "Active summary",
+                        "status": "active",
+                        "link_status": "active",
+                        "importance": 0.8,
+                        "revision": 2,
+                    },
+                    {
+                        "topic_uid": "topic-archived",
+                        "title": "Archived Topic",
+                        "status": "archived",
+                        "link_status": "active",
+                    },
+                    {
+                        "topic_uid": "topic-stale-link",
+                        "title": "Stale link",
+                        "status": "active",
+                        "link_status": "archived",
+                    },
+                ]
+            )
+        )
+        engine = api.plugin.initializer.memory_engine
+        engine.db_path = str(db_path)
+        engine.topic_memory_store = topic_store
+        req = _mock_page_request(args={"memory_id": "7"})
+
+        with _patch_page_request(req):
+            result = await api.get_memory_detail()
+
+        assert result["status"] == "ok"
+        assert result["data"]["topic_count"] == 1
+        assert [item["topic_uid"] for item in result["data"]["related_topics"]] == [
+            "topic-active"
+        ]
+        topic_store.get_topics_for_timeline.assert_awaited_once_with("timeline-7")
 
     @pytest.mark.asyncio
     async def test_plugin_not_ready(self, api_not_ready):
@@ -1380,13 +1580,222 @@ class TestTestRecall:
         assert "k" in result["message"]
 
     @pytest.mark.asyncio
+    async def test_invalid_mode(self, api):
+        req = _mock_page_request(get_json={"query": "hello", "mode": "both"})
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "error"
+        assert "mode" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_topic_mode_requires_session(self, api):
+        req = _mock_page_request(get_json={"query": "hello", "mode": "topic"})
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "error"
+        assert "会话 ID" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_recall_rejects_invalid_temporal_constraint(self, api):
+        req = _mock_page_request(
+            get_json={
+                "query": "七月的安排",
+                "mode": "timeline",
+                "temporal": {"mode": "range"},
+            }
+        )
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "error"
+        assert "时间检索参数无效" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_topic_mode_bypasses_feature_switch_and_skips_timeline_search(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.topic_memory_enabled = False
+        engine.search_memories = AsyncMock(return_value=[])
+        engine.topic_memory_store = SimpleNamespace(
+            find_memory_spaces_for_session=AsyncMock(return_value=["space-1"])
+        )
+        topic = SimpleNamespace(
+            title="Topic title",
+            summary="Topic summary",
+            importance=0.8,
+            status=SimpleNamespace(value="active"),
+        )
+        topic_result = SimpleNamespace(
+            topic_uid="topic-1",
+            topic=topic,
+            content="Topic title\nTopic summary",
+            final_score=0.9,
+            relevance_score=0.8,
+            embedding_score=0.7,
+            keyword_score=0.2,
+            base_relevance_score=0.8,
+            rerank_score=None,
+        )
+        outcome = SimpleNamespace(
+            results=[topic_result], diagnostics=lambda: {"selected_count": 1}
+        )
+        engine.topic_recall_pipeline = SimpleNamespace(
+            config={"recall_top_k": 1}, search=AsyncMock(return_value=outcome)
+        )
+        req = _mock_page_request(
+            get_json={
+                "query": "hello",
+                "mode": "topic",
+                "session_id": "bot:FriendMessage:user",
+                "k": 5,
+            }
+        )
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "ok"
+        assert result["data"]["mode"] == "topic"
+        assert result["data"]["results"][0]["metadata"]["memory_layer"] == "topic"
+        engine.search_memories.assert_not_awaited()
+        assert engine.topic_recall_pipeline.search.await_args.kwargs["final_k"] == 5
+
+    @pytest.mark.asyncio
+    async def test_current_mode_uses_timeline_fallback_when_fragments_exist_but_none_match(
+        self, api
+    ):
+        engine = api.plugin.initializer.memory_engine
+        engine.topic_memory_enabled = True
+        timeline = SimpleNamespace(
+            doc_id=7,
+            content="工资核对的 Timeline",
+            final_score=0.8,
+            rrf_score=0.8,
+            bm25_score=0.2,
+            vector_score=0.8,
+            metadata={"memory_uid": "timeline-7", "importance": 0.7},
+            score_breakdown={"document_vector_score": 0.8},
+        )
+        engine.search_memories = AsyncMock(return_value=[timeline])
+        engine.topic_memory_store = SimpleNamespace(
+            find_memory_spaces_for_session=AsyncMock(return_value=["space-1"])
+        )
+        topic = SimpleNamespace(
+            title="工资核对",
+            summary="工资核对详情",
+            importance=0.8,
+            status=SimpleNamespace(value="active"),
+        )
+        topic_result = SimpleNamespace(
+            topic_uid="topic-1",
+            topic=topic,
+            content="工资核对\n工资核对详情",
+            final_score=0.9,
+            relevance_score=0.8,
+            embedding_score=0.7,
+            keyword_score=0.2,
+            base_relevance_score=0.8,
+            rerank_score=None,
+        )
+        topic_outcome = SimpleNamespace(
+            results=[topic_result],
+            diagnostics=lambda: {"selected_count": 1},
+        )
+        fragment_outcome = SimpleNamespace(
+            results=[],
+            available_count=3,
+            diagnostics=lambda: {
+                "available_count": 3,
+                "selected_count": 0,
+            },
+        )
+        select_supplements = MagicMock(return_value=[timeline])
+        engine.topic_recall_pipeline = SimpleNamespace(
+            config={"recall_top_k": 1, "timeline_supplement_k": 2},
+            search=AsyncMock(return_value=topic_outcome),
+            search_fragment_supplements=AsyncMock(
+                return_value=fragment_outcome
+            ),
+            select_timeline_supplements=select_supplements,
+        )
+        req = _mock_page_request(
+            get_json={
+                "query": "工资",
+                "mode": "current",
+                "session_id": "bot:FriendMessage:user",
+                "k": 5,
+            }
+        )
+
+        with _patch_page_request(req):
+            result = await api.test_recall()
+
+        assert result["status"] == "ok"
+        assert any(
+            item["metadata"]["memory_layer"] == "timeline_supplement"
+            for item in result["data"]["results"]
+        )
+        select_supplements.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_valid_recall(self, api):
         req = _mock_page_request(get_json={"query": "test", "k": 5})
         with _patch_page_request(req):
             result = await api.test_recall()
         assert result["status"] == "ok"
         assert result["data"]["query"] == "test"
+        assert result["data"]["mode"] == "current"
         assert result["data"]["total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_completed_recall_is_saved_to_test_history(self, api):
+        trace_store = SimpleNamespace(
+            record=AsyncMock(return_value="trace-test-1")
+        )
+        api.plugin.initializer.recall_trace_store = trace_store
+        req = _mock_page_request(
+            get_json={"query": "六月工资", "k": 3, "mode": "timeline"}
+        )
+
+        with _patch_page_request(req):
+            result = await api.test_recall()
+
+        assert result["status"] == "ok"
+        assert result["data"]["trace_uid"] == "trace-test-1"
+        saved = trace_store.record.await_args.kwargs
+        assert saved["trace_type"] == "test"
+        assert saved["status"] == "completed"
+        assert saved["query_text"] == "六月工资"
+        assert saved["request_data"]["mode"] == "timeline"
+        assert saved["result_data"]["diagnostics"]["mode"] == "timeline"
+
+    @pytest.mark.asyncio
+    async def test_timeline_mode_ignores_disabled_production_top_k(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.search_memories = AsyncMock(return_value=[])
+        config = api.plugin.initializer.config_manager
+        config.get.side_effect = lambda key, default=None: (
+            0 if key == "recall_engine.top_k" else default
+        )
+        req = _mock_page_request(
+            get_json={"query": "test", "k": 4, "mode": "timeline"}
+        )
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "ok"
+        engine.search_memories.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_current_mode_respects_disabled_production_top_k(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.search_memories = AsyncMock(return_value=[])
+        config = api.plugin.initializer.config_manager
+        config.get.side_effect = lambda key, default=None: (
+            0 if key == "recall_engine.top_k" else default
+        )
+        req = _mock_page_request(
+            get_json={"query": "test", "k": 4, "mode": "current"}
+        )
+        with _patch_page_request(req):
+            result = await api.test_recall()
+        assert result["status"] == "ok"
+        engine.search_memories.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_recall_includes_score_breakdown_for_dashboard(self, api):
@@ -1413,6 +1822,180 @@ class TestTestRecall:
         item = result["data"]["results"][0]
         assert item["score_breakdown"]["graph_vector_score"] == 0.4
         assert item["metadata"]["document_keyword_score"] == 0.1
+
+
+class TestSharedTopicQuerySettings:
+    @staticmethod
+    def _topic_payload():
+        return {
+            "definitions": {
+                "recall_top_k": {
+                    "default": 3,
+                    "type": "int",
+                    "category": "recall",
+                }
+            },
+            "overrides": {},
+            "effective": {"recall_top_k": 3},
+        }
+
+    @staticmethod
+    def _timeline_payload():
+        from astrbot_plugin_livingmemory.core.timeline_settings import (
+            TIMELINE_SETTING_DEFINITIONS,
+            effective_timeline_settings,
+        )
+
+        return {
+            "definitions": TIMELINE_SETTING_DEFINITIONS,
+            "overrides": {"recall_engine.recent_user_weight": 0.30},
+            "effective": effective_timeline_settings(
+                {"recall_engine.recent_user_weight": 0.30}
+            ),
+        }
+
+    @pytest.mark.asyncio
+    async def test_topic_settings_include_shared_query_controls(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.get_topic_runtime_settings = AsyncMock(
+            return_value=self._topic_payload()
+        )
+        engine.topic_build_manager = SimpleNamespace(
+            has_active_builds=lambda: False
+        )
+        api.plugin.initializer.get_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+
+        result = await api.get_topic_settings()
+
+        assert result["status"] == "ok"
+        data = result["data"]
+        assert data["effective"]["recall_engine.recent_user_weight"] == 0.30
+        assert data["definitions"]["recall_engine.inject_with_recent_context"][
+            "shared_query_setting"
+        ] is True
+
+    @pytest.mark.asyncio
+    async def test_topic_update_splits_topic_and_shared_changes(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.get_topic_runtime_settings = AsyncMock(
+            return_value=self._topic_payload()
+        )
+        engine.update_topic_runtime_settings = AsyncMock(
+            return_value=self._topic_payload()
+        )
+        engine.topic_build_manager = SimpleNamespace(
+            has_active_builds=lambda: False
+        )
+        initializer = api.plugin.initializer
+        initializer.get_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+        initializer.update_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+        req = _mock_page_request(
+            get_json={
+                "changes": {
+                    "recall_top_k": 4,
+                    "recall_engine.recent_user_weight": 0.25,
+                },
+                "reset_keys": ["recall_engine.assistant_context_mode"],
+                "reset_all": False,
+            }
+        )
+
+        with _patch_page_request(req):
+            result = await api.update_topic_settings()
+
+        assert result["status"] == "ok"
+        engine.update_topic_runtime_settings.assert_awaited_once_with(
+            {"recall_top_k": 4}, reset_keys=[], reset_all=False
+        )
+        initializer.update_timeline_runtime_settings.assert_awaited_once_with(
+            {"recall_engine.recent_user_weight": 0.25},
+            reset_keys=["recall_engine.assistant_context_mode"],
+            reset_all=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_unified_settings_are_classified_by_backend(self, api):
+        from astrbot_plugin_livingmemory.core.topic_settings import (
+            TOPIC_SETTING_DEFINITIONS,
+            effective_topic_settings,
+        )
+
+        engine = api.plugin.initializer.memory_engine
+        engine.get_topic_runtime_settings = AsyncMock(
+            return_value={
+                "definitions": TOPIC_SETTING_DEFINITIONS,
+                "overrides": {},
+                "effective": effective_topic_settings({}),
+            }
+        )
+        engine.topic_build_manager = SimpleNamespace(has_active_builds=lambda: False)
+        api.plugin.initializer.get_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+        req = _mock_page_request(args={})
+
+        with _patch_page_request(req):
+            result = await api.get_settings()
+
+        assert result["status"] == "ok"
+        data = result["data"]
+        assert data["schema_revision"] == 1
+        assert data["definitions"]["recall_top_k"]["settings_category"] == "recall"
+        assert data["definitions"]["related_topic_top_n"]["settings_group"] == "topic_relations"
+        assert data["definitions"]["recall_engine.recent_user_weight"]["views"] == ["timeline", "topic"]
+        assert {item["id"] for item in data["categories"]} >= {"recall", "timeline", "topic"}
+
+    @pytest.mark.asyncio
+    async def test_unified_settings_update_splits_internal_owners(self, api):
+        from astrbot_plugin_livingmemory.core.topic_settings import (
+            TOPIC_SETTING_DEFINITIONS,
+            effective_topic_settings,
+        )
+
+        engine = api.plugin.initializer.memory_engine
+        topic_payload = {
+            "definitions": TOPIC_SETTING_DEFINITIONS,
+            "overrides": {},
+            "effective": effective_topic_settings({}),
+        }
+        engine.get_topic_runtime_settings = AsyncMock(return_value=topic_payload)
+        engine.update_topic_runtime_settings = AsyncMock(return_value=topic_payload)
+        engine.topic_build_manager = SimpleNamespace(has_active_builds=lambda: False)
+        initializer = api.plugin.initializer
+        initializer.get_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+        initializer.update_timeline_runtime_settings = AsyncMock(
+            return_value=self._timeline_payload()
+        )
+        req = _mock_page_request(
+            get_json={
+                "changes": {
+                    "recall_top_k": 4,
+                    "recall_engine.recent_user_weight": 0.25,
+                },
+                "reset_keys": ["recall_engine.assistant_context_mode"],
+            }
+        )
+
+        with _patch_page_request(req):
+            result = await api.update_settings()
+
+        assert result["status"] == "ok"
+        engine.update_topic_runtime_settings.assert_awaited_once_with(
+            {"recall_top_k": 4}, reset_keys=[], reset_all=False
+        )
+        initializer.update_timeline_runtime_settings.assert_awaited_once_with(
+            {"recall_engine.recent_user_weight": 0.25},
+            reset_keys=["recall_engine.assistant_context_mode"],
+            reset_all=False,
+        )
 
 
 class TestGraphEndpoints:
@@ -1639,22 +2222,89 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 14
+        assert len(plugin._api_routes) == 70
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
         assert f"{prefix}/stats" in paths
         assert f"{prefix}/sessions" in paths
+        assert f"{prefix}/sessions/audit" in paths
+        assert f"{prefix}/sessions/maintenance/preview" in paths
+        assert f"{prefix}/sessions/maintenance/start" in paths
+        assert f"{prefix}/sessions/maintenance/task" in paths
+        assert f"{prefix}/sessions/maintenance/tasks" in paths
+        assert f"{prefix}/sessions/maintenance/tasks/delete" in paths
+        assert f"{prefix}/sessions/maintenance/tasks/clear" in paths
         assert f"{prefix}/memories" in paths
         assert f"{prefix}/memories/update" in paths
+        assert f"{prefix}/memories/update/stage" in paths
         assert f"{prefix}/memories/related" in paths
         assert f"{prefix}/memories/update/start" in paths
+        assert f"{prefix}/timeline/staged-edits" in paths
+        assert f"{prefix}/timeline/staged-edits/apply" in paths
+        assert f"{prefix}/timeline/staged-edits/delete" in paths
+        assert f"{prefix}/timeline/inactive" in paths
+        assert f"{prefix}/timeline/inactive/restore" in paths
         assert f"{prefix}/memories/update/progress" in paths
         assert f"{prefix}/memories/batch-delete" in paths
+        assert f"{prefix}/timeline/settings" in paths
+        assert f"{prefix}/timeline/settings/update" in paths
+        assert f"{prefix}/timeline/rebuild/preview" in paths
+        assert f"{prefix}/timeline/rebuild/start" in paths
+        assert f"{prefix}/timeline/rebuild/task" in paths
+        assert f"{prefix}/timeline/rebuild/tasks" in paths
+        assert f"{prefix}/timeline/rebuild/resume" in paths
+        assert f"{prefix}/timeline/rebuild/cancel" in paths
+        assert f"{prefix}/timeline/rebuild/tasks/delete" in paths
+        assert f"{prefix}/timeline/rebuild/tasks/clear" in paths
+        assert f"{prefix}/settings" in paths
+        assert f"{prefix}/settings/update" in paths
         assert f"{prefix}/recall/test" in paths
+        assert f"{prefix}/recall/traces" in paths
+        assert f"{prefix}/recall/traces/detail" in paths
+        assert f"{prefix}/recall/traces/settings" in paths
+        assert f"{prefix}/recall/traces/delete" in paths
+        assert f"{prefix}/recall/traces/clear" in paths
         assert f"{prefix}/graph/overview" in paths
         assert f"{prefix}/graph/query" in paths
         assert f"{prefix}/backups" in paths
+        assert f"{prefix}/database/health" in paths
+        assert f"{prefix}/database/repair" in paths
+        assert f"{prefix}/database/repair/progress" in paths
+        assert f"{prefix}/topics/overview" in paths
+        assert f"{prefix}/topics" in paths
+        assert f"{prefix}/topics/detail" in paths
+        assert f"{prefix}/topics/settings" in paths
+        assert f"{prefix}/topics/settings/update" in paths
+        assert f"{prefix}/topics/maintenance/unindexed" in paths
+        assert f"{prefix}/topics/maintenance/preview" in paths
+        assert f"{prefix}/topics/maintenance/clear" in paths
+        assert f"{prefix}/topics/archived/delete" in paths
+        assert f"{prefix}/topics/maintenance/revectorize" in paths
+        assert f"{prefix}/topics/relations/recompute" in paths
+        assert f"{prefix}/topics/build/start" in paths
+        assert f"{prefix}/topics/build/progress" in paths
+        assert f"{prefix}/topics/build/discard" in paths
+        assert f"{prefix}/topics/reviews" in paths
+        assert f"{prefix}/topics/reviews/detail" in paths
+        assert f"{prefix}/topics/reviews/resolve" in paths
+        assert f"{prefix}/topics/governance/preview" in paths
+        assert f"{prefix}/topics/governance/execute" in paths
+        assert f"{prefix}/models" in paths
+        assert f"{prefix}/models/test" in paths
+        assert f"{prefix}/identities" in paths
+        assert f"{prefix}/identities/save" in paths
+        assert f"{prefix}/identities/topics/sync" not in paths
+        assert f"{prefix}/identities/impact" not in paths
 
     def test_route_prefix_contains_plugin_name(self):
         assert PLUGIN_NAME in PAGE_API_PREFIX
+
+
+@pytest.mark.asyncio
+async def test_page_api_shutdown_drains_topic_handler(api):
+    api.topic_handler.shutdown = AsyncMock()
+
+    await api.shutdown()
+
+    api.topic_handler.shutdown.assert_awaited_once()

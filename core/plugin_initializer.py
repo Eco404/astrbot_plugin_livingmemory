@@ -17,14 +17,35 @@ from astrbot.api import logger
 from astrbot.api.star import Context
 from astrbot.core.provider.provider import EmbeddingProvider, Provider
 
+try:
+    from astrbot.core.provider.provider import RerankProvider
+except ImportError:  # AstrBot versions without the optional rerank interface
+    RerankProvider = None  # type: ignore[assignment,misc]
+
 from ..storage.conversation_store import ConversationStore
 from ..storage.db_migration import DBMigration
+from ..storage.recall_trace_store import RecallTraceStore
+from ..storage.topic_memory_store import TopicMemoryStore
 from .base.config_manager import ConfigManager
 from .base.exceptions import InitializationError, ProviderNotReadyError
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
+from .managers.session_maintenance_manager import SessionMaintenanceManager
+from .managers.timeline_rebuild_manager import TimelineRebuildManager
+from .managers.timeline_summary_service import TimelineSummaryService
+from .models.identity_profile import SupplementalIdentityStore
 from .processors.memory_processor import MemoryProcessor
+from .providers.cloudflare_rerank import CloudflareRerankClient
 from .schedulers.decay_scheduler import DecayScheduler
+from .schedulers.idle_summary_scheduler import IdleSummaryScheduler
+from .topic_settings import topic_setting_defaults
+from .timeline_settings import (
+    TIMELINE_SETTING_DEFINITIONS,
+    TIMELINE_SETTINGS_REVISION,
+    effective_timeline_settings,
+    timeline_setting_defaults,
+    validate_timeline_setting,
+)
 from .validators.index_validator import IndexValidator
 
 FaissVecDB: Any = None
@@ -97,14 +118,22 @@ class PluginInitializer:
         # 组件实例
         self.embedding_provider: EmbeddingProvider | None = None
         self.llm_provider: Provider | None = None
+        self.rerank_provider: Any | None = None
+        self.rerank_initialization_error: str | None = None
         self.db: Any | None = None
         self.graph_db: Any | None = None
         self.memory_engine: MemoryEngine | None = None
         self.memory_processor: MemoryProcessor | None = None
+        self.identity_profile_store: SupplementalIdentityStore | None = None
         self.db_migration: DBMigration | None = None
         self.conversation_manager: ConversationManager | None = None
         self.index_validator: IndexValidator | None = None
         self.decay_scheduler: DecayScheduler | None = None
+        self.timeline_summary_service: TimelineSummaryService | None = None
+        self.timeline_rebuild_manager: TimelineRebuildManager | None = None
+        self.idle_summary_scheduler: IdleSummaryScheduler | None = None
+        self.session_maintenance_manager: SessionMaintenanceManager | None = None
+        self.recall_trace_store: RecallTraceStore | None = None
 
         # 初始化状态
         self._initialization_complete = False
@@ -268,6 +297,10 @@ class PluginInitializer:
 
     def _initialize_providers(self, silent: bool = False):
         """初始化 Embedding 和 LLM provider"""
+        # Rerank 不依赖聊天 Provider。必须先初始化，避免静默等待 LLM 时的
+        # 提前返回跳过内置 Cloudflare 客户端。
+        self._initialize_rerank_provider(silent=silent)
+
         # 初始化 Embedding Provider
         emb_id = self.config_manager.get("provider_settings.embedding_provider_id")
         if emb_id:
@@ -330,6 +363,62 @@ class PluginInitializer:
                     logger.debug(f"获取默认 LLM Provider 失败: {e}")
                 self.llm_provider = None
 
+    def _initialize_rerank_provider(self, *, silent: bool = False) -> None:
+        """Resolve AstrBot or built-in Cloudflare Rerank independently."""
+        self.rerank_provider = None
+        self.rerank_initialization_error = None
+        rerank_id = self.config_manager.get("provider_settings.rerank_provider_id")
+        if rerank_id:
+            provider = self._get_provider_by_id(rerank_id, silent=silent)
+            is_reranker = (
+                isinstance(provider, RerankProvider)
+                if RerankProvider is not None
+                else callable(getattr(provider, "rerank", None))
+            )
+            if provider and is_reranker:
+                self.rerank_provider = provider
+                if not silent:
+                    logger.info(f"成功从配置加载 Rerank Provider: {rerank_id}")
+            elif provider and not silent:
+                logger.warning(f"Provider {rerank_id} 不是 RerankProvider 类型")
+
+        if self.config_manager.get("cloudflare_rerank.enabled", False):
+            try:
+                self.rerank_provider = CloudflareRerankClient(
+                    account_id=self.config_manager.get(
+                        "cloudflare_rerank.account_id", ""
+                    ),
+                    api_token=self.config_manager.get(
+                        "cloudflare_rerank.api_token", ""
+                    ),
+                    model=self.config_manager.get(
+                        "cloudflare_rerank.model",
+                        CloudflareRerankClient.DEFAULT_MODEL,
+                    ),
+                    base_url=self.config_manager.get(
+                        "cloudflare_rerank.base_url",
+                        CloudflareRerankClient.DEFAULT_BASE_URL,
+                    ),
+                    timeout_seconds=self.config_manager.get(
+                        "cloudflare_rerank.timeout_seconds", 30.0
+                    ),
+                    max_retries=self.config_manager.get(
+                        "cloudflare_rerank.max_retries", 2
+                    ),
+                    retry_base_delay=self.config_manager.get(
+                        "cloudflare_rerank.retry_base_delay", 1.0
+                    ),
+                )
+                if not silent:
+                    logger.info(
+                        "已启用插件内置 Cloudflare Workers AI Rerank: "
+                        f"{self.rerank_provider.model}"
+                    )
+            except ValueError as exc:
+                self.rerank_initialization_error = str(exc)
+                if not silent:
+                    logger.warning(f"Cloudflare Rerank 配置无效，已回退: {exc}")
+
     def _get_provider_by_id(self, provider_id: str, *, silent: bool):
         """静默检查阶段绕过会打印 warning 的 AstrBot 查询接口。"""
         if not provider_id:
@@ -341,6 +430,47 @@ class PluginInitializer:
         if isinstance(inst_map, dict):
             return inst_map.get(provider_id)
         return None
+
+    def resolve_topic_providers(self) -> dict[str, Any]:
+        """Resolve AstrBot-managed providers while retaining the built-in reranker."""
+        embedding = None
+        embedding_id = self.config_manager.get(
+            "provider_settings.embedding_provider_id"
+        )
+        if embedding_id:
+            candidate = self._get_provider_by_id(embedding_id, silent=True)
+            if isinstance(candidate, EmbeddingProvider):
+                embedding = candidate
+        if embedding is None:
+            providers = self.context.get_all_embedding_providers()
+            embedding = providers[0] if providers else None
+
+        llm = None
+        llm_id = self.config_manager.get("provider_settings.llm_provider_id")
+        if llm_id:
+            candidate = self._get_provider_by_id(llm_id, silent=True)
+            if isinstance(candidate, Provider):
+                llm = candidate
+        if llm is None:
+            candidate = self.context.get_using_provider()
+            llm = candidate if isinstance(candidate, Provider) else None
+
+        rerank = None
+        if isinstance(self.rerank_provider, CloudflareRerankClient):
+            rerank = self.rerank_provider
+        else:
+            rerank_id = self.config_manager.get(
+                "provider_settings.rerank_provider_id"
+            )
+            if rerank_id:
+                candidate = self._get_provider_by_id(rerank_id, silent=True)
+                if callable(getattr(candidate, "rerank", None)):
+                    rerank = candidate
+        return {
+            "llm_provider": llm,
+            "embedding_provider": embedding,
+            "rerank_provider": rerank,
+        }
 
     def _check_faiss_runtime(self) -> None:
         try:
@@ -452,6 +582,10 @@ class PluginInitializer:
             graph_doc_path = data_dir_path / "livingmemory_graph_documents.db"
             graph_index_path = data_dir_path / "livingmemory_graph.index"
             graph_memory_enabled = self.config_manager.get("graph_memory.enabled", True)
+            # Keep the legacy filename so existing installations load in place.
+            self.identity_profile_store = SupplementalIdentityStore(
+                data_dir_path / "authoritative_identities.json"
+            )
 
             if not self.embedding_provider:
                 raise ProviderNotReadyError("Embedding Provider 未初始化")
@@ -488,6 +622,8 @@ class PluginInitializer:
             if self.config_manager.get("migration_settings.auto_migrate", True):
                 await self._check_and_migrate_database()
 
+            await self._initialize_timeline_runtime_settings(str(db_path))
+
             # 初始化MemoryEngine
             stopwords_dir = data_dir_path / "stopwords"
             stopwords_dir.mkdir(parents=True, exist_ok=True)
@@ -508,6 +644,18 @@ class PluginInitializer:
                 ),
                 "importance_weight": self.config_manager.get(
                     "recall_engine.importance_weight", 1.0
+                ),
+                "candidate_multiplier": self.config_manager.get(
+                    "recall_engine.candidate_multiplier", 3
+                ),
+                "min_relevance_score": self.config_manager.get(
+                    "recall_engine.min_relevance_score", 0.38
+                ),
+                "relative_score_floor": self.config_manager.get(
+                    "recall_engine.relative_score_floor", 0.65
+                ),
+                "mmr_lambda": self.config_manager.get(
+                    "recall_engine.mmr_lambda", 0.72
                 ),
                 "search_cache_enabled": self.config_manager.get(
                     "recall_engine.search_cache_enabled", True
@@ -598,6 +746,21 @@ class PluginInitializer:
                 "index_rebuild_max_failure_ratio": self.config_manager.get(
                     "index_rebuild_settings.max_failure_ratio", 0.02
                 ),
+                "topic_memory": {
+                    "enabled": self.config_manager.get(
+                        "topic_memory.enabled", False
+                    ),
+                    "recall_enabled": self.config_manager.get(
+                        "topic_memory.recall_enabled", True
+                    ),
+                    "auto_maintenance": self.config_manager.get(
+                        "topic_memory.auto_maintenance", True
+                    ),
+                    **topic_setting_defaults(),
+                },
+                "topic_memory_legacy_overrides": self.config_manager.get_raw_section(
+                    "topic_memory"
+                ),
             }
 
             self.memory_engine = MemoryEngine(
@@ -605,9 +768,15 @@ class PluginInitializer:
                 faiss_db=self.db,
                 graph_vector_db=self.graph_db,
                 llm_provider=self.llm_provider,
+                rerank_provider=self.rerank_provider,
                 config=memory_engine_config,
+                identity_profile_store=self.identity_profile_store,
+                topic_provider_resolver=self.resolve_topic_providers,
             )
             await self.memory_engine.initialize()
+            self.recall_trace_store = RecallTraceStore(str(db_path))
+            await self.recall_trace_store.initialize()
+            self.memory_engine.recall_trace_store = self.recall_trace_store
             logger.info("MemoryEngine 已初始化")
 
             # 初始化 ConversationManager
@@ -622,6 +791,29 @@ class PluginInitializer:
                 context_window_size=session_config.get("context_window_size", 50),
                 session_ttl=session_config.get("session_ttl", 3600),
             )
+            apply_runtime_settings = getattr(
+                self.conversation_manager, "apply_runtime_settings", None
+            )
+            if callable(apply_runtime_settings):
+                await apply_runtime_settings(
+                    self.config_manager.get_runtime_overrides()
+                )
+            # Topic construction keeps Timeline as its primary source and consults
+            # raw messages only for identity backfill or ambiguous attribution.
+            topic_build_manager = getattr(
+                self.memory_engine, "topic_build_manager", None
+            )
+            if topic_build_manager is not None:
+                topic_build_manager.conversation_store = conversation_store
+            self.memory_engine.set_session_scope_resolver(
+                self.conversation_manager.get_session_scope
+            )
+            self.session_maintenance_manager = SessionMaintenanceManager(
+                str(db_path),
+                self.conversation_manager,
+                self.memory_engine,
+            )
+            await self.session_maintenance_manager.initialize()
             logger.info("ConversationManager 已初始化")
 
             # 自动修复 message_count 不一致问题
@@ -638,9 +830,31 @@ class PluginInitializer:
                 llm_provider=llm_id if llm_id else None,
                 config={
                     "atom_enabled": memory_engine_config["atom_enabled"],
+                    "timeline_require_source_grounding": True,
                 },
+                identity_profile_store=self.identity_profile_store,
             )
             logger.info("MemoryProcessor 已初始化")
+
+            self.timeline_summary_service = TimelineSummaryService(
+                config_manager=self.config_manager,
+                conversation_manager=self.conversation_manager,
+                memory_engine=self.memory_engine,
+                memory_processor=self.memory_processor,
+            )
+            self.timeline_rebuild_manager = TimelineRebuildManager(
+                str(db_path),
+                self.conversation_manager,
+                self.memory_engine,
+                self.memory_processor,
+            )
+            await self.timeline_rebuild_manager.initialize()
+            self.idle_summary_scheduler = IdleSummaryScheduler(
+                config_manager=self.config_manager,
+                conversation_manager=self.conversation_manager,
+                summary_service=self.timeline_summary_service,
+            )
+            await self.idle_summary_scheduler.start()
 
             # 初始化索引验证器并自动重建索引
             self.index_validator = IndexValidator(str(db_path), self.db)
@@ -687,6 +901,156 @@ class PluginInitializer:
             self._initialization_failed = True
             self._initialization_error = str(e)
             raise InitializationError(f"初始化失败: {e}") from e
+
+    async def _initialize_timeline_runtime_settings(self, db_path: str) -> None:
+        """Import legacy custom values once, then apply sparse DB overrides."""
+        store = TopicMemoryStore(db_path)
+        await store.initialize()
+        stored = await store.get_timeline_setting_overrides()
+        if not stored.get("__legacy_imported_v4__"):
+            defaults = timeline_setting_defaults()
+            imported: dict[str, Any] = {}
+            for key in TIMELINE_SETTING_DEFINITIONS:
+                section, field = key.split(".", 1)
+                raw_section = self.config_manager.get_raw_section(section)
+                if field not in raw_section:
+                    continue
+                try:
+                    value = validate_timeline_setting(key, raw_section[field])
+                except ValueError:
+                    continue
+                if value != defaults[key]:
+                    imported[key] = value
+            imported["__legacy_imported_v1__"] = True
+            imported["__legacy_imported_v2__"] = True
+            imported["__legacy_imported_v3__"] = True
+            imported["__legacy_imported_v4__"] = True
+            stored = await store.update_timeline_setting_overrides(
+                imported,
+                settings_revision=TIMELINE_SETTINGS_REVISION,
+            )
+        public = {
+            key: value
+            for key, value in stored.items()
+            if key in TIMELINE_SETTING_DEFINITIONS
+        }
+        effective = effective_timeline_settings(public)
+        self.config_manager.apply_runtime_overrides(effective)
+        await self._apply_cloudflare_runtime_settings(effective)
+
+    async def get_timeline_runtime_settings(self) -> dict[str, Any]:
+        if not self.memory_engine:
+            raise RuntimeError("MemoryEngine 尚未初始化")
+        stored = await self.memory_engine.topic_memory_store.get_timeline_setting_overrides()
+        overrides = {
+            key: value
+            for key, value in stored.items()
+            if key in TIMELINE_SETTING_DEFINITIONS
+        }
+        return {
+            "settings_revision": TIMELINE_SETTINGS_REVISION,
+            "definitions": {
+                key: {**definition, "customized": key in overrides}
+                for key, definition in TIMELINE_SETTING_DEFINITIONS.items()
+            },
+            "overrides": overrides,
+            "effective": effective_timeline_settings(overrides),
+        }
+
+    async def update_timeline_runtime_settings(
+        self,
+        changes: dict[str, Any],
+        *,
+        reset_keys: list[str] | None = None,
+        reset_all: bool = False,
+    ) -> dict[str, Any]:
+        if not self.memory_engine:
+            raise RuntimeError("MemoryEngine 尚未初始化")
+        normalized = {
+            key: validate_timeline_setting(key, value)
+            for key, value in changes.items()
+        }
+        stored = await self.memory_engine.topic_memory_store.update_timeline_setting_overrides(
+            normalized,
+            reset_keys=reset_keys,
+            reset_all=reset_all,
+            settings_revision=TIMELINE_SETTINGS_REVISION,
+        )
+        public = {
+            key: value
+            for key, value in stored.items()
+            if key in TIMELINE_SETTING_DEFINITIONS
+        }
+        effective = effective_timeline_settings(public)
+        self.config_manager.apply_runtime_overrides(effective)
+        self.memory_engine.apply_timeline_runtime_settings(effective)
+        if self.conversation_manager is not None:
+            await self.conversation_manager.apply_runtime_settings(effective)
+        await self._apply_decay_scheduler_settings(effective)
+        if self.idle_summary_scheduler is not None:
+            self.idle_summary_scheduler.notify_settings_changed()
+        await self._apply_cloudflare_runtime_settings(effective)
+        return await self.get_timeline_runtime_settings()
+
+    async def _apply_cloudflare_runtime_settings(
+        self, effective: dict[str, Any]
+    ) -> None:
+        """Apply WebUI-managed transport tuning to an existing client."""
+        if not isinstance(self.rerank_provider, CloudflareRerankClient):
+            return
+        timeout = float(
+            effective.get(
+                "cloudflare_rerank.timeout_seconds",
+                self.rerank_provider.timeout_seconds,
+            )
+        )
+        if timeout != self.rerank_provider.timeout_seconds:
+            await self.rerank_provider.aclose()
+            self.rerank_provider.timeout_seconds = timeout
+        self.rerank_provider.max_retries = int(
+            effective.get(
+                "cloudflare_rerank.max_retries",
+                self.rerank_provider.max_retries,
+            )
+        )
+        self.rerank_provider.retry_base_delay = float(
+            effective.get(
+                "cloudflare_rerank.retry_base_delay",
+                self.rerank_provider.retry_base_delay,
+            )
+        )
+
+    async def _apply_decay_scheduler_settings(
+        self, effective: dict[str, Any]
+    ) -> None:
+        decay_rate = float(effective["importance_decay.decay_rate"])
+        cleanup_enabled = bool(
+            effective["forgetting_agent.auto_cleanup_enabled"]
+        )
+        if self.decay_scheduler is not None:
+            self.decay_scheduler.decay_rate = decay_rate
+            self.decay_scheduler.backup_keep_days = int(
+                effective.get(
+                    "backup_settings.keep_days",
+                    self.decay_scheduler.backup_keep_days,
+                )
+            )
+            if decay_rate <= 0 and not cleanup_enabled:
+                await self.decay_scheduler.stop()
+                self.decay_scheduler = None
+            return
+        if not self.memory_engine or (decay_rate <= 0 and not cleanup_enabled):
+            return
+        scheduler = DecayScheduler(
+            memory_engine=self.memory_engine,
+            decay_rate=decay_rate,
+            data_dir=self.data_dir,
+            db_migration=self.db_migration,
+            backup_enabled=self.config_manager.get("backup_settings.enabled", True),
+            backup_keep_days=self.config_manager.get("backup_settings.keep_days", 7),
+        )
+        await scheduler.start()
+        self.decay_scheduler = scheduler
 
     async def _check_and_migrate_database(self):
         """检查并执行数据库迁移"""
@@ -922,7 +1286,13 @@ class PluginInitializer:
                     pass
 
     async def stop_scheduler(self) -> None:
-        """停止衰减调度器"""
+        """Stop all runtime schedulers and drain summary work."""
+        if self.idle_summary_scheduler:
+            await self.idle_summary_scheduler.stop()
+            self.idle_summary_scheduler = None
+        if self.timeline_summary_service:
+            await self.timeline_summary_service.shutdown()
+            self.timeline_summary_service = None
         if self.decay_scheduler:
             await self.decay_scheduler.stop()
             self.decay_scheduler = None

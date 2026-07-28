@@ -710,10 +710,12 @@ async def test_group_memory_quality_low_for_group_member_generic_term():
     )
     processor = MemoryProcessor(llm_provider=llm, context=None)
 
-    _, metadata, _ = await processor.process_conversation(
+    _content, metadata, _importance = await processor.process_conversation(
         messages=_make_group_messages(),
         is_group_chat=True,
         persona_id=None,
     )
 
-    assert metadata.get("summary_quality") == "low"
+    assert metadata["summary_quality"] == "low"
+    assert metadata["summary_rebuild_recommended"] is True
+    assert metadata["summary_quality_report"]["status"] == "rejected"

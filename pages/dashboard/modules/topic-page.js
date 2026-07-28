@@ -1,0 +1,1335 @@
+import { esc } from "./utils.js";
+
+export class TopicPage {
+  constructor(api, showToast) {
+    this.api = api;
+    this.showToast = showToast;
+    this.pollTimer = null;
+    this.pollInFlight = false;
+    this.activeJobUid = null;
+    this.buildEnabled = false;
+    this.topicCount = 0;
+    this.detailRequestId = 0;
+    this.detailTrigger = null;
+    this.timelineSources = [];
+    this.timelineDetailTrigger = null;
+    this.fullBuildTrigger = null;
+    this.maintenanceTrigger = null;
+    this.maintenanceRequestId = 0;
+    this.maintenanceItems = [];
+    this.maintenancePreviewKey = null;
+    this.discardBuildTrigger = null;
+    this.discardRun = null;
+    this.clearTopicsTrigger = null;
+    this.settingsTrigger = null;
+    this.settingsData = null;
+    this.settingsResetKeys = new Set();
+    this.settingsResetAll = false;
+    this.actorFilter = "";
+    this.actorCatalog = [];
+    this.statusFilter = "active";
+  }
+
+  initEventListeners() {
+    document.getElementById("topic-refresh")?.addEventListener("click", () => this.fetch());
+    document.getElementById("topic-space")?.addEventListener("change", () => {
+      this.actorFilter = "";
+      this.statusFilter = "active";
+      this.syncStatusFilterControls();
+      this.fetch();
+    });
+    document.getElementById("topic-status-filter")?.addEventListener("change", event => {
+      this.statusFilter = event.currentTarget.value || "active";
+      this.fetchTopics();
+    });
+    document.getElementById("topic-actor-filter")?.addEventListener("click", event => {
+      event.stopPropagation();
+      this.toggleActorFilter();
+    });
+    document.getElementById("topic-actor-filter-search")?.addEventListener("input", event => {
+      this.renderActorFilterOptions(event.currentTarget.value || "");
+    });
+    document.getElementById("topic-actor-filter-menu")?.addEventListener("click", event => {
+      event.stopPropagation();
+      const option = event.target.closest("[data-actor-filter-value]");
+      if (!option) return;
+      this.selectActorFilter(option.dataset.actorFilterValue || "");
+    });
+    document.addEventListener("click", () => this.closeActorFilter());
+    document.getElementById("topic-build-full")?.addEventListener("click", event => this.requestFullBuild(event.currentTarget));
+    document.getElementById("topic-maintenance")?.addEventListener("click", event => this.openMaintenance(event.currentTarget));
+    document.getElementById("topic-settings")?.addEventListener("click", event => this.openSettings(event.currentTarget));
+    document.getElementById("topic-settings-close")?.addEventListener("click", () => this.closeSettings());
+    document.getElementById("topic-settings-cancel")?.addEventListener("click", () => this.closeSettings());
+    document.getElementById("topic-settings-save")?.addEventListener("click", () => this.saveSettings());
+    document.getElementById("topic-settings-reset-all")?.addEventListener("click", () => this.resetAllSettings());
+    document.getElementById("topic-settings-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeSettings();
+    });
+    document.getElementById("topic-maintenance-close")?.addEventListener("click", () => this.closeMaintenance());
+    document.getElementById("topic-maintenance-cancel")?.addEventListener("click", () => this.closeMaintenance());
+    document.getElementById("topic-maintenance-detect")?.addEventListener("click", () => this.detectUnindexedTimelines());
+    document.getElementById("topic-recompute-relations")?.addEventListener("click", () => this.recomputeRelations());
+    document.getElementById("topic-revectorize")?.addEventListener("click", () => this.startRevectorization());
+    document.getElementById("topic-clear-topics")?.addEventListener("click", event => this.requestClearTopics(event.currentTarget));
+    document.getElementById("topic-clear-confirm-close")?.addEventListener("click", () => this.closeClearTopicsConfirm());
+    document.getElementById("topic-clear-confirm-cancel")?.addEventListener("click", () => this.closeClearTopicsConfirm());
+    document.getElementById("topic-clear-confirm-submit")?.addEventListener("click", () => this.clearTopics());
+    document.getElementById("topic-clear-confirm-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeClearTopicsConfirm();
+    });
+    document.getElementById("topic-maintenance-select-all")?.addEventListener("change", event => {
+      document.querySelectorAll("#topic-maintenance-list .topic-maintenance-checkbox").forEach(input => {
+        input.checked = event.currentTarget.checked;
+      });
+      this.updateMaintenanceSelection();
+    });
+    document.getElementById("topic-maintenance-submit")?.addEventListener("click", () => this.startSelectedMaintenance());
+    document.getElementById("topic-maintenance-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeMaintenance();
+    });
+    document.getElementById("topic-detail-close")?.addEventListener("click", () => this.closeDetail());
+    document.getElementById("topic-detail-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeDetail();
+    });
+    document.getElementById("topic-timeline-detail-close")?.addEventListener("click", () => this.closeTimelineDetail());
+    document.getElementById("topic-timeline-detail-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeTimelineDetail();
+    });
+    document.getElementById("topic-full-build-confirm-close")?.addEventListener("click", () => this.closeFullBuildConfirm());
+    document.getElementById("topic-full-build-confirm-cancel")?.addEventListener("click", () => this.closeFullBuildConfirm());
+    document.querySelectorAll('input[name="topic-full-build-mode"]').forEach(input => {
+      input.addEventListener("change", () => this.updateFullBuildChoice());
+    });
+    document.getElementById("topic-full-build-confirm-submit")?.addEventListener("click", () => {
+      const resetTopics = document.querySelector('input[name="topic-full-build-mode"]:checked')?.value === "clear";
+      this.closeFullBuildConfirm({ restoreFocus: false });
+      this.startBuild("full", { resetTopics });
+    });
+    document.getElementById("topic-full-build-confirm-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeFullBuildConfirm();
+    });
+    document.getElementById("topic-discard-build-close")?.addEventListener("click", () => this.closeDiscardBuildConfirm());
+    document.getElementById("topic-discard-build-cancel")?.addEventListener("click", () => this.closeDiscardBuildConfirm());
+    document.getElementById("topic-discard-build-submit")?.addEventListener("click", () => this.discardBuild());
+    document.getElementById("topic-discard-build-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeDiscardBuildConfirm();
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Escape") return;
+      if (this.actorFilterIsOpen()) this.closeActorFilter();
+      else if (this.timelineDetailIsOpen()) this.closeTimelineDetail();
+      else if (this.clearTopicsConfirmIsOpen()) this.closeClearTopicsConfirm();
+      else if (this.discardBuildConfirmIsOpen()) this.closeDiscardBuildConfirm();
+      else if (this.fullBuildConfirmIsOpen()) this.closeFullBuildConfirm();
+      else if (this.settingsIsOpen()) this.closeSettings();
+      else if (this.maintenanceIsOpen()) this.closeMaintenance();
+      else if (this.detailIsOpen()) this.closeDetail();
+    });
+  }
+
+  currentSpace() {
+    return document.getElementById("topic-space")?.value || "";
+  }
+
+  syncStatusFilterControls() {
+    const select = document.getElementById("topic-status-filter");
+    if (select) select.value = this.statusFilter;
+  }
+
+  actorFilterIsOpen() {
+    return !document.getElementById("topic-actor-filter-menu")?.classList.contains("hidden");
+  }
+
+  toggleActorFilter() {
+    if (this.actorFilterIsOpen()) {
+      this.closeActorFilter();
+      return;
+    }
+    const menu = document.getElementById("topic-actor-filter-menu");
+    const button = document.getElementById("topic-actor-filter");
+    menu?.classList.remove("hidden");
+    button?.setAttribute("aria-expanded", "true");
+    const search = document.getElementById("topic-actor-filter-search");
+    if (search) {
+      search.value = "";
+      this.renderActorFilterOptions();
+      search.focus();
+    }
+  }
+
+  closeActorFilter() {
+    document.getElementById("topic-actor-filter-menu")?.classList.add("hidden");
+    document.getElementById("topic-actor-filter")?.setAttribute("aria-expanded", "false");
+  }
+
+  selectActorFilter(value) {
+    this.actorFilter = value;
+    this.updateActorFilterLabel();
+    this.closeActorFilter();
+    this.fetchTopics();
+  }
+
+  updateActorFilterLabel() {
+    const label = document.getElementById("topic-actor-filter-label");
+    if (!label) return;
+    const selected = this.actorCatalog.find(item => item.actor_id === this.actorFilter);
+    label.textContent = selected
+      ? `${selected.display_name} (${Number(selected.topic_count || 0)})`
+      : window.t("topic.actorFilterAll");
+  }
+
+  renderActorFilterOptions(query = "") {
+    const container = document.getElementById("topic-actor-filter-options");
+    if (!container) return;
+    const needle = query.trim().toLocaleLowerCase();
+    const matches = item => !needle || String(item.display_name || "").toLocaleLowerCase().includes(needle);
+    const resolved = this.actorCatalog.filter(item => item.catalog_group === "resolved" && matches(item));
+    const unresolved = this.actorCatalog.filter(item => item.catalog_group !== "resolved" && matches(item));
+    const renderOption = item => `<button class="topic-actor-filter-option ${item.actor_id === this.actorFilter ? "is-selected" : ""}" type="button" role="option" aria-selected="${item.actor_id === this.actorFilter ? "true" : "false"}" data-actor-filter-value="${esc(item.actor_id)}"><span title="${esc(item.display_name)}">${esc(item.display_name)}</span><small>${Number(item.topic_count || 0)}</small></button>`;
+    const empty = `<div class="topic-actor-filter-empty text-tertiary">${esc(window.t("topic.actorFilterEmpty"))}</div>`;
+    container.innerHTML = `
+      <button class="topic-actor-filter-option ${this.actorFilter ? "" : "is-selected"}" type="button" role="option" aria-selected="${this.actorFilter ? "false" : "true"}" data-actor-filter-value=""><span>${esc(window.t("topic.actorFilterAll"))}</span></button>
+      <div class="topic-actor-filter-group"><strong>${esc(window.t("topic.actorFilterResolved"))}</strong>${resolved.length ? resolved.map(renderOption).join("") : empty}</div>
+      ${unresolved.length ? `<details class="topic-actor-filter-unresolved" ${needle ? "open" : ""}><summary>${esc(window.t("topic.actorFilterUnresolved"))} (${unresolved.length})</summary>${unresolved.map(renderOption).join("")}</details>` : ""}`;
+  }
+
+  async fetch() {
+    try {
+      const data = await this.api.get("topics/overview", { memory_space_id: this.currentSpace() });
+      this.renderOverview(data);
+      await this.fetchTopics();
+    } catch (e) {
+      const body = document.getElementById("topics-body");
+      if (body) body.innerHTML = `<tr><td colspan="6" class="table-empty table-empty-error">${esc(window.t("topic.loadFailed"))}</td></tr>`;
+      this.showToast(e.message || "Topic 数据加载失败", true);
+    }
+  }
+
+  renderOverview(data) {
+    const spaces = data.memory_spaces || [];
+    const activeJobs = data.active_jobs || [];
+    const resumableRun = data.resumable_run || null;
+    const select = document.getElementById("topic-space");
+    let selected = select.value;
+    if (!selected && activeJobs.length) {
+      selected = activeJobs[0].memory_space_id || "";
+    } else if (!selected && resumableRun) {
+      selected = resumableRun.memory_space_id || "";
+    }
+    select.innerHTML = `<option value="">${esc(window.t("topic.space"))}</option>` + spaces.map(item =>
+      `<option value="${esc(item.memory_space_id)}">${esc(item.memory_space_id)} · ${item.timeline_count} Timeline / ${item.topic_count} Topic</option>`
+    ).join("");
+    if (spaces.some(item => item.memory_space_id === selected)) select.value = selected;
+    this.buildEnabled = Boolean(data.enabled);
+    this.topicCount = Math.max(0, Number(data.topic_count || 0));
+    document.getElementById("topic-total").textContent = this.topicCount;
+    document.getElementById("topic-active").textContent = data.status_counts?.active || 0;
+    document.getElementById("topic-atoms").textContent = data.atom_count || 0;
+    document.getElementById("topic-links").textContent = data.timeline_link_count || 0;
+    document.getElementById("topic-relations").textContent = data.relation_count || 0;
+    const flags = document.getElementById("topic-flags");
+    flags.textContent = [
+      window.t(data.enabled ? "topic.buildEnabled" : "topic.buildDisabled"),
+      window.t(data.auto_maintenance ? "topic.autoOn" : "topic.autoOff"),
+      data.rerank_available
+        ? `${window.t("topic.rerankOn")} (${data.rerank_backend || "configured"})`
+        : window.t("topic.rerankOff"),
+    ].join(" · ");
+    const vectorWarning = document.getElementById("topic-vector-warning");
+    const embeddingHealth = data.embedding_health || {};
+    if (vectorWarning) {
+      const showWarning = Boolean(
+        embeddingHealth.needs_revectorization
+          && Number(embeddingHealth.topic_count || 0) > 0
+      );
+      vectorWarning.classList.toggle("hidden", !showWarning);
+      vectorWarning.textContent = showWarning
+        ? window.t(
+            "topic.needsRevectorization",
+            Number(embeddingHealth.incompatible_count || 0),
+          )
+        : "";
+    }
+
+    const activeJob = activeJobs[0] || null;
+    const settingsButton = document.getElementById("topic-settings");
+    if (settingsButton) settingsButton.disabled = Boolean(activeJob);
+    this.setBuildButtonsDisabled(
+      !this.currentSpace() || !this.buildEnabled || Boolean(activeJob)
+    );
+    if (activeJob) {
+      this.renderProgress(activeJob);
+      this.resumePolling(activeJob.job_uid);
+    } else {
+      this.stopPolling();
+      if (resumableRun && resumableRun.memory_space_id === this.currentSpace()) {
+        this.renderProgress(resumableRun);
+      } else {
+        document.getElementById("topic-progress")?.classList.add("hidden");
+        document.getElementById("maintenance-topic-progress")?.classList.add("hidden");
+      }
+    }
+  }
+
+  async fetchTopics() {
+    const space = this.currentSpace();
+    const body = document.getElementById("topics-body");
+    this.closeDetail({ restoreFocus: false });
+    if (!space) {
+      body.innerHTML = `<tr><td colspan="6" class="table-empty">${esc(window.t("topic.chooseSpace"))}</td></tr>`;
+      return;
+    }
+    try {
+      const data = await this.api.get("topics", {
+        memory_space_id: space,
+        actor_id: this.actorFilter,
+        status: this.statusFilter,
+        limit: 200,
+      });
+      const items = data.items || [];
+      const spaceTotal = Math.max(0, Number(data.space_total ?? this.topicCount));
+      this.actorCatalog = data.actors || [];
+      if (this.actorFilter && !this.actorCatalog.some(actor => actor.actor_id === this.actorFilter)) this.actorFilter = "";
+      this.updateActorFilterLabel();
+      this.renderActorFilterOptions();
+      body.innerHTML = items.length ? items.map(item => `
+        <tr class="topic-row" data-topic-uid="${esc(item.topic_uid)}" tabindex="0" role="button" aria-label="${esc(`${window.t("topic.viewDetails")}: ${item.title}`)}">
+          <td class="text-mono">${esc(item.topic_uid.slice(0, 12))}</td>
+          <td class="topic-title-cell" title="${esc(item.title)}"><span>${esc(item.title)}</span></td>
+          <td>${esc(item.status)}</td>
+          <td>${Number(item.importance || 0).toFixed(2)}</td>
+          <td>${item.support?.time_cluster_count || 0} / ${item.support?.timeline_count || 0}</td>
+          <td>r${item.revision}</td>
+      </tr>`).join("") : `<tr><td colspan="6" class="table-empty">${esc(window.t(spaceTotal > 0 ? "topic.emptyFiltered" : "topic.emptySpace"))}</td></tr>`;
+      body.querySelectorAll(".topic-row").forEach(row => {
+        row.addEventListener("click", () => this.showDetail(row.dataset.topicUid));
+        row.addEventListener("keydown", event => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          this.showDetail(row.dataset.topicUid);
+        });
+      });
+    } catch (e) {
+      body.innerHTML = `<tr><td colspan="6" class="table-empty table-empty-error">${esc(window.t("topic.loadFailed"))}</td></tr>`;
+      this.showToast(e.message || window.t("topic.loadFailed"), true);
+    }
+  }
+
+  async showDetail(topicUid) {
+    const requestId = ++this.detailRequestId;
+    const overlay = document.getElementById("topic-detail-overlay");
+    const title = document.getElementById("topic-detail-title");
+    const body = document.getElementById("topic-detail-body");
+    this.detailTrigger = Array.from(document.querySelectorAll("#topics-body .topic-row"))
+      .find(row => row.dataset.topicUid === topicUid) || null;
+    document.querySelectorAll("#topics-body .topic-row").forEach(row => {
+      row.classList.toggle("is-selected", row.dataset.topicUid === topicUid);
+    });
+    title.textContent = window.t("common.loading");
+    body.innerHTML = `<div class="topic-detail-loading text-tertiary">${esc(window.t("common.loading"))}</div>`;
+    overlay.classList.add("visible");
+    overlay.setAttribute("aria-hidden", "false");
+    document.getElementById("topic-detail-close")?.focus();
+
+    try {
+      const data = await this.api.get("topics/detail", { topic_uid: topicUid });
+      if (requestId !== this.detailRequestId || !this.detailIsOpen()) return;
+      const topic = data.topic;
+      const provenance = data.provenance || {};
+      const relatedTopics = data.related_topics || [];
+      const sourcesByAtom = {};
+      (provenance.atom_sources || []).forEach(source => {
+        (sourcesByAtom[source.topic_atom_uid] ||= []).push(source);
+      });
+      const actorLinks = provenance.actor_links || [];
+      const actorFactGroups = provenance.actor_fact_groups || [];
+      this.timelineSources = provenance.links || [];
+      const participantRoles = new Set(["speaker", "narrator", "responder"]);
+      const roleNamesByActorId = new Map();
+      (provenance.fragments || []).forEach(fragment => {
+        const roles = fragment?.metadata?.conversation_roles || {};
+        ["human_participants", "assistant_personas"].forEach(bucket => {
+          (roles[bucket] || []).forEach(actor => {
+            const actorId = String(actor.actor_id || "").trim();
+            const observedNames = Array.isArray(actor.observed_names) ? actor.observed_names : [];
+            const names = [actor.persona_name, ...observedNames]
+              .map(value => String(value || "").trim())
+              .filter(Boolean);
+            if (actorId && names.length && !roleNamesByActorId.has(actorId)) {
+              roleNamesByActorId.set(actorId, names[0]);
+            }
+          });
+        });
+      });
+      const actorDisplayName = link => {
+        const actorId = String(link.actor_id || "").trim();
+        const actorType = String(link.actor_type || "unknown").trim().toLocaleLowerCase();
+        const snapshot = String(link.display_name_snapshot || "").trim();
+        const roleName = roleNamesByActorId.get(actorId) || "";
+        if (actorType === "assistant") {
+          if (roleName && !/^\d+$/.test(roleName)) return roleName;
+          const suffix = actorId.startsWith("assistant-persona:")
+            ? actorId.slice("assistant-persona:".length).trim()
+            : "";
+          if (snapshot && !/^\d+$/.test(snapshot) && snapshot !== actorId) return snapshot;
+          if (suffix && !/^\d+$/.test(suffix) && suffix !== "default") return suffix;
+          return window.t("topic.assistantFallback");
+        }
+        return snapshot || roleName || actorId || "--";
+      };
+      const groupActors = links => {
+        const displayNamesByActorId = new Map();
+        links.forEach(link => {
+          const actorId = String(link.actor_id || "").trim();
+          const displayName = actorDisplayName(link);
+          if (actorId && displayName && !displayNamesByActorId.has(actorId)) {
+            displayNamesByActorId.set(actorId, displayName);
+          }
+        });
+        const grouped = new Map();
+        links.forEach(link => {
+          const actorId = String(link.actor_id || "").trim();
+          const snapshotName = actorDisplayName(link);
+          const displayName = snapshotName || displayNamesByActorId.get(actorId) || actorId || "--";
+          const actorType = String(link.actor_type || "unknown").trim().toLocaleLowerCase();
+          const normalizedName = displayName.normalize("NFKC").toLocaleLowerCase().replace(/\s+/g, " ");
+          // Chips are a compact presentation summary. The expanded rows retain each
+          // stable/unresolved actor ID and relation for identity diagnostics.
+          const key = (snapshotName || displayNamesByActorId.has(actorId))
+            ? `${actorType}:name:${normalizedName}`
+            : `${actorType}:id:${actorId || "unknown"}`;
+          const item = grouped.get(key) || {
+            displayName,
+            links: [],
+          };
+          item.links.push(link);
+          grouped.set(key, item);
+        });
+        return Array.from(grouped.values());
+      };
+      const renderActors = links => {
+        const groups = groupActors(links);
+        if (!groups.length) return `<div class="text-tertiary">${esc(window.t("topic.none"))}</div>`;
+        const chips = groups.map(item => `<span class="topic-actor-chip">${esc(item.displayName)} <span>(${item.links.length})</span></span>`).join("");
+        const details = links.map(link => {
+          const factGroup = actorFactGroups.find(group => group.actor_id === link.actor_id && group.relation_type === link.relation_type);
+          const actorFacts = factGroup?.facts || [];
+          const metadata = link.metadata || {};
+          const roleKey = `topic.role.${link.relation_type}`;
+          const displayName = actorDisplayName(link);
+          const resolution = window.t(`topic.resolution.${link.resolution_status || "unresolved"}`);
+          const identitySources = factGroup?.identity_sources || [];
+          return `<div class="topic-actor-detail-row">
+            <div><strong>${esc(displayName)}</strong><span>${esc(window.t(roleKey))}</span></div>
+            <small class="text-tertiary">${esc(resolution)} · ${Number(link.confidence || 0).toFixed(2)} · ${esc(window.t("topic.actorFacts"))} ${actorFacts.length} · Fragment ${(metadata.fragment_uids || []).length} · Timeline ${(metadata.timeline_uids || []).length}${identitySources.length ? ` · ${esc(window.t("topic.identitySources"))}: ${esc(identitySources.join(", "))}` : ""}</small>
+            <details class="topic-actor-facts"><summary>${esc(window.t("topic.actorFacts"))} (${actorFacts.length})</summary>
+              <div>${actorFacts.length ? actorFacts.map(fact => `<div class="topic-actor-fact"><span>${esc(fact.content)}</span><details class="topic-compact-details"><summary>${esc(window.t("topic.identifierDetails"))}</summary><code>${esc(fact.atom_uid)}</code></details></div>`).join("") : `<span class="text-tertiary">${esc(window.t("topic.none"))}</span>`}</div>
+            </details>
+            <code>${esc(link.actor_id)}</code>
+          </div>`;
+        }).join("");
+        return `<div class="topic-actor-chips">${chips}</div><details class="topic-compact-details"><summary>${esc(window.t("topic.actorDetails"))} (${links.length})</summary><div class="topic-actor-detail-list">${details}</div></details>`;
+      };
+      const participants = actorLinks.filter(link => participantRoles.has(link.relation_type));
+      const mentionedActors = actorLinks.filter(link => !participantRoles.has(link.relation_type));
+      const participantGroups = groupActors(participants);
+      const mentionedGroups = groupActors(mentionedActors);
+      const importanceProjection = topic.metadata?.importance_projection || {};
+      const affectProfile = Array.isArray(topic.affect_profile) ? topic.affect_profile : [];
+      const importanceMetrics = [
+        [window.t("topic.currentImportance"), topic.importance],
+        [window.t("topic.baseImportance"), topic.base_importance],
+        [window.t("topic.semanticImportance"), topic.semantic_importance],
+        [window.t("topic.sourceImportance"), topic.source_base_component],
+        [window.t("topic.evidenceStrength"), topic.evidence_strength],
+      ];
+      const renderAtoms = () => (provenance.atoms || []).map(atom => {
+        const sources = sourcesByAtom[atom.atom_uid] || [];
+        return `<div class="topic-source-item topic-atom-item">
+          <div>${esc(atom.content)}</div>
+          <details class="topic-compact-details"><summary>${esc(window.t("topic.identifierDetails"))} (${sources.length})</summary>
+            <div class="topic-identifier-list"><code>${esc(atom.atom_uid)}</code>${sources.map(source => `<code>↳ ${esc(source.timeline_uid)} · ${esc(source.source_kind)} · ${esc(source.source_atom_fingerprint || "--")}</code>`).join("")}</div>
+          </details>
+        </div>`;
+      }).join("") || `<div class="text-tertiary">${esc(window.t("topic.none"))}</div>`;
+      const renderTimelines = () => this.timelineSources.map((link, index) => {
+        const preview = link.timeline_preview || window.t("topic.timelineUnavailable");
+        const available = Boolean(link.timeline_available && link.timeline_content);
+        return `<div class="topic-source-item topic-timeline-source">
+          <button class="topic-timeline-preview" type="button" data-timeline-source-index="${index}" ${available ? "" : "disabled"}>
+            <span>${esc(preview)}</span>${available ? `<small>${esc(window.t("topic.timelineOpen"))}</small>` : ""}
+          </button>
+          <details class="topic-compact-details"><summary>${esc(window.t("topic.identifierDetails"))}</summary>
+            <div class="topic-identifier-list"><code>${esc(link.timeline_uid)}</code><code>${esc(link.time_cluster_key)}</code></div>
+          </details>
+        </div>`;
+      }).join("") || `<div class="text-tertiary">${esc(window.t("topic.none"))}</div>`;
+      const translatedEnum = (prefix, value) => {
+        const normalized = String(value || "").trim();
+        if (!normalized) return "--";
+        const key = `${prefix}.${normalized}`;
+        const translated = window.t(key);
+        return translated === key ? normalized : translated;
+      };
+      const affectActorName = event => {
+        const actorId = String(event.actor_id || "").trim();
+        const actorLink = actorLinks.find(link => String(link.actor_id || "").trim() === actorId);
+        return actorLink
+          ? actorDisplayName(actorLink)
+          : String(event.display_name_snapshot || actorId || "--").trim();
+      };
+      const renderAffect = () => affectProfile.length ? affectProfile.map(event => {
+        const sourceTimelines = Array.isArray(event.source_timeline_uids) ? event.source_timeline_uids : [];
+        const sourceFacts = Array.isArray(event.source_fact_keys) ? event.source_fact_keys : [];
+        const sourceAtoms = Array.isArray(event.source_atom_fingerprints) ? event.source_atom_fingerprints : [];
+        const identifiers = [event.event_uid, event.fragment_uid, ...sourceTimelines, ...sourceFacts, ...sourceAtoms]
+          .map(value => String(value || "").trim())
+          .filter(Boolean);
+        return `<article class="topic-affect-event">
+          <div class="topic-affect-event-heading"><strong>${esc(affectActorName(event))}</strong><span>${esc(event.emotion || "--")}</span></div>
+          <p>${esc(event.description || "--")}</p>
+          <div class="topic-affect-event-meta">
+            <span><small>${esc(window.t("topic.affectTimeStatus"))}</small>${esc(translatedEnum("topic.affectStatus", event.temporal_status))}</span>
+            <span><small>${esc(window.t("topic.affectEvidence"))}</small>${esc(translatedEnum("topic.affectEvidence", event.evidence_type))}</span>
+            <span><small>${esc(window.t("topic.affectIntensity"))}</small>${Number(event.intensity || 0).toFixed(2)}</span>
+            <span><small>${esc(window.t("topic.affectConfidence"))}</small>${Number(event.confidence || 0).toFixed(2)}</span>
+          </div>
+          ${event.trigger ? `<div class="topic-affect-event-context"><small>${esc(window.t("topic.affectTrigger"))}</small><span>${esc(event.trigger)}</span></div>` : ""}
+          ${event.target ? `<div class="topic-affect-event-context"><small>${esc(window.t("topic.affectTarget"))}</small><span>${esc(event.target)}</span></div>` : ""}
+          ${identifiers.length ? `<div class="topic-affect-sources"><small>${esc(window.t("topic.affectSource"))}</small>${identifiers.map(value => `<code>${esc(value)}</code>`).join("")}</div>` : ""}
+        </article>`;
+      }).join("") : `<div class="text-tertiary">${esc(window.t("topic.affectNone"))}</div>`;
+      title.innerHTML = `${esc(topic.title)} <span class="topic-detail-readonly text-tertiary">（${esc(window.t("topic.readOnly"))}）</span>`;
+      body.innerHTML = `
+        <p class="topic-detail-summary">${esc(topic.summary)}</p>
+        <div class="topic-importance-metrics">
+          ${importanceMetrics.map(([label, value]) => `<span><small>${esc(label)}</small><strong>${Number(value ?? 0).toFixed(2)}</strong></span>`).join("")}
+          <span><small>${esc(window.t("topic.accessCount"))}</small><strong>${Number(topic.access_count || 0)}</strong></span>
+          <span><small>${esc(window.t("topic.dynamicFactor"))}</small><strong>${Number(importanceProjection.dynamic_factor ?? 1).toFixed(2)}</strong></span>
+        </div>
+        <details class="topic-compact-details topic-more-details">
+          <summary>${esc(window.t("topic.identifierDetails"))}</summary>
+          <div class="topic-more-details-content">
+            <section>
+              <div class="topic-more-details-heading"><strong>${esc(window.t("topic.affectMemory"))} (${affectProfile.length})</strong><small>${esc(window.t("topic.affectSalience"))} ${Number(topic.affective_salience || 0).toFixed(2)}</small></div>
+              <div class="topic-affect-list">${renderAffect()}</div>
+            </section>
+            <section class="topic-identifier-list"><code>${esc(topic.topic_uid)}</code><code>r${Number(topic.revision || 0)}</code></section>
+          </div>
+        </details>
+        <div class="topic-related-section">
+          <strong>${esc(window.t("topic.relatedTopics"))} (${relatedTopics.length})</strong>
+          <div class="topic-related-list">${relatedTopics.length ? relatedTopics.map(item => `
+            <button class="topic-related-item" type="button" data-related-topic-uid="${esc(item.related_topic_uid)}">
+              <span>${esc(item.related_title)}</span><small>${Number(item.semantic_similarity || 0).toFixed(3)}</small>
+            </button>`).join("") : `<span class="text-tertiary">${esc(window.t("topic.none"))}</span>`}</div>
+        </div>
+        <div class="topic-actor-grid">
+          <section><strong>${esc(window.t("topic.participants"))} (${participantGroups.length})</strong>${renderActors(participants)}</section>
+          <section><strong>${esc(window.t("topic.mentionedActors"))} (${mentionedGroups.length})</strong>${renderActors(mentionedActors)}</section>
+        </div>
+        <div class="topic-detail-grid">
+          <section><strong>${esc(window.t("topic.topicAtoms"))} (${(provenance.atoms || []).length})</strong>${renderAtoms()}</section>
+          <section><strong>${esc(window.t("topic.sources"))} (${this.timelineSources.length})</strong>${renderTimelines()}</section>
+        </div>`;
+      body.querySelectorAll("[data-related-topic-uid]").forEach(button => {
+        button.addEventListener("click", () => this.showDetail(button.dataset.relatedTopicUid));
+      });
+      body.querySelectorAll("[data-timeline-source-index]").forEach(button => {
+        button.addEventListener("click", () => this.showTimelineDetail(Number(button.dataset.timelineSourceIndex), button));
+      });
+    } catch (e) {
+      if (requestId !== this.detailRequestId) return;
+      this.closeDetail();
+      this.showToast(e.message || "Topic 详情加载失败", true);
+    }
+  }
+
+  showTimelineDetail(index, trigger) {
+    const source = this.timelineSources[index];
+    if (!source?.timeline_content) return;
+    this.showReadonlyRecord({
+      title: window.t("topic.timelineDetailTitle"),
+      content: source.timeline_content,
+      identifiers: [source.timeline_uid, source.time_cluster_key].filter(Boolean),
+    }, trigger);
+  }
+
+  showReadonlyRecord(record, trigger) {
+    if (!record?.content) return;
+    this.timelineDetailTrigger = trigger || null;
+    const overlay = document.getElementById("topic-timeline-detail-overlay");
+    const body = document.getElementById("topic-timeline-detail-body");
+    const title = document.getElementById("topic-timeline-detail-title");
+    if (title) title.textContent = record.title || window.t("topic.timelineDetailTitle");
+    const identifiers = (record.identifiers || []).filter(Boolean);
+    const metadata = (record.metadata || []).filter(item => item?.label && item?.value);
+    body.innerHTML = `
+      <section class="topic-timeline-content-section">
+        <strong>${esc(record.contentLabel || window.t("topic.timelineContent"))}</strong>
+        <div class="topic-timeline-full-content">${esc(record.content)}</div>
+      </section>
+      ${metadata.length ? `<div class="topic-readonly-metadata">${metadata.map(item => `<span><strong>${esc(item.label)}</strong> ${esc(item.value)}</span>`).join("")}</div>` : ""}
+      ${identifiers.length ? `<details class="topic-compact-details topic-timeline-identifiers"><summary>${esc(window.t("topic.identifierDetails"))}</summary>
+        <div class="topic-identifier-list">${identifiers.map(value => `<code>${esc(value)}</code>`).join("")}</div>
+      </details>` : ""}`;
+    overlay?.classList.add("visible");
+    overlay?.setAttribute("aria-hidden", "false");
+    document.getElementById("topic-timeline-detail-close")?.focus();
+  }
+
+  timelineDetailIsOpen() {
+    return document.getElementById("topic-timeline-detail-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeTimelineDetail({ restoreFocus = true } = {}) {
+    if (!this.timelineDetailIsOpen() && !this.timelineDetailTrigger) return;
+    document.getElementById("topic-timeline-detail-overlay")?.classList.remove("visible");
+    document.getElementById("topic-timeline-detail-overlay")?.setAttribute("aria-hidden", "true");
+    const title = document.getElementById("topic-timeline-detail-title");
+    if (title) title.textContent = window.t("topic.timelineDetailTitle");
+    const trigger = this.timelineDetailTrigger;
+    this.timelineDetailTrigger = null;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  detailIsOpen() {
+    return document.getElementById("topic-detail-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeDetail({ restoreFocus = true } = {}) {
+    if (!this.detailIsOpen() && !this.detailTrigger) return;
+    this.closeTimelineDetail({ restoreFocus: false });
+    this.detailRequestId += 1;
+    const overlay = document.getElementById("topic-detail-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    document.querySelectorAll("#topics-body .topic-row").forEach(row => {
+      row.classList.remove("is-selected");
+    });
+    const trigger = this.detailTrigger;
+    this.detailTrigger = null;
+    this.timelineSources = [];
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  async openSettings(trigger) {
+    if (this.activeJobUid) return;
+    this.settingsTrigger = trigger || null;
+    this.settingsResetKeys = new Set();
+    this.settingsResetAll = false;
+    const overlay = document.getElementById("topic-settings-overlay");
+    const status = document.getElementById("topic-settings-status");
+    const content = document.getElementById("topic-settings-content");
+    overlay?.classList.add("visible");
+    overlay?.setAttribute("aria-hidden", "false");
+    status.textContent = window.t("common.loading");
+    content.innerHTML = "";
+    try {
+      this.settingsData = await this.api.get("settings", { view: "topic" });
+      this.renderSettings();
+      document.getElementById("topic-settings-close")?.focus();
+    } catch (e) {
+      status.textContent = e.message || window.t("topic.settingsLoadFailed");
+    }
+  }
+
+  settingsIsOpen() {
+    return document.getElementById("topic-settings-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeSettings({ restoreFocus = true } = {}) {
+    if (!this.settingsIsOpen() && !this.settingsTrigger) return;
+    const overlay = document.getElementById("topic-settings-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    const trigger = this.settingsTrigger;
+    this.settingsTrigger = null;
+    this.settingsData = null;
+    this.settingsResetKeys = new Set();
+    this.settingsResetAll = false;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  renderSettings() {
+    const data = this.settingsData || {};
+    const definitions = data.definitions || {};
+    const effective = data.effective || {};
+    const overrides = data.overrides || {};
+    const status = document.getElementById("topic-settings-status");
+    status.textContent = data.build_active ? window.t("topic.settingsBuildActive") : "";
+    const categories = ["recall", "build", "performance"];
+    const content = document.getElementById("topic-settings-content");
+    content.innerHTML = categories.map(category => {
+      const rows = Object.entries(definitions)
+        .filter(([, definition]) => definition.category === category && !definition.deprecated)
+        .map(([key, definition]) => {
+          const customized = Object.prototype.hasOwnProperty.call(overrides, key);
+          const value = effective[key];
+          const input = definition.type === "bool"
+            ? `<input class="topic-setting-input" data-setting-key="${esc(key)}" type="checkbox" ${value ? "checked" : ""}>`
+            : definition.type === "select"
+              ? `<select class="select input topic-setting-input" data-setting-key="${esc(key)}">${(definition.options || []).map(option => `<option value="${esc(option)}" ${option === value ? "selected" : ""}>${esc(definition.option_labels?.[option] || option)}</option>`).join("")}</select>`
+              : `<input class="input topic-setting-input" data-setting-key="${esc(key)}" type="number" value="${esc(value)}" min="${esc(definition.min)}" max="${esc(definition.max)}" step="${esc(definition.step || 1)}">`;
+          return `<div class="topic-setting-row" data-setting-row="${esc(key)}">
+            <div class="topic-setting-copy"><strong>${esc(definition.label || key)}</strong><small class="topic-setting-description text-secondary">${esc(definition.description || "")}</small><small class="text-tertiary text-mono">${esc(key)}</small></div>
+            <div class="topic-setting-control">${input}<span class="topic-setting-source ${customized ? "is-custom" : ""}" data-setting-source>${esc(window.t(customized ? "topic.customValue" : "topic.defaultValue"))}</span><button class="btn btn-ghost btn-sm topic-setting-reset" type="button" data-reset-setting="${esc(key)}" ${customized ? "" : "disabled"}>${esc(window.t("topic.resetDefault"))}</button></div>
+            <div class="topic-setting-default text-tertiary">${esc(window.t("topic.codeDefault"))}: ${esc(definition.default)}</div>
+          </div>`;
+        }).join("");
+      return `<section class="topic-settings-section"><h3>${esc(window.t(`topic.settingsCategory.${category}`))}</h3>${rows}</section>`;
+    }).join("");
+    content.querySelectorAll("[data-reset-setting]").forEach(button => {
+      button.addEventListener("click", () => this.resetSetting(button.dataset.resetSetting));
+    });
+    ["topic-settings-save", "topic-settings-reset-all"].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = Boolean(data.build_active);
+    });
+  }
+
+  resetSetting(key) {
+    const definition = this.settingsData?.definitions?.[key];
+    const input = document.querySelector(`.topic-setting-input[data-setting-key="${key}"]`);
+    if (!definition || !input) return;
+    if (definition.type === "bool") input.checked = Boolean(definition.default);
+    else input.value = definition.default;
+    this.settingsResetKeys.add(key);
+    const row = document.querySelector(`[data-setting-row="${key}"]`);
+    row?.querySelector("[data-setting-source]")?.classList.remove("is-custom");
+    const source = row?.querySelector("[data-setting-source]");
+    if (source) source.textContent = window.t("topic.defaultValue");
+    const button = row?.querySelector("[data-reset-setting]");
+    if (button) button.disabled = true;
+  }
+
+  resetAllSettings() {
+    this.settingsResetAll = true;
+    Object.keys(this.settingsData?.definitions || {}).forEach(key => this.resetSetting(key));
+  }
+
+  async saveSettings() {
+    if (!this.settingsData || this.settingsData.build_active) return;
+    const changes = {};
+    try {
+      document.querySelectorAll(".topic-setting-input[data-setting-key]").forEach(input => {
+        const key = input.dataset.settingKey;
+        const definition = this.settingsData.definitions[key];
+        const value = definition.type === "bool" ? input.checked
+          : definition.type === "select" ? input.value
+          : definition.type === "int" ? Number.parseInt(input.value, 10)
+          : Number.parseFloat(input.value);
+        if (!Number.isFinite(value) && !["bool", "select"].includes(definition.type)) throw new Error(`${definition.label}: ${window.t("topic.invalidSetting")}`);
+        if (value === definition.default) this.settingsResetKeys.add(key);
+        else changes[key] = value;
+      });
+      const save = document.getElementById("topic-settings-save");
+      save.disabled = true;
+      const result = await this.api.post("settings/update", {
+        view: "topic",
+        changes,
+        reset_keys: Array.from(this.settingsResetKeys),
+        reset_all: this.settingsResetAll,
+      });
+      this.settingsData = result;
+      this.settingsResetKeys = new Set();
+      this.settingsResetAll = false;
+      this.closeSettings();
+      this.showToast(window.t("topic.settingsSaved"));
+    } catch (e) {
+      this.showToast(e.message || window.t("topic.settingsSaveFailed"), true);
+      const save = document.getElementById("topic-settings-save");
+      if (save) save.disabled = false;
+    }
+  }
+
+  openMaintenance(trigger) {
+    if (!this.currentSpace() || !this.buildEnabled || this.activeJobUid) return;
+    this.maintenanceTrigger = trigger || null;
+    const overlay = document.getElementById("topic-maintenance-overlay");
+    overlay?.classList.add("visible");
+    overlay?.setAttribute("aria-hidden", "false");
+    document.getElementById("topic-maintenance-close")?.focus();
+    this.detectUnindexedTimelines();
+  }
+
+  maintenanceIsOpen() {
+    return document.getElementById("topic-maintenance-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeMaintenance({ restoreFocus = true } = {}) {
+    if (!this.maintenanceIsOpen() && !this.maintenanceTrigger) return;
+    const overlay = document.getElementById("topic-maintenance-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    this.maintenanceRequestId += 1;
+    this.maintenanceItems = [];
+    this.resetMaintenancePreview();
+    const trigger = this.maintenanceTrigger;
+    this.maintenanceTrigger = null;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  async detectUnindexedTimelines() {
+    if (!this.maintenanceIsOpen()) return;
+    this.resetMaintenancePreview();
+    const requestId = ++this.maintenanceRequestId;
+    const detectButton = document.getElementById("topic-maintenance-detect");
+    const submitButton = document.getElementById("topic-maintenance-submit");
+    const selection = document.getElementById("topic-maintenance-selection");
+    const status = document.getElementById("topic-maintenance-status");
+    const list = document.getElementById("topic-maintenance-list");
+    detectButton.disabled = true;
+    submitButton.disabled = true;
+    selection.classList.add("hidden");
+    status.textContent = window.t("topic.detectingUnindexed");
+    list.innerHTML = `<div class="topic-maintenance-empty text-tertiary">${esc(window.t("common.loading"))}</div>`;
+    try {
+      const data = await this.api.get("topics/maintenance/unindexed", {
+        memory_space_id: this.currentSpace(),
+      });
+      if (requestId !== this.maintenanceRequestId || !this.maintenanceIsOpen()) return;
+      const maintenanceCount = document.getElementById("maintenance-topic-unindexed-count");
+      if (maintenanceCount) maintenanceCount.textContent = String(Number(data.total || 0));
+      this.maintenanceItems = data.items || [];
+      status.textContent = window.t("topic.unindexedDetected", Number(data.total || 0));
+      if (!this.maintenanceItems.length) {
+        list.innerHTML = `<div class="topic-maintenance-empty text-tertiary">${esc(window.t("topic.noUnindexed"))}</div>`;
+        return;
+      }
+      selection.classList.remove("hidden");
+      document.getElementById("topic-maintenance-select-all").checked = true;
+      list.innerHTML = this.maintenanceItems.map(item => `
+        <label class="topic-maintenance-item">
+          <input class="topic-maintenance-checkbox" type="checkbox" value="${esc(item.timeline_uid)}" checked>
+          <span class="topic-maintenance-item-content">
+            <span class="topic-maintenance-item-meta">
+              <strong class="text-mono">${esc(item.timeline_uid)}</strong>
+              <small>r${Number(item.revision || 1)}${item.started_at ? ` · ${esc(this.formatTimestamp(item.started_at))}` : ""}</small>
+            </span>
+            <span class="topic-maintenance-item-summary">${esc(item.summary || window.t("topic.noTimelineSummary"))}</span>
+          </span>
+        </label>
+      `).join("");
+      list.querySelectorAll(".topic-maintenance-checkbox").forEach(input => {
+        input.addEventListener("change", () => this.updateMaintenanceSelection());
+      });
+      this.updateMaintenanceSelection();
+    } catch (e) {
+      if (requestId !== this.maintenanceRequestId) return;
+      this.maintenanceItems = [];
+      this.resetMaintenancePreview();
+      status.textContent = e.message || window.t("topic.detectUnindexedFailed");
+      list.innerHTML = "";
+      this.showToast(e.message || window.t("topic.detectUnindexedFailed"), true);
+    } finally {
+      if (requestId === this.maintenanceRequestId) detectButton.disabled = false;
+    }
+  }
+
+  async recomputeRelations() {
+    if (!this.currentSpace() || this.activeJobUid) return;
+    const button = document.getElementById("topic-recompute-relations");
+    const status = document.getElementById("topic-maintenance-status");
+    if (button) button.disabled = true;
+    if (status) status.textContent = window.t("topic.recomputingRelations");
+    try {
+      const job = await this.api.post("topics/relations/recompute", {
+        memory_space_id: this.currentSpace(),
+      });
+      this.closeMaintenance({ restoreFocus: false });
+      this.renderProgress(job);
+      this.resumePolling(job.job_uid);
+      this.setBuildButtonsDisabled(true);
+      this.showToast(window.t("topic.recomputingRelations"));
+    } catch (error) {
+      if (status) status.textContent = error.message || window.t("topic.recomputeRelationsFailed");
+      this.showToast(error.message || window.t("topic.recomputeRelationsFailed"), true);
+    } finally {
+      if (button) button.disabled = Boolean(this.activeJobUid);
+    }
+  }
+
+  async startRevectorization() {
+    if (!this.currentSpace() || this.activeJobUid) return;
+    const button = document.getElementById("topic-revectorize");
+    if (button) button.disabled = true;
+    try {
+      const job = await this.api.post("topics/maintenance/revectorize", {
+        memory_space_id: this.currentSpace(),
+      });
+      this.closeMaintenance({ restoreFocus: false });
+      this.renderProgress(job);
+      this.resumePolling(job.job_uid);
+      this.setBuildButtonsDisabled(true);
+      this.showToast(window.t("topic.revectorizeStarted"));
+    } catch (error) {
+      this.showToast(error.message || window.t("topic.revectorizeFailed"), true);
+      if (button) button.disabled = false;
+    }
+  }
+
+  requestClearTopics(trigger) {
+    if (!this.currentSpace() || this.activeJobUid) return;
+    this.clearTopicsTrigger = trigger || null;
+    const overlay = document.getElementById("topic-clear-confirm-overlay");
+    const message = document.getElementById("topic-clear-confirm-message");
+    if (message) {
+      message.textContent = window.t(
+        "topic.clearConfirmMessage",
+        this.topicCount,
+        this.currentSpace(),
+      );
+    }
+    overlay?.classList.add("visible");
+    overlay?.setAttribute("aria-hidden", "false");
+    document.getElementById("topic-clear-confirm-cancel")?.focus();
+  }
+
+  clearTopicsConfirmIsOpen() {
+    return document.getElementById("topic-clear-confirm-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeClearTopicsConfirm({ restoreFocus = true } = {}) {
+    if (!this.clearTopicsConfirmIsOpen() && !this.clearTopicsTrigger) return;
+    const overlay = document.getElementById("topic-clear-confirm-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    const trigger = this.clearTopicsTrigger;
+    this.clearTopicsTrigger = null;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  async clearTopics() {
+    if (!this.currentSpace() || this.activeJobUid) return;
+    const submit = document.getElementById("topic-clear-confirm-submit");
+    const cancel = document.getElementById("topic-clear-confirm-cancel");
+    if (submit) submit.disabled = true;
+    if (cancel) cancel.disabled = true;
+    try {
+      const result = await this.api.post("topics/maintenance/clear", {
+        memory_space_id: this.currentSpace(),
+        confirmed: true,
+      });
+      this.closeClearTopicsConfirm({ restoreFocus: false });
+      this.closeMaintenance({ restoreFocus: false });
+      this.showToast(window.t(
+        "topic.clearSuccess",
+        Number(result.deleted_topics || 0),
+      ));
+      await this.fetch();
+      window.dispatchEvent(new CustomEvent("livingmemory:topic-maintenance-updated", {
+        detail: { memory_space_id: this.currentSpace() },
+      }));
+    } catch (error) {
+      this.showToast(error.message || window.t("topic.clearFailed"), true);
+    } finally {
+      if (submit) submit.disabled = false;
+      if (cancel) cancel.disabled = false;
+    }
+  }
+
+  updateMaintenanceSelection() {
+    this.resetMaintenancePreview();
+    const checkboxes = Array.from(document.querySelectorAll("#topic-maintenance-list .topic-maintenance-checkbox"));
+    const selected = checkboxes.filter(input => input.checked).length;
+    const selectAll = document.getElementById("topic-maintenance-select-all");
+    if (selectAll) {
+      selectAll.checked = Boolean(checkboxes.length) && selected === checkboxes.length;
+      selectAll.indeterminate = selected > 0 && selected < checkboxes.length;
+    }
+    const selectedCount = document.getElementById("topic-maintenance-selected-count");
+    if (selectedCount) selectedCount.textContent = window.t("topic.selectedUnindexed", selected, checkboxes.length);
+    const submit = document.getElementById("topic-maintenance-submit");
+    if (submit) submit.disabled = selected === 0 || Boolean(this.activeJobUid);
+  }
+
+  resetMaintenancePreview() {
+    this.maintenancePreviewKey = null;
+    const preview = document.getElementById("topic-maintenance-preview");
+    preview?.classList.add("hidden");
+    if (preview) preview.innerHTML = "";
+    const submit = document.getElementById("topic-maintenance-submit");
+    if (submit) submit.textContent = window.t("topic.maintenanceSubmit");
+  }
+
+  async startSelectedMaintenance() {
+    const timelineUids = Array.from(
+      document.querySelectorAll("#topic-maintenance-list .topic-maintenance-checkbox:checked")
+    ).map(input => input.value);
+    if (!timelineUids.length || this.activeJobUid) return;
+    const previewKey = [...timelineUids].sort().join("\n");
+    if (this.maintenancePreviewKey !== previewKey) {
+      const submit = document.getElementById("topic-maintenance-submit");
+      const preview = document.getElementById("topic-maintenance-preview");
+      if (submit) submit.disabled = true;
+      try {
+        const data = await this.api.post("topics/maintenance/preview", {
+          memory_space_id: this.currentSpace(),
+          timeline_uids: timelineUids,
+        });
+        this.maintenancePreviewKey = previewKey;
+        preview.innerHTML = `
+          <strong>${esc(window.t("topic.maintenancePreviewTitle"))}</strong>
+          <div>${esc(window.t(
+            "topic.maintenancePreviewSummary",
+            Number(data.eligible_count || 0),
+            Number(data.batch_count || 0),
+            Number(data.batch_limit || 0),
+            Number(data.directly_affected_topic_count || 0),
+            Number(data.estimated_fragment_extraction_calls || 0),
+          ))}</div>
+          ${data.missing_or_already_indexed?.length ? `<small>${esc(window.t("topic.maintenancePreviewSkipped", data.missing_or_already_indexed.length))}</small>` : ""}
+          ${Number(data.pending_review_count || 0) ? `<small class="topic-maintenance-review-warning">${esc(window.t("topic.maintenancePendingReviews", Number(data.pending_review_count || 0)))}</small>` : ""}`;
+        preview.classList.remove("hidden");
+        if (submit) {
+          submit.textContent = window.t("topic.maintenanceConfirmSubmit");
+          submit.disabled = Number(data.eligible_count || 0) === 0;
+        }
+      } catch (error) {
+        this.showToast(error.message || window.t("topic.maintenancePreviewFailed"), true);
+        if (submit) submit.disabled = false;
+      }
+      return;
+    }
+    this.closeMaintenance({ restoreFocus: false });
+    this.startBuild("incremental", { timelineUids, scopeConfirmed: true });
+  }
+
+  requestFullBuild(trigger) {
+    if (!this.currentSpace() || !this.buildEnabled || this.activeJobUid) {
+      this.startBuild("full");
+      return;
+    }
+    if (this.topicCount <= 0) {
+      this.startBuild("full");
+      return;
+    }
+    this.fullBuildTrigger = trigger || null;
+    const overlay = document.getElementById("topic-full-build-confirm-overlay");
+    const message = document.getElementById("topic-full-build-confirm-message");
+    message.textContent = window.t(
+      "topic.fullBuildConfirmMessage",
+      this.topicCount,
+      this.currentSpace(),
+    );
+    const preserve = document.querySelector('input[name="topic-full-build-mode"][value="preserve"]');
+    if (preserve) preserve.checked = true;
+    this.updateFullBuildChoice();
+    overlay.classList.add("visible");
+    overlay.setAttribute("aria-hidden", "false");
+    document.getElementById("topic-full-build-confirm-cancel")?.focus();
+  }
+
+  updateFullBuildChoice() {
+    const resetTopics = document.querySelector('input[name="topic-full-build-mode"]:checked')?.value === "clear";
+    document.getElementById("topic-full-build-reset-risk")?.classList.toggle("hidden", !resetTopics);
+    const submit = document.getElementById("topic-full-build-confirm-submit");
+    if (submit) {
+      submit.textContent = window.t(resetTopics ? "topic.fullBuildClearSubmit" : "topic.fullBuildConfirmSubmit");
+    }
+  }
+
+  fullBuildConfirmIsOpen() {
+    return document.getElementById("topic-full-build-confirm-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeFullBuildConfirm({ restoreFocus = true } = {}) {
+    if (!this.fullBuildConfirmIsOpen() && !this.fullBuildTrigger) return;
+    const overlay = document.getElementById("topic-full-build-confirm-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    const trigger = this.fullBuildTrigger;
+    this.fullBuildTrigger = null;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  async startBuild(mode, { resetTopics = false, timelineUids = null, scopeConfirmed = false } = {}) {
+    const memorySpaceId = this.currentSpace();
+    if (!memorySpaceId) {
+      this.showToast("请先选择记忆空间", true);
+      return;
+    }
+    if (this.activeJobUid) {
+      this.showToast(window.t("topic.buildAlreadyRunning"), true);
+      return;
+    }
+    this.setBuildButtonsDisabled(true);
+    try {
+      const job = await this.api.post("topics/build/start", {
+        memory_space_id: memorySpaceId,
+        mode,
+        reset_topics: Boolean(resetTopics),
+        scope_confirmed: Boolean(scopeConfirmed),
+        ...(Array.isArray(timelineUids) ? { timeline_uids: timelineUids } : {}),
+      });
+      this.renderProgress(job);
+      if (job.already_running) {
+        this.showToast(window.t("topic.buildAlreadyRunning"));
+      }
+      this.resumePolling(job.job_uid);
+    } catch (e) {
+      this.setBuildButtonsDisabled(!this.currentSpace() || !this.buildEnabled);
+      this.showToast(e.message || "无法启动 Topic 构建", true);
+    }
+  }
+
+  async resumeBuild(runUid) {
+    if (!runUid || this.activeJobUid) return;
+    this.setBuildButtonsDisabled(true);
+    try {
+      const job = await this.api.post("topics/build/start", {
+        memory_space_id: this.currentSpace(),
+        resume_run_uid: runUid,
+      });
+      this.renderProgress(job);
+      this.resumePolling(job.job_uid);
+      this.showToast(window.t("topic.resumeStarted"));
+    } catch (e) {
+      this.setBuildButtonsDisabled(!this.currentSpace() || !this.buildEnabled);
+      this.showToast(e.message || window.t("topic.resumeFailed"), true);
+    }
+  }
+
+  requestDiscardBuild(job, trigger) {
+    if (!job?.run_uid || this.activeJobUid) return;
+    this.discardRun = {
+      run_uid: job.run_uid,
+      memory_space_id: job.memory_space_id || this.currentSpace(),
+    };
+    this.discardBuildTrigger = trigger || null;
+    const overlay = document.getElementById("topic-discard-build-overlay");
+    const message = document.getElementById("topic-discard-build-message");
+    message.textContent = window.t("topic.discardBuildMessage", job.run_uid);
+    overlay.classList.add("visible");
+    overlay.setAttribute("aria-hidden", "false");
+    document.getElementById("topic-discard-build-cancel")?.focus();
+  }
+
+  discardBuildConfirmIsOpen() {
+    return document.getElementById("topic-discard-build-overlay")?.classList.contains("visible") || false;
+  }
+
+  closeDiscardBuildConfirm({ restoreFocus = true } = {}) {
+    if (!this.discardBuildConfirmIsOpen() && !this.discardRun) return;
+    const overlay = document.getElementById("topic-discard-build-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    const trigger = this.discardBuildTrigger;
+    this.discardBuildTrigger = null;
+    this.discardRun = null;
+    if (restoreFocus && trigger?.isConnected) trigger.focus();
+  }
+
+  async discardBuild() {
+    const run = this.discardRun;
+    if (!run?.run_uid || this.activeJobUid) return;
+    const submit = document.getElementById("topic-discard-build-submit");
+    const cancel = document.getElementById("topic-discard-build-cancel");
+    if (submit) submit.disabled = true;
+    if (cancel) cancel.disabled = true;
+    try {
+      const result = await this.api.post("topics/build/discard", run);
+      this.closeDiscardBuildConfirm({ restoreFocus: false });
+      document.getElementById("topic-progress")?.classList.add("hidden");
+      document.getElementById("maintenance-topic-progress")?.classList.add("hidden");
+      this.showToast(window.t(
+        "topic.discardBuildSuccess",
+        Number(result.deleted_intermediate_items || 0),
+      ));
+      await this.fetch();
+    } catch (e) {
+      this.showToast(e.message || window.t("topic.discardBuildFailed"), true);
+    } finally {
+      if (submit) submit.disabled = false;
+      if (cancel) cancel.disabled = false;
+    }
+  }
+
+  resumePolling(jobUid) {
+    if (!jobUid) return;
+    if (this.activeJobUid === jobUid && (this.pollTimer || this.pollInFlight)) return;
+    clearTimeout(this.pollTimer);
+    this.activeJobUid = jobUid;
+    this.pollTimer = setTimeout(() => this.poll(jobUid), 200);
+  }
+
+  stopPolling() {
+    clearTimeout(this.pollTimer);
+    this.pollTimer = null;
+    this.activeJobUid = null;
+  }
+
+  setBuildButtonsDisabled(disabled) {
+    [
+      "topic-build-full",
+      "topic-maintenance",
+      "maintenance-open-topic",
+      "maintenance-open-reviews",
+      "maintenance-open-governance",
+      "topic-revectorize",
+      "topic-recompute-relations",
+      "topic-clear-topics",
+    ].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = Boolean(disabled);
+    });
+  }
+
+  async poll(jobUid) {
+    if (this.pollInFlight) return;
+    this.pollTimer = null;
+    this.pollInFlight = true;
+    try {
+      const job = await this.api.get("topics/build/progress", { job_uid: jobUid });
+      this.renderProgress(job);
+      if (["completed", "completed_with_review", "failed", "cancelled"].includes(job.status)) {
+        this.stopPolling();
+        this.setBuildButtonsDisabled(!this.currentSpace() || !this.buildEnabled);
+        if (["completed", "completed_with_review"].includes(job.status) || job.reset_topics) {
+          await this.fetch();
+          window.dispatchEvent(new CustomEvent("livingmemory:topic-maintenance-updated", {
+            detail: { memory_space_id: job.memory_space_id || this.currentSpace() },
+          }));
+          if (job.operation === "recompute_relations") {
+            this.showToast(window.t("topic.recomputedRelations", Number(job.result?.relation_count || 0)));
+          }
+        }
+        if (job.status === "failed") this.showToast(job.error || "Topic 构建失败", true);
+        return;
+      }
+      this.pollTimer = setTimeout(() => this.poll(jobUid), 1200);
+    } catch (e) {
+      this.showToast(e.message || "构建进度查询失败", true);
+      if (this.activeJobUid === jobUid) {
+        this.pollTimer = setTimeout(() => this.poll(jobUid), 3000);
+      }
+    } finally {
+      this.pollInFlight = false;
+    }
+  }
+
+  renderProgress(job) {
+    const total = Number(job.total || 0);
+    const current = Number(job.current || 0);
+    const stagePercent = total ? Math.min(100, Math.round(current * 100 / total)) : 0;
+    const overallPercent = Math.max(0, Math.min(100, Number(job.overall_percent || 0)));
+    const stageKey = `topic.stage.${job.stage || "pending"}`;
+    const stageLabel = window.t(stageKey);
+    const failedStageLabel = window.t(`topic.stage.${job.failed_stage || "failed"}`);
+    const now = Date.now() / 1000;
+    const elapsed = this.formatDuration(Math.max(0, now - Number(job.created_at || now)));
+    const updatedAgo = this.formatDuration(Math.max(0, now - Number(job.last_progress_at || now)));
+    const detail = this.progressDetail(job);
+    const failureDescription = this.failureDescription(job);
+    const renderTarget = (element, prefix) => {
+      if (!element) return;
+      const resumeId = `${prefix}-resume-build`;
+      const discardId = `${prefix}-discard-build`;
+      element.classList.remove("hidden");
+      element.innerHTML = `
+        <div class="topic-progress-header"><strong>${esc(window.t("topic.overallProgress"))}</strong><strong>${overallPercent.toFixed(1)}%</strong></div>
+        <div class="topic-progress-track topic-progress-overall"><span style="width:${overallPercent}%"></span></div>
+        <div class="topic-progress-header"><span>${esc(stageLabel)}</span><span>${current} / ${total}</span></div>
+        <div class="topic-progress-track"><span style="width:${stagePercent}%"></span></div>
+        ${detail ? `<div class="topic-progress-detail">${esc(detail)}</div>` : ""}
+        ${job.status === "failed" ? `<div class="topic-progress-failure">
+          <strong>${esc(window.t("topic.progress.failedAt"))} ${esc(failedStageLabel)}</strong>
+          ${failureDescription ? `<div>${esc(failureDescription)}</div>` : ""}
+          ${job.error ? `<code>${esc(job.error)}</code>` : ""}
+        </div>` : ""}
+        <div class="text-tertiary">${esc(window.t("topic.progress.elapsed"))} ${esc(elapsed)} · ${esc(window.t("topic.progress.updated"))} ${esc(updatedAgo)}</div>
+        <div class="text-tertiary">${esc(job.status)} · ${esc(job.memory_space_id || "")}</div>
+        ${job.run_uid && ["failed", "cancelled", "pending"].includes(job.status)
+          ? `<div class="topic-progress-actions">
+              <button id="${resumeId}" class="btn btn-primary">${esc(window.t("topic.resumeBuild"))}</button>
+              <button id="${discardId}" class="btn btn-danger">${esc(window.t("topic.discardBuild"))}</button>
+            </div>`
+          : ""}`;
+      document.getElementById(resumeId)?.addEventListener("click", () => this.resumeBuild(job.run_uid));
+      document.getElementById(discardId)?.addEventListener("click", event => this.requestDiscardBuild(job, event.currentTarget));
+    };
+    renderTarget(document.getElementById("topic-progress"), "topic");
+    renderTarget(document.getElementById("maintenance-topic-progress"), "maintenance-topic");
+  }
+
+  progressDetail(job) {
+    if (job.status === "failed") return "";
+    if (!["pending", "running"].includes(job.status)) return "";
+    const callTotal = Number(job.llm_call_total || 0);
+    const completed = Number(job.llm_call_current || 0);
+    const callText = callTotal
+      ? ` · ${window.t("topic.progress.llmCall")} ${Math.min(callTotal, completed)} / ${callTotal}`
+        + ` · ${window.t("topic.progress.concurrency")} ${Number(job.llm_concurrency || 1)}`
+      : "";
+    if (job.item_kind === "rerank_query") {
+      const rerankTotal = Number(job.rerank_call_total || job.item_total || 0);
+      const rerankCompleted = Math.min(
+        rerankTotal,
+        Number(job.rerank_call_current || 0),
+      );
+      return `${window.t("topic.progress.rerankCompleted")} ${rerankCompleted} / ${rerankTotal}`
+        + ` · ${window.t("topic.progress.rerankActive")} ${Number(job.active_rerank_count || 0)}`
+        + ` · ${window.t("topic.progress.concurrency")} ${Number(job.rerank_concurrency || 1)}`;
+    }
+    if (job.item_kind === "candidate_group") {
+      const groupCompleted = Number(job.completed_groups ?? job.current ?? 0);
+      const groupTotal = Number(job.item_total || job.total || 0);
+      const activeGroups = Number(job.active_group_count || 0);
+      const groupConcurrency = Number(job.group_concurrency || job.llm_concurrency || 1);
+      const aggregate = `${window.t("topic.progress.groupsCompleted")} ${groupCompleted} / ${groupTotal}`
+        + ` · ${window.t("topic.progress.activeGroups")} ${activeGroups} / ${groupConcurrency}`;
+      if (job.activity !== "llm_call") return aggregate;
+      return aggregate
+        + ` · ${window.t("topic.progress.extractingGroup")} #${Number(job.item_index || 0)}`
+        + ` · ${window.t("topic.progress.groupTimelines")} ${Number(job.group_timeline_count || job.timeline_count || 0)}`
+        + ` · ${window.t("topic.progress.currentBatch")} ${Number(job.batch_index || 1)} / ${Number(job.batch_total || 1)}`
+        + ` (${window.t("topic.progress.timelines")} ${Number(job.timeline_count || 0)})`
+        + callText;
+    }
+    if (job.item_kind === "topic_component" && job.activity === "llm_call") {
+      const level = Number(job.synthesis_level || 1);
+      return `${window.t("topic.progress.synthesizingComponent")} ${Number(job.item_index || 0)} / ${Number(job.item_total || 0)}`
+        + ` · ${window.t("topic.progress.fragments")} ${Number(job.fragment_count || 0)}`
+        + ` · ${window.t("topic.progress.currentBatch")} ${Number(job.batch_fragment_count || 0)}`
+        + ` · ${window.t("topic.progress.level")} ${level}`
+        + callText;
+    }
+    if (job.item_kind === "component_review") {
+      const reviewed = Number(job.reviewed_components ?? job.current ?? 0);
+      const total = Number(job.item_total || job.total || 0);
+      const active = Number(job.active_component_review_count || 0);
+      const concurrency = Number(job.component_review_concurrency || job.llm_concurrency || 1);
+      const groups = Number(job.review_output_groups || 0);
+      return `${window.t("topic.progress.reviewedComponents")} ${reviewed} / ${total}`
+        + ` · ${window.t("topic.progress.reviewingComponent")} #${Number(job.item_index || 0)}`
+        + ` · ${window.t("topic.progress.fragments")} ${Number(job.fragment_count || 0)}`
+        + (groups ? ` · ${window.t("topic.progress.reviewOutputGroups")} ${groups}` : "")
+        + ` · ${window.t("topic.progress.concurrency")} ${active} / ${concurrency}`;
+    }
+    return callText.replace(/^ · /, "");
+  }
+
+  failureDescription(job) {
+    if (job.status !== "failed") return "";
+    const key = `topic.stageFailure.${job.failed_stage || "unknown"}`;
+    const translated = window.t(key);
+    return translated === key ? window.t("topic.stageFailure.unknown") : translated;
+  }
+
+  formatDuration(seconds) {
+    const value = Math.max(0, Math.floor(Number(seconds || 0)));
+    const hours = Math.floor(value / 3600);
+    const minutes = Math.floor((value % 3600) / 60);
+    const secs = value % 60;
+    if (hours) return `${hours}h ${minutes}m ${secs}s`;
+    if (minutes) return `${minutes}m ${secs}s`;
+    return `${secs}s`;
+  }
+
+  formatTimestamp(timestamp) {
+    const date = new Date(Number(timestamp || 0) * 1000);
+    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString();
+  }
+}

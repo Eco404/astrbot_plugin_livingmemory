@@ -1,19 +1,26 @@
 """供 Agent 主动调用的长期记忆回忆工具。"""
 
 import asyncio
+import inspect
 import json
 from dataclasses import field
 from typing import Any
-
-from pydantic.dataclasses import dataclass
 
 from astrbot.api import logger
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
+from pydantic.dataclasses import dataclass
 
 from ..base.config_manager import ConfigManager
-from ..utils import get_persona_id
+from ..fact_temporal import normalize_fact_temporal
+from ..models.conversation_models import stable_actor_id
+from ..retrieval.temporal_constraint import TemporalConstraint
+from ..retrieval.unified_recall import (
+    UnifiedRecallCoordinator,
+    UnifiedRecallRequest,
+)
+from ..utils import content_with_temporal_key_facts, get_persona_id
 
 
 def _json_result(data: dict[str, Any]) -> str:
@@ -39,6 +46,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
         "or when resolving ambiguous references requires checking memory. "
         "Prefer short topic phrases, named entities, preferences, commitments, or past events as recall keywords. "
         "If the first recall is not enough, refine the keywords and recall again."
+        " Optionally provide a temporal constraint when an explicit time range or chronological order is required."
     )
     parameters: dict[str, Any] = field(
         default_factory=lambda: {
@@ -53,6 +61,33 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "description": "Maximum number of memory items to return for one recall. Keep this small unless more evidence is needed.",
                     "default": 5,
                 },
+                "temporal": {
+                    "type": "object",
+                    "description": "Optional event-time constraint. It is applied only to this explicit tool call and uses stored Timeline source times, never raw chat history.",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["range", "earliest", "latest"],
+                            "default": "range",
+                        },
+                        "start": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Optional inclusive RFC3339 lower bound with timezone.",
+                        },
+                        "end": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Optional inclusive RFC3339 upper bound with timezone.",
+                        },
+                        "order": {
+                            "type": "string",
+                            "enum": ["relevance", "earliest", "latest"],
+                            "description": "Result order after semantic qualification.",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
             },
             "required": ["query"],
         }
@@ -63,6 +98,7 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
         context: ContextWrapper[AstrAgentContext],
         query: str,
         k: int = 5,
+        temporal: dict[str, Any] | None = None,
     ) -> ToolExecResult:
         """执行长期记忆回忆。"""
         cleaned_query = (query or "").strip()
@@ -73,6 +109,19 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "count": 0,
                     "results": [],
                     "error": "query is empty",
+                }
+            )
+
+        try:
+            temporal_constraint = TemporalConstraint.from_payload(temporal)
+        except ValueError as exc:
+            return _json_result(
+                {
+                    "query": cleaned_query,
+                    "count": 0,
+                    "results": [],
+                    "error": "invalid_temporal_constraint",
+                    "detail": str(exc),
                 }
             )
 
@@ -96,10 +145,28 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
             use_persona_filtering = filtering_config.get("use_persona_filtering", True)
             use_session_filtering = filtering_config.get("use_session_filtering", True)
 
-            session_id = event.unified_msg_origin
+            raw_session_id = event.unified_msg_origin
+            scope_resolver = getattr(
+                self.memory_engine, "resolve_session_scope", None
+            )
+            scope_result = (
+                scope_resolver(raw_session_id)
+                if callable(scope_resolver)
+                else None
+            )
+            session_scope = (
+                await scope_result
+                if inspect.isawaitable(scope_result)
+                else [raw_session_id]
+            )
+            session_id = session_scope[0] if session_scope else raw_session_id
+            coordinator = UnifiedRecallCoordinator(
+                self.memory_engine, self.config_manager
+            )
+            topic_enabled = coordinator.topic_enabled()
             persona_id = (
                 await get_persona_id(self.context, event)
-                if use_persona_filtering
+                if use_persona_filtering or topic_enabled
                 else None
             )
 
@@ -116,28 +183,224 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
 
             limited_k = max(1, min(requested_k_int, max_k))
 
-            memories = await self.memory_engine.search_memories(
-                query=cleaned_query,
-                k=limited_k,
-                session_id=recall_session_id,
-                persona_id=recall_persona_id,
+            sender_id = (
+                event.get_sender_id()
+                if hasattr(event, "get_sender_id")
+                else getattr(event, "sender_id", "")
             )
-
+            platform = (
+                event.get_platform_name()
+                if hasattr(event, "get_platform_name")
+                else "unknown"
+            )
+            current_actor_ids = {
+                stable_actor_id(platform, str(sender_id), "human")
+            } if sender_id else set()
+            unified_outcome = await coordinator.search(
+                UnifiedRecallRequest(
+                    query=cleaned_query,
+                    final_k=limited_k,
+                    session_id=session_id,
+                    persona_id=persona_id,
+                    recall_session_id=recall_session_id,
+                    recall_persona_id=recall_persona_id,
+                    session_scope=list(session_scope or [session_id]),
+                    current_actor_ids=current_actor_ids,
+                    topic_enabled=topic_enabled,
+                    temporal=temporal_constraint,
+                )
+            )
+            topic_outcome = unified_outcome.topic_outcome
+            topic_results = unified_outcome.topic_results
+            fragment_outcome = unified_outcome.fragment_outcome
+            fragment_results = unified_outcome.fragment_results
+            memories = unified_outcome.timeline_results
             serialized_results = []
+            for item in topic_results:
+                topic_started_at = getattr(item.topic, "started_at", None)
+                topic_ended_at = getattr(item.topic, "ended_at", None)
+                selected_atoms = [
+                    atom
+                    for atom in list(getattr(item, "atoms", []) or [])[:4]
+                    if isinstance(atom, dict)
+                    and str(atom.get("content") or "").strip()
+                ]
+                topic_facts = [
+                    str(atom.get("content") or "").strip()
+                    for atom in selected_atoms
+                ]
+                topic_fact_temporal = [
+                    normalize_fact_temporal(
+                        atom.get("metadata", {})
+                        if isinstance(atom.get("metadata"), dict)
+                        else {},
+                        fallback_started_at=atom.get("event_started_at")
+                        or topic_started_at,
+                        fallback_ended_at=atom.get("event_ended_at")
+                        or topic_ended_at,
+                        fallback_basis="topic_window",
+                    )
+                    for atom in selected_atoms
+                ]
+                topic_content = content_with_temporal_key_facts(
+                    f"Topic: {item.content}".strip(),
+                    {
+                        "key_facts": topic_facts,
+                        "key_fact_temporal": topic_fact_temporal,
+                    },
+                )
+                serialized_results.append(
+                    {
+                        "id": item.topic_uid,
+                        "content": topic_content,
+                        "score": item.final_score,
+                        "importance": item.topic.importance,
+                        "memory_layer": "topic",
+                        "source_timeline_count": len(item.sources),
+                        "affect_match_score": item.affect_match_score,
+                        "affect_match_boost": item.affect_match_boost,
+                        "affect_event_count": len(item.selected_affect_events),
+                        **(
+                            {
+                                "event_started_at": getattr(item, "event_started_at", None),
+                                "event_ended_at": getattr(item, "event_ended_at", None),
+                                "time_basis": getattr(item, "time_basis", "unavailable"),
+                                "time_fallback": getattr(item, "time_fallback", True),
+                                "matched_source_uids": getattr(item, "matched_source_uids", []),
+                            }
+                            if temporal_constraint is not None
+                            else {}
+                        ),
+                    }
+                )
+            for item in fragment_results:
+                facts_by_content = {
+                    str(fact.get("content") or "").strip(): fact
+                    for fact in item.fragment.facts
+                    if isinstance(fact, dict)
+                    and str(fact.get("content") or "").strip()
+                }
+                fragment_facts = [
+                    str(value).strip()
+                    for value in item.fact_contents
+                    if str(value).strip()
+                ]
+                fragment_fact_temporal = [
+                    normalize_fact_temporal(
+                        facts_by_content.get(content, {}),
+                        fallback_started_at=item.fragment.started_at,
+                        fallback_ended_at=item.fragment.ended_at,
+                        fallback_basis="fragment_window",
+                    )
+                    for content in fragment_facts
+                ]
+                fragment_content = content_with_temporal_key_facts(
+                    item.content,
+                    {
+                        "key_facts": fragment_facts,
+                        "key_fact_temporal": fragment_fact_temporal,
+                    },
+                )
+                serialized_results.append(
+                    {
+                        "id": item.fragment_uid,
+                        "content": fragment_content,
+                        "score": item.final_score,
+                        "importance": item.fragment.importance,
+                        "memory_layer": "topic_fragment",
+                        "parent_topic_uid": item.topic_uid,
+                        "fragment_body_suppressed": item.body_suppressed,
+                        "fragment_fact_count": len(item.fact_contents),
+                        "source_timeline_count": len(item.fragment.timeline_uids),
+                        "narrative_perspective": "first_person_assistant",
+                        **(
+                            {
+                                "event_started_at": getattr(item, "event_started_at", None),
+                                "event_ended_at": getattr(item, "event_ended_at", None),
+                                "time_basis": getattr(item, "time_basis", "unavailable"),
+                                "time_fallback": getattr(item, "time_fallback", True),
+                                "matched_source_uids": getattr(item, "matched_source_uids", []),
+                            }
+                            if temporal_constraint is not None
+                            else {}
+                        ),
+                    }
+                )
             for memory in memories:
-                metadata = memory.metadata if isinstance(memory.metadata, dict) else {}
+                metadata = (
+                    dict(memory.metadata) if isinstance(memory.metadata, dict) else {}
+                )
+                source_window = (
+                    metadata.get("source_window", {})
+                    if isinstance(metadata.get("source_window"), dict)
+                    else {}
+                )
+                key_facts = metadata.get("key_facts", [])
+                temporal_rows = metadata.get("key_fact_temporal", [])
+                if isinstance(key_facts, list):
+                    fallback_start = source_window.get("started_at") or metadata.get(
+                        "create_time"
+                    )
+                    fallback_end = source_window.get("ended_at") or fallback_start
+                    metadata["key_fact_temporal"] = [
+                        normalize_fact_temporal(
+                            temporal_rows[index]
+                            if isinstance(temporal_rows, list)
+                            and index < len(temporal_rows)
+                            else {},
+                            fallback_started_at=fallback_start,
+                            fallback_ended_at=fallback_end,
+                            fallback_basis="timeline_window",
+                        )
+                        for index in range(len(key_facts))
+                    ]
                 serialized_results.append(
                     {
                         "id": memory.doc_id,
-                        "content": memory.content,
+                        "content": content_with_temporal_key_facts(
+                            memory.content, metadata
+                        ),
                         "score": memory.final_score,
                         "importance": metadata.get("importance"),
                         "session_id": metadata.get("session_id"),
                         "persona_id": metadata.get("persona_id"),
                         "create_time": metadata.get("create_time"),
                         "last_access_time": metadata.get("last_access_time"),
+                        **(
+                            {
+                                "event_started_at": metadata.get("event_started_at"),
+                                "event_ended_at": metadata.get("event_ended_at"),
+                                "time_basis": metadata.get("time_basis"),
+                                "time_fallback": metadata.get("time_fallback"),
+                                "matched_source_uids": metadata.get(
+                                    "matched_source_uids", []
+                                ),
+                            }
+                            if temporal_constraint is not None
+                            else {}
+                        ),
+                        **(
+                            {
+                                "memory_layer": (
+                                    "timeline_supplement"
+                                    if topic_results
+                                    else "timeline"
+                                )
+                            }
+                            if topic_enabled
+                            else {}
+                        ),
                     }
                 )
+
+            if serialized_results:
+                try:
+                    await coordinator.record_access(unified_outcome)
+                except Exception:
+                    logger.warning(
+                        "记忆工具已生成结果，但访问统计更新失败",
+                        exc_info=True,
+                    )
 
             return _json_result(
                 {
@@ -145,9 +408,15 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "applied_filters": {
                         "session_filtered": use_session_filtering,
                         "persona_filtered": use_persona_filtering,
+                        **(
+                            {"temporal": temporal_constraint.to_dict()}
+                            if temporal_constraint is not None
+                            else {}
+                        ),
                     },
                     "count": len(serialized_results),
                     "results": serialized_results,
+                    "diagnostics": unified_outcome.diagnostics(),
                 }
             )
         except asyncio.CancelledError:

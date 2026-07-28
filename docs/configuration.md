@@ -42,10 +42,38 @@ LivingMemory 的默认配置已经适合大多数场景。真正需要调整的�
 | `recall_engine.importance_weight` | `1.0` | 重要性在最终排序中的权重 |
 | `recall_engine.fallback_to_vector` | `true` | 混合检索失败时降级到向量检索 |
 | `recall_engine.injection_method` | `extra_user_content` | 记忆注入到 LLM 请求的位置或形式 |
-| `recall_engine.inject_with_recent_context` | `false` | 是否拼接最近对话扩展查询 |
+| `recall_engine.inject_with_recent_context` | `false` | 是否使用最近两轮对话扩展查询；当前消息始终独立作为主查询 |
+| `recall_engine.assistant_context_mode` | `exclude` | Bot 回复不参与、低权重参与或正常参与跨轮查询 |
+| `recall_engine.candidate_multiplier` | `3` | 最终筛选前检索的候选倍率 |
+| `recall_engine.min_relevance_score` | `0.38` | 自动召回最低相关度，允许结果少于 `top_k` |
+| `recall_engine.relative_score_floor` | `0.65` | 相对本轮最佳候选的最低相关度比例 |
+| `recall_engine.mmr_lambda` | `0.72` | 相关性与结果多样性的平衡 |
+| `recall_engine.context_overlap_suppression` | `true` | 不重复注入来源仍位于当前原始上下文的 Timeline |
 | `recall_engine.search_cache_enabled` | `true` | 是否启用短期检索缓存 |
 
 `extra_user_content` 是最稳妥的默认注入方式。Gemini Provider 下选择 `fake_tool_call` 会自动降级到 `extra_user_content`；DeepSeek V4 thinking 模式现在可以直接使用普通 `fake_tool_call`，旧的 `fake_tool_call_deepseek_v4` 仅作为兼容别名保留，并会自动回退到 `fake_tool_call`。
+
+开启跨轮扩展时，最近用户消息以较低权重单独检索，不会再与当前消息重复拼接。`assistant_context_mode=exclude` 可以避免 Bot 对用户内容的复述反复放大同一批关键词；只有确实依赖 Bot 上一轮说明的场景，才建议改为 `low_weight` 或 `normal`。
+
+## Topic 优先召回
+
+| 配置项 | 默认 | 说明 |
+| --- | --- | --- |
+| `topic_memory.recall_enabled` | `true` | Topic 总开关开启后优先召回活跃 Topic |
+| `topic_memory.recall_top_k` | `3` | 每轮最多注入的 Topic 数量 |
+| `topic_memory.recall_candidate_multiplier` | `4` | Topic 精筛前的候选倍率 |
+| `topic_memory.recall_scan_limit` | `2000` | 单个记忆空间每次参与向量扫描的 Topic 上限 |
+| `topic_memory.recall_min_relevance` | `0.32` | 当前消息与 Topic 的最低相关度 |
+| `topic_memory.recall_relative_floor` | `0.70` | 相对最佳 Topic 的最低比例 |
+| `topic_memory.recall_selection_relative_floor` | `0.90` | 最终选择相对最佳当前相关度的动态停止比例，结果可少于配置上限 |
+| `topic_memory.recall_mmr_lambda` | `0.78` | Topic 相关性与结果多样性的平衡 |
+| `topic_memory.recall_use_rerank` | `true` | 有可用 Rerank 时使用当前消息对合格 Topic 精排 |
+| `topic_memory.recall_rerank_weight` | `0.35` | Rerank 相对名次的最大影响强度；按本轮可信度衰减，不混合原始绝对分 |
+| `topic_memory.recall_context_support_cap` | `0.08` | 跨轮上下文可提供的最大排序奖励，不能单独使 Topic 入选 |
+| `topic_memory.recall_context_overlap_threshold` | `0.80` | 当前上下文覆盖该比例的 Topic 来源时抑制注入 |
+| `topic_memory.timeline_supplement_k` | `2` | Topic 命中后附带的 Timeline 上限 |
+
+Topic 检索复用构建时保存的向量，不调用 LLM。正式注入总数仍不超过 `recall_engine.top_k`；没有活跃或足够相关的 Topic 时自动回退纯 Timeline。部分 Topic 来源仍位于当前上下文时只降低分数，只有覆盖率达到配置阈值才过滤整个 Topic。
 
 ## 记忆隔离
 

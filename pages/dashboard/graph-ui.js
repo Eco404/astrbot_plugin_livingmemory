@@ -52,6 +52,9 @@
 
   async function requestGraph(path, options) {
     options = options || {};
+    if (typeof window.lmApiRequest === "function") {
+      return unwrapGraphData(await window.lmApiRequest(path, options));
+    }
     var bridge = window.AstrBotPluginPage;
     if (!bridge) throw new Error(window.t("graph.bridgeError"));
 

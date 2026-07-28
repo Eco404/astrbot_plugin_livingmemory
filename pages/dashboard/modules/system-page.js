@@ -56,8 +56,9 @@ export class SystemPage {
    * @param {Object} data - 统计数据
    */
   renderStatCards(data) {
-    // 后端返回字段：total_memories, status_breakdown, graph_nodes, atom_count
     const statusBreakdown = data.status_breakdown || {};
+    const topic = data.topic_memory || {};
+    const topicStatus = topic.status_counts || {};
 
     document.getElementById("ss-total").textContent = data.total_memories || 0;
     document.getElementById("ss-active").textContent = statusBreakdown.active || 0;
@@ -65,6 +66,19 @@ export class SystemPage {
     document.getElementById("ss-deleted").textContent = statusBreakdown.deleted || 0;
     document.getElementById("ss-nodes").textContent = data.graph_nodes || 0;
     document.getElementById("ss-atoms").textContent = data.atom_count || 0;
+    document.getElementById("ss-topics").textContent = topicStatus.active || 0;
+    document.getElementById("ss-fragments").textContent = topic.fragment_count || 0;
+    document.getElementById("ss-spaces").textContent = topic.memory_space_count || 0;
+    document.getElementById("ss-topic-atoms").textContent = topic.atom_count || 0;
+    document.getElementById("ss-topic-links").textContent = topic.timeline_link_count || 0;
+    document.getElementById("ss-topic-relations").textContent = topic.relation_count || 0;
+    document.getElementById("ss-actor-links").textContent = topic.actor_link_count || 0;
+    document.getElementById("ss-pending-review").textContent = topic.pending_review_count || 0;
+    const state = document.getElementById("ss-topic-state");
+    if (state) {
+      state.textContent = window.t(topic.enabled ? "system.enabled" : "system.disabled");
+      state.classList.toggle("is-enabled", Boolean(topic.enabled));
+    }
   }
 
   /**
@@ -172,7 +186,7 @@ export class SystemPage {
       html += '<div class="session-item">';
       html += '<div class="session-item-header">';
       html += '<span class="session-item-id">' + esc(String(sessionId)) + '</span>';
-      html += '<span class="session-item-count">' + messageCount + ' ' + window.t("system.messages") + '</span>';
+      html += '<span class="session-item-count">' + messageCount + ' ' + window.t("system.timelineItems") + '</span>';
       html += '</div>';
       if (lastActive !== "--") {
         html += '<div class="session-item-meta">' + window.t("system.lastActive") + ': ' + esc(lastActive) + '</div>';

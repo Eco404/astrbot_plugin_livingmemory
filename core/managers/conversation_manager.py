@@ -20,7 +20,8 @@ from astrbot.api import logger
 from astrbot.api.platform import MessageType
 
 from ...storage.conversation_store import ConversationStore
-from ..models.conversation_models import Message, Session
+from ..models.conversation_identity import ConversationIdentityResolver
+from ..models.conversation_models import Message, Session, stable_actor_id
 
 
 class ConversationManager:
@@ -69,6 +70,12 @@ class ConversationManager:
         self.max_cache_size = max_cache_size
         self.context_window_size = context_window_size
         self.session_ttl = session_ttl
+        self.raw_message_retention_days = 0
+        self.auto_delete_raw_sessions = False
+        self._identity_resolver = ConversationIdentityResolver(
+            self._normalize_sender_name,
+            self._resolve_sender_name,
+        )
 
         # LRU缓存: {session_id: (messages, last_access_time)}
         self._cache: OrderedDict = OrderedDict()
@@ -85,6 +92,10 @@ class ConversationManager:
         event: Any,  # AstrBot MessageEvent
         role: str,
         content: str,
+        *,
+        persona_id: str | None = None,
+        persona_name: str | None = None,
+        event_source: str | None = None,
     ) -> Message:
         """
         从AstrBot事件添加消息(自动提取发送者信息)
@@ -97,25 +108,15 @@ class ConversationManager:
         Returns:
             创建的Message对象
         """
-        # 使用 unified_msg_origin 作为会话ID，确保多Bot场景下的唯一性
         session_id = event.unified_msg_origin
-
-        # 提取发送者信息
-        sender_id = None
-        sender_name = None
         group_id = None
-
-        # 尝试获取发送者ID
-        if hasattr(event, "get_sender_id"):
-            sender_id = event.get_sender_id()
-        elif hasattr(event, "sender_id"):
-            sender_id = event.sender_id
-
-        # 如果还是没有sender_id,使用session_id作为后备
-        if not sender_id:
-            sender_id = session_id
-
-        sender_name = self._resolve_sender_name(event, sender_id)
+        identity = self._identity_resolver.resolve(
+            event,
+            role,
+            persona_id=persona_id,
+            persona_name=persona_name,
+            event_source=event_source,
+        )
 
         # Debug: 记录原始 message_obj.sender 信息
         if hasattr(event, "message_obj") and hasattr(event.message_obj, "sender"):
@@ -133,42 +134,38 @@ class ConversationManager:
             if is_group:
                 group_id = session_id  # 群聊时session_id即为group_id
 
-        # 群聊中助手消息：sender_name 使用 Bot 自身昵称（如果可获取）
-        is_bot_message = role == "assistant"
-        if is_bot_message and is_group:
-            bot_name = None
-            if hasattr(event, "get_self_id"):
-                bot_name = event.get_self_id()
-            # 尝试从 context 获取 Bot 昵称（AstrBot 通常在 message_obj 中有 self_id）
-            if hasattr(event, "message_obj") and hasattr(event.message_obj, "self_id"):
-                bot_name = str(event.message_obj.self_id)
-            if bot_name:
-                sender_id = bot_name
-                sender_name = sender_name or bot_name
-
         # 调试日志：记录最终获取到的发送者信息
         logger.debug(
             f"[add_message_from_event] [{session_id}] 最终发送者信息: "
-            f"sender_id={sender_id}, sender_name='{sender_name}', "
-            f"role={role}, is_group={is_group}, group_id={group_id}"
+            f"sender_id={identity.sender_id}, sender_name='{identity.sender_name}', "
+            f"role={role}, is_group={is_group}, group_id={group_id}, "
+            f"source={identity.identity_source}, warnings={list(identity.warnings)}"
         )
 
-        # 获取平台名称（字符串）
-        platform = (
-            event.get_platform_name()
-            if hasattr(event, "get_platform_name")
-            else "unknown"
-        )
+        identity_metadata = identity.metadata()
+        message_obj = getattr(event, "message_obj", None)
+        source_message_id = None
+        for owner in (message_obj, event):
+            for attr in ("message_id", "id"):
+                source_message_id = self._raw_get(owner, attr)
+                if source_message_id not in (None, ""):
+                    break
+            if source_message_id not in (None, ""):
+                break
+        if source_message_id not in (None, ""):
+            identity_metadata["source_message_id"] = str(source_message_id)
+        identity_metadata["source_event_class"] = event.__class__.__name__
 
         return await self.add_message(
             session_id=session_id,
             role=role,
             content=content,
-            sender_id=sender_id,
-            sender_name=sender_name,
+            sender_id=identity.sender_id,
+            sender_name=identity.sender_name,
             group_id=group_id,
-            platform=platform,
+            platform=identity.platform,
             is_bot_message=(role == "assistant"),
+            metadata=identity_metadata,
         )
 
     async def add_message(
@@ -181,6 +178,7 @@ class ConversationManager:
         group_id: str | None = None,
         platform: str = "unknown",
         is_bot_message: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> Message:
         """
         添加消息到会话
@@ -197,11 +195,21 @@ class ConversationManager:
         Returns:
             创建的Message对象
         """
-        # 如果没有sender_id,使用session_id
+        session_id = await self.resolve_session_id(session_id)
+        # 如果没有sender_id,使用规范会话 ID
         if not sender_id:
             sender_id = session_id
 
         # 创建消息对象
+        actor_type = "assistant" if is_bot_message or role == "assistant" else "human"
+        message_metadata = dict(metadata or {})
+        message_metadata.update(
+            {
+                "is_bot_message": actor_type == "assistant",
+                "actor_type": actor_type,
+                "actor_id": stable_actor_id(platform, sender_id, actor_type),
+            }
+        )
         message = Message(
             id=0,  # 将由数据库分配
             session_id=session_id,
@@ -212,7 +220,7 @@ class ConversationManager:
             group_id=group_id,
             platform=platform,
             timestamp=time.time(),
-            metadata={"is_bot_message": True} if is_bot_message else {},
+            metadata=message_metadata,
         )
 
         # 存储到数据库
@@ -394,6 +402,7 @@ class ConversationManager:
         Returns:
             Message对象列表
         """
+        session_id = await self.resolve_session_id(session_id)
         # 如果指定了sender_id,不使用缓存(需要过滤)
         if sender_id:
             use_cache = False
@@ -429,6 +438,7 @@ class ConversationManager:
         Returns:
             Session对象
         """
+        session_id = await self.resolve_session_id(session_id)
         # 尝试获取现有会话
         session = await self.store.get_session(session_id)
 
@@ -453,6 +463,7 @@ class ConversationManager:
         Returns:
             Session对象,不存在则返回None
         """
+        session_id = await self.resolve_session_id(session_id)
         session = await self.store.get_session(session_id)
         if session:
             logger.debug(
@@ -484,6 +495,7 @@ class ConversationManager:
         Args:
             session_id: 会话ID
         """
+        session_id = await self.resolve_session_id(session_id)
         # 删除数据库中的消息
         await self.store.delete_session_messages(session_id)
 
@@ -497,26 +509,40 @@ class ConversationManager:
         logger.info(f"[ConversationManager] 已清空会话并重置记忆上下文: {session_id}")
 
     async def cleanup_expired_sessions(self) -> int:
-        """
-        清理过期会话
-
-        Returns:
-            清理的会话数量
-        """
-        ttl_seconds = max(60, int(self.session_ttl))
-        deleted_count = await self.store.delete_old_sessions(ttl_seconds=ttl_seconds)
-
-        # 清空缓存(可能包含已删除的会话)
+        """Evict idle in-memory entries; persisted conversations are untouched."""
+        cutoff = time.time() - max(60, int(self.session_ttl))
+        removed = 0
         async with self._cache_lock:
-            self._cache.clear()
+            for session_id, (_, last_access) in list(self._cache.items()):
+                if float(last_access) < cutoff:
+                    self._cache.pop(session_id, None)
+                    removed += 1
+        return removed
 
-        if deleted_count > 0:
-            logger.info(
-                f"[ConversationManager] 清理过期会话: {deleted_count}个 "
-                f"(TTL={ttl_seconds}秒)"
-            )
+    async def resolve_session_id(self, session_id: str) -> str:
+        """Resolve a user-confirmed session alias to its canonical ID."""
+        return await self.store.resolve_session_id(session_id)
 
-        return deleted_count
+    async def get_session_scope(self, session_id: str) -> list[str]:
+        """Return the canonical ID followed by its legacy aliases."""
+        return await self.store.list_session_alias_group(session_id)
+
+    async def active_session_ids(self) -> set[str]:
+        async with self._cache_lock:
+            return set(self._cache.keys())
+
+    async def invalidate_session_cache(self, session_ids: list[str]) -> None:
+        """Drop raw and canonical cache entries after out-of-band maintenance."""
+        normalized = {
+            str(item or "").strip() for item in session_ids if str(item or "").strip()
+        }
+        for session_id in list(normalized):
+            canonical = await self.resolve_session_id(session_id)
+            if canonical:
+                normalized.add(canonical)
+        async with self._cache_lock:
+            for session_id in normalized:
+                self._cache.pop(session_id, None)
 
     async def _update_cache(self, session_id: str, messages: list[Message]):
         """
@@ -550,7 +576,10 @@ class ConversationManager:
         """
         async with self._cache_lock:
             if session_id in self._cache:
-                messages, _ = self._cache[session_id]
+                messages, cached_at = self._cache[session_id]
+                if time.time() - cached_at > max(60, int(self.session_ttl)):
+                    del self._cache[session_id]
+                    return None
                 # 移到末尾(标记为最新访问)
                 self._cache.move_to_end(session_id)
                 # 更新访问时间
@@ -592,6 +621,7 @@ class ConversationManager:
         Returns:
             Message对象列表
         """
+        session_id = await self.resolve_session_id(session_id)
         # 先获取会话信息以确定消息总数
         session_info = await self.get_session_info(session_id)
         if not session_info:
@@ -664,6 +694,22 @@ class ConversationManager:
 
         return result
 
+    async def get_messages_by_id_span(
+        self,
+        session_id: str,
+        first_message_id: int,
+        last_message_id: int,
+        *,
+        limit: int = 100,
+    ) -> list[Message]:
+        """Fetch the immutable message-ID span recorded by a Timeline."""
+        return await self.store.get_messages_by_id_span(
+            session_id,
+            first_message_id,
+            last_message_id,
+            limit=limit,
+        )
+
     async def update_session_metadata(
         self, session_id: str, key: str, value: Any
     ) -> None:
@@ -675,34 +721,58 @@ class ConversationManager:
             key: 元数据键
             value: 元数据值
         """
-        session = await self.store.get_session(session_id)
-        if not session:
+        session_id = await self.resolve_session_id(session_id)
+        updated = await self.store.update_session_metadata_values(
+            session_id, {key: value}
+        )
+        if not updated:
             logger.warning(
                 f"[ConversationManager] 会话 {session_id} 不存在，无法更新元数据"
             )
             return
 
-        # 更新元数据
-        session.metadata[key] = value
-
-        # 保存到数据库
-        if self.store.connection is not None:
-            try:
-                await self.store.connection.execute(
-                    """
-                    UPDATE sessions
-                    SET metadata = ?
-                    WHERE session_id = ?
-                """,
-                    (json.dumps(session.metadata, ensure_ascii=False), session_id),
-                )
-                await self.store.connection.commit()
-            except Exception as e:
-                logger.error(f"更新会话元数据失败: {e}", exc_info=True)
-
         logger.debug(
             f"[ConversationManager] 更新会话元数据: {session_id}, {key}={value}"
         )
+
+    async def update_session_metadata_values(
+        self, session_id: str, changes: dict[str, Any]
+    ) -> bool:
+        """Atomically update multiple metadata keys."""
+        session_id = await self.resolve_session_id(session_id)
+        return await self.store.update_session_metadata_values(session_id, changes)
+
+    async def apply_runtime_settings(self, effective: dict[str, Any]) -> None:
+        """Apply WebUI-owned session settings to the live cache manager."""
+        self.max_cache_size = int(
+            effective.get("session_manager.max_sessions", self.max_cache_size)
+        )
+        self.context_window_size = int(
+            effective.get(
+                "session_manager.context_window_size", self.context_window_size
+            )
+        )
+        self.session_ttl = int(
+            effective.get("session_manager.session_ttl", self.session_ttl)
+        )
+        self.raw_message_retention_days = max(
+            0,
+            int(
+                effective.get(
+                    "session_manager.raw_message_retention_days",
+                    self.raw_message_retention_days,
+                )
+            ),
+        )
+        self.auto_delete_raw_sessions = bool(
+            effective.get(
+                "session_manager.auto_delete_raw_sessions",
+                self.auto_delete_raw_sessions,
+            )
+        )
+        async with self._cache_lock:
+            while len(self._cache) > self.max_cache_size:
+                self._cache.popitem(last=False)
 
     async def get_session_metadata(
         self, session_id: str, key: str, default: Any = None
@@ -718,6 +788,7 @@ class ConversationManager:
         Returns:
             元数据值，不存在则返回default
         """
+        session_id = await self.resolve_session_id(session_id)
         session = await self.store.get_session(session_id)
         if not session:
             return default
@@ -729,6 +800,7 @@ class ConversationManager:
         重置指定会话的所有元数据，特别是 'last_summarized_index'。
         这会使下一次记忆总结从头开始，不会包含旧的上下文。
         """
+        session_id = await self.resolve_session_id(session_id)
         session = await self.store.get_session(session_id)
         if not session:
             logger.warning(

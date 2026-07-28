@@ -6,7 +6,9 @@
 import asyncio
 import json
 import time
+import uuid
 from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
@@ -46,6 +48,7 @@ class ConversationStore:
             self.connection.row_factory = aiosqlite.Row
             await self.connection.execute("PRAGMA journal_mode = WAL")
             await self.connection.execute("PRAGMA busy_timeout = 10000")
+            await self.connection.execute("PRAGMA foreign_keys = ON")
 
         await self._create_tables()
         await self._create_indexes()
@@ -93,6 +96,62 @@ class ConversationStore:
             )
         """)
 
+            await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS session_summary_jobs (
+                session_id TEXT PRIMARY KEY,
+                job_uid TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trigger_type TEXT NOT NULL,
+                start_index INTEGER NOT NULL,
+                end_index INTEGER NOT NULL,
+                persona_id TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at REAL,
+                error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                completed_at REAL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+            await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS session_summary_decisions (
+                decision_uid TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                job_uid TEXT,
+                trigger_type TEXT NOT NULL,
+                start_index INTEGER NOT NULL,
+                end_index INTEGER NOT NULL,
+                first_message_id INTEGER,
+                last_message_id INTEGER,
+                persona_id TEXT,
+                decision TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                importance REAL NOT NULL,
+                message_coverage TEXT NOT NULL DEFAULT '[]',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE,
+                UNIQUE(session_id, start_index, end_index, decision)
+            )
+        """)
+
+            await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS session_aliases (
+                alias_session_id TEXT PRIMARY KEY,
+                canonical_session_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                CHECK(alias_session_id <> canonical_session_id)
+            )
+        """)
+
             await self.connection.commit()
 
     async def _create_indexes(self) -> None:
@@ -118,6 +177,22 @@ class ConversationStore:
             )
             await self.connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_msg_session_id ON messages(session_id, id)"
+            )
+            await self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_summary_jobs_status_retry "
+                "ON session_summary_jobs(status, next_retry_at)"
+            )
+            await self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_summary_decisions_session_range "
+                "ON session_summary_decisions(session_id, end_index DESC)"
+            )
+            await self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_summary_decisions_created "
+                "ON session_summary_decisions(created_at DESC)"
+            )
+            await self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_aliases_canonical "
+                "ON session_aliases(canonical_session_id, status)"
             )
 
             await self.connection.commit()
@@ -274,6 +349,484 @@ class ConversationStore:
             )
 
         return sessions
+
+    async def list_session_audit_rows(self, limit: int = 1000) -> list[dict[str, Any]]:
+        """Return compact raw-session facts used by the maintenance audit."""
+        if self.connection is None:
+            return []
+        rows = await (
+            await self.connection.execute(
+                """
+                SELECT s.*,
+                       COUNT(m.id) AS actual_message_count,
+                       MIN(m.id) AS first_message_id,
+                       MAX(m.id) AS last_message_id,
+                       MAX(j.status) AS summary_job_status
+                FROM sessions s
+                LEFT JOIN messages m ON m.session_id = s.session_id
+                LEFT JOIN session_summary_jobs j ON j.session_id = s.session_id
+                GROUP BY s.session_id
+                ORDER BY s.last_active_at DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 10000)),),
+            )
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def resolve_session_id(self, session_id: str) -> str:
+        """Resolve an alias chain to its canonical session without guessing."""
+        current = str(session_id or "").strip()
+        if not current or self.connection is None:
+            return current
+        visited: set[str] = set()
+        for _ in range(16):
+            if current in visited:
+                logger.error("[ConversationStore] 检测到会话别名循环: %s", current)
+                return str(session_id or "").strip()
+            visited.add(current)
+            row = await (
+                await self.connection.execute(
+                    """
+                    SELECT canonical_session_id FROM session_aliases
+                    WHERE alias_session_id = ? AND status = 'active'
+                    """,
+                    (current,),
+                )
+            ).fetchone()
+            if not row:
+                return current
+            current = str(row["canonical_session_id"] or "").strip()
+        logger.error("[ConversationStore] 会话别名链超过安全上限: %s", session_id)
+        return str(session_id or "").strip()
+
+    async def list_session_alias_group(self, session_id: str) -> list[str]:
+        """Return canonical ID first, followed by every active direct alias."""
+        canonical = await self.resolve_session_id(session_id)
+        if not canonical or self.connection is None:
+            return [canonical] if canonical else []
+        rows = await (
+            await self.connection.execute(
+                """
+                SELECT alias_session_id FROM session_aliases
+                WHERE canonical_session_id = ? AND status = 'active'
+                ORDER BY created_at ASC, alias_session_id ASC
+                """,
+                (canonical,),
+            )
+        ).fetchall()
+        return [canonical, *(str(row["alias_session_id"]) for row in rows)]
+
+    async def list_session_aliases(self) -> list[dict[str, Any]]:
+        if self.connection is None:
+            return []
+        rows = await (
+            await self.connection.execute(
+                "SELECT * FROM session_aliases ORDER BY updated_at DESC"
+            )
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def set_session_aliases(
+        self,
+        canonical_session_id: str,
+        alias_session_ids: list[str],
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Persist an explicit logical merge; source rows remain recoverable."""
+        canonical = str(canonical_session_id or "").strip()
+        aliases = sorted(
+            {
+                str(item or "").strip()
+                for item in alias_session_ids
+                if str(item or "").strip() and str(item or "").strip() != canonical
+            }
+        )
+        if not canonical:
+            raise ValueError("规范会话 ID 不能为空")
+        if not aliases:
+            raise ValueError("至少需要一个不同于规范会话的别名")
+        if self.connection is None:
+            raise RuntimeError("数据库连接未初始化")
+        now = time.time()
+        payload = json.dumps(metadata or {}, ensure_ascii=False)
+        async with self._write_lock:
+            # Flatten existing chains before writing and reject a canonical ID that
+            # currently resolves into one of the requested aliases.
+            resolved_canonical = await self.resolve_session_id(canonical)
+            if resolved_canonical != canonical:
+                raise ValueError("所选规范会话本身是其他会话的别名")
+            for alias in aliases:
+                target = await self.resolve_session_id(alias)
+                if target == canonical:
+                    continue
+                if target != alias and target in aliases:
+                    raise ValueError("会话别名选择会形成循环")
+                await self.connection.execute(
+                    """
+                    INSERT INTO session_aliases (
+                        alias_session_id, canonical_session_id, status, metadata,
+                        created_at, updated_at
+                    ) VALUES (?, ?, 'active', ?, ?, ?)
+                    ON CONFLICT(alias_session_id) DO UPDATE SET
+                        canonical_session_id = excluded.canonical_session_id,
+                        status = 'active', metadata = excluded.metadata,
+                        updated_at = excluded.updated_at
+                    """,
+                    (alias, canonical, payload, now, now),
+                )
+            await self.connection.commit()
+        return [canonical, *aliases]
+
+    async def remove_session_aliases(self, session_ids: list[str]) -> int:
+        normalized = sorted({str(item).strip() for item in session_ids if str(item).strip()})
+        if not normalized or self.connection is None:
+            return 0
+        placeholders = ",".join("?" for _ in normalized)
+        async with self._write_lock:
+            cursor = await self.connection.execute(
+                f"""
+                DELETE FROM session_aliases
+                WHERE alias_session_id IN ({placeholders})
+                   OR canonical_session_id IN ({placeholders})
+                """,
+                [*normalized, *normalized],
+            )
+            await self.connection.commit()
+        return int(cursor.rowcount or 0)
+
+    async def get_idle_sessions(
+        self, *, last_active_before: float, limit: int = 50
+    ) -> list[Session]:
+        """Return least-recently active sessions eligible for idle work."""
+        if self.connection is None:
+            return []
+        async with self.connection.execute(
+            """
+            SELECT id, session_id, platform, created_at, last_active_at,
+                   message_count, participants, metadata
+            FROM sessions
+            WHERE last_active_at <= ? AND message_count > 0
+            ORDER BY last_active_at ASC
+            LIMIT ?
+            """,
+            (float(last_active_before), max(1, min(int(limit), 500))),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [Session.from_dict(dict(row)) for row in rows]
+
+    async def update_session_metadata_values(
+        self, session_id: str, changes: dict[str, object]
+    ) -> bool:
+        """Atomically patch session metadata without losing concurrent keys."""
+        if self.connection is None:
+            return False
+        async with self._write_lock:
+            row = await (
+                await self.connection.execute(
+                    "SELECT metadata FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+            ).fetchone()
+            if not row:
+                return False
+            try:
+                metadata = json.loads(row["metadata"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = {}
+            for key, value in changes.items():
+                if value is None:
+                    metadata.pop(str(key), None)
+                else:
+                    metadata[str(key)] = value
+            await self.connection.execute(
+                "UPDATE sessions SET metadata = ? WHERE session_id = ?",
+                (json.dumps(metadata, ensure_ascii=False), session_id),
+            )
+            await self.connection.commit()
+        return True
+
+    async def start_summary_job(
+        self,
+        session_id: str,
+        *,
+        trigger_type: str,
+        start_index: int,
+        end_index: int,
+        persona_id: str | None,
+        retry_count: int,
+    ) -> dict[str, object]:
+        """Persist the exact Timeline-summary window before calling the LLM."""
+        if self.connection is None:
+            raise RuntimeError("数据库连接未初始化")
+        now = time.time()
+        job_uid = str(uuid.uuid4())
+        async with self._write_lock:
+            await self.connection.execute(
+                """
+                INSERT INTO session_summary_jobs (
+                    session_id, job_uid, status, trigger_type, start_index,
+                    end_index, persona_id, retry_count, next_retry_at, error,
+                    created_at, updated_at, completed_at
+                ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    job_uid = excluded.job_uid,
+                    status = 'running',
+                    trigger_type = excluded.trigger_type,
+                    start_index = excluded.start_index,
+                    end_index = excluded.end_index,
+                    persona_id = excluded.persona_id,
+                    retry_count = excluded.retry_count,
+                    next_retry_at = NULL,
+                    error = NULL,
+                    updated_at = excluded.updated_at,
+                    completed_at = NULL
+                """,
+                (
+                    session_id,
+                    job_uid,
+                    str(trigger_type),
+                    int(start_index),
+                    int(end_index),
+                    persona_id,
+                    max(0, int(retry_count)),
+                    now,
+                    now,
+                ),
+            )
+            await self.connection.commit()
+        return {
+            "session_id": session_id,
+            "job_uid": job_uid,
+            "status": "running",
+            "start_index": int(start_index),
+            "end_index": int(end_index),
+        }
+
+    async def finish_summary_job(self, session_id: str) -> None:
+        if self.connection is None:
+            return
+        now = time.time()
+        async with self._write_lock:
+            await self.connection.execute(
+                """
+                UPDATE session_summary_jobs
+                SET status = 'completed', updated_at = ?, completed_at = ?,
+                    next_retry_at = NULL, error = NULL
+                WHERE session_id = ?
+                """,
+                (now, now, session_id),
+            )
+            await self.connection.commit()
+
+    async def fail_summary_job(
+        self,
+        session_id: str,
+        *,
+        retry_count: int,
+        next_retry_at: float | None,
+        error: str,
+    ) -> None:
+        if self.connection is None:
+            return
+        async with self._write_lock:
+            await self.connection.execute(
+                """
+                UPDATE session_summary_jobs
+                SET status = 'failed', retry_count = ?, next_retry_at = ?,
+                    error = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    max(0, int(retry_count)),
+                    next_retry_at,
+                    str(error)[:2000],
+                    time.time(),
+                    session_id,
+                ),
+            )
+            await self.connection.commit()
+
+    async def get_summary_job(self, session_id: str) -> dict[str, object] | None:
+        if self.connection is None:
+            return None
+        row = await (
+            await self.connection.execute(
+                "SELECT * FROM session_summary_jobs WHERE session_id = ?",
+                (session_id,),
+            )
+        ).fetchone()
+        return dict(row) if row else None
+
+    async def complete_no_memory_summary(
+        self,
+        session_id: str,
+        *,
+        job_uid: str,
+        trigger_type: str,
+        start_index: int,
+        end_index: int,
+        first_message_id: int | None,
+        last_message_id: int | None,
+        persona_id: str | None,
+        reason: str,
+        importance: float,
+        message_coverage: list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically audit a no-memory window and advance its checkpoint."""
+        if self.connection is None:
+            raise RuntimeError("数据库连接未初始化")
+        now = time.time()
+        decision_uid = str(uuid.uuid4())
+        audit_metadata = dict(metadata or {})
+        async with self._write_lock:
+            try:
+                await self.connection.execute("BEGIN IMMEDIATE")
+                row = await (
+                    await self.connection.execute(
+                        "SELECT metadata FROM sessions WHERE session_id = ?",
+                        (session_id,),
+                    )
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Session does not exist: {session_id}")
+                try:
+                    session_metadata = json.loads(row["metadata"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    session_metadata = {}
+
+                await self.connection.execute(
+                    """
+                    INSERT INTO session_summary_decisions (
+                        decision_uid, session_id, job_uid, trigger_type,
+                        start_index, end_index, first_message_id, last_message_id,
+                        persona_id, decision, reason, importance,
+                        message_coverage, metadata, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'no_memory', ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id, start_index, end_index, decision)
+                    DO UPDATE SET
+                        job_uid = excluded.job_uid,
+                        trigger_type = excluded.trigger_type,
+                        first_message_id = excluded.first_message_id,
+                        last_message_id = excluded.last_message_id,
+                        persona_id = excluded.persona_id,
+                        reason = excluded.reason,
+                        importance = excluded.importance,
+                        message_coverage = excluded.message_coverage,
+                        metadata = excluded.metadata,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        decision_uid,
+                        session_id,
+                        job_uid,
+                        str(trigger_type),
+                        int(start_index),
+                        int(end_index),
+                        first_message_id,
+                        last_message_id,
+                        persona_id,
+                        str(reason),
+                        max(0.0, min(1.0, float(importance))),
+                        json.dumps(message_coverage, ensure_ascii=False),
+                        json.dumps(audit_metadata, ensure_ascii=False),
+                        now,
+                        now,
+                    ),
+                )
+
+                session_metadata.update(
+                    {
+                        "last_summarized_index": int(end_index),
+                        "last_summary_trigger": str(trigger_type),
+                        "last_summary_at": now,
+                        "last_persona_id": str(persona_id or "default"),
+                        "last_summary_decision": "no_memory",
+                        "last_no_memory_reason": str(reason),
+                    }
+                )
+                session_metadata.pop("pending_summary", None)
+                await self.connection.execute(
+                    "UPDATE sessions SET metadata = ? WHERE session_id = ?",
+                    (
+                        json.dumps(session_metadata, ensure_ascii=False),
+                        session_id,
+                    ),
+                )
+                job_cursor = await self.connection.execute(
+                    """
+                    UPDATE session_summary_jobs
+                    SET status = 'completed', updated_at = ?, completed_at = ?,
+                        next_retry_at = NULL, error = NULL
+                    WHERE session_id = ? AND job_uid = ?
+                    """,
+                    (now, now, session_id, job_uid),
+                )
+                if int(job_cursor.rowcount or 0) != 1:
+                    raise RuntimeError(
+                        "Timeline summary job changed before no-memory publication"
+                    )
+                await self.connection.commit()
+            except Exception:
+                await self.connection.rollback()
+                raise
+
+        row = await (
+            await self.connection.execute(
+                """
+                SELECT * FROM session_summary_decisions
+                WHERE session_id = ? AND start_index = ?
+                  AND end_index = ? AND decision = 'no_memory'
+                """,
+                (session_id, int(start_index), int(end_index)),
+            )
+        ).fetchone()
+        return self._decode_summary_decision(row) if row else {}
+
+    async def list_summary_decisions(
+        self,
+        *,
+        session_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List durable summary decisions for audit and future rebuilding."""
+        if self.connection is None:
+            return []
+        bounded_limit = max(1, min(1000, int(limit)))
+        if session_id:
+            cursor = await self.connection.execute(
+                """
+                SELECT * FROM session_summary_decisions
+                WHERE session_id = ?
+                ORDER BY end_index DESC, created_at DESC
+                LIMIT ?
+                """,
+                (session_id, bounded_limit),
+            )
+        else:
+            cursor = await self.connection.execute(
+                """
+                SELECT * FROM session_summary_decisions
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (bounded_limit,),
+            )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [self._decode_summary_decision(row) for row in rows]
+
+    @staticmethod
+    def _decode_summary_decision(row: Any) -> dict[str, Any]:
+        result = dict(row)
+        for field, fallback in (("message_coverage", []), ("metadata", {})):
+            try:
+                result[field] = json.loads(result.get(field) or "")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                result[field] = fallback
+        return result
 
     async def delete_old_sessions(
         self, days: int = 30, ttl_seconds: int | None = None
@@ -720,6 +1273,71 @@ class ConversationStore:
         )
         return deleted_count
 
+    async def delete_raw_session(self, session_id: str) -> dict[str, int]:
+        """Delete one raw conversation row and its messages, not derived memory."""
+        if self.connection is None:
+            return {"messages": 0, "sessions": 0}
+        async with self._write_lock:
+            message_cursor = await self.connection.execute(
+                "DELETE FROM messages WHERE session_id = ?", (session_id,)
+            )
+            await self.connection.execute(
+                "DELETE FROM session_summary_jobs WHERE session_id = ?", (session_id,)
+            )
+            session_cursor = await self.connection.execute(
+                "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+            )
+            await self.connection.commit()
+        return {
+            "messages": int(message_cursor.rowcount or 0),
+            "sessions": int(session_cursor.rowcount or 0),
+        }
+
+    async def summarized_cleanup_preview(self, session_id: str) -> dict[str, int]:
+        """Describe the exact oldest summarized message range eligible for removal."""
+        if self.connection is None:
+            return {
+                "eligible_count": 0,
+                "first_message_id": 0,
+                "last_message_id": 0,
+            }
+        row = await (
+            await self.connection.execute(
+                "SELECT metadata FROM sessions WHERE session_id = ?", (session_id,)
+            )
+        ).fetchone()
+        if not row:
+            return {
+                "eligible_count": 0,
+                "first_message_id": 0,
+                "last_message_id": 0,
+            }
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            metadata = {}
+        try:
+            eligible = max(0, int(metadata.get("last_summarized_index", 0) or 0))
+        except (TypeError, ValueError):
+            eligible = 0
+        bounds = await (
+            await self.connection.execute(
+                """
+                SELECT MIN(id) AS first_message_id, MAX(id) AS last_message_id
+                FROM (
+                    SELECT id FROM messages WHERE session_id = ?
+                    ORDER BY timestamp ASC, id ASC LIMIT ?
+                )
+                """,
+                (session_id, eligible),
+            )
+        ).fetchone()
+        return {
+            "eligible_count": eligible,
+            "first_message_id": int(bounds["first_message_id"] or 0) if bounds else 0,
+            "last_message_id": int(bounds["last_message_id"] or 0) if bounds else 0,
+        }
+
     # ==================== 高级查询 ====================
 
     async def get_user_message_stats(self, session_id: str) -> dict[str, int]:
@@ -891,6 +1509,49 @@ class ConversationStore:
         )
 
         return messages
+
+    async def get_messages_by_id_span(
+        self,
+        session_id: str,
+        first_message_id: int,
+        last_message_id: int,
+        *,
+        limit: int = 100,
+    ) -> list[Message]:
+        """Read a stable source span without relying on deletion-sensitive offsets."""
+        if self.connection is None:
+            return []
+        lower = min(int(first_message_id), int(last_message_id))
+        upper = max(int(first_message_id), int(last_message_id))
+        async with self.connection.execute(
+            """
+            SELECT id, session_id, role, content, sender_id, sender_name,
+                   group_id, platform, timestamp, metadata
+            FROM messages
+            WHERE session_id = ? AND id BETWEEN ? AND ?
+            ORDER BY timestamp ASC, id ASC
+            LIMIT ?
+            """,
+            (session_id, lower, upper, max(1, int(limit))),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            Message.from_dict(
+                {
+                    "id": row["id"],
+                    "session_id": row["session_id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "sender_id": row["sender_id"],
+                    "sender_name": row["sender_name"],
+                    "group_id": row["group_id"],
+                    "platform": row["platform"],
+                    "timestamp": row["timestamp"],
+                    "metadata": row["metadata"],
+                }
+            )
+            for row in rows
+        ]
 
     async def sync_message_counts(self) -> dict[str, int]:
         """

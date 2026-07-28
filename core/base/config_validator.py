@@ -3,11 +3,12 @@ config_validator.py - 配置验证模块
 提供配置验证和默认值管理功能。
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from astrbot.api import logger
+
 
 
 class SessionManagerConfig(BaseModel):
@@ -70,6 +71,31 @@ class RecallEngineConfig(BaseModel):
     inject_with_recent_context: bool = Field(
         default=False,
         description="启用后使用最近2轮对话作为扩展查询关键词，提升检索精准度",
+    )
+    assistant_context_mode: Literal["exclude", "low_weight", "normal"] = Field(
+        default="exclude",
+        description="跨轮扩展时 Bot 回复的参与方式",
+    )
+    recent_user_weight: float = Field(
+        default=0.45, ge=0.0, le=1.0, description="历史用户消息查询分支权重"
+    )
+    recent_assistant_weight: float = Field(
+        default=0.40, ge=0.0, le=1.0, description="Bot 历史回复查询分支权重"
+    )
+    candidate_multiplier: int = Field(
+        default=3, ge=1, le=10, description="最终筛选前的候选数量倍率"
+    )
+    min_relevance_score: float = Field(
+        default=0.38, ge=0.0, le=1.0, description="自动召回最低相关度"
+    )
+    relative_score_floor: float = Field(
+        default=0.65, ge=0.0, le=1.0, description="相对最佳候选的最低比例"
+    )
+    mmr_lambda: float = Field(
+        default=0.72, ge=0.0, le=1.0, description="相关性与结果多样性的平衡"
+    )
+    context_overlap_suppression: bool = Field(
+        default=True, description="过滤来源仍位于当前原始上下文中的记忆"
     )
     search_cache_enabled: bool = Field(
         default=True, description="是否启用短期检索结果缓存"
@@ -135,6 +161,81 @@ class ProviderConfig(BaseModel):
         default=None, description="Embedding Provider ID"
     )
     llm_provider_id: str | None = Field(default=None, description="LLM Provider ID")
+    rerank_provider_id: str | None = Field(
+        default=None, description="Optional Rerank Provider ID"
+    )
+
+
+class TopicMemoryConfig(BaseModel):
+    """Automatically maintained derived Topic-memory settings."""
+
+    enabled: bool = False
+    recall_enabled: bool = True
+    recall_top_k: int = Field(default=3, ge=1, le=20)
+    recall_candidate_multiplier: int = Field(default=4, ge=1, le=10)
+    recall_scan_limit: int = Field(default=2000, ge=100, le=5000)
+    recall_min_relevance: float = Field(default=0.32, ge=0.0, le=1.0)
+    recall_relative_floor: float = Field(default=0.70, ge=0.0, le=1.0)
+    recall_selection_relative_floor: float = Field(default=0.90, ge=0.5, le=1.0)
+    recall_mmr_lambda: float = Field(default=0.78, ge=0.0, le=1.0)
+    recall_use_rerank: bool = True
+    recall_rerank_weight: float = Field(default=0.35, ge=0.0, le=1.0)
+    recall_context_support_cap: float = Field(default=0.08, ge=0.0, le=0.25)
+    recall_context_overlap_threshold: float = Field(
+        default=0.8, ge=0.0, le=1.0
+    )
+    timeline_supplement_k: int = Field(default=2, ge=0, le=10)
+    fragment_min_relevance: float = Field(default=0.28, ge=0.0, le=1.0)
+    fragment_relative_floor: float = Field(default=0.65, ge=0.0, le=1.0)
+    recall_affect_enabled: bool = True
+    recall_affect_boost_cap: float = Field(default=0.04, ge=0.0, le=0.12)
+    recall_affect_event_limit: int = Field(default=1, ge=0, le=3)
+    recall_affect_min_confidence: float = Field(default=0.65, ge=0.0, le=1.0)
+    auto_maintenance: bool = True
+    auto_debounce_seconds: float = Field(default=60.0, ge=0.0, le=3600.0)
+    time_gap_hours: float = Field(default=6.0, ge=1 / 60, le=24 * 30)
+    candidate_batch_size: int = Field(default=100, ge=1, le=1000)
+    fragment_extraction_batch_size: int = Field(default=12, ge=1, le=100)
+    fragment_validation_retries: int = Field(default=2, ge=0, le=8)
+    candidate_similarity_threshold: float = Field(default=0.52, ge=0.0, le=1.0)
+    fragment_similarity_threshold: float = Field(default=0.78, ge=0.0, le=1.0)
+    rerank_candidate_floor: float = Field(default=0.63, ge=0.0, le=1.0)
+    component_min_pair_similarity: float = Field(default=0.52, ge=0.0, le=1.0)
+    component_min_average_similarity: float = Field(default=0.65, ge=0.0, le=1.0)
+    component_size_cohesion_penalty: float = Field(
+        default=0.005, ge=0.0, le=0.05
+    )
+    component_review_enabled: bool = True
+    component_review_min_fragments: int = Field(default=6, ge=3, le=100)
+    component_review_max_fragments: int = Field(default=48, ge=6, le=200)
+    component_review_failure_fallback: bool = True
+    rerank_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    rerank_reciprocal_rank_threshold: float = Field(
+        default=0.60, ge=0.0, le=1.0
+    )
+    rerank_top_n: int = Field(default=5, ge=1, le=100)
+    rerank_concurrency: int = Field(default=1, ge=1, le=32)
+    rerank_failure_fallback: bool = True
+    related_topic_similarity_threshold: float = Field(default=0.60, ge=0.0, le=1.0)
+    related_topic_top_n: int = Field(default=3, ge=1, le=20)
+    existing_topic_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    synthesis_batch_size: int = Field(default=12, ge=2, le=50)
+    embedding_batch_size: int = Field(default=8, ge=1, le=256)
+    llm_concurrency: int = Field(default=1, ge=1, le=64)
+    llm_max_retries: int = Field(default=3, ge=1, le=8)
+
+
+class CloudflareRerankConfig(BaseModel):
+    """Plugin-owned Cloudflare Workers AI reranker settings."""
+
+    enabled: bool = False
+    account_id: str = ""
+    api_token: str = ""
+    model: str = "@cf/baai/bge-reranker-base"
+    base_url: str = "https://api.cloudflare.com/client/v4"
+    timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    max_retries: int = Field(default=2, ge=0, le=8)
+    retry_base_delay: float = Field(default=1.0, ge=0.0, le=60.0)
 
 
 class ImportanceDecayConfig(BaseModel):
@@ -257,6 +358,10 @@ class LivingMemoryConfig(BaseModel):
     )
     filtering_settings: FilteringConfig = Field(default_factory=FilteringConfig)
     provider_settings: ProviderConfig = Field(default_factory=ProviderConfig)
+    topic_memory: TopicMemoryConfig = Field(default_factory=TopicMemoryConfig)
+    cloudflare_rerank: CloudflareRerankConfig = Field(
+        default_factory=CloudflareRerankConfig
+    )
     migration_settings: MigrationSettings = Field(default_factory=MigrationSettings)
     index_rebuild_settings: IndexRebuildSettings = Field(
         default_factory=IndexRebuildSettings
@@ -314,6 +419,7 @@ def merge_config_with_defaults(user_config: dict[str, Any]) -> dict[str, Any]:
     Returns:
         dict[str, Any]: 合并后的配置
     """
+    user_config = dict(user_config)
     default_config = get_default_config()
 
     def deep_merge(default: dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:

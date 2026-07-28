@@ -13,6 +13,11 @@ import aiosqlite
 import pytest
 from astrbot_plugin_livingmemory.core.managers.memory_engine import MemoryEngine
 from astrbot_plugin_livingmemory.core.models.memory_atom import MemoryAtom
+from astrbot_plugin_livingmemory.core.models.topic_memory import (
+    TopicMemory,
+    TopicMemoryStatus,
+    TopicTimelineLink,
+)
 from astrbot_plugin_livingmemory.storage.atom_store import AtomStore
 
 
@@ -164,13 +169,40 @@ async def test_memory_engine_add_search_get_delete(tmp_path: Path):
         session_id="test:private:s1",
         persona_id="persona_1",
         importance=0.8,
-        metadata={"topics": ["饮食"]},
+        metadata={
+            "topics": ["饮食"],
+            "source_window": {
+                "session_id": "test:private:s1",
+                "first_message_id": 11,
+                "last_message_id": 12,
+                "start_index": 0,
+                "end_index": 2,
+                "started_at": 100.0,
+                "ended_at": 101.0,
+            },
+        },
     )
     assert memory_id > 0
 
     result = await engine.get_memory(memory_id)
     assert result is not None
     assert "苹果" in result["text"]
+    assert result["metadata"]["memory_uid"]
+    assert result["metadata"]["revision"] == 1
+    assert result["metadata"]["memory_layer"] == "timeline"
+    assert result["metadata"]["memory_space_id"].startswith("space-v1-")
+
+    registry = await engine.memory_identity_store.get_by_document_id(memory_id)
+    assert registry is not None
+    assert registry.memory_uid == result["metadata"]["memory_uid"]
+    assert registry.memory_space_id == result["metadata"]["memory_space_id"]
+    source_span = await engine.memory_identity_store.get_source_span(
+        registry.memory_uid
+    )
+    assert source_span is not None
+    assert source_span["first_message_id"] == 11
+    assert source_span["last_message_id"] == 12
+    assert source_span["traceability"] == "full"
 
     searched = await engine.search_memories(
         query="苹果",
@@ -184,6 +216,66 @@ async def test_memory_engine_add_search_get_delete(tmp_path: Path):
     ok_delete = await engine.delete_memory(memory_id)
     assert ok_delete is True
     assert await engine.get_memory(memory_id) is None
+    assert await engine.memory_identity_store.get_by_uid(registry.memory_uid) is None
+    assert (
+        await engine.memory_identity_store.get_source_span(registry.memory_uid)
+        is None
+    )
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_add_memory_routes_alias_identity_and_source_span_to_canonical(
+    tmp_path: Path,
+):
+    engine = MemoryEngine(
+        db_path=str(tmp_path / "canonical_memory.db"),
+        faiss_db=_FakeFaissDB(),
+        config={"fallback_enabled": True, "rrf_k": 60, "atom_enabled": True},
+    )
+    await engine.initialize()
+    engine.atom_store = AtomStore(str(tmp_path / "canonical_memory.db"))
+    await engine.atom_store.initialize()
+    canonical = "bot-a:FriendMessage:user-1"
+    alias = "bot-a:private:user-1"
+
+    async def resolve_scope(session_id: str) -> list[str]:
+        return [canonical, alias] if session_id in {canonical, alias} else [session_id]
+
+    engine.set_session_scope_resolver(resolve_scope)
+    memory_id = await engine.add_memory(
+        content="别名会话产生的新 Timeline",
+        session_id=alias,
+        persona_id="p1",
+        metadata={
+            "session_id": alias,
+            "source_window": {
+                "session_id": alias,
+                "first_message_id": 1,
+                "last_message_id": 2,
+            },
+        },
+        atoms=[
+            MemoryAtom(
+                parent_memory_id=0,
+                content="别名来源事实",
+                session_id=alias,
+            )
+        ],
+    )
+
+    memory = await engine.get_memory(memory_id)
+    assert memory is not None
+    assert memory["metadata"]["session_id"] == canonical
+    source_span = await engine.memory_identity_store.get_source_span(
+        memory["metadata"]["memory_uid"]
+    )
+    assert source_span is not None
+    assert source_span["session_id"] == canonical
+    atoms = await engine.atom_store.get_by_parent(memory_id)
+    assert len(atoms) == 1
+    assert atoms[0].session_id == canonical
+
     await engine.close()
 
 
@@ -202,10 +294,21 @@ async def test_replace_memory_preserves_logical_uid_and_increments_revision(
         session_id="bot-a:FriendMessage:user-1",
         persona_id="p1",
         importance=0.6,
-        metadata={"topics": ["旧主题"], "key_facts": ["旧事实"]},
+        metadata={
+            "topics": ["旧主题"],
+            "key_facts": ["旧事实"],
+            "source_window": {
+                "session_id": "bot-a:FriendMessage:user-1",
+                "first_message_id": 21,
+                "last_message_id": 22,
+                "start_index": 0,
+                "end_index": 2,
+            },
+        },
     )
     old_memory = await engine.get_memory(old_id)
     old_create_time = old_memory["metadata"]["create_time"]
+    old_memory_uid = old_memory["metadata"]["memory_uid"]
 
     new_id = await engine.replace_memory(
         old_id,
@@ -228,8 +331,18 @@ async def test_replace_memory_preserves_logical_uid_and_increments_revision(
     assert replacement["metadata"]["revision"] == 2
     assert replacement["metadata"]["previous_id"] == old_id
     assert replacement["metadata"]["memory_uid"]
+    assert replacement["metadata"]["memory_uid"] == old_memory_uid
     assert replacement["metadata"]["key_facts"] == ["新事实"]
     assert replacement["metadata"]["create_time"] == old_create_time
+    registry = await engine.memory_identity_store.get_by_uid(old_memory_uid)
+    assert registry is not None
+    assert registry.document_id == new_id
+    assert registry.revision == 2
+    assert await engine.memory_identity_store.get_by_document_id(old_id) is None
+    source_span = await engine.memory_identity_store.get_source_span(old_memory_uid)
+    assert source_span is not None
+    assert source_span["first_message_id"] == 21
+    assert source_span["last_message_id"] == 22
     await engine.close()
 
 
@@ -248,6 +361,26 @@ async def test_rewrite_memory_in_place_preserves_document_id(tmp_path: Path):
         importance=0.5,
         metadata={"topics": ["旧主题"], "key_facts": ["旧事实"]},
     )
+    original = await engine.get_memory(memory_id)
+    original_uid = original["metadata"]["memory_uid"]
+    topic = await engine.topic_memory_store.save_topic_snapshot(
+        TopicMemory(
+            topic_uid="topic-rewrite-test",
+            memory_space_id=original["metadata"]["memory_space_id"],
+            title="旧主题派生记忆",
+            summary="来自即将被修改的 Timeline。",
+        ),
+        atoms=[],
+        links=[
+            TopicTimelineLink(
+                topic_uid="topic-rewrite-test",
+                timeline_uid=original_uid,
+                time_cluster_key="cluster-1",
+            )
+        ],
+        atom_sources=[],
+    )
+    assert topic.status is TopicMemoryStatus.ACTIVE
 
     engine.hybrid_retriever.replace_memory_in_place = AsyncMock(return_value=True)
     engine.atom_store = Mock()
@@ -273,10 +406,20 @@ async def test_rewrite_memory_in_place_preserves_document_id(tmp_path: Path):
     rewrite_call = engine.hybrid_retriever.replace_memory_in_place.call_args
     assert rewrite_call.args[0] == memory_id
     assert rewrite_call.args[1] == "新事实"
+    retained_topic = await engine.topic_memory_store.get_topic(topic.topic_uid)
+    assert retained_topic is not None
+    assert retained_topic.status is TopicMemoryStatus.ACTIVE
     assert rewrite_call.args[2]["revision"] == 2
     assert rewrite_call.args[2]["memory_uid"]
+    assert rewrite_call.args[2]["memory_uid"] == original_uid
     engine.atom_store.replace_by_parent.assert_awaited_once_with(memory_id, [])
     engine.graph_memory_manager.index_memory.assert_awaited_once()
+    registry = await engine.memory_identity_store.get_by_uid(original_uid)
+    assert registry is not None
+    assert registry.document_id == memory_id
+    assert registry.revision == 2
+    provenance = await engine.topic_memory_store.get_topic_provenance(topic.topic_uid)
+    assert provenance["links"][0]["source_timeline_revision"] == 1
     await engine.close()
 
 
@@ -760,6 +903,44 @@ async def test_memory_engine_session_filter_isolates_sessions(tmp_path: Path):
     for r in results_a:
         assert r.metadata.get("session_id") == "test:private:session_A"
 
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_engine_alias_scope_recalls_canonical_and_legacy_sessions(
+    tmp_path: Path,
+):
+    engine = MemoryEngine(
+        db_path=str(tmp_path / "alias_scope.db"),
+        faiss_db=_FakeFaissDB(),
+        config={"fallback_enabled": True},
+    )
+    await engine.initialize()
+    canonical = "bot-a:FriendMessage:user-1"
+    legacy = "bot-a:private:user-1"
+    canonical_id = await engine.add_memory(
+        content="共同关键词：规范会话记忆",
+        session_id=canonical,
+        persona_id="p1",
+    )
+    legacy_id = await engine.add_memory(
+        content="共同关键词：旧会话记忆",
+        session_id=legacy,
+        persona_id="p1",
+    )
+
+    async def resolve_scope(session_id: str) -> list[str]:
+        return [canonical, legacy] if session_id in {canonical, legacy} else [session_id]
+
+    engine.set_session_scope_resolver(resolve_scope)
+    results = await engine.search_memories(
+        query="共同关键词",
+        k=5,
+        session_id=legacy,
+        persona_id="p1",
+    )
+
+    assert {item.doc_id for item in results} == {canonical_id, legacy_id}
     await engine.close()
 
 
@@ -1279,6 +1460,33 @@ async def test_cleanup_old_memories_uses_batch_delete(tmp_path: Path):
     for mid in ids:
         assert mid not in faiss.docs
 
+    await engine.close()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_old_memories_preserves_recently_accessed_old_memory(tmp_path: Path):
+    db_path = tmp_path / "cleanup_recent_access.db"
+    faiss = _FakeFaissDB()
+    engine = MemoryEngine(db_path=str(db_path), faiss_db=faiss, config={})
+    await engine.initialize()
+    mid = faiss._next_id
+    faiss._next_id += 1
+    faiss.docs[mid] = {
+        "id": mid,
+        "doc_id": f"uuid-{mid}",
+        "text": "经常通过 Topic 访问的旧 Timeline",
+        "metadata": {
+            "importance": 0.1,
+            "create_time": time.time() - 86400 * 60,
+            "last_access_time": time.time(),
+        },
+    }
+
+    deleted = await engine.cleanup_old_memories(
+        days_threshold=30, importance_threshold=0.3
+    )
+    assert deleted == 0
+    assert mid in faiss.docs
     await engine.close()
 
 

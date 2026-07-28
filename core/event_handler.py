@@ -28,13 +28,9 @@ from .event_handler_modules import (
 )
 from .managers.conversation_manager import ConversationManager
 from .managers.memory_engine import MemoryEngine
+from .managers.timeline_summary_service import TimelineSummaryService
 from .processors.memory_processor import MemoryProcessor
-from .utils import (
-    OperationContext,
-    format_memories_for_fake_tool_call,
-    format_memories_for_injection,
-    get_persona_id,
-)
+from .utils import get_persona_id
 from .utils.injection_adapter import InjectionAdapter
 
 # 预编译记忆注入清理正则（热路径优化：避免每次调用 re.compile）
@@ -54,6 +50,7 @@ class EventHandler:
         memory_engine: MemoryEngine,
         memory_processor: MemoryProcessor,
         conversation_manager: ConversationManager,
+        timeline_summary_service: TimelineSummaryService | None = None,
     ):
         """
         初始化事件处理器
@@ -84,6 +81,7 @@ class EventHandler:
             conversation_manager,
             self._message_utils,
             self._injection_adapter,
+            persona_resolver=lambda context, event: get_persona_id(context, event),
         )
 
         # 后台存储任务跟踪
@@ -102,6 +100,7 @@ class EventHandler:
             self._storage_tasks,
             self._storage_sessions_inflight,
             self._storage_state_lock,
+            summary_service=timeline_summary_service,
         )
 
     async def handle_all_group_messages(self, event: AstrMessageEvent):

@@ -25,13 +25,15 @@
               <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>
               <rect x="8" y="2" width="8" height="4" rx="1"/>
             </svg>
-            <span data-i18n="nav.memory">Memories</span>
+            <span data-i18n="nav.memory">Timeline 记忆</span>
           </button>
-          <button class="nav-item" data-page="recall">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
-            </svg>
-            <span data-i18n="nav.recall">Recall Test</span>
+          <button class="nav-item" data-page="topic">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h13"/><circle cx="19" cy="12" r="2"/></svg>
+            <span data-i18n="nav.topic">Topic 记忆</span>
+          </button>
+          <button class="nav-item" data-page="identities">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/><path d="m17 11 2 2 3-3"/></svg>
+            <span data-i18n="nav.identities">补充人物资料</span>
           </button>
           <button class="nav-item" data-page="system">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -42,6 +44,14 @@
         </nav>
         <div class="sidebar-divider"></div>
         <div class="sidebar-footer">
+          <button class="nav-item" data-page="settings">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.08h-4V21a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.08v-4H3A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.08h4V3A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.15.38.36.72.6 1 .27.25.62.4 1 .4h.08v4H21a1.7 1.7 0 0 0-1.6.6Z"/></svg>
+            <span data-i18n="nav.settings">设置</span>
+          </button>
+          <button class="nav-item" data-page="maintenance">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.6 5.6L3 18a2.1 2.1 0 0 0 3 3l6.1-6.1a4 4 0 0 0 5.6-5.6l-2.4 2.4-3-3 2.4-2.4Z"/></svg>
+            <span data-i18n="nav.maintenance">维护</span>
+          </button>
           <button class="nav-item" id="theme-toggle">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" id="theme-icon-dark">
               <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
@@ -115,9 +125,12 @@
         <!-- Page: Memory -->
         <section class="page" id="page-memory">
           <header class="page-header">
-            <span class="page-title" data-i18n="nav.memory">Memories</span>
+            <span class="page-title" data-i18n="nav.memory">Timeline 记忆</span>
+            <div class="page-actions">
+              <button class="btn btn-secondary btn-sm" id="timeline-settings" data-i18n="timeline.settings">参数</button>
+            </div>
           </header>
-          <div class="page-body">
+          <div class="page-body memory-page-body">
             <div class="filter-bar">
               <input type="text" id="mem-keyword" class="input" data-i18n-placeholder="filter.keyword" placeholder="Search by keyword or memory ID..." />
               <div class="session-input-group">
@@ -163,6 +176,7 @@
                   <tr>
                     <th class="cell-id" data-i18n="table.id">ID</th>
                     <th class="cell-summary" data-i18n="table.summary">Summary</th>
+                    <th class="cell-topics" data-i18n="table.topicLinks">关联 Topic</th>
                     <th class="cell-type" data-i18n="table.type">Type</th>
                     <th class="cell-importance" data-i18n="table.importance">Importance</th>
                     <th class="cell-status" data-i18n="table.status">Status</th>
@@ -170,7 +184,7 @@
                   </tr>
                 </thead>
                 <tbody id="memories-body">
-                  <tr><td colspan="6" class="table-empty" data-i18n="table.noData">No data</td></tr>
+                  <tr><td colspan="7" class="table-empty" data-i18n="table.noData">No data</td></tr>
                 </tbody>
               </table>
               </div>
@@ -185,15 +199,301 @@
           </div>
         </section>
 
-        <!-- Page: Recall Test -->
-        <section class="page" id="page-recall">
+        <!-- Page: Topic Memory -->
+        <section class="page" id="page-topic">
           <header class="page-header">
-            <span class="page-title" data-i18n="nav.recall">Recall Test</span>
+            <span class="page-title" data-i18n="nav.topic">Topic 记忆</span>
+            <div class="page-actions">
+              <select id="topic-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
+              <button class="btn btn-secondary btn-sm" id="topic-refresh" data-i18n="common.refresh">刷新</button>
+              <button class="btn btn-primary btn-sm" id="topic-build-full" data-i18n="topic.fullBuild" disabled>全量构建</button>
+              <button class="btn btn-secondary btn-sm" id="topic-settings" data-i18n="topic.settings">参数</button>
+            </div>
           </header>
-          <div class="page-body">
+          <div class="page-body topic-page-body">
+            <div class="topic-overview-compact">
+              <div class="topic-overview-meta">
+                <div id="topic-flags" class="topic-flags text-secondary"></div>
+                <div id="topic-vector-warning" class="topic-vector-warning hidden" role="status"></div>
+                <div class="topic-stats">
+                  <div class="topic-stat"><span data-i18n="topic.total">Topic 总数</span><strong id="topic-total">0</strong></div>
+                  <div class="topic-stat"><span data-i18n="topic.active">活跃 Topic</span><strong id="topic-active">0</strong></div>
+                  <div class="topic-stat"><span data-i18n="topic.atoms">独立原子</span><strong id="topic-atoms">0</strong></div>
+                  <div class="topic-stat"><span data-i18n="topic.links">Timeline 索引</span><strong id="topic-links">0</strong></div>
+                  <div class="topic-stat"><span data-i18n="topic.relations">相关关系</span><strong id="topic-relations">0</strong></div>
+                </div>
+              </div>
+            </div>
+            <div id="topic-progress" class="system-panel hidden mb-4"></div>
+            <div class="topic-list-toolbar">
+              <div class="topic-status-filters">
+                <label class="topic-status-filter">
+                  <span data-i18n="topic.statusFilter">状态</span>
+                  <select id="topic-status-filter" class="select input input-sm">
+                    <option value="active" data-i18n="topic.statusActive">活跃</option>
+                    <option value="archived" data-i18n="topic.statusArchived">已归档</option>
+                    <option value="stale" data-i18n="topic.statusStale">待同步</option>
+                    <option value="error" data-i18n="topic.statusError">错误</option>
+                    <option value="all" data-i18n="topic.statusAll">全部</option>
+                  </select>
+                </label>
+              </div>
+              <div class="topic-list-filter">
+                <span data-i18n="topic.actorFilter">按人物筛选</span>
+                <div class="topic-actor-filter-control">
+                  <button id="topic-actor-filter" class="btn btn-ghost btn-sm topic-actor-filter-button" type="button" aria-haspopup="listbox" aria-expanded="false">
+                    <span id="topic-actor-filter-label" data-i18n="topic.actorFilterAll">全部人物</span><span class="topic-actor-filter-caret" aria-hidden="true"></span>
+                  </button>
+                  <div id="topic-actor-filter-menu" class="topic-actor-filter-menu hidden" role="listbox">
+                    <input id="topic-actor-filter-search" class="input input-sm" type="search" autocomplete="off" data-i18n-placeholder="topic.actorFilterSearch" placeholder="搜索人物">
+                    <div id="topic-actor-filter-options" class="topic-actor-filter-options"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="table-container topic-table-container">
+              <div class="table-scroll topic-table-scroll">
+                <table class="data-table topic-data-table">
+                  <colgroup>
+                    <col class="topic-col-uid">
+                    <col class="topic-col-title">
+                    <col class="topic-col-status">
+                    <col class="topic-col-importance">
+                    <col class="topic-col-support">
+                    <col class="topic-col-revision">
+                  </colgroup>
+                  <thead><tr><th data-i18n="topic.uid">Topic UID</th><th data-i18n="topic.title">标题</th><th data-i18n="topic.status">状态</th><th data-i18n="topic.importance">重要性</th><th data-i18n="topic.support">时间簇 / Timeline</th><th data-i18n="topic.revision">版本</th></tr></thead>
+                  <tbody id="topics-body"><tr><td colspan="6" class="table-empty" data-i18n="topic.chooseSpace">请选择记忆空间</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Page: Settings -->
+        <section class="page" id="page-settings">
+          <header class="page-header">
+            <span class="page-title" data-i18n="nav.settings">设置</span>
+            <div class="page-actions">
+              <button class="btn btn-ghost btn-sm" id="settings-reset-all" data-i18n="topic.resetAllDefaults">全部恢复默认</button>
+              <button class="btn btn-primary btn-sm" id="settings-save" data-i18n="common.save">保存</button>
+            </div>
+          </header>
+          <div class="page-body settings-page-body">
+            <div class="settings-category-tabs" role="tablist" aria-label="Settings categories" data-i18n-aria="settings.categories">
+              <button class="settings-category-tab active" type="button" data-settings-category="recall" role="tab" aria-selected="true" data-i18n="settings.category.recall">召回</button>
+              <button class="settings-category-tab" type="button" data-settings-category="timeline" role="tab" aria-selected="false" data-i18n="settings.category.timeline">Timeline</button>
+              <button class="settings-category-tab" type="button" data-settings-category="topic" role="tab" aria-selected="false" data-i18n="settings.category.topic">Topic</button>
+              <button class="settings-category-tab" type="button" data-settings-category="session" role="tab" aria-selected="false" data-i18n="settings.category.session">会话</button>
+              <button class="settings-category-tab" type="button" data-settings-category="graph" role="tab" aria-selected="false" data-i18n="settings.category.graph">图谱</button>
+              <button class="settings-category-tab" type="button" data-settings-category="lifecycle" role="tab" aria-selected="false" data-i18n="settings.category.lifecycle">生命周期</button>
+              <button class="settings-category-tab" type="button" data-settings-category="model" role="tab" aria-selected="false" data-i18n="settings.category.model">模型</button>
+              <button class="settings-category-tab" type="button" data-settings-category="index" role="tab" aria-selected="false" data-i18n="settings.category.index">索引</button>
+              <button class="settings-category-tab" type="button" data-settings-category="maintenance" role="tab" aria-selected="false" data-i18n="settings.category.maintenance">维护</button>
+            </div>
+            <div id="settings-page-status" class="text-secondary" aria-live="polite"></div>
+            <div id="settings-page-content" class="settings-page-content"></div>
+          </div>
+        </section>
+
+        <!-- Page: Maintenance -->
+        <section class="page" id="page-maintenance">
+          <header class="page-header">
+            <span class="page-title" data-i18n="nav.maintenance">维护</span>
+          </header>
+          <div class="page-body maintenance-page-body">
+            <div class="maintenance-tabs" role="tablist">
+              <button class="maintenance-tab active" type="button" data-maintenance-tab="topic" role="tab" aria-selected="true" data-i18n="maintenance.topicTab">Topic 维护</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="timeline-rebuild" role="tab" aria-selected="false" data-i18n="maintenance.timelineRebuildTab">Timeline 维护</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="sessions" role="tab" aria-selected="false" data-i18n="maintenance.sessionsTab">会话审计</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="database" role="tab" aria-selected="false" data-i18n="maintenance.databaseTab">数据库</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="recent-recall" role="tab" aria-selected="false" data-i18n="maintenance.recentRecallTab">最近召回</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="recall" role="tab" aria-selected="false" data-i18n="nav.recall">召回测试</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="models" role="tab" aria-selected="false" data-i18n="nav.models">模型测试</button>
+            </div>
+            <div class="maintenance-panel active" id="maintenance-panel-topic">
+              <div class="topic-maintenance-page-head">
+                <div>
+                  <h2 data-i18n="topic.maintenanceTitle">Topic 维护</h2>
+                  <p class="text-secondary" data-i18n="maintenance.topicIntro">选择记忆空间后管理 Topic 派生数据、补建任务和人工审查。</p>
+                </div>
+                <label class="topic-maintenance-space-field">
+                  <span data-i18n="maintenance.topicSpaceLabel">记忆空间</span>
+                  <select id="maintenance-topic-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
+                </label>
+              </div>
+              <div class="topic-progress hidden maintenance-topic-progress" id="maintenance-topic-progress" aria-live="polite"></div>
+              <div class="identity-state" id="maintenance-topic-empty" data-i18n="maintenance.chooseTopicSpace">请选择记忆空间后查看维护功能</div>
+              <div class="maintenance-topic-action-list hidden" id="maintenance-topic-actions">
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="topic.revectorizeTitle">重新向量化并重算关系</strong><p data-i18n="topic.revectorizeIntro">使用当前 Embedding 模型更新正式片段和 Topic 向量，并重算相关话题；不调用 LLM。</p></div>
+                  <button class="btn btn-secondary" id="topic-revectorize" type="button" data-i18n="topic.revectorize">开始</button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="topic.recomputeRelationsTitle">重新计算相关话题</strong><p data-i18n="topic.recomputeRelationsIntro">使用现有 Topic 向量和参数替换关系图，不重新构建 Topic，也不调用 LLM。</p></div>
+                  <button class="btn btn-secondary" id="topic-recompute-relations" type="button" data-i18n="topic.recomputeRelations">立即重算</button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.incrementalTitle">增量补建</strong><p data-i18n="maintenance.incrementalIntro">检查尚未被活跃 Topic 索引的 Timeline，并按选择范围补建。</p></div>
+                  <button class="btn btn-secondary maintenance-count-button" id="maintenance-open-topic" type="button"><span data-i18n="maintenance.openIncremental">查看</span><span class="maintenance-action-count" id="maintenance-topic-unindexed-count">0</span></button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.reviewTitle">Topic 待审查</strong><p data-i18n="maintenance.reviewIntro">核对歧义片段与候选 Topic，再决定合并、新建、暂缓或忽略。</p></div>
+                  <button class="btn btn-secondary maintenance-count-button" id="maintenance-open-reviews" type="button"><span data-i18n="maintenance.openReviews">查看</span><span class="maintenance-action-count" id="maintenance-topic-review-count">0</span></button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.governanceTitle">Topic 拆分 / 合并</strong><p data-i18n="maintenance.governanceIntro">按正式片段预览并执行 Topic 合并或拆分，操作失败时保持原数据不变。</p></div>
+                  <button class="btn btn-secondary" id="maintenance-open-governance" type="button" data-i18n="maintenance.governance">拆分 / 合并</button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.archivedTopicsTitle">已归档 Topic</strong><p data-i18n="maintenance.archivedTopicsIntro">查看已退出召回的 Topic，并永久清理确认不再需要的派生数据。</p></div>
+                  <button class="btn btn-secondary" id="maintenance-open-archived-topics" type="button" data-i18n="maintenance.manageArchived">查看 / 清理</button>
+                </div>
+                <div class="maintenance-topic-action-row maintenance-topic-action-danger">
+                  <div><strong data-i18n="topic.clearTopicsTitle">清空 Topic 记忆</strong><p data-i18n="topic.clearTopicsIntro">永久删除当前空间的全部 Topic、正式片段、人物索引、关系和构建断点，不影响 Timeline 记忆。</p></div>
+                  <button class="btn btn-danger" id="topic-clear-topics" type="button" data-i18n="topic.clearTopics">清空</button>
+                </div>
+              </div>
+            </div>
+            <div class="maintenance-panel" id="maintenance-panel-timeline-rebuild">
+              <div class="topic-maintenance-page-head">
+                <div>
+                  <h2 data-i18n="maintenance.timelineRebuildTitle">Timeline 记忆维护</h2>
+                  <p class="text-secondary" data-i18n="maintenance.timelineRebuildIntro">先检查原始消息证据是否完整，再选择需要同 ID 重构的 Timeline。重构后会同步修复 Topic。</p>
+                </div>
+                <label class="topic-maintenance-space-field">
+                  <span data-i18n="maintenance.topicSpaceLabel">记忆空间</span>
+                  <select id="timeline-rebuild-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
+                </label>
+              </div>
+              <div class="maintenance-topic-action-list maintenance-timeline-action-list">
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.detectRebuildable">检测可重构项</strong><p data-i18n="maintenance.detectRebuildableIntro">核对原始消息证据与记忆质量，再由用户选择需要同 ID 重构的 Timeline。</p></div>
+                  <div class="maintenance-timeline-action-control">
+                    <select id="timeline-rebuild-quality" class="select input input-sm" aria-label="Timeline 质量筛选">
+                      <option value="all" data-i18n="maintenance.allTimelineQuality">全部质量</option>
+                      <option value="low" data-i18n="maintenance.lowQualityOnly">仅低质量</option>
+                    </select>
+                    <button class="btn btn-primary" id="timeline-rebuild-preview" type="button" data-i18n="maintenance.detect">检测</button>
+                  </div>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.stagedEdits">查看暂存修改</strong><p data-i18n="maintenance.stagedEditsActionIntro">批量应用已暂存的 Timeline 编辑，完成整批写入后再统一同步 Topic。</p></div>
+                  <button class="btn btn-secondary maintenance-count-button" id="timeline-staged-open" type="button"><span data-i18n="maintenance.openStagedEdits">查看</span><span class="maintenance-action-count" id="timeline-staged-count">0</span></button>
+                </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.inactiveTimelines">不活跃 Timeline</strong><p data-i18n="maintenance.inactiveTimelinesActionIntro">查看已退出召回的 Timeline，并按需要恢复或永久删除。</p></div>
+                  <button class="btn btn-secondary" id="timeline-inactive-open" type="button" data-i18n="maintenance.manageInactive">查看 / 管理</button>
+                </div>
+              </div>
+              <div id="timeline-rebuild-summary" class="text-secondary"></div>
+              <div class="timeline-rebuild-options hidden" id="timeline-rebuild-options">
+                <button class="btn btn-secondary" id="timeline-rebuild-select-all" type="button" data-i18n="common.selectAll">全选</button>
+                <label>
+                  <span data-i18n="maintenance.topicSyncMode">Topic 同步方式</span>
+                  <select id="timeline-rebuild-topic-mode" class="select input input-sm">
+                    <option value="local" data-i18n="maintenance.topicSyncLocal">局部修复关联 Topic（推荐）</option>
+                    <option value="full" data-i18n="maintenance.topicSyncFull">重建当前空间全部 Topic</option>
+                  </select>
+                </label>
+                <button class="btn btn-primary" id="timeline-rebuild-start" type="button" disabled data-i18n="maintenance.startRebuild">开始重构</button>
+              </div>
+              <div id="timeline-rebuild-list" class="timeline-rebuild-list"><div class="identity-state" data-i18n="maintenance.rebuildNotChecked">尚未检测</div></div>
+              <div class="session-task-history">
+                <div class="maintenance-history-heading">
+                  <h3 data-i18n="maintenance.rebuildTasks">Timeline 维护任务</h3>
+                  <div>
+                    <button class="btn btn-secondary btn-sm" id="timeline-rebuild-task-refresh" type="button" data-i18n="common.refresh">刷新</button>
+                    <button class="btn btn-secondary btn-sm" id="timeline-rebuild-task-clear" type="button" data-i18n="common.clear">清空</button>
+                  </div>
+                </div>
+                <div id="timeline-rebuild-task-list"></div>
+              </div>
+            </div>
+            <div class="maintenance-panel" id="maintenance-panel-sessions">
+              <div class="maintenance-review-toolbar">
+                <div>
+                  <h2 data-i18n="maintenance.sessionsTitle">会话审计与清理</h2>
+                  <p class="text-secondary" data-i18n="maintenance.sessionsIntro">核对原始消息与派生记忆的引用关系，再执行分级清理或会话别名合并。</p>
+                </div>
+                <div class="maintenance-topic-controls">
+                  <input id="session-audit-filter" class="input input-sm" type="search" data-i18n-placeholder="maintenance.sessionsFilter" placeholder="筛选会话、账号或聊天对象">
+                  <button class="btn btn-secondary btn-sm" id="session-audit-refresh" type="button" data-i18n="common.refresh">刷新</button>
+                  <button class="btn btn-primary btn-sm" id="session-audit-action" type="button" data-i18n="maintenance.sessionAction">维护所选会话</button>
+                </div>
+              </div>
+              <div id="session-audit-summary" class="text-secondary"></div>
+              <div id="session-audit-list" class="session-audit-list"><div class="identity-state" data-i18n="common.loading">加载中...</div></div>
+              <div class="session-task-history">
+                <div class="maintenance-history-heading">
+                  <h3 data-i18n="maintenance.taskHistory">维护任务</h3>
+                  <button class="btn btn-secondary btn-sm" id="session-task-clear" type="button" data-i18n="common.clear">清空</button>
+                </div>
+                <div id="session-task-list"></div>
+              </div>
+            </div>
+            <div class="maintenance-panel" id="maintenance-panel-recent-recall">
+              <div class="maintenance-review-toolbar">
+                <div>
+                  <h2 data-i18n="maintenance.recentRecallTitle">最近实际召回</h2>
+                  <p class="text-secondary" data-i18n="maintenance.recentRecallIntro">记录原始触发、真实注入内容和诊断快照。默认关闭，记录失败不会影响聊天。</p>
+                </div>
+                <div class="maintenance-topic-controls">
+                  <label class="recall-trace-toggle"><input id="recall-trace-enabled" type="checkbox"><span data-i18n="maintenance.recordRecall">记录实际召回</span></label>
+                  <button class="btn btn-secondary btn-sm" id="recent-recall-refresh" type="button" data-i18n="common.refresh">刷新</button>
+                  <button class="btn btn-secondary btn-sm" id="recent-recall-clear" type="button" data-i18n="common.clear">清空</button>
+                </div>
+              </div>
+              <div id="recent-recall-list" class="recall-history-list"></div>
+            </div>
+            <div class="maintenance-panel" id="maintenance-panel-database">
+              <div class="maintenance-review-toolbar">
+                <div>
+                  <h2 data-i18n="maintenance.databaseTitle">数据库健康检查</h2>
+                  <p class="text-secondary" data-i18n="maintenance.databaseIntro">检查 SQLite 完整性、外键和记忆来源关系。检查不会修改数据，修复只处理手动勾选的项目。</p>
+                </div>
+                <div class="maintenance-topic-controls">
+                  <button class="btn btn-secondary btn-sm" id="database-health-refresh" type="button" data-i18n="maintenance.runDatabaseCheck">开始检查</button>
+                  <button class="btn btn-danger btn-sm" id="database-health-repair" type="button" disabled data-i18n="maintenance.repairSelected">修复所选项</button>
+                </div>
+              </div>
+              <div id="database-health-summary" class="database-health-summary">
+                <div class="identity-state" data-i18n="maintenance.databaseNotChecked">尚未检查数据库</div>
+              </div>
+              <div id="database-repair-progress" class="database-repair-progress hidden" aria-live="polite">
+                <div class="database-repair-progress-head">
+                  <strong id="database-repair-progress-stage" data-i18n="maintenance.databaseRepairProgress">数据库修复进度</strong>
+                  <span id="database-repair-progress-percent">0.0%</span>
+                </div>
+                <div class="topic-progress-track"><span id="database-repair-progress-bar" style="width:0%"></span></div>
+                <div class="database-repair-progress-meta">
+                  <span id="database-repair-progress-step"></span>
+                  <span id="database-repair-progress-count">0 / 0</span>
+                </div>
+                <small id="database-repair-progress-elapsed" class="text-tertiary"></small>
+                <div id="database-repair-progress-error" class="text-danger"></div>
+              </div>
+              <div id="database-health-databases" class="database-health-databases"></div>
+              <div class="maintenance-history-heading database-health-issues-heading">
+                <h3 data-i18n="maintenance.databaseIssues">发现的问题</h3>
+                <span id="database-health-selection" class="text-secondary"></span>
+              </div>
+              <div id="database-health-issues" class="database-health-issues">
+                <div class="identity-state" data-i18n="maintenance.databaseCheckHint">点击“开始检查”获取当前状态</div>
+              </div>
+            </div>
+            <div class="maintenance-panel" id="maintenance-panel-recall">
             <div class="recall-form-section">
               <textarea id="recall-query" class="input textarea" rows="3" data-i18n-placeholder="recall.queryPh" placeholder="Enter a query to test the dual-route four-mode hybrid retrieval engine..."></textarea>
               <div class="recall-form-row">
+                <div class="recall-form-field" style="max-width:220px">
+                  <label class="recall-form-label" data-i18n="recall.modeLabel">测试模式</label>
+                  <select id="recall-mode" class="select input input-sm">
+                    <option value="current" data-i18n="recall.mode.current">当前插件行为</option>
+                    <option value="timeline" data-i18n="recall.mode.timeline">仅 Timeline 召回</option>
+                    <option value="topic" data-i18n="recall.mode.topic">仅 Topic 召回</option>
+                  </select>
+                </div>
                 <div class="recall-form-field" style="max-width:200px">
                   <label class="recall-form-label" data-i18n="recall.kLabel">Results (k)</label>
                   <div class="slider-group">
@@ -201,18 +501,106 @@
                     <span class="slider-value" id="recall-k-value">5</span>
                   </div>
                 </div>
-                <div class="recall-form-field" style="max-width:280px">
+                <div class="recall-form-field recall-session-field is-missing" style="max-width:280px">
                   <label class="recall-form-label" data-i18n="recall.sessionLabel">Session ID (optional)</label>
-                  <input type="text" id="recall-session" class="input input-sm" data-i18n-placeholder="recall.sessionPh" placeholder="Filter by session..." />
+                  <input type="text" id="recall-session" class="input input-sm" list="recall-session-options" autocomplete="off" aria-describedby="recall-session-reminder" data-i18n-placeholder="recall.sessionPh" placeholder="Filter by session..." />
+                  <datalist id="recall-session-options"></datalist>
+                  <small class="recall-session-reminder" id="recall-session-reminder" data-i18n="recall.sessionReminder">请选择会话，以便准确定位记忆空间</small>
                 </div>
                 <button class="btn btn-primary" id="recall-search-btn" data-i18n="recall.searchBtn">Run Recall</button>
+              </div>
+              <div class="recall-temporal-section">
+                <label class="recall-temporal-toggle" for="recall-temporal-enabled">
+                  <input id="recall-temporal-enabled" type="checkbox" aria-controls="recall-temporal-controls" aria-expanded="false" />
+                  <span>
+                    <strong data-i18n="recall.temporal.enable">时间检索</strong>
+                    <small data-i18n="recall.temporal.hint">仅用于本次召回测试；关闭时不附加时间约束。</small>
+                  </span>
+                </label>
+                <div class="recall-temporal-controls hidden" id="recall-temporal-controls">
+                  <div class="recall-form-field">
+                    <label class="recall-form-label" for="recall-temporal-mode" data-i18n="recall.temporal.mode">检索方式</label>
+                    <select id="recall-temporal-mode" class="select input input-sm">
+                      <option value="range" data-i18n="recall.temporal.mode.range">指定时间范围</option>
+                      <option value="earliest" data-i18n="recall.temporal.mode.earliest">较早的相关记忆</option>
+                      <option value="latest" data-i18n="recall.temporal.mode.latest">较新的相关记忆</option>
+                    </select>
+                  </div>
+                  <div class="recall-temporal-range-fields" id="recall-temporal-range-fields">
+                    <div class="recall-form-field">
+                      <label class="recall-form-label" for="recall-temporal-start" data-i18n="recall.temporal.start">开始时间（可选）</label>
+                      <input id="recall-temporal-start" type="datetime-local" class="input input-sm" />
+                    </div>
+                    <div class="recall-form-field">
+                      <label class="recall-form-label" for="recall-temporal-end" data-i18n="recall.temporal.end">结束时间（可选）</label>
+                      <input id="recall-temporal-end" type="datetime-local" class="input input-sm" />
+                    </div>
+                  </div>
+                  <div class="recall-form-field">
+                    <label class="recall-form-label" for="recall-temporal-order" data-i18n="recall.temporal.order">结果排序</label>
+                    <select id="recall-temporal-order" class="select input input-sm">
+                      <option value="relevance" data-i18n="recall.temporal.order.relevance">相关度优先</option>
+                      <option value="earliest" data-i18n="recall.temporal.order.earliest">时间从早到晚</option>
+                      <option value="latest" data-i18n="recall.temporal.order.latest">时间从晚到早</option>
+                    </select>
+                  </div>
+                </div>
               </div>
             </div>
             <div class="recall-results-header hidden" id="recall-stats">
               <span id="recall-count-text">0 results</span>
               <span class="text-tertiary" id="recall-time-text"></span>
+              <button class="btn btn-secondary btn-sm hidden" id="recall-export-current" type="button" data-i18n="recall.exportCurrent">导出本次 JSON</button>
             </div>
+            <div class="recall-diagnostics hidden" id="recall-diagnostics"></div>
             <div id="recall-results"></div>
+            <div class="recall-history-section">
+              <div class="maintenance-history-heading">
+                <h3 data-i18n="recall.history">测试历史</h3>
+                <div>
+                  <button class="btn btn-secondary btn-sm" id="recall-history-refresh" type="button" data-i18n="common.refresh">刷新</button>
+                  <button class="btn btn-secondary btn-sm" id="recall-history-clear" type="button" data-i18n="common.clear">清空</button>
+                </div>
+              </div>
+              <div id="recall-history-list" class="recall-history-list"></div>
+            </div>
+            </div>
+
+            <div class="maintenance-panel" id="maintenance-panel-models">
+              <div class="maintenance-panel-actions">
+                <button class="btn btn-secondary btn-sm" id="model-refresh" data-i18n="common.refresh">刷新</button>
+              </div>
+            <div class="model-page-intro">
+              <div class="model-page-intro-title" data-i18n="models.introTitle">LivingMemory 当前模型</div>
+              <p data-i18n="models.intro">这里展示插件运行时实际使用的模型。测试连接会发起一次真实模型请求，可能产生少量用量和费用。</p>
+            </div>
+            <div class="model-cards" id="model-cards">
+              <div class="model-page-state" data-i18n="common.loading">加载中...</div>
+            </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Page: Supplemental identities -->
+        <section class="page" id="page-identities">
+          <header class="page-header">
+            <span class="page-title" data-i18n="nav.identities">补充人物资料</span>
+            <div class="page-actions">
+              <span class="identity-dirty hidden" id="identity-dirty" data-i18n="identity.unsaved">有未保存的修改</span>
+              <button class="btn btn-secondary btn-sm" id="identity-refresh" data-i18n="common.refresh">刷新</button>
+              <button class="btn btn-secondary btn-sm" id="identity-add" data-i18n="identity.add">添加人物</button>
+              <button class="btn btn-primary btn-sm" id="identity-save" data-i18n="common.save" disabled>保存</button>
+            </div>
+          </header>
+          <div class="page-body identity-page-body">
+            <div class="model-page-intro">
+              <div class="model-page-intro-title" data-i18n="identity.introTitle">补充人物资料</div>
+              <p data-i18n="identity.intro">使用稳定账号补充来源中含糊的人物信息，仅影响之后的新建或重建。</p>
+            </div>
+            <div class="identity-warning" data-i18n="identity.warning">来源事实始终优先。新增、修改或删除资料不会重写已有 Timeline 或 Topic。</div>
+            <div class="identity-list" id="identity-list">
+              <div class="identity-state" data-i18n="common.loading">加载中...</div>
+            </div>
           </div>
         </section>
 
@@ -223,30 +611,55 @@
           </header>
           <div class="page-body">
             <div class="stat-cards" id="system-stat-cards">
-              <div class="stat-card"><div class="stat-card-value" id="ss-total">--</div><div class="stat-card-label" data-i18n="stats.total">Total Memories</div></div>
-              <div class="stat-card"><div class="stat-card-value" id="ss-active">--</div><div class="stat-card-label" data-i18n="stats.active">Active</div></div>
-              <div class="stat-card"><div class="stat-card-value" id="ss-archived">--</div><div class="stat-card-label" data-i18n="stats.archived">Archived</div></div>
-              <div class="stat-card"><div class="stat-card-value" id="ss-deleted">--</div><div class="stat-card-label" data-i18n="stats.deleted">Deleted</div></div>
+              <div class="stat-card"><div class="stat-card-value" id="ss-total">--</div><div class="stat-card-label" data-i18n="system.timelineTotal">Timeline 总数</div></div>
+              <div class="stat-card"><div class="stat-card-value" id="ss-active">--</div><div class="stat-card-label" data-i18n="system.timelineActive">活跃 Timeline</div></div>
+              <div class="stat-card"><div class="stat-card-value" id="ss-topics">--</div><div class="stat-card-label" data-i18n="system.topicActive">活跃 Topic</div></div>
+              <div class="stat-card"><div class="stat-card-value" id="ss-fragments">--</div><div class="stat-card-label" data-i18n="system.formalFragments">正式片段</div></div>
+              <div class="stat-card"><div class="stat-card-value" id="ss-spaces">--</div><div class="stat-card-label" data-i18n="system.memorySpaces">记忆空间</div></div>
               <div class="stat-card"><div class="stat-card-value" id="ss-nodes">--</div><div class="stat-card-label" data-i18n="stats.graphNodes">Graph Nodes</div></div>
-              <div class="stat-card"><div class="stat-card-value" id="ss-atoms">--</div><div class="stat-card-label" data-i18n="stats.atoms">Atoms</div></div>
+            </div>
+            <div class="system-panel system-layer-panel">
+              <div class="system-panel-title" data-i18n="system.memoryLayers">记忆层与索引</div>
+              <div class="system-layer-list">
+                <div class="system-layer-row">
+                  <div class="system-layer-heading"><span class="system-layer-dot timeline"></span><strong>Timeline</strong></div>
+                  <div class="system-layer-metrics">
+                    <span><b id="ss-archived">--</b> <span data-i18n="stats.archived">已归档</span></span>
+                    <span><b id="ss-deleted">--</b> <span data-i18n="stats.deleted">已删除</span></span>
+                    <span><b id="ss-atoms">--</b> <span data-i18n="system.timelineAtoms">事实原子</span></span>
+                  </div>
+                </div>
+                <div class="system-layer-row">
+                  <div class="system-layer-heading"><span class="system-layer-dot topic"></span><strong>Topic</strong><span class="system-state-badge" id="ss-topic-state">--</span></div>
+                  <div class="system-layer-metrics">
+                    <span><b id="ss-topic-atoms">--</b> <span data-i18n="system.topicAtoms">Topic 原子</span></span>
+                    <span><b id="ss-topic-links">--</b> <span data-i18n="system.timelineLinks">Timeline 索引</span></span>
+                    <span><b id="ss-topic-relations">--</b> <span data-i18n="system.topicRelations">相关话题</span></span>
+                    <span><b id="ss-actor-links">--</b> <span data-i18n="system.actorLinks">人物关系</span></span>
+                    <span><b id="ss-pending-review">--</b> <span data-i18n="system.pendingReview">待审查</span></span>
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="system-grid">
               <div class="system-panel">
-                <div class="system-panel-title" data-i18n="system.importanceDistribution">Importance Distribution</div>
+                <div class="system-panel-title" data-i18n="system.importanceDistribution">Timeline 重要性分布</div>
                 <div class="bar-chart" id="importance-chart"></div>
               </div>
               <div class="system-panel">
-                <div class="system-panel-title" data-i18n="system.atomTypes">Atom Types</div>
+                <div class="system-panel-title" data-i18n="system.atomTypes">Timeline 原子类型</div>
                 <div class="bar-chart" id="atom-chart"></div>
               </div>
             </div>
-            <div class="system-panel mb-6" style="margin-top:0">
-              <div class="system-panel-title" data-i18n="system.activeSessions">Active Sessions</div>
-              <div class="session-list" id="session-list"></div>
-            </div>
-            <div class="system-panel">
-              <div class="system-panel-title" data-i18n="system.versionBackups">Version Backups</div>
-              <div class="backup-list" id="backup-list"></div>
+            <div class="system-grid system-support-grid">
+              <div class="system-panel">
+                <div class="system-panel-title" data-i18n="system.activeSessions">Timeline 会话分布</div>
+                <div class="session-list" id="session-list"></div>
+              </div>
+              <div class="system-panel">
+                <div class="system-panel-title" data-i18n="system.versionBackups">Version Backups</div>
+                <div class="backup-list" id="backup-list"></div>
+              </div>
             </div>
           </div>
         </section>
@@ -267,6 +680,255 @@
       </div>
       <div class="peek-body" id="peek-body"></div>
     </aside>
+
+    <!-- Shared destructive-action confirmation -->
+    <div class="modal-overlay" id="action-confirm-overlay" aria-hidden="true">
+      <div class="modal action-confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="action-confirm-title" aria-describedby="action-confirm-message">
+        <div class="modal-header">
+          <div class="modal-title" id="action-confirm-title"></div>
+          <button class="modal-close" id="action-confirm-close" type="button" data-i18n-aria="common.close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body"><p class="action-confirm-message" id="action-confirm-message"></p></div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="action-confirm-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-danger" id="action-confirm-submit" type="button" data-i18n="common.confirm">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Topic Detail Modal -->
+    <div class="modal-overlay topic-detail-overlay" id="topic-detail-overlay" aria-hidden="true">
+      <div class="modal topic-detail-modal" role="dialog" aria-modal="true" aria-labelledby="topic-detail-title">
+        <div class="modal-header">
+          <div class="modal-title topic-detail-title" id="topic-detail-title">Topic</div>
+          <button class="modal-close topic-detail-close" id="topic-detail-close" type="button" data-i18n-aria="common.close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body topic-detail-body" id="topic-detail-body"></div>
+      </div>
+    </div>
+
+    <!-- Read-only Timeline Source Modal -->
+    <div class="modal-overlay topic-timeline-detail-overlay" id="topic-timeline-detail-overlay" aria-hidden="true">
+      <div class="modal topic-timeline-detail-modal" role="dialog" aria-modal="true" aria-labelledby="topic-timeline-detail-title">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-timeline-detail-title" data-i18n="topic.timelineDetailTitle">Timeline 记忆</div>
+          <button class="modal-close" id="topic-timeline-detail-close" type="button" data-i18n-aria="common.close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body topic-timeline-detail-body" id="topic-timeline-detail-body"></div>
+      </div>
+    </div>
+
+    <!-- Topic Governance Modal -->
+    <div class="modal-overlay topic-governance-overlay" id="topic-governance-overlay" aria-hidden="true">
+      <div class="modal topic-governance-modal" role="dialog" aria-modal="true" aria-labelledby="topic-governance-title">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-governance-title" data-i18n="maintenance.governance">拆分 / 合并</div>
+          <button class="modal-close" id="topic-governance-close" type="button" data-i18n-aria="common.close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body topic-governance-body" id="topic-governance-body"></div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="topic-governance-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-primary" id="topic-governance-submit" type="button" data-i18n="maintenance.previewChanges">预览变更</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Pending Topic Reviews Modal -->
+    <div class="modal-overlay topic-review-overlay" id="topic-review-overlay" aria-hidden="true">
+      <div class="modal topic-review-modal" role="dialog" aria-modal="true" aria-labelledby="topic-review-title">
+        <div class="modal-header">
+          <div>
+            <div class="modal-title" id="topic-review-title" data-i18n="maintenance.reviewTitle">Topic 待审查</div>
+            <p class="modal-subtitle" data-i18n="maintenance.reviewIntro">核对歧义片段与候选 Topic，再决定合并、新建、暂缓或忽略。</p>
+          </div>
+          <button class="modal-close" id="topic-review-close" type="button" data-i18n-aria="common.close" aria-label="Close">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="modal-body topic-review-body">
+          <div class="maintenance-panel-actions">
+            <button class="btn btn-secondary btn-sm" id="maintenance-review-refresh" type="button" data-i18n="common.refresh">刷新</button>
+          </div>
+          <div class="maintenance-review-layout">
+            <div class="maintenance-review-list" id="maintenance-review-list"><div class="identity-state" data-i18n="maintenance.chooseReviewSpace">请选择记忆空间</div></div>
+            <div class="maintenance-review-detail" id="maintenance-review-detail"><div class="identity-state" data-i18n="maintenance.chooseReview">请选择待审查项</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Session Maintenance Modal -->
+    <div class="modal-overlay" id="session-maintenance-overlay" aria-hidden="true">
+      <div class="modal session-maintenance-modal" role="dialog" aria-modal="true" aria-labelledby="session-maintenance-title">
+        <div class="modal-header">
+          <div class="modal-title" id="session-maintenance-title" data-i18n="maintenance.sessionAction">维护所选会话</div>
+          <button class="modal-close" id="session-maintenance-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <label class="identity-field"><span data-i18n="maintenance.operation">操作</span>
+            <select class="select input" id="session-maintenance-operation">
+              <option value="cleanup_summarized" data-i18n="maintenance.cleanupSummarized">清理已总结的聊天记录</option>
+              <option value="delete_raw_keep_memory" data-i18n="maintenance.deleteRawKeepMemory">删除全部聊天记录（危险操作）</option>
+              <option value="merge_aliases" data-i18n="maintenance.mergeAliases">合并会话别名</option>
+              <option value="delete_memory_chain" data-i18n="maintenance.deleteMemoryChain">完整删除会话记忆链（危险操作）</option>
+            </select>
+          </label>
+          <label class="identity-field hidden" id="session-canonical-field"><span data-i18n="maintenance.canonicalSession">规范会话</span><select class="select input" id="session-maintenance-canonical"></select></label>
+          <div id="session-maintenance-selection" class="session-maintenance-selection"></div>
+          <div id="session-maintenance-preview" class="session-maintenance-preview"></div>
+          <label class="session-force-confirm hidden" id="session-force-field"><input type="checkbox" id="session-maintenance-force"><span data-i18n="maintenance.forceConfirm">我了解阻止原因，仍要执行此高风险操作</span></label>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="session-maintenance-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-primary" id="session-maintenance-submit" type="button" data-i18n="maintenance.previewChanges">预览变更</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Incremental Topic Maintenance Panel -->
+    <div class="modal-overlay" id="topic-maintenance-overlay" aria-hidden="true">
+      <div class="modal topic-maintenance-modal" role="dialog" aria-modal="true" aria-labelledby="topic-maintenance-title" aria-describedby="topic-maintenance-intro">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-maintenance-title" data-i18n="maintenance.incrementalTitle">增量补建</div>
+          <button class="modal-close" id="topic-maintenance-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <p class="topic-maintenance-intro text-secondary" id="topic-maintenance-intro" data-i18n="topic.maintenanceIntro">检查尚未被活跃 Topic 以当前版本索引的 Timeline，确认后仅补建所选条目。</p>
+          <div class="topic-maintenance-toolbar">
+            <div id="topic-maintenance-status" class="text-secondary" aria-live="polite"></div>
+            <button class="btn btn-secondary btn-sm" id="topic-maintenance-detect" type="button" data-i18n="topic.detectUnindexed">重新检查</button>
+          </div>
+          <div class="topic-maintenance-selection hidden" id="topic-maintenance-selection">
+            <label class="topic-maintenance-select-all">
+              <input id="topic-maintenance-select-all" type="checkbox" checked>
+              <span data-i18n="topic.selectAllUnindexed">全选未索引 Timeline</span>
+            </label>
+            <span class="text-tertiary" id="topic-maintenance-selected-count"></span>
+          </div>
+          <div class="topic-maintenance-preview hidden" id="topic-maintenance-preview" aria-live="polite"></div>
+          <div class="topic-maintenance-list" id="topic-maintenance-list"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="topic-maintenance-cancel" type="button" data-i18n="common.close">关闭</button>
+          <button class="btn btn-primary" id="topic-maintenance-submit" type="button" data-i18n="topic.maintenanceSubmit" disabled>开始增量补建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Clear Topic Memories Confirmation -->
+    <div class="modal-overlay" id="topic-clear-confirm-overlay" aria-hidden="true">
+      <div class="modal topic-discard-build-modal" role="alertdialog" aria-modal="true" aria-labelledby="topic-clear-confirm-title" aria-describedby="topic-clear-confirm-message">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-clear-confirm-title" data-i18n="topic.clearConfirmTitle">确认清空 Topic 记忆</div>
+          <button class="modal-close" id="topic-clear-confirm-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="topic-discard-build-warning" data-i18n="topic.clearConfirmWarning">这是不可撤销的危险操作。只会删除 Topic 派生数据，Timeline 记忆不会被删除。</div>
+          <p class="topic-discard-build-message" id="topic-clear-confirm-message"></p>
+          <p class="text-tertiary" data-i18n="topic.clearConfirmRecovery">清空后只能通过全量构建重新生成 Topic 记忆。</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="topic-clear-confirm-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-danger" id="topic-clear-confirm-submit" type="button" data-i18n="topic.clearConfirmSubmit">确认永久清空</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Topic Runtime Settings -->
+    <div class="modal-overlay" id="topic-settings-overlay" aria-hidden="true">
+      <div class="modal topic-settings-modal" role="dialog" aria-modal="true" aria-labelledby="topic-settings-title">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-settings-title" data-i18n="topic.settingsTitle">Topic 参数</div>
+          <button class="modal-close" id="topic-settings-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body topic-settings-body">
+          <div id="topic-settings-status" class="text-secondary" aria-live="polite"></div>
+          <div id="topic-settings-content" class="topic-settings-content"></div>
+        </div>
+        <div class="modal-footer topic-settings-footer">
+          <button class="btn btn-ghost" id="topic-settings-reset-all" type="button" data-i18n="topic.resetAllDefaults">全部恢复默认</button>
+          <span class="topic-settings-footer-spacer"></span>
+          <button class="btn btn-secondary" id="topic-settings-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-primary" id="topic-settings-save" type="button" data-i18n="common.save">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Timeline Runtime Settings -->
+    <div class="modal-overlay" id="timeline-settings-overlay" aria-hidden="true">
+      <div class="modal topic-settings-modal" role="dialog" aria-modal="true" aria-labelledby="timeline-settings-title">
+        <div class="modal-header">
+          <div class="modal-title" id="timeline-settings-title" data-i18n="timeline.settingsTitle">Timeline 参数</div>
+          <button class="modal-close" id="timeline-settings-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body topic-settings-body">
+          <div id="timeline-settings-status" class="text-secondary" aria-live="polite"></div>
+          <div id="timeline-settings-content" class="topic-settings-content"></div>
+        </div>
+        <div class="modal-footer topic-settings-footer">
+          <button class="btn btn-ghost" id="timeline-settings-reset-all" type="button" data-i18n="topic.resetAllDefaults">全部恢复默认</button>
+          <span class="topic-settings-footer-spacer"></span>
+          <button class="btn btn-secondary" id="timeline-settings-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-primary" id="timeline-settings-save" type="button" data-i18n="common.save">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Full Topic Build Confirmation -->
+    <div class="modal-overlay" id="topic-full-build-confirm-overlay" aria-hidden="true">
+      <div class="modal topic-full-build-confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="topic-full-build-confirm-title" aria-describedby="topic-full-build-confirm-message">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-full-build-confirm-title" data-i18n="topic.fullBuildConfirmTitle">确认重新全量构建</div>
+          <button class="modal-close" id="topic-full-build-confirm-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="topic-full-build-warning" data-i18n="topic.fullBuildConfirmWarning">这是高耗时操作，会重新调用 LLM、Embedding 和 Rerank。</div>
+          <p class="topic-full-build-message" id="topic-full-build-confirm-message"></p>
+          <div class="topic-full-build-choices" role="radiogroup" data-i18n-aria="topic.fullBuildModeLabel" aria-label="Full build mode">
+            <label class="topic-full-build-choice">
+              <input type="radio" name="topic-full-build-mode" value="preserve" checked>
+              <span><strong data-i18n="topic.fullBuildPreserveTitle">保留现有 Topic 后重新构建</strong><small data-i18n="topic.fullBuildPreserveDetail">匹配到的 Topic 保留 ID 并更新版本；新主题会新建，本轮未生成的旧 Topic 会归档。</small></span>
+            </label>
+            <label class="topic-full-build-choice topic-full-build-choice-danger">
+              <input type="radio" name="topic-full-build-mode" value="clear">
+              <span><strong data-i18n="topic.fullBuildClearTitle">清空后全量构建</strong><small data-i18n="topic.fullBuildClearDetail">按首次使用方式生成全新 Topic；旧数据会保留到新构建完整成功后再原子替换。</small></span>
+            </label>
+          </div>
+          <div class="topic-full-build-reset-risk hidden" id="topic-full-build-reset-risk" data-i18n="topic.fullBuildClearRisk">构建失败或取消不会删除现有 Topic；只有完整构建成功后才会一次性替换旧数据。</div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="topic-full-build-confirm-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-danger" id="topic-full-build-confirm-submit" type="button" data-i18n="topic.fullBuildConfirmSubmit">仍然全量构建</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Discard Topic Build Checkpoint Confirmation -->
+    <div class="modal-overlay" id="topic-discard-build-overlay" aria-hidden="true">
+      <div class="modal topic-discard-build-modal" role="alertdialog" aria-modal="true" aria-labelledby="topic-discard-build-title" aria-describedby="topic-discard-build-message">
+        <div class="modal-header">
+          <div class="modal-title" id="topic-discard-build-title" data-i18n="topic.discardBuildTitle">取消断点任务</div>
+          <button class="modal-close" id="topic-discard-build-close" type="button" data-i18n-aria="common.close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="topic-discard-build-warning" data-i18n="topic.discardBuildWarning">此操作会永久清除该任务已保存的候选扫描、片段、向量、匹配、合成结果和构建检查点，之后无法从该断点继续。</div>
+          <p class="topic-discard-build-message" id="topic-discard-build-message"></p>
+          <p class="text-tertiary" data-i18n="topic.discardBuildMaterialized">构建结果只会在全部完成后正式发布；取消断点不会修改任务开始前的 Topic。</p>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="topic-discard-build-cancel" type="button" data-i18n="common.cancel">取消</button>
+          <button class="btn btn-danger" id="topic-discard-build-submit" type="button" data-i18n="topic.discardBuildSubmit">确认取消并清除进度</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Layered Session Picker -->
     <div class="modal-overlay" id="session-picker-overlay">

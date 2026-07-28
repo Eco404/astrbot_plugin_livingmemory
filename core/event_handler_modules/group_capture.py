@@ -82,6 +82,7 @@ class GroupCapture:
                 event=event,
                 role="user",
                 content=content,
+                event_source="incoming_group_message",
             )
             if dedup_key:
                 await self.message_utils.mark_message_processed(dedup_key)

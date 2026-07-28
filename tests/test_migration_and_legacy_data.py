@@ -138,6 +138,685 @@ async def _get_all_metadata(db_path: str) -> list[dict]:
     return result
 
 
+@pytest.mark.asyncio
+async def test_migrate_v9_16_to_v9_17_backfills_importance_contract_idempotently(
+    tmp_path,
+):
+    db_path = str(tmp_path / "v9-17-importance.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "CREATE TABLE documents (id INTEGER PRIMARY KEY, text TEXT, metadata TEXT)"
+        )
+        await db.execute(
+            "INSERT INTO documents VALUES (1, 'Timeline', ?)",
+            (json.dumps({"importance": 0.72}, ensure_ascii=False),),
+        )
+        await db.execute(
+            """
+            CREATE TABLE topic_memories (
+                topic_uid TEXT PRIMARY KEY,
+                base_importance REAL NOT NULL,
+                confidence REAL NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            "INSERT INTO topic_memories VALUES ('topic-1', 0.81, 0.66)"
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_16_to_v9_17(None)
+    await migration._migrate_v9_16_to_v9_17(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        topic = await (
+            await db.execute("SELECT * FROM topic_memories WHERE topic_uid='topic-1'")
+        ).fetchone()
+        document = await (
+            await db.execute("SELECT metadata FROM documents WHERE id=1")
+        ).fetchone()
+    metadata = json.loads(document["metadata"])
+    assert topic["semantic_importance"] == pytest.approx(0.81)
+    assert topic["source_base_component"] == pytest.approx(0.81)
+    assert topic["evidence_strength"] == pytest.approx(0.66)
+    assert topic["importance_policy_version"] == 2
+    assert metadata["base_importance"] == pytest.approx(0.72)
+    assert metadata["importance_revision"] == 1
+    assert metadata["importance_policy_version"] == 2
+
+
+def test_database_version_segments_do_not_use_float_ordering():
+    assert DBMigration.normalize_version("v9.02") == "9.2"
+    assert DBMigration.version_key("9.10") > DBMigration.version_key("9.2")
+    assert DBMigration.version_key("10") > DBMigration.version_key("9.22")
+    assert DBMigration.version_key(9) < DBMigration.version_key("9.1")
+    assert DBMigration.storage_version("9.2") == "v9.2"
+    assert all("." not in str(version) for version in DBMigration.VERSION_HISTORY)
+
+
+@pytest.mark.asyncio
+async def test_v9_to_v10_uses_one_public_migration_boundary(monkeypatch, tmp_path):
+    migration = DBMigration(str(tmp_path / "v10.db"))
+    stage_names = [
+        "_migrate_v9_to_v9_1",
+        "_migrate_v9_1_to_v9_2",
+        "_migrate_v9_2_to_v9_3",
+        "_migrate_v9_3_to_v9_4",
+        "_migrate_v9_4_to_v9_5",
+        "_migrate_v9_5_to_v9_6",
+        "_migrate_v9_6_to_v9_7",
+        "_migrate_v9_7_to_v9_8",
+        "_migrate_v9_8_to_v9_9",
+        "_migrate_v9_9_to_v9_10",
+        "_migrate_v9_10_to_v9_11",
+        "_migrate_v9_11_to_v9_12",
+        "_migrate_v9_12_to_v9_13",
+        "_migrate_v9_13_to_v9_14",
+        "_migrate_v9_14_to_v9_15",
+        "_migrate_v9_15_to_v9_16",
+        "_migrate_v9_16_to_v9_17",
+        "_migrate_v9_17_to_v9_18",
+        "_migrate_v9_18_to_v9_19",
+        "_migrate_v9_19_to_v9_20",
+        "_migrate_v9_20_to_v9_21",
+        "_migrate_v9_21_to_v9_22",
+    ]
+    called: list[str] = []
+
+    for stage_name in stage_names:
+        async def record_stage(_progress, *, name=stage_name):
+            called.append(name)
+
+        monkeypatch.setattr(migration, stage_name, record_stage)
+
+    await migration._migrate_v9_to_v10(None)
+
+    assert called == stage_names
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_22_to_v10_records_release_boundary(tmp_path):
+    db_path = str(tmp_path / "v9_22.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE db_version (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL,
+                description TEXT,
+                migrated_at TEXT NOT NULL,
+                migration_duration_seconds REAL
+            )
+            """
+        )
+        await db.execute(
+            """
+            INSERT INTO db_version(version, description, migrated_at)
+            VALUES ('v9.22', 'test fixture', '2026-07-28T00:00:00+00:00')
+            """
+        )
+        await db.commit()
+
+    progress: list[tuple[str, int, int]] = []
+    migration = DBMigration(db_path)
+
+    def record_progress(message: str, current: int, total: int) -> None:
+        progress.append((message, current, total))
+
+    result = await migration.migrate(record_progress)
+
+    assert result["success"] is True
+    assert result["from_version"] == "9.22"
+    assert result["to_version"] == "10"
+    assert await migration.get_db_version() == "10"
+    assert progress == [("完成 v10 数据库版本收束", 1, 1)]
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_17_to_v9_18_adds_empty_affect_contract_idempotently(
+    tmp_path,
+):
+    db_path = str(tmp_path / "v9-18-affect.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("CREATE TABLE topic_memories (topic_uid TEXT PRIMARY KEY)")
+        await db.execute(
+            "CREATE TABLE topic_fragment_drafts (fragment_uid TEXT PRIMARY KEY)"
+        )
+        await db.execute(
+            "CREATE TABLE topic_fragments (fragment_uid TEXT PRIMARY KEY)"
+        )
+        await db.execute("INSERT INTO topic_memories VALUES ('topic-1')")
+        await db.execute("INSERT INTO topic_fragments VALUES ('fragment-1')")
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_17_to_v9_18(None)
+    await migration._migrate_v9_17_to_v9_18(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        topic = await (
+            await db.execute(
+                "SELECT affect_profile, affective_salience, affect_signature "
+                "FROM topic_memories"
+            )
+        ).fetchone()
+        fragment = await (
+            await db.execute(
+                "SELECT affect_events, affect_signature FROM topic_fragments"
+            )
+        ).fetchone()
+    assert topic == ("[]", 0.0, "{}")
+    assert fragment == ("[]", "{}")
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_18_to_v9_19_adds_timeline_rebuild_journal(tmp_path):
+    db_path = str(tmp_path / "legacy-v9.18.db")
+    migration = DBMigration(db_path)
+
+    await migration._migrate_v9_18_to_v9_19(None)
+    await migration._migrate_v9_18_to_v9_19(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            row[0]
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+    assert "timeline_rebuild_tasks" in tables
+    assert "timeline_rebuild_items" in tables
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_19_to_v9_20_repairs_fragment_and_affect_identity(
+    tmp_path,
+):
+    db_path = str(tmp_path / "legacy-v9.19.db")
+    base_logical_uid = "shared-source-logical-id"
+    target_actor_id = "unresolved:fragment-2:person-hash"
+    event_uid = "affect-event-1"
+    common_columns = {
+        "memory_space_id": "space-1",
+        "timeline_uids": json.dumps(["timeline-1"]),
+        "logical_fragment_uid": base_logical_uid,
+        "fragment_revision": 4,
+        "status": "active",
+        "updated_at": 1.0,
+    }
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE topic_fragments (
+                fragment_uid TEXT PRIMARY KEY,
+                memory_space_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                timeline_uids TEXT NOT NULL,
+                facts TEXT NOT NULL,
+                logical_fragment_uid TEXT NOT NULL,
+                fragment_revision INTEGER NOT NULL,
+                metadata TEXT NOT NULL,
+                affect_events TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE topic_fragment_drafts AS
+            SELECT * FROM topic_fragments WHERE 0
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE topic_memories (
+                topic_uid TEXT PRIMARY KEY,
+                affect_profile TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE topic_actor_links (
+                topic_uid TEXT NOT NULL,
+                actor_id TEXT NOT NULL
+            )
+            """
+        )
+        first_fact = {
+            "type": "weather",
+            "content": "当天遇到台风天气。",
+            "source_fact_keys": ["timeline-1:key-fact-1"],
+        }
+        second_fact = {
+            "type": "relationship",
+            "content": "示例甲表达了获得陪伴后的安心。",
+            "source_fact_keys": ["timeline-1:key-fact-1"],
+            "actor_refs": [
+                {
+                    "actor_id": target_actor_id,
+                    "display_name_snapshot": "示例甲",
+                    "relation_type": "subject",
+                }
+            ],
+        }
+        detached_event = {
+            "event_uid": event_uid,
+            "actor_id": "unresolved:fragment-2:affect:0",
+            "display_name_snapshot": "示例甲",
+            "source_timeline_uids": ["timeline-1"],
+        }
+        rows = [
+            {
+                **common_columns,
+                "fragment_uid": "fragment-1",
+                "label": "台风天气",
+                "summary": "当天遇到台风天气。",
+                "facts": json.dumps([first_fact], ensure_ascii=False),
+                "metadata": "{}",
+                "affect_events": "[]",
+            },
+            {
+                **common_columns,
+                "fragment_uid": "fragment-2",
+                "label": "安心陪伴",
+                "summary": "示例甲表达了获得陪伴后的安心。",
+                "facts": json.dumps([second_fact], ensure_ascii=False),
+                "metadata": "{}",
+                "affect_events": json.dumps(
+                    [detached_event], ensure_ascii=False
+                ),
+            },
+        ]
+        insert_fragment_sql = """
+            INSERT INTO {table_name} (
+                fragment_uid, memory_space_id, label, summary, timeline_uids,
+                facts, logical_fragment_uid, fragment_revision, metadata,
+                affect_events, status, updated_at
+            ) VALUES (
+                :fragment_uid, :memory_space_id, :label, :summary,
+                :timeline_uids, :facts, :logical_fragment_uid,
+                :fragment_revision, :metadata, :affect_events, :status,
+                :updated_at
+            )
+        """
+        await db.executemany(
+            insert_fragment_sql.format(table_name="topic_fragments"),
+            rows,
+        )
+        await db.executemany(
+            insert_fragment_sql.format(table_name="topic_fragment_drafts"),
+            rows,
+        )
+        await db.execute(
+            "INSERT INTO topic_memories VALUES (?, ?, 'active', 1.0)",
+            (
+                "topic-1",
+                json.dumps(
+                    [{**detached_event, "fragment_uid": "fragment-2"}],
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        await db.execute(
+            "INSERT INTO topic_actor_links VALUES ('topic-1', ?)",
+            (target_actor_id,),
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_19_to_v9_20(None)
+    await migration._migrate_v9_19_to_v9_20(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        fragments = await (
+            await db.execute(
+                """
+                SELECT fragment_uid, summary, logical_fragment_uid,
+                       fragment_revision, metadata, affect_events
+                FROM topic_fragments ORDER BY fragment_uid
+                """
+            )
+        ).fetchall()
+        topic = await (
+            await db.execute(
+                "SELECT affect_profile FROM topic_memories WHERE topic_uid='topic-1'"
+            )
+        ).fetchone()
+        drafts = await (
+            await db.execute(
+                """
+                SELECT logical_fragment_uid, fragment_revision, affect_events
+                FROM topic_fragment_drafts ORDER BY fragment_uid
+                """
+            )
+        ).fetchall()
+
+    assert fragments[0]["logical_fragment_uid"] != fragments[1][
+        "logical_fragment_uid"
+    ]
+    assert all(row["fragment_revision"] == 1 for row in fragments)
+    assert all(
+        "logical_identity_disambiguation" in json.loads(row["metadata"])
+        for row in fragments
+    )
+    assert fragments[0]["summary"] == "当天遇到台风天气。"
+    repaired_fragment_event = json.loads(fragments[1]["affect_events"])[0]
+    repaired_topic_event = json.loads(topic["affect_profile"])[0]
+    assert repaired_fragment_event["actor_id"] == target_actor_id
+    assert repaired_topic_event["actor_id"] == target_actor_id
+    assert drafts[0]["logical_fragment_uid"] != drafts[1][
+        "logical_fragment_uid"
+    ]
+    assert all(row["fragment_revision"] == 1 for row in drafts)
+    assert json.loads(drafts[1]["affect_events"])[0][
+        "actor_id"
+    ] == target_actor_id
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_20_to_v9_21_backfills_sources_without_repairing_orphans(
+    tmp_path,
+):
+    db_path = str(tmp_path / "legacy-v9.20-graph.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE graph_edges (
+                id INTEGER PRIMARY KEY,
+                edge_key TEXT NOT NULL UNIQUE,
+                source_node_id INTEGER NOT NULL,
+                target_node_id INTEGER NOT NULL,
+                relation_type TEXT NOT NULL,
+                source_memory_id INTEGER NOT NULL,
+                weight REAL NOT NULL,
+                confidence REAL NOT NULL,
+                status TEXT NOT NULL,
+                metadata TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE graph_entries (
+                id INTEGER PRIMARY KEY,
+                entry_key TEXT NOT NULL UNIQUE,
+                source_memory_id INTEGER NOT NULL,
+                edge_id INTEGER
+            )
+            """
+        )
+        await db.execute(
+            """
+            INSERT INTO graph_edges VALUES (
+                10, 'edge-10', 1, 2, 'related', 101,
+                0.8, 0.9, 'active', '{}', 'now', 'now'
+            )
+            """
+        )
+        await db.executemany(
+            "INSERT INTO graph_entries VALUES (?, ?, ?, ?)",
+            [
+                (1, "entry-owner", 101, 10),
+                (2, "entry-shared", 202, 10),
+                (3, "entry-orphan", 303, 999),
+            ],
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_20_to_v9_21(None)
+    await migration._migrate_v9_20_to_v9_21(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        sources = await (
+            await db.execute(
+                """
+                SELECT edge_id, source_memory_id
+                FROM graph_edge_sources
+                ORDER BY source_memory_id
+                """
+            )
+        ).fetchall()
+        orphan = await (
+            await db.execute("SELECT edge_id FROM graph_entries WHERE id = 3")
+        ).fetchone()
+
+    assert sources == [(10, 101), (10, 202)]
+    assert orphan == (999,)
+
+
+@pytest.mark.asyncio
+async def test_set_db_version_forces_text_in_legacy_integer_column(tmp_path):
+    db_path = str(tmp_path / "version_affinity.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE db_version (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version INTEGER NOT NULL,
+                description TEXT,
+                migrated_at TEXT NOT NULL,
+                migration_duration_seconds REAL
+            )
+            """
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration.set_db_version("9.10", "future test")
+    async with aiosqlite.connect(db_path) as db:
+        row = await (
+            await db.execute(
+                "SELECT version, typeof(version) FROM db_version ORDER BY id DESC LIMIT 1"
+            )
+        ).fetchone()
+
+    assert row == ("v9.10", "text")
+    assert await migration.get_db_version() == "9.10"
+
+
+@pytest.mark.asyncio
+async def test_v9_10_migration_adds_embedding_signatures_idempotently(tmp_path):
+    db_path = str(tmp_path / "v9.9-topic.db")
+    async with aiosqlite.connect(db_path) as db:
+        for table in (
+            "topic_memories",
+            "topic_fragment_drafts",
+            "topic_fragments",
+        ):
+            await db.execute(
+                f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, metadata TEXT)"
+            )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_9_to_v9_10(None)
+    await migration._migrate_v9_9_to_v9_10(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        for table in (
+            "topic_memories",
+            "topic_fragment_drafts",
+            "topic_fragments",
+        ):
+            cursor = await db.execute(f"PRAGMA table_info({table})")
+            columns = {str(row[1]) for row in await cursor.fetchall()}
+            assert "embedding_signature" in columns
+
+
+@pytest.mark.asyncio
+async def test_v9_13_migration_adds_review_governance_fields_idempotently(tmp_path):
+    db_path = str(tmp_path / "v9.12-topic.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE topic_maintenance_queue (
+                review_uid TEXT PRIMARY KEY,
+                memory_space_id TEXT NOT NULL,
+                review_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                timeline_uids TEXT NOT NULL DEFAULT '[]',
+                topic_uids TEXT NOT NULL DEFAULT '[]',
+                details TEXT NOT NULL DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_12_to_v9_13(None)
+    await migration._migrate_v9_12_to_v9_13(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        columns = {
+            str(row[1])
+            for row in await (
+                await db.execute("PRAGMA table_info(topic_maintenance_queue)")
+            ).fetchall()
+        }
+        indexes = {
+            str(row[1])
+            for row in await (
+                await db.execute("PRAGMA index_list(topic_actor_links)")
+            ).fetchall()
+        }
+
+    assert {
+        "resolved_at",
+        "resolution_action",
+        "resolution_payload",
+        "expected_topic_revisions",
+    } <= columns
+    assert "idx_topic_actor_display_name" in indexes
+
+
+@pytest.mark.asyncio
+async def test_v9_14_migration_adds_session_maintenance_journal_idempotently(
+    tmp_path,
+):
+    db_path = str(tmp_path / "v9.13-session-maintenance.db")
+    migration = DBMigration(db_path)
+
+    await migration._migrate_v9_13_to_v9_14(None)
+    await migration._migrate_v9_13_to_v9_14(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+        indexes = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
+            ).fetchall()
+        }
+
+    assert {"session_maintenance_tasks", "session_maintenance_events"} <= tables
+    assert {
+        "idx_session_maintenance_task_status",
+        "idx_session_maintenance_event_task",
+    } <= indexes
+
+
+@pytest.mark.asyncio
+async def test_v9_15_migration_adds_recall_trace_tables_idempotently(tmp_path):
+    db_path = str(tmp_path / "v9.14-recall-traces.db")
+    migration = DBMigration(db_path)
+
+    await migration._migrate_v9_14_to_v9_15(None)
+    await migration._migrate_v9_14_to_v9_15(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+        enabled = await (
+            await db.execute(
+                "SELECT production_enabled FROM recall_trace_settings WHERE id = 1"
+            )
+        ).fetchone()
+
+    assert {"recall_trace_records", "recall_trace_settings"} <= tables
+    assert enabled == (0,)
+
+
+@pytest.mark.asyncio
+async def test_v9_16_migration_only_clears_obsolete_identity_sync_flags(tmp_path):
+    db_path = str(tmp_path / "v9.15-supplemental-identities.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE topic_memories (
+                topic_uid TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        await db.execute(
+            "INSERT INTO topic_memories(topic_uid, title, metadata) VALUES (?, ?, ?)",
+            (
+                "topic-1",
+                "保持原样",
+                json.dumps(
+                    {
+                        "identity_sync_pending": True,
+                        "identity_sync_requested_at": 123.0,
+                        "source_timeline_uids": ["timeline-1"],
+                        "stable_value": "unchanged",
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        await db.commit()
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v9_15_to_v9_16(None)
+    await migration._migrate_v9_15_to_v9_16(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        row = await (
+            await db.execute(
+                "SELECT title, metadata FROM topic_memories WHERE topic_uid = ?",
+                ("topic-1",),
+            )
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == "保持原样"
+    assert json.loads(row[1]) == {
+        "source_timeline_uids": ["timeline-1"],
+        "stable_value": "unchanged",
+    }
+
+
 # ===========================================================================
 # 一、迁移正确性测试
 # ===========================================================================
@@ -317,6 +996,196 @@ async def test_migrate_idempotent(tmp_path):
     assert meta["summary_schema_version"] == "v1"
     raw = json.dumps(meta)
     assert raw.count("summary_schema_version") == 1
+
+
+@pytest.mark.asyncio
+async def test_migrate_v8_to_v9_backfills_stable_identity_and_source_span(tmp_path):
+    db_path = str(tmp_path / "identity.db")
+    metadata = {
+        **PRIVATE_METADATA_V2,
+        "source_window": {
+            **PRIVATE_METADATA_V2["source_window"],
+            "first_message_id": 101,
+            "last_message_id": 108,
+            "started_at": 1000.0,
+            "ended_at": 1100.0,
+        },
+    }
+    await _create_legacy_db(
+        db_path,
+        [{"text": PRIVATE_MEMORY_LONG, "metadata": json.dumps(metadata)}],
+    )
+
+    migration = DBMigration(db_path)
+    await migration._migrate_v8_to_v9(None)
+    await migration._migrate_v8_to_v9(None)
+
+    records = await _get_all_metadata(db_path)
+    migrated = records[0]["metadata"]
+    assert migrated["memory_uid"]
+    assert migrated["revision"] == 1
+    assert migrated["memory_layer"] == "timeline"
+    assert migrated["memory_space_id"].startswith("space-v1-")
+
+    async with aiosqlite.connect(db_path) as db:
+        registry = await (
+            await db.execute(
+                "SELECT memory_uid, document_id, revision FROM memory_registry"
+            )
+        ).fetchall()
+        source = await (
+            await db.execute(
+                """
+                SELECT first_message_id, last_message_id, traceability
+                FROM memory_source_spans
+                """
+            )
+        ).fetchone()
+
+    assert registry == [(migrated["memory_uid"], records[0]["id"], 1)]
+    assert source == (101, 108, "full")
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_to_v9_1_creates_empty_topic_foundation(tmp_path):
+    db_path = str(tmp_path / "topic_foundation.db")
+    await _create_legacy_db(
+        db_path,
+        [{"text": PRIVATE_MEMORY_LONG, "metadata": json.dumps(PRIVATE_METADATA_V2)}],
+    )
+    migration = DBMigration(db_path)
+    await migration._migrate_v8_to_v9(None)
+    await migration._migrate_v9_to_v9_1(None)
+    await migration._migrate_v9_to_v9_1(None)
+
+    expected_tables = {
+        "topic_memories",
+        "topic_memory_atoms",
+        "topic_timeline_links",
+        "topic_atom_sources",
+        "topic_maintenance_runs",
+    }
+    async with aiosqlite.connect(db_path) as db:
+        rows = await (
+            await db.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        ).fetchall()
+        table_names = {str(row[0]) for row in rows}
+        topic_count = (
+            await (await db.execute("SELECT COUNT(*) FROM topic_memories")).fetchone()
+        )[0]
+        timeline_count = (
+            await (await db.execute("SELECT COUNT(*) FROM documents")).fetchone()
+        )[0]
+
+    assert expected_tables <= table_names
+    assert topic_count == 0
+    assert timeline_count == 1
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_1_to_v9_2_creates_empty_candidate_scan_tables(tmp_path):
+    db_path = str(tmp_path / "candidate_foundation.db")
+    await _create_legacy_db(
+        db_path,
+        [{"text": PRIVATE_MEMORY_LONG, "metadata": json.dumps(PRIVATE_METADATA_V2)}],
+    )
+    migration = DBMigration(db_path)
+    await migration._migrate_v8_to_v9(None)
+    await migration._migrate_v9_to_v9_1(None)
+    await migration._migrate_v9_1_to_v9_2(None)
+    await migration._migrate_v9_1_to_v9_2(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+        item_count = (
+            await (
+                await db.execute("SELECT COUNT(*) FROM topic_maintenance_items")
+            ).fetchone()
+        )[0]
+        group_count = (
+            await (
+                await db.execute("SELECT COUNT(*) FROM topic_candidate_groups")
+            ).fetchone()
+        )[0]
+
+    assert {"topic_maintenance_items", "topic_candidate_groups"} <= tables
+    assert item_count == 0
+    assert group_count == 0
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_2_to_v9_3_creates_resumable_topic_build_tables(tmp_path):
+    db_path = str(tmp_path / "topic_build_foundation.db")
+    await _create_legacy_db(
+        db_path,
+        [{"text": PRIVATE_MEMORY_LONG, "metadata": json.dumps(PRIVATE_METADATA_V2)}],
+    )
+    migration = DBMigration(db_path)
+    await migration._migrate_v8_to_v9(None)
+    await migration._migrate_v9_to_v9_1(None)
+    await migration._migrate_v9_1_to_v9_2(None)
+    await migration._migrate_v9_2_to_v9_3(None)
+    await migration._migrate_v9_2_to_v9_3(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+        run_columns = {
+            str(row[1])
+            for row in await (
+                await db.execute("PRAGMA table_info(topic_maintenance_runs)")
+            ).fetchall()
+        }
+
+    assert {
+        "topic_build_group_jobs",
+        "topic_fragment_drafts",
+        "topic_build_decisions",
+    } <= tables
+    assert {"stage", "current_group_index", "total_groups"} <= run_columns
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_3_to_v9_4_creates_related_topic_graph(tmp_path):
+    db_path = str(tmp_path / "topic_relations.db")
+    await _create_legacy_db(
+        db_path,
+        [{"text": PRIVATE_MEMORY_LONG, "metadata": json.dumps(PRIVATE_METADATA_V2)}],
+    )
+    migration = DBMigration(db_path)
+    await migration._migrate_v8_to_v9(None)
+    await migration._migrate_v9_to_v9_1(None)
+    await migration._migrate_v9_1_to_v9_2(None)
+    await migration._migrate_v9_2_to_v9_3(None)
+    await migration._migrate_v9_3_to_v9_4(None)
+    await migration._migrate_v9_3_to_v9_4(None)
+
+    async with aiosqlite.connect(db_path) as db:
+        tables = {
+            str(row[0])
+            for row in await (
+                await db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            ).fetchall()
+        }
+
+    assert "topic_relations" in tables
 
 
 @pytest.mark.asyncio

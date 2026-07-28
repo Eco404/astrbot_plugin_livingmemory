@@ -42,10 +42,38 @@ For very busy group chats, lower `context_window_size` or disable full group cap
 | `recall_engine.importance_weight` | `1.0` | Importance weight in final ranking |
 | `recall_engine.fallback_to_vector` | `true` | Falls back to vector search if hybrid retrieval fails |
 | `recall_engine.injection_method` | `extra_user_content` | Where or how recalled memories are injected |
-| `recall_engine.inject_with_recent_context` | `false` | Expands the query with recent conversation |
+| `recall_engine.inject_with_recent_context` | `false` | Searches the last two turns as auxiliary branches while keeping the current message primary |
+| `recall_engine.assistant_context_mode` | `exclude` | Excludes bot replies or searches them at low/normal weight |
+| `recall_engine.candidate_multiplier` | `3` | Candidate pool multiplier before filtering |
+| `recall_engine.min_relevance_score` | `0.38` | Minimum automatic-recall relevance; fewer than `top_k` results are allowed |
+| `recall_engine.relative_score_floor` | `0.65` | Minimum relevance relative to the best candidate in the turn |
+| `recall_engine.mmr_lambda` | `0.72` | Balance between relevance and result diversity |
+| `recall_engine.context_overlap_suppression` | `true` | Suppresses Timelines whose source messages remain in the raw context |
 | `recall_engine.search_cache_enabled` | `true` | Enables short-term retrieval caching |
 
 `extra_user_content` is the safest default. Gemini providers automatically fall back from `fake_tool_call` to `extra_user_content`. DeepSeek V4 thinking mode can now use normal `fake_tool_call` on recent AstrBot versions; the legacy `fake_tool_call_deepseek_v4` option is kept only as a compatibility alias and automatically falls back to `fake_tool_call`.
+
+With recent-context expansion enabled, recent user messages are searched as a separate lower-weight branch instead of being concatenated repeatedly into the current query. Keep `assistant_context_mode=exclude` to prevent bot paraphrases from amplifying keywords; use `low_weight` or `normal` only when the previous bot response is useful retrieval context.
+
+## Topic-first recall
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `topic_memory.recall_enabled` | `true` | Prefer active Topics when Topic memory is enabled |
+| `topic_memory.recall_top_k` | `3` | Maximum Topics injected per recall |
+| `topic_memory.recall_candidate_multiplier` | `4` | Topic candidate multiplier before filtering |
+| `topic_memory.recall_scan_limit` | `2000` | Topic vector scan limit per memory space |
+| `topic_memory.recall_min_relevance` | `0.32` | Minimum current-query relevance for a Topic |
+| `topic_memory.recall_relative_floor` | `0.70` | Minimum relevance relative to the best Topic |
+| `topic_memory.recall_selection_relative_floor` | `0.90` | Dynamic final-selection floor relative to the best current-query relevance; results may stop below the configured limit |
+| `topic_memory.recall_mmr_lambda` | `0.78` | Balance between Topic relevance and diversity |
+| `topic_memory.recall_use_rerank` | `true` | Rerank qualified Topic candidates once with the current query |
+| `topic_memory.recall_rerank_weight` | `0.35` | Maximum influence of relative Rerank order, reduced by per-call confidence; raw absolute scores are not blended |
+| `topic_memory.recall_context_support_cap` | `0.08` | Maximum ranking bonus from recent context; context cannot qualify a Topic alone |
+| `topic_memory.recall_context_overlap_threshold` | `0.80` | Suppress a Topic when this fraction of its sources is already visible |
+| `topic_memory.timeline_supplement_k` | `2` | Maximum Timeline supplements after a Topic match |
+
+Topic retrieval reuses vectors saved during Topic construction and does not invoke an LLM. The combined injection never exceeds `recall_engine.top_k`. If no active/relevant Topic exists, recall falls back to Timeline-only behavior. Partial source overlap only reduces the Topic score; the Topic is suppressed only after the configured coverage threshold is reached.
 
 ## Memory isolation
 
