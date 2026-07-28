@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -17,11 +16,11 @@ from ..embedding_signature import (
     signature_mismatch_reason,
 )
 from ..models.topic_memory import TopicFragmentDraft, TopicMemory
+from ..topic_similarity import cosine_similarity, retrieval_text_features
 from ..topic_vector_index import (
     TopicVectorIndex,
     TopicVectorIndexCompatibilityError,
 )
-from ..topic_similarity import cosine_similarity
 
 
 class TopicEmbeddingCompatibilityError(RuntimeError):
@@ -624,16 +623,7 @@ class TopicRetriever:
 
     @staticmethod
     def _text_features(text: str) -> set[str]:
-        normalized = str(text or "").casefold()
-        features = set(re.findall(r"[a-z0-9_]{2,}", normalized))
-        for chunk in re.findall(r"[\u4e00-\u9fff]+", normalized):
-            if len(chunk) == 1:
-                features.add(chunk)
-            else:
-                features.update(
-                    chunk[index : index + 2] for index in range(len(chunk) - 1)
-                )
-        return features or {"<empty>"}
+        return retrieval_text_features(text)
 
 
 __all__ = [
