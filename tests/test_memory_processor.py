@@ -6,7 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+from astrbot_plugin_livingmemory.core.models.conversation_models import (
+    Message,
+    build_role_bindings,
+)
 from astrbot_plugin_livingmemory.core.models.identity_profile import (
     SupplementalIdentityStore,
 )
@@ -112,9 +115,11 @@ async def test_process_conversation_accepts_strict_no_memory_decision():
             "topics":[],
             "key_facts":[],
             "key_fact_evidence":[],
+            "key_fact_attributions":[],
+            "key_fact_profiles":[],
             "message_coverage":[
-                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason":"仅简短确认"},
-                {"message_ref":"M2","disposition":"omitted","fact_indexes":[],"reason":"无持久信息"}
+                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"仅简短确认"},
+                {"message_ref":"M2","disposition":"omitted","fact_indexes":[],"reason_code":"routine_response","reason":"无持久信息"}
             ],
             "sentiment":"neutral",
             "importance":0.1
@@ -310,7 +315,7 @@ async def test_dual_channel_summary_stores_canonical_and_persona():
     assert content == metadata["canonical_summary"]
 
     # schema 版本标记
-    assert metadata.get("summary_schema_version") == "v5-actor-attribution"
+    assert metadata.get("summary_schema_version") == "v6-fact-selection"
 
 
 @pytest.mark.asyncio
@@ -379,9 +384,12 @@ async def test_source_grounding_contract_repairs_once_and_persists_report():
             "key_fact_attributions":[
                 {"fact_index":0,"subject_refs":[{"actor_ref":"A2","display_name_snapshot":"张三"}],"claim_type":"speaker_self","confidence":1.0}
             ],
+            "key_fact_profiles":[
+                {"fact_index":0,"fact_type":"plan","durability":"high","selection_reason":"future_utility"}
+            ],
             "message_coverage":[
-                {"message_ref":"M1","disposition":"fact","fact_indexes":[0],"reason":"会议时间来源"},
-                {"message_ref":"M2","disposition":"context","fact_indexes":[],"reason":"Bot确认提醒"}
+                {"message_ref":"M1","disposition":"fact","fact_indexes":[0],"reason_code":"durable_fact","reason":"会议时间来源"},
+                {"message_ref":"M2","disposition":"context","fact_indexes":[],"reason_code":"routine_response","reason":"Bot确认提醒"}
             ],
             "sentiment":"neutral",
             "importance":0.7
@@ -450,10 +458,11 @@ async def test_proactive_bot_self_action_is_not_transferred_to_private_peer():
             "key_facts":["示例甲打算开电脑写一小段"],
             "key_fact_evidence":[{"fact_index":0,"message_refs":["M2"]}],
             "key_fact_attributions":[{"fact_index":0,"subject_refs":[{"actor_ref":"A2","display_name_snapshot":"示例甲"}],"claim_type":"speaker_self","confidence":0.9}],
+            "key_fact_profiles":[{"fact_index":0,"fact_type":"plan","durability":"medium","selection_reason":"future_utility"}],
             "message_coverage":[
-                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason":"晚间背景"},
-                {"message_ref":"M2","disposition":"fact","fact_indexes":[0],"reason":"计划来源"},
-                {"message_ref":"M3","disposition":"context","fact_indexes":[],"reason":"后续安排"}
+                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"晚间背景"},
+                {"message_ref":"M2","disposition":"fact","fact_indexes":[0],"reason_code":"durable_fact","reason":"计划来源"},
+                {"message_ref":"M3","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"后续安排"}
             ],
             "sentiment":"positive","importance":0.5
         }""",
@@ -464,10 +473,11 @@ async def test_proactive_bot_self_action_is_not_transferred_to_private_peer():
             "key_facts":["我打算开电脑写一小段整理念头"],
             "key_fact_evidence":[{"fact_index":0,"message_refs":["M2"]}],
             "key_fact_attributions":[{"fact_index":0,"subject_refs":[{"actor_ref":"A1","display_name_snapshot":"测试助手"}],"claim_type":"speaker_self","confidence":1.0}],
+            "key_fact_profiles":[{"fact_index":0,"fact_type":"plan","durability":"medium","selection_reason":"future_utility"}],
             "message_coverage":[
-                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason":"晚间背景"},
-                {"message_ref":"M2","disposition":"fact","fact_indexes":[0],"reason":"Bot自述计划"},
-                {"message_ref":"M3","disposition":"context","fact_indexes":[],"reason":"后续安排"}
+                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"晚间背景"},
+                {"message_ref":"M2","disposition":"fact","fact_indexes":[0],"reason_code":"durable_fact","reason":"Bot自述计划"},
+                {"message_ref":"M3","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"后续安排"}
             ],
             "sentiment":"positive","importance":0.5
         }""",
@@ -490,6 +500,131 @@ async def test_proactive_bot_self_action_is_not_transferred_to_private_peer():
     prompt = llm.text_chat.await_args_list[1].kwargs["prompt"]
     assert "[speaker=A1 | role=assistant]" in prompt
     assert "称呼语只表示被称呼者" in prompt
+
+
+def test_source_grounding_accepts_durable_bot_relationship_interaction():
+    processor = MemoryProcessor(llm_provider=Mock(), context=None)
+    messages = _make_messages()
+    role_bindings = build_role_bindings(messages)
+    _, actor_refs = processor._actor_prompt_block(role_bindings)
+    report = processor.assess_summary_quality(
+        {
+            "memory_decision": "store",
+            "no_memory_reason": "none",
+            "summary": "我主动提醒示例甲按时吃晚饭，并继续陪他讨论晚间安排",
+            "topics": ["晚间陪伴"],
+            "key_facts": ["我主动提醒示例甲按时吃晚饭"],
+            "key_fact_evidence": [
+                {"fact_index": 0, "message_refs": ["M2"]}
+            ],
+            "key_fact_attributions": [
+                {
+                    "fact_index": 0,
+                    "subject_refs": [
+                        {
+                            "actor_ref": "A1",
+                            "display_name_snapshot": "Bot",
+                        }
+                    ],
+                    "claim_type": "speaker_self",
+                    "confidence": 1.0,
+                }
+            ],
+            "key_fact_profiles": [
+                {
+                    "fact_index": 0,
+                    "fact_type": "relationship_interaction",
+                    "durability": "medium",
+                    "selection_reason": "relationship_significance",
+                }
+            ],
+            "message_coverage": [
+                {
+                    "message_ref": "M1",
+                    "disposition": "context",
+                    "fact_indexes": [],
+                    "reason_code": "supporting_context",
+                    "reason": "用户说明晚间安排",
+                },
+                {
+                    "message_ref": "M2",
+                    "disposition": "fact",
+                    "fact_indexes": [0],
+                    "reason_code": "durable_interaction",
+                    "reason": "Bot 主动提供持续关系支持",
+                },
+            ],
+            "sentiment": "positive",
+            "importance": 0.6,
+        },
+        messages=messages,
+        require_source_grounding=True,
+        role_bindings=role_bindings,
+        actor_refs=actor_refs,
+    )
+
+    assert report.acceptable is True, [issue.code for issue in report.errors]
+
+
+def test_durable_interaction_requires_relationship_fact_profile():
+    processor = MemoryProcessor(llm_provider=Mock(), context=None)
+    report = processor.assess_summary_quality(
+        {
+            "memory_decision": "store",
+            "no_memory_reason": "none",
+            "summary": "我记录了张三明天下午三点开会",
+            "topics": ["会议"],
+            "key_facts": ["张三明天下午三点开会"],
+            "key_fact_evidence": [
+                {"fact_index": 0, "message_refs": ["M1"]}
+            ],
+            "key_fact_attributions": [
+                {
+                    "fact_index": 0,
+                    "subject_refs": [
+                        {
+                            "actor_ref": "A2",
+                            "display_name_snapshot": "张三",
+                        }
+                    ],
+                    "claim_type": "speaker_self",
+                    "confidence": 1.0,
+                }
+            ],
+            "key_fact_profiles": [
+                {
+                    "fact_index": 0,
+                    "fact_type": "observation",
+                    "durability": "medium",
+                    "selection_reason": "future_utility",
+                }
+            ],
+            "message_coverage": [
+                {
+                    "message_ref": "M1",
+                    "disposition": "fact",
+                    "fact_indexes": [0],
+                    "reason_code": "durable_interaction",
+                    "reason": "错误地按关系互动分类",
+                },
+                {
+                    "message_ref": "M2",
+                    "disposition": "context",
+                    "fact_indexes": [],
+                    "reason_code": "routine_response",
+                    "reason": "确认回复",
+                },
+            ],
+            "sentiment": "neutral",
+            "importance": 0.6,
+        },
+        messages=_make_messages(),
+        require_source_grounding=True,
+    )
+
+    assert "durable_interaction_without_profile" in {
+        issue.code for issue in report.errors
+    }
 
 
 def test_summary_quality_rejects_unanchored_relative_fact_when_grounding_required():
@@ -695,7 +830,7 @@ def test_build_memory_from_structured_data_uses_standard_storage_format():
     assert metadata["key_facts"] == ["主动记忆应复用 MemoryProcessor 格式化流程"]
     assert metadata["sentiment"] == "neutral"
     assert metadata["interaction_type"] == "private_chat"
-    assert metadata["summary_schema_version"] == "v5-actor-attribution"
+    assert metadata["summary_schema_version"] == "v6-fact-selection"
     assert metadata["summary_quality"] == "normal"
     assert importance == 0.8
 
@@ -846,7 +981,7 @@ async def test_process_group_chat_dual_channel_summary():
 
     assert "canonical_summary" in metadata
     assert "persona_summary" in metadata
-    assert metadata.get("summary_schema_version") == "v5-actor-attribution"
+    assert metadata.get("summary_schema_version") == "v6-fact-selection"
     # canonical_summary 应包含 key_facts
     assert "私有化 LLM" in metadata["canonical_summary"]
     # content 应等于 canonical_summary

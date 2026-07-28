@@ -38,6 +38,39 @@ _NO_MEMORY_REASONS = {
     "no_durable_information",
 }
 
+_MAX_TIMELINE_KEY_FACTS = 8
+_KEY_FACT_TYPES = {
+    "event",
+    "state",
+    "preference",
+    "plan",
+    "commitment",
+    "relationship_interaction",
+    "affect",
+    "observation",
+}
+_FACT_DURABILITY_LEVELS = {"low", "medium", "high"}
+_FACT_SELECTION_REASONS = {
+    "future_utility",
+    "stable_personal_fact",
+    "completed_action",
+    "repeated_completed_action",
+    "commitment_or_decision",
+    "relationship_significance",
+    "affective_significance",
+    "specific_grounded_observation",
+}
+_COVERAGE_REASON_CODES = {
+    "durable_fact",
+    "durable_interaction",
+    "supporting_context",
+    "routine_response",
+    "duplicate_detail",
+    "noise",
+}
+
+TIMELINE_SUMMARY_SCHEMA_VERSION = "v6-fact-selection"
+
 
 class MemoryProcessor:
     """
@@ -419,14 +452,18 @@ class MemoryProcessor:
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
                 "minItems": 0 if allow_no_memory else 1,
-                "maxItems": 5,
+                "maxItems": _MAX_TIMELINE_KEY_FACTS,
             },
             "key_fact_evidence": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "fact_index": {"type": "integer", "minimum": 0, "maximum": 4},
+                        "fact_index": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": _MAX_TIMELINE_KEY_FACTS - 1,
+                        },
                         "message_refs": {
                             "type": "array",
                             "items": {"type": "string", "pattern": "^M[1-9][0-9]*$"},
@@ -437,14 +474,18 @@ class MemoryProcessor:
                     "additionalProperties": False,
                 },
                 "minItems": 0 if allow_no_memory else 1,
-                "maxItems": 5,
+                "maxItems": _MAX_TIMELINE_KEY_FACTS,
             },
             "key_fact_attributions": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "fact_index": {"type": "integer", "minimum": 0, "maximum": 4},
+                        "fact_index": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": _MAX_TIMELINE_KEY_FACTS - 1,
+                        },
                         "subject_refs": {
                             "type": "array",
                             "items": {
@@ -479,7 +520,41 @@ class MemoryProcessor:
                     "additionalProperties": False,
                 },
                 "minItems": 0 if allow_no_memory else 1,
-                "maxItems": 5,
+                "maxItems": _MAX_TIMELINE_KEY_FACTS,
+            },
+            "key_fact_profiles": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "fact_index": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": _MAX_TIMELINE_KEY_FACTS - 1,
+                        },
+                        "fact_type": {
+                            "type": "string",
+                            "enum": sorted(_KEY_FACT_TYPES),
+                        },
+                        "durability": {
+                            "type": "string",
+                            "enum": sorted(_FACT_DURABILITY_LEVELS),
+                        },
+                        "selection_reason": {
+                            "type": "string",
+                            "enum": sorted(_FACT_SELECTION_REASONS),
+                        },
+                    },
+                    "required": [
+                        "fact_index",
+                        "fact_type",
+                        "durability",
+                        "selection_reason",
+                    ],
+                    "additionalProperties": False,
+                },
+                "minItems": 0 if allow_no_memory else 1,
+                "maxItems": _MAX_TIMELINE_KEY_FACTS,
             },
             "message_coverage": {
                 "type": "array",
@@ -493,12 +568,24 @@ class MemoryProcessor:
                         },
                         "fact_indexes": {
                             "type": "array",
-                            "items": {"type": "integer", "minimum": 0, "maximum": 4},
+                            "items": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": _MAX_TIMELINE_KEY_FACTS - 1,
+                            },
+                        },
+                        "reason_code": {
+                            "type": "string",
+                            "enum": sorted(_COVERAGE_REASON_CODES),
                         },
                         "reason": {"type": "string"},
                     },
                     "required": [
-                        "message_ref", "disposition", "fact_indexes", "reason"
+                        "message_ref",
+                        "disposition",
+                        "fact_indexes",
+                        "reason_code",
+                        "reason",
                     ],
                     "additionalProperties": False,
                 },
@@ -518,6 +605,7 @@ class MemoryProcessor:
             "key_facts",
             "key_fact_evidence",
             "key_fact_attributions",
+            "key_fact_profiles",
             "message_coverage",
             "sentiment",
             "importance",
@@ -1038,9 +1126,11 @@ class MemoryProcessor:
 - 每条消息还带 speaker=A1/A2...；这是代码绑定的实际发送者，不得按称呼、语气或句意改写。
 - key_fact_evidence 必须逐一覆盖 key_facts 的每个索引，且只能引用真实支持该事实的消息。
 - key_fact_attributions 必须逐一覆盖 key_facts。speaker_self 的主语必须是证据消息的发送者；speaker_requests_other 表示请求对象，不代表对方已经执行。
+- key_fact_profiles 必须逐一覆盖 key_facts，并且只能使用给定的 fact_type、durability 和 selection_reason 枚举。
 - 一条消息中的称呼语不会自动成为后续省略主语动作的主语。Bot 消息中的第一人称或省略主语的自述、计划、感受默认属于 Bot，除非原句有明确语法证据指向别人。
 - message_coverage 必须逐一且仅一次覆盖全部来源消息。
-- disposition=fact 时 fact_indexes 至少一项；context 可不关联事实；omitted 必须写明省略理由。
+- message_coverage.reason_code 必须使用给定枚举。disposition=fact 时必须使用 durable_fact 或 durable_interaction 且 fact_indexes 至少一项；context/omitted 不得使用 durable 理由。
+- 只要来源中有 Bot 已完成的、重复发生的或具有关系/情绪意义的主动行为，至少保留一条对应事实；一次性客套、简单确认和泛化建议只作上下文。
 - 不得根据昵称、语气、兴趣或人格设定猜测身份、性别、代词或人物关系。
 - summary 和每条 key_fact 中的相对时间必须根据消息前缀时间改写为绝对日期；不得保留“今天、昨天、两小时前”等悬空表达。
 - memory_decision=no_memory 只能在条件全部满足时保留：无摘要、无主题、无事实、无事实引用、重要性不高于0.2，且所有消息均为context或omitted。
@@ -1076,8 +1166,8 @@ class MemoryProcessor:
 - 有任何可持续事实、偏好、需求、计划、决定、承诺、人际互动、情绪变化或值得回忆的共同经历时，memory_decision 必须为 store。对话短、日常或轻松不是丢弃理由。
 - 只有整个窗口均是纯问候、无信息确认、测试/噪声、纯表情/无语义媒体，或不含任何可持续信息时，才允许 memory_decision=no_memory。
 - no_memory_reason 只能是：{reasons}。store 时必须为 none。
-- no_memory 时必须精确输出：summary=""，topics=[]，key_facts=[]，key_fact_evidence=[]，key_fact_attributions=[]，importance<=0.2。
-- no_memory 时 message_coverage 仍必须不重不漏地覆盖每个 M 引用，disposition 只能为 context 或 omitted，fact_indexes=[]，并说明理由。
+- no_memory 时必须精确输出：summary=""，topics=[]，key_facts=[]，key_fact_evidence=[]，key_fact_attributions=[]，key_fact_profiles=[]，importance<=0.2。
+- no_memory 时 message_coverage 仍必须不重不漏地覆盖每个 M 引用，disposition 只能为 context 或 omitted，fact_indexes=[]，reason_code 只能使用 supporting_context、routine_response、duplicate_detail 或 noise，并说明理由。
 - 不确定时选择 store，禁止为了减少记忆而省略有意义的内容。"""
 
     @staticmethod
@@ -1184,7 +1274,9 @@ class MemoryProcessor:
                 f"[MemoryProcessor] 提取 topics ({len(data['topics'])} 个): {data['topics']}"
             )
 
-            data["key_facts"] = self._ensure_list(data.get("key_facts", []))[:5]
+            data["key_facts"] = self._ensure_list(data.get("key_facts", []))[
+                :_MAX_TIMELINE_KEY_FACTS
+            ]
             logger.debug(
                 f"[MemoryProcessor] 提取 key_facts ({len(data['key_facts'])} 个): {data['key_facts']}"
             )
@@ -1208,6 +1300,9 @@ class MemoryProcessor:
             )
             data["key_fact_attributions"] = self._ensure_dict_list(
                 data.get("key_fact_attributions", [])
+            )
+            data["key_fact_profiles"] = self._ensure_dict_list(
+                data.get("key_fact_profiles", [])
             )
             data["message_coverage"] = self._ensure_dict_list(
                 data.get("message_coverage", [])
@@ -1337,7 +1432,7 @@ class MemoryProcessor:
                 if facts_match:
                     facts_str = facts_match.group(1)
                     facts = re.findall(r'"([^"]+)"', facts_str)
-                    data["key_facts"] = facts[:5]
+                    data["key_facts"] = facts[:_MAX_TIMELINE_KEY_FACTS]
                     logger.debug(
                         f"[MemoryProcessor] 正则提取 key_facts: {data['key_facts']}"
                     )
@@ -1375,7 +1470,9 @@ class MemoryProcessor:
         # 由 summary + key_facts 拼接，去除人格语气词
         canonical_parts = [summary] if summary else []
         if key_facts:
-            canonical_parts.append("；".join(str(f) for f in key_facts[:5]))
+            canonical_parts.append(
+                "；".join(str(f) for f in key_facts[:_MAX_TIMELINE_KEY_FACTS])
+            )
         canonical_summary = " | ".join(canonical_parts) if canonical_parts else ""
 
         # content 字段使用 canonical_summary，提升检索稳定性
@@ -1402,13 +1499,15 @@ class MemoryProcessor:
             "key_fact_attributions": structured_data.get(
                 "key_fact_attributions", []
             ),
+            "key_fact_profiles": structured_data.get("key_fact_profiles", []),
             "message_coverage": structured_data.get("message_coverage", []),
             "sentiment": structured_data.get("sentiment", "neutral"),
             "interaction_type": "group_chat" if is_group_chat else "private_chat",
             # 双通道：canonical 用于检索，persona_summary 保留原始人格风格摘要
             "canonical_summary": canonical_summary,
             "persona_summary": summary,
-            "summary_schema_version": "v5-actor-attribution",
+            "summary_schema_version": TIMELINE_SUMMARY_SCHEMA_VERSION,
+            "fact_selection_contract_version": "timeline-fact-selection-v1",
             # summary_quality 由 process_conversation 中的 SummaryValidator 覆盖写入
         }
 
@@ -1446,12 +1545,17 @@ class MemoryProcessor:
         ).strip().lower()
         data["summary"] = str(data.get("summary", ""))
         data["topics"] = self._ensure_list(data.get("topics", []))[:5]
-        data["key_facts"] = self._ensure_list(data.get("key_facts", []))[:5]
+        data["key_facts"] = self._ensure_list(data.get("key_facts", []))[
+            :_MAX_TIMELINE_KEY_FACTS
+        ]
         data["key_fact_evidence"] = self._ensure_dict_list(
             data.get("key_fact_evidence", [])
         )
         data["key_fact_attributions"] = self._ensure_dict_list(
             data.get("key_fact_attributions", [])
+        )
+        data["key_fact_profiles"] = self._ensure_dict_list(
+            data.get("key_fact_profiles", [])
         )
         data["message_coverage"] = self._ensure_dict_list(
             data.get("message_coverage", [])
@@ -1526,6 +1630,7 @@ class MemoryProcessor:
             "key_facts": [],
             "key_fact_evidence": [],
             "key_fact_attributions": [],
+            "key_fact_profiles": [],
             "message_coverage": [],
             "participants": [],
             "sentiment": "neutral",
@@ -1541,6 +1646,7 @@ class MemoryProcessor:
             "key_facts": [],
             "key_fact_evidence": [],
             "key_fact_attributions": [],
+            "key_fact_profiles": [],
             "message_coverage": [],
             "sentiment": "neutral",
             "importance": 0.5,
@@ -1779,6 +1885,62 @@ class MemoryProcessor:
                     "key_fact_evidence",
                 )
 
+            profile_rows = self._ensure_dict_list(
+                structured_data.get("key_fact_profiles", [])
+            )
+            if no_memory and profile_rows:
+                add(
+                    "no_memory_has_fact_profiles",
+                    "no_memory must not retain fact profiles",
+                    "key_fact_profiles",
+                )
+            profiles_by_index: dict[int, dict[str, Any]] = {}
+            for row in profile_rows:
+                try:
+                    fact_index = int(row.get("fact_index"))
+                except (TypeError, ValueError):
+                    add(
+                        "invalid_fact_profile_index",
+                        "Fact profile contains a non-integer fact index",
+                        "key_fact_profiles",
+                    )
+                    continue
+                if fact_index in profiles_by_index:
+                    add(
+                        "duplicate_fact_profile",
+                        f"Fact {fact_index} has duplicate profile rows",
+                        "key_fact_profiles",
+                    )
+                    continue
+                profiles_by_index[fact_index] = row
+                if str(row.get("fact_type") or "") not in _KEY_FACT_TYPES:
+                    add(
+                        "invalid_fact_type",
+                        f"Fact {fact_index} has an invalid fact type",
+                        "key_fact_profiles",
+                    )
+                if str(row.get("durability") or "") not in _FACT_DURABILITY_LEVELS:
+                    add(
+                        "invalid_fact_durability",
+                        f"Fact {fact_index} has an invalid durability",
+                        "key_fact_profiles",
+                    )
+                if (
+                    str(row.get("selection_reason") or "")
+                    not in _FACT_SELECTION_REASONS
+                ):
+                    add(
+                        "invalid_fact_selection_reason",
+                        f"Fact {fact_index} has an invalid selection reason",
+                        "key_fact_profiles",
+                    )
+            if set(profiles_by_index) != expected_fact_indexes:
+                add(
+                    "incomplete_fact_profiles",
+                    "Every key fact must have exactly one selection profile",
+                    "key_fact_profiles",
+                )
+
             attribution_rows = self._ensure_dict_list(
                 structured_data.get("key_fact_attributions", [])
             )
@@ -1948,6 +2110,7 @@ class MemoryProcessor:
                     continue
                 coverage_by_ref[message_ref] = row
                 disposition = str(row.get("disposition") or "")
+                reason_code = str(row.get("reason_code") or "").strip()
                 try:
                     fact_indexes = {int(value) for value in row.get("fact_indexes", [])}
                 except (TypeError, ValueError):
@@ -1968,6 +2131,40 @@ class MemoryProcessor:
                     add(
                         "ungrounded_fact_disposition",
                         f"Message {message_ref} is marked fact without fact indexes",
+                        "message_coverage",
+                    )
+                if reason_code not in _COVERAGE_REASON_CODES:
+                    add(
+                        "invalid_coverage_reason_code",
+                        f"Message {message_ref} has an invalid coverage reason code",
+                        "message_coverage",
+                    )
+                if disposition == "fact" and reason_code not in {
+                    "durable_fact",
+                    "durable_interaction",
+                }:
+                    add(
+                        "fact_without_durable_reason",
+                        f"Message {message_ref} supports facts without a durable reason",
+                        "message_coverage",
+                    )
+                if disposition != "fact" and reason_code in {
+                    "durable_fact",
+                    "durable_interaction",
+                }:
+                    add(
+                        "durable_reason_without_fact",
+                        f"Message {message_ref} marks durable information without preserving a fact",
+                        "message_coverage",
+                    )
+                if reason_code == "durable_interaction" and not any(
+                    str(profiles_by_index.get(index, {}).get("fact_type") or "")
+                    in {"relationship_interaction", "commitment", "affect"}
+                    for index in fact_indexes
+                ):
+                    add(
+                        "durable_interaction_without_profile",
+                        f"Message {message_ref} durable interaction lacks a matching fact profile",
                         "message_coverage",
                     )
                 if no_memory and (disposition == "fact" or fact_indexes):

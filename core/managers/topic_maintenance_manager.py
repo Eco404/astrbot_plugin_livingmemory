@@ -114,7 +114,10 @@ class TopicMaintenanceManager:
         run = await self.store.get_maintenance_run(run_uid)
         if run is None:
             raise ValueError(f"Topic maintenance run not found: {run_uid}")
-        if str(run["status"]) == TopicMaintenanceStatus.COMPLETED.value:
+        if str(run["status"]) in {
+            TopicMaintenanceStatus.COMPLETED.value,
+            TopicMaintenanceStatus.COMPLETED_WITH_REVIEW.value,
+        }:
             groups = await self.store.list_candidate_groups(run_uid)
             return self._result(run, groups)
 

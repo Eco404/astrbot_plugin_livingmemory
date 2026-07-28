@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+TIMELINE_QUALITY_CONTRACT_VERSION = "timeline-summary-quality-v2"
+
 
 @dataclass(frozen=True, slots=True)
 class TimelineQualityIssue:
@@ -24,7 +26,7 @@ class TimelineQualityReport:
     source_message_count: int = 0
     grounded_fact_count: int = 0
     covered_message_count: int = 0
-    contract_version: str = "timeline-summary-quality-v1"
+    contract_version: str = TIMELINE_QUALITY_CONTRACT_VERSION
 
     @property
     def errors(self) -> list[TimelineQualityIssue]:
@@ -69,6 +71,7 @@ class TimelineSummaryQualityError(ValueError):
 
 
 __all__ = [
+    "TIMELINE_QUALITY_CONTRACT_VERSION",
     "TimelineQualityIssue",
     "TimelineQualityReport",
     "TimelineSummaryQualityError",

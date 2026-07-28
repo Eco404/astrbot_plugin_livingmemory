@@ -397,16 +397,7 @@ async def test_automatic_incremental_build_is_split_into_bounded_batches():
         since=100.0,
         only_unindexed=True,
     )
-    store.resolve_maintenance_reviews.assert_awaited_once_with(
-        "space-1",
-        timeline_uids=[
-            "timeline-0",
-            "timeline-1",
-            "timeline-2",
-            "timeline-3",
-            "timeline-4",
-        ],
-    )
+    store.resolve_maintenance_reviews.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2101,14 +2092,14 @@ async def test_incremental_marginal_tie_creates_topic_without_manual_review():
             memory_space_id="space-1",
             title="Broad sibling A",
             summary="Summary A",
-            metadata={"embedding": [0.70, 0.71414284]},
+            metadata={"embedding": [0.75, 0.66143783]},
         ),
         TopicMemory(
             topic_uid="topic-b",
             memory_space_id="space-1",
             title="Broad sibling B",
             summary="Summary B",
-            metadata={"embedding": [0.68, 0.73321211]},
+            metadata={"embedding": [0.74, 0.67260687]},
         ),
     ]
 
@@ -2179,6 +2170,150 @@ async def test_incremental_strong_tie_still_requires_manual_review():
     assert ranked[0][0] - ranked[1][0] < 0.04
     assert matched is None
     assert requires_review is True
+
+
+@pytest.mark.asyncio
+async def test_incremental_matching_excludes_an_already_used_topic_before_ranking():
+    store = SimpleNamespace(get_topic_provenance=AsyncMock(return_value={}))
+    manager = TopicBuildManager(":memory:", store, None)
+    fragment = TopicFragmentDraft(
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        fragment_uid="fragment-1",
+        label="Delta",
+        summary="Delta",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[],
+        embedding=[1.0, 0.0],
+    )
+    strongest = TopicMemory(
+        topic_uid="topic-used",
+        memory_space_id="space-1",
+        title="Used",
+        summary="Used",
+        metadata={"embedding": [1.0, 0.0]},
+    )
+    available = TopicMemory(
+        topic_uid="topic-available",
+        memory_space_id="space-1",
+        title="Available",
+        summary="Available",
+        metadata={"embedding": [0.8, 0.6]},
+    )
+
+    matched, ranked, requires_review = await manager._match_existing_topic_decision(
+        {"title": "Delta"},
+        [fragment],
+        [strongest, available],
+        {strongest.topic_uid},
+        incremental=True,
+    )
+
+    assert [topic.topic_uid for _, topic in ranked] == [available.topic_uid]
+    assert matched is available
+    assert requires_review is False
+
+
+@pytest.mark.asyncio
+async def test_shared_timeline_is_only_a_weak_topic_match_signal():
+    store = SimpleNamespace(get_topic_provenance=AsyncMock(return_value={}))
+    manager = TopicBuildManager(":memory:", store, None)
+    fragment = TopicFragmentDraft(
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        fragment_uid="fragment-1",
+        label="Dinner",
+        summary="Dinner",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 1},
+        facts=[],
+        embedding=[1.0, 0.0],
+    )
+    unrelated_same_timeline = TopicMemory(
+        topic_uid="topic-unrelated",
+        memory_space_id="space-1",
+        title="Weather",
+        summary="Weather",
+        metadata={
+            "embedding": [0.0, 1.0],
+            "source_timeline_uids": ["timeline-1"],
+        },
+    )
+    related_other_timeline = TopicMemory(
+        topic_uid="topic-related",
+        memory_space_id="space-1",
+        title="Food",
+        summary="Food",
+        metadata={
+            "embedding": [0.8, 0.6],
+            "source_timeline_uids": ["timeline-2"],
+        },
+    )
+
+    matched, ranked, _ = await manager._match_existing_topic_decision(
+        {"title": "Dinner"},
+        [fragment],
+        [unrelated_same_timeline, related_other_timeline],
+        set(),
+        incremental=True,
+    )
+
+    assert ranked[0][1] is related_other_timeline
+    assert matched is related_other_timeline
+    assert ranked[1][0] <= 0.05
+
+
+@pytest.mark.asyncio
+async def test_fact_continuity_measures_coverage_of_the_incoming_fragment():
+    async def provenance(topic_uid):
+        assert topic_uid == "topic-existing"
+        return {
+            "atom_sources": [
+                {"source_atom_fingerprint": fingerprint}
+                for fingerprint in ["fp-1", "fp-2", "fp-3", "fp-4", "fp-5"]
+            ],
+            "actor_links": [],
+        }
+
+    store = SimpleNamespace(get_topic_provenance=AsyncMock(side_effect=provenance))
+    manager = TopicBuildManager(":memory:", store, None)
+    fragment = TopicFragmentDraft(
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        fragment_uid="fragment-1",
+        label="Continuation",
+        summary="Continuation",
+        timeline_uids=["timeline-1"],
+        source_revisions={"timeline-1": 2},
+        facts=[{"source_atom_fingerprints": ["fp-1"]}],
+        embedding=[1.0, 0.0],
+    )
+    existing = TopicMemory(
+        topic_uid="topic-existing",
+        memory_space_id="space-1",
+        title="Existing",
+        summary="Existing",
+        metadata={
+            "embedding": [0.4, 0.91651514],
+            "source_timeline_uids": ["timeline-1"],
+        },
+    )
+
+    matched, ranked, requires_review = await manager._match_existing_topic_decision(
+        {"title": "Continuation"},
+        [fragment],
+        [existing],
+        set(),
+        incremental=True,
+    )
+
+    assert ranked[0][0] >= 0.60
+    assert matched is existing
+    assert requires_review is False
 
 
 def test_related_topic_graph_rejects_one_generic_keyword_without_semantic_support():
@@ -3523,8 +3658,9 @@ def test_topic_prompts_anchor_assistant_perspective_without_character_replacemen
 
     for prompt in (fragment_prompt, synthesis_prompt):
         assert "identity anchors" in prompt or "actor bindings" in prompt
-        assert "唯一方案" in prompt
-        assert "我说明自己是唯" in prompt
+        assert "<Bot昵称>" in prompt
+        assert "display name" in prompt
+        assert "same characters" in prompt
 
 
 def test_synthesis_prompt_strips_nested_provenance_and_derives_fragment_scope():
@@ -3787,6 +3923,88 @@ def test_fragment_role_map_preserves_bot_first_person_with_actor_anchor():
             [],
             [candidate],
         )
+
+
+def test_fragment_source_attribution_rebinds_timeline_local_actor_refs():
+    manager = TopicBuildManager(":memory:", None, None)
+    candidate = TimelineTopicCandidate(
+        memory_uid="timeline-local-refs",
+        document_id=1,
+        source_revision=1,
+        memory_space_id="space-1",
+        session_id="QQ:FriendMessage:10000001",
+        persona_id="测试助手",
+        content="我提醒示例甲按时吃晚饭",
+        summary="我提醒示例甲按时吃晚饭",
+        key_facts=[
+            "示例甲准备找晚饭",
+            "我主动提醒示例甲按时吃晚饭",
+        ],
+        key_fact_attributions=[
+            {
+                "subject_refs": [
+                    {
+                        "actor_ref": "A2",
+                        "actor_id": "qq:human:10000001",
+                        "display_name_snapshot": "示例甲",
+                    }
+                ]
+            },
+            {
+                "subject_refs": [
+                    {
+                        "actor_ref": "A1",
+                        "actor_id": "qq:assistant:bot-1",
+                        "display_name_snapshot": "测试助手",
+                    }
+                ]
+            },
+        ],
+        role_bindings={
+            "narrator_actor_id": "qq:assistant:bot-1",
+            "actors": [
+                {
+                    "actor_id": "qq:assistant:bot-1",
+                    "actor_type": "assistant",
+                    "sender_id": "bot-1",
+                    "platform": "qq",
+                    "observed_names": ["测试助手"],
+                },
+                {
+                    "actor_id": "qq:human:10000001",
+                    "actor_type": "human",
+                    "sender_id": "10000001",
+                    "platform": "qq",
+                    "observed_names": ["示例甲"],
+                },
+            ],
+        },
+    )
+
+    payload, _, source_refs, actor_refs = manager._fragment_llm_context([candidate])
+
+    # Fragment prompt refs enumerate humans before assistants, which is the
+    # opposite order from this Timeline's local refs. Stable actor IDs must win.
+    assert actor_refs["A1"]["actor_id"] == "qq:human:10000001"
+    assert actor_refs["A2"]["actor_id"] == "assistant-persona:测试助手"
+    first = payload["timelines"][0]["source_facts"][0]["attribution"]
+    second = payload["timelines"][0]["source_facts"][1]["attribution"]
+    assert first["subject_refs"] == [
+        {
+            "actor_ref": "A1",
+            "actor_id": "qq:human:10000001",
+            "display_name_snapshot": "示例甲",
+        }
+    ]
+    assert second["subject_refs"] == [
+        {
+            "actor_ref": "A2",
+            "actor_id": "assistant-persona:测试助手",
+            "display_name_snapshot": "测试助手",
+        }
+    ]
+    assert source_refs["T1.K1"]["attribution"] == first
+    assert source_refs["T1.K2"]["attribution"] == second
     fragment = _topic_fragment(1)
     fragment.metadata = {
         "narrative_schema_version": "first_person_assistant_roles_v2",

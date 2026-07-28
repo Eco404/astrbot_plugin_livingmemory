@@ -518,6 +518,37 @@ class TestGetStats:
         assert "尚未就绪" in result["message"]
 
 
+class TestTopicList:
+    @pytest.mark.asyncio
+    async def test_defaults_to_active_and_reports_unfiltered_space_total(self, api):
+        engine = api.plugin.initializer.memory_engine
+
+        async def count_topics(_space_id, *, status=None):
+            return 0 if status == "active" else 4
+
+        engine.topic_memory_store = SimpleNamespace(
+            list_topics=AsyncMock(return_value=[]),
+            count_topics=AsyncMock(side_effect=count_topics),
+            list_topic_actors=AsyncMock(return_value=[]),
+        )
+        req = _mock_page_request(args={"memory_space_id": "space-1"})
+
+        with _patch_page_request(req):
+            result = await api.list_topics()
+
+        assert result["status"] == "ok"
+        assert result["data"]["status"] == "active"
+        assert result["data"]["total"] == 0
+        assert result["data"]["space_total"] == 4
+        engine.topic_memory_store.list_topics.assert_awaited_once_with(
+            "space-1",
+            status="active",
+            limit=100,
+            offset=0,
+            actor_id=None,
+        )
+
+
 class TestSessionCatalog:
     @pytest.mark.asyncio
     async def test_layered_filters(self, api):
@@ -2191,7 +2222,7 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 63
+        assert len(plugin._api_routes) == 70
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
@@ -2206,8 +2237,14 @@ class TestRouteRegistration:
         assert f"{prefix}/sessions/maintenance/tasks/clear" in paths
         assert f"{prefix}/memories" in paths
         assert f"{prefix}/memories/update" in paths
+        assert f"{prefix}/memories/update/stage" in paths
         assert f"{prefix}/memories/related" in paths
         assert f"{prefix}/memories/update/start" in paths
+        assert f"{prefix}/timeline/staged-edits" in paths
+        assert f"{prefix}/timeline/staged-edits/apply" in paths
+        assert f"{prefix}/timeline/staged-edits/delete" in paths
+        assert f"{prefix}/timeline/inactive" in paths
+        assert f"{prefix}/timeline/inactive/restore" in paths
         assert f"{prefix}/memories/update/progress" in paths
         assert f"{prefix}/memories/batch-delete" in paths
         assert f"{prefix}/timeline/settings" in paths
@@ -2242,6 +2279,7 @@ class TestRouteRegistration:
         assert f"{prefix}/topics/maintenance/unindexed" in paths
         assert f"{prefix}/topics/maintenance/preview" in paths
         assert f"{prefix}/topics/maintenance/clear" in paths
+        assert f"{prefix}/topics/archived/delete" in paths
         assert f"{prefix}/topics/maintenance/revectorize" in paths
         assert f"{prefix}/topics/relations/recompute" in paths
         assert f"{prefix}/topics/build/start" in paths

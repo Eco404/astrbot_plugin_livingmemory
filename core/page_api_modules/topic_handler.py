@@ -145,14 +145,15 @@ class TopicHandler:
         memory_space_id = self.utils.optional_text(request.args.get("memory_space_id"))
         if not memory_space_id:
             return self.utils.ok({"items": [], "memory_space_id": None})
-        status = self.utils.optional_text(request.args.get("status"))
+        status = self.utils.optional_text(request.args.get("status")) or "active"
         actor_id = self.utils.optional_text(request.args.get("actor_id"))
         try:
             limit = max(1, min(int(request.args.get("limit", 100)), 500))
             offset = max(0, int(request.args.get("offset", 0)))
+            normalized_status = None if status == "all" else status
             topics = await memory_engine.topic_memory_store.list_topics(
                 memory_space_id,
-                status=None if status in (None, "all") else status,
+                status=normalized_status,
                 limit=limit,
                 offset=offset,
                 actor_id=actor_id,
@@ -162,18 +163,46 @@ class TopicHandler:
                 item["support"] = await memory_engine.topic_memory_store.get_topic_support_metrics(
                     item["topic_uid"]
                 )
+            filtered_total, space_total = await asyncio.gather(
+                memory_engine.topic_memory_store.count_topics(
+                    memory_space_id,
+                    status=normalized_status,
+                ),
+                memory_engine.topic_memory_store.count_topics(memory_space_id),
+            )
             return self.utils.ok(
                 {
                     "items": items,
+                    "total": filtered_total,
+                    "space_total": space_total,
                     "memory_space_id": memory_space_id,
                     "actors": await memory_engine.topic_memory_store.list_topic_actors(
-                        memory_space_id
+                        memory_space_id,
+                        status=normalized_status,
                     ),
                     "actor_id": actor_id,
+                    "status": status,
                 }
             )
         except Exception as exc:
             logger.error("[PageAPI] 获取 Topic 列表失败", exc_info=True)
+            return self.utils.error(str(exc))
+
+    async def delete_archived_topics(self, memory_engine) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        memory_space_id = self.utils.optional_text(payload.get("memory_space_id"))
+        topic_uids = payload.get("topic_uids", [])
+        if not memory_space_id:
+            return self.utils.error("缺少 memory_space_id")
+        if not isinstance(topic_uids, list) or not topic_uids:
+            return self.utils.error("至少选择一条已归档 Topic")
+        try:
+            deleted = await memory_engine.topic_memory_store.delete_archived_topics(
+                memory_space_id,
+                [str(uid) for uid in topic_uids],
+            )
+            return self.utils.ok({"deleted_count": deleted})
+        except (TypeError, ValueError, RuntimeError) as exc:
             return self.utils.error(str(exc))
 
     async def _combined_settings(self, memory_engine, initializer) -> dict[str, Any]:
@@ -626,10 +655,16 @@ class TopicHandler:
                     memory_space_id,
                     progress_callback=progress,
                 )
+                completion_status = str(result.get("status") or "completed")
+                if completion_status not in {
+                    "completed",
+                    "completed_with_review",
+                }:
+                    completion_status = "completed"
                 self._jobs[job_uid].update(
                     {
-                        "status": "completed",
-                        "stage": "completed",
+                        "status": completion_status,
+                        "stage": completion_status,
                         "current": 1,
                         "total": 1,
                         "overall_percent": 100.0,

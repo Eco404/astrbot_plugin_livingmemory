@@ -14,6 +14,7 @@ export class MaintenancePage {
     this.sessionPreview = null;
     this.timelineRebuildItems = [];
     this.timelineRebuildPoller = null;
+    this.timelineStagedItems = [];
     this.databaseHealth = null;
     this.databaseRepairPoller = null;
     this.databaseRepairTaskUid = null;
@@ -26,6 +27,7 @@ export class MaintenancePage {
     });
     document.getElementById("maintenance-topic-space")?.addEventListener("change", () => this.changeTopicSpace());
     document.getElementById("maintenance-open-topic")?.addEventListener("click", event => this.openTopicMaintenance(event.currentTarget));
+    document.getElementById("maintenance-open-archived-topics")?.addEventListener("click", () => this.openArchivedTopics());
     document.getElementById("maintenance-open-reviews")?.addEventListener("click", () => this.openReviews());
     document.getElementById("maintenance-review-refresh")?.addEventListener("click", () => this.loadReviews());
     document.getElementById("maintenance-review-list")?.addEventListener("click", event => {
@@ -50,10 +52,13 @@ export class MaintenancePage {
       if (button) this.deleteSessionTask(button.dataset.sessionTaskDelete, button);
     });
     document.getElementById("timeline-rebuild-preview")?.addEventListener("click", () => this.previewTimelineRebuild());
+    document.getElementById("timeline-rebuild-select-all")?.addEventListener("click", () => this.toggleTimelineRebuildSelection());
+    document.getElementById("timeline-inactive-open")?.addEventListener("click", () => this.openInactiveTimelines());
     document.getElementById("timeline-rebuild-start")?.addEventListener("click", () => this.startTimelineRebuild());
     document.getElementById("timeline-rebuild-list")?.addEventListener("change", () => this.updateTimelineRebuildSelection());
     document.getElementById("timeline-rebuild-task-refresh")?.addEventListener("click", () => this.loadTimelineRebuildTasks());
     document.getElementById("timeline-rebuild-task-clear")?.addEventListener("click", () => this.clearTimelineRebuildTasks());
+    document.getElementById("timeline-staged-open")?.addEventListener("click", () => this.openTimelineStagedEdits());
     document.getElementById("timeline-rebuild-task-list")?.addEventListener("click", event => {
       const button = event.target.closest("[data-timeline-rebuild-action]");
       if (button) this.handleTimelineRebuildTaskAction(button.dataset.timelineRebuildAction, button.dataset.taskUid, button);
@@ -100,6 +105,7 @@ export class MaintenancePage {
         this.loadTopicMaintenanceCounts();
       }
     });
+    window.addEventListener("livingmemory:timeline-staged-updated", () => this.loadTimelineStagedCount());
   }
 
   async activate() {
@@ -110,7 +116,10 @@ export class MaintenancePage {
     if (this.tab === "recall") this.recallPage.fetchSessions();
     if (this.tab === "sessions") this.loadSessionAudit();
     if (this.tab === "recent-recall") this.loadRecentRecalls();
-    if (this.tab === "timeline-rebuild") this.loadTimelineRebuildTasks();
+    if (this.tab === "timeline-rebuild") {
+      this.loadTimelineRebuildTasks();
+      this.loadTimelineStagedCount();
+    }
     if (this.tab === "database") this.resumeDatabaseRepair();
   }
 
@@ -131,7 +140,10 @@ export class MaintenancePage {
     if (tab === "topic") this.loadTopicMaintenanceCounts();
     if (tab === "sessions") this.loadSessionAudit();
     if (tab === "recent-recall") this.loadRecentRecalls();
-    if (tab === "timeline-rebuild") this.loadTimelineRebuildTasks();
+    if (tab === "timeline-rebuild") {
+      this.loadTimelineRebuildTasks();
+      this.loadTimelineStagedCount();
+    }
     if (tab === "database" && !this.databaseHealth) this.resumeDatabaseRepair();
   }
 
@@ -429,14 +441,28 @@ export class MaintenancePage {
 
   updateTimelineRebuildSelection() {
     const selected = this.selectedTimelineRebuildIds();
+    const availableInputs = Array.from(document.querySelectorAll("[data-timeline-rebuild-select]:not(:disabled)"));
     const button = document.getElementById("timeline-rebuild-start");
     if (button) button.disabled = selected.length === 0;
+    const selectAll = document.getElementById("timeline-rebuild-select-all");
+    if (selectAll) {
+      const allSelected = availableInputs.length > 0 && availableInputs.every(input => input.checked);
+      selectAll.textContent = window.t(allSelected ? "common.deselectAll" : "common.selectAll");
+      selectAll.disabled = availableInputs.length === 0;
+    }
     const summary = document.getElementById("timeline-rebuild-summary");
     if (summary && this.timelineRebuildItems.length) {
       const available = this.timelineRebuildItems.filter(item => item.reconstructable).length;
       const blocked = this.timelineRebuildItems.length - available;
       summary.textContent = window.t("maintenance.rebuildSummary", this.timelineRebuildItems.length, available, blocked, selected.length);
     }
+  }
+
+  toggleTimelineRebuildSelection() {
+    const inputs = Array.from(document.querySelectorAll("[data-timeline-rebuild-select]:not(:disabled)"));
+    const allSelected = inputs.length > 0 && inputs.every(input => input.checked);
+    inputs.forEach(input => { input.checked = !allSelected; });
+    this.updateTimelineRebuildSelection();
   }
 
   async previewTimelineRebuild() {
@@ -455,7 +481,7 @@ export class MaintenancePage {
         const blocked = (item.blocked_reasons || []).join("；");
         const warnings = (item.identity_warnings || []).join("、");
         return `<label class="timeline-rebuild-row ${item.reconstructable ? "" : "is-blocked"}">
-          <input type="checkbox" data-timeline-rebuild-select value="${Number(item.memory_id)}" ${item.reconstructable ? "checked" : "disabled"}>
+          <input type="checkbox" data-timeline-rebuild-select value="${Number(item.memory_id)}" ${item.reconstructable ? "" : "disabled"}>
           <span class="timeline-rebuild-main"><strong>ID ${Number(item.memory_id)}${item.summary_quality === "low" ? ` <span class="timeline-quality-flag" title="${esc(window.t("memory.lowQualityHint"))}" aria-label="${esc(window.t("memory.lowQuality"))}"></span>` : ""}</strong><span>${esc(item.excerpt || "--")}</span><small>${esc(item.session_id || "--")} · ${Number(item.message_count || 0)} / ${Number(item.expected_message_count || 0)} ${esc(window.t("maintenance.sourceMessages"))} · Topic ${Number(item.topic_count || 0)}</small></span>
           <span class="timeline-rebuild-state ${item.reconstructable ? "is-ready" : "is-blocked"}">${esc(item.reconstructable ? window.t("maintenance.rebuildable") : blocked)}${warnings ? `<small>${esc(window.t("maintenance.identityWarning"))}: ${esc(warnings)}</small>` : ""}</span>
         </label>`;
@@ -503,7 +529,7 @@ export class MaintenancePage {
         const done = Number(task.completed_count || 0);
         const failed = Number(task.failed_count || 0);
         const progress = total ? Math.max(0, Math.min(100, done / total * 100)) : 0;
-        const terminal = ["completed", "completed_with_errors", "failed", "cancelled"].includes(task.status);
+        const terminal = ["completed", "completed_with_review", "completed_with_errors", "failed", "cancelled"].includes(task.status);
         const resumable = ["failed", "completed_with_errors"].includes(task.status);
         const cancellable = ["queued", "running", "cancelling"].includes(task.status);
         return `<div class="session-task-row timeline-rebuild-task-row">
@@ -528,7 +554,7 @@ export class MaintenancePage {
       try {
         const task = await this.topicPage.api.get("timeline/rebuild/task", { task_uid: taskUid });
         await this.loadTimelineRebuildTasks();
-        if (["completed", "completed_with_errors", "failed", "cancelled"].includes(task.status)) {
+        if (["completed", "completed_with_review", "completed_with_errors", "failed", "cancelled"].includes(task.status)) {
           clearInterval(this.timelineRebuildPoller);
           this.timelineRebuildPoller = null;
           if (this.tab === "timeline-rebuild" && document.getElementById("timeline-rebuild-space")?.value) {
@@ -579,6 +605,247 @@ export class MaintenancePage {
       this.showToast(error.message, true);
     } finally {
       if (button) button.disabled = false;
+    }
+  }
+
+  async loadTimelineStagedCount() {
+    const badge = document.getElementById("timeline-staged-count");
+    if (!badge) return;
+    try {
+      const data = await this.topicPage.api.get("timeline/staged-edits", { limit: 2000 });
+      this.timelineStagedItems = data.items || [];
+      badge.textContent = String(Number(data.total ?? this.timelineStagedItems.length));
+    } catch (_) {
+      badge.textContent = "!";
+    }
+  }
+
+  async openTimelineStagedEdits() {
+    let overlay = document.getElementById("timeline-staged-overlay");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = "timeline-staged-overlay";
+      overlay.className = "modal-overlay timeline-staged-overlay";
+      document.body.appendChild(overlay);
+    }
+    overlay.classList.add("visible");
+    overlay.innerHTML = `<div class="modal timeline-staged-modal" role="dialog" aria-modal="true">
+      <div class="modal-header"><div><div class="modal-title">${esc(window.t("maintenance.stagedEditsTitle"))}</div><p class="text-secondary">${esc(window.t("maintenance.stagedEditsIntro"))}</p></div><button class="modal-close" data-staged-close aria-label="Close">×</button></div>
+      <div class="modal-body"><div class="identity-state">${esc(window.t("common.loading"))}</div></div>
+      <div class="modal-footer"><label class="timeline-staged-mode"><span>${esc(window.t("maintenance.topicSyncMode"))}</span><select class="select input input-sm" data-staged-topic-mode><option value="local">${esc(window.t("maintenance.topicSyncLocal"))}</option><option value="full">${esc(window.t("maintenance.topicSyncFull"))}</option></select></label><button class="btn btn-danger" data-staged-delete disabled>${esc(window.t("maintenance.deleteStaged"))}</button><button class="btn btn-primary" data-staged-apply disabled>${esc(window.t("maintenance.applyStaged"))}</button></div>
+      </div>`;
+    const close = () => overlay.classList.remove("visible");
+    overlay.querySelector("[data-staged-close]")?.addEventListener("click", close);
+    overlay.onclick = event => { if (event.target === overlay) close(); };
+    try {
+      const space = document.getElementById("timeline-rebuild-space")?.value || "";
+      const data = await this.topicPage.api.get("timeline/staged-edits", { memory_space_id: space, limit: 2000 });
+      this.timelineStagedItems = data.items || [];
+      const body = overlay.querySelector(".modal-body");
+      body.innerHTML = this.timelineStagedItems.length
+        ? `<div class="timeline-staged-list">${this.timelineStagedItems.map(item => `<label class="timeline-staged-row"><input type="checkbox" data-staged-select value="${esc(item.edit_uid)}" checked><span><strong>Timeline #${Number(item.memory_id)}</strong><small>r${Number(item.source_revision)} · ${esc(item.status || "pending")}${item.reason ? ` · ${esc(item.reason)}` : ""}</small><span>${esc(item.preview || item.source_excerpt || "--")}</span>${item.last_error ? `<small class="text-danger">${esc(item.last_error)}</small>` : ""}</span></label>`).join("")}</div>`
+        : `<div class="identity-state">${esc(window.t("maintenance.noStagedEdits"))}</div>`;
+      const update = () => {
+        const any = overlay.querySelectorAll("[data-staged-select]:checked").length > 0;
+        overlay.querySelector("[data-staged-apply]").disabled = !any;
+        overlay.querySelector("[data-staged-delete]").disabled = !any;
+      };
+      body.addEventListener("change", update);
+      update();
+      overlay.querySelector("[data-staged-apply]")?.addEventListener("click", () => this.applyTimelineStagedEdits(overlay));
+      overlay.querySelector("[data-staged-delete]")?.addEventListener("click", () => this.deleteTimelineStagedEdits(overlay));
+      await this.loadTimelineStagedCount();
+    } catch (error) {
+      overlay.querySelector(".modal-body").innerHTML = `<div class="identity-state identity-state-error">${esc(error.message)}</div>`;
+    }
+  }
+
+  selectedTimelineStagedUids(overlay) {
+    return Array.from(overlay.querySelectorAll("[data-staged-select]:checked")).map(input => input.value).filter(Boolean);
+  }
+
+  async applyTimelineStagedEdits(overlay) {
+    const editUids = this.selectedTimelineStagedUids(overlay);
+    if (!editUids.length) return;
+    const button = overlay.querySelector("[data-staged-apply]");
+    button.disabled = true;
+    try {
+      const task = await this.topicPage.api.post("timeline/staged-edits/apply", {
+        edit_uids: editUids,
+        topic_mode: overlay.querySelector("[data-staged-topic-mode]")?.value || "local"
+      });
+      overlay.classList.remove("visible");
+      this.showToast(window.t("maintenance.rebuildStarted"));
+      await this.loadTimelineRebuildTasks();
+      await this.loadTimelineStagedCount();
+      this.pollTimelineRebuildTask(task.task_uid);
+    } catch (error) {
+      this.showToast(error.message, true);
+      button.disabled = false;
+    }
+  }
+
+  async deleteTimelineStagedEdits(overlay) {
+    const editUids = this.selectedTimelineStagedUids(overlay);
+    if (!editUids.length) return;
+    const confirmed = await this.confirmDialog.show({
+      title: window.t("maintenance.deleteStaged"),
+      message: window.t("maintenance.stagedEditsIntro"),
+      confirmLabel: window.t("common.delete"),
+      danger: true,
+    });
+    if (!confirmed) return;
+    try {
+      await this.topicPage.api.post("timeline/staged-edits/delete", { edit_uids: editUids });
+      await this.loadTimelineStagedCount();
+      await this.openTimelineStagedEdits();
+    } catch (error) {
+      this.showToast(error.message, true);
+    }
+  }
+
+  createStateMaintenanceModal(id, titleKey, introKey) {
+    let overlay = document.getElementById(id);
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = id;
+      overlay.className = "modal-overlay timeline-staged-overlay";
+      document.body.appendChild(overlay);
+    }
+    overlay.innerHTML = `<div class="modal timeline-staged-modal" role="dialog" aria-modal="true">
+      <div class="modal-header"><div><div class="modal-title">${esc(window.t(titleKey))}</div><p class="text-secondary">${esc(window.t(introKey))}</p></div><button class="modal-close" data-state-close aria-label="${esc(window.t("common.close"))}">×</button></div>
+      <div class="modal-body"><div class="identity-state">${esc(window.t("common.loading"))}</div></div>
+      <div class="modal-footer"><button class="btn btn-secondary" data-state-select-all disabled>${esc(window.t("common.selectAll"))}</button><button class="btn btn-danger" data-state-submit disabled></button></div>
+    </div>`;
+    overlay.classList.add("visible");
+    const close = () => overlay.classList.remove("visible");
+    overlay.querySelector("[data-state-close]")?.addEventListener("click", close);
+    overlay.onclick = event => { if (event.target === overlay) close(); };
+    return overlay;
+  }
+
+  bindStateMaintenanceSelection(overlay, submitLabelKey) {
+    const update = () => {
+      const inputs = Array.from(overlay.querySelectorAll("[data-state-select]"));
+      const selected = inputs.filter(input => input.checked);
+      const allSelected = inputs.length > 0 && selected.length === inputs.length;
+      const toggle = overlay.querySelector("[data-state-select-all]");
+      const submit = overlay.querySelector("[data-state-submit]");
+      if (toggle) {
+        toggle.disabled = inputs.length === 0;
+        toggle.textContent = window.t(allSelected ? "common.deselectAll" : "common.selectAll");
+      }
+      if (submit) {
+        submit.disabled = selected.length === 0;
+        submit.textContent = window.t(submitLabelKey);
+      }
+    };
+    overlay.querySelector(".modal-body")?.addEventListener("change", update);
+    overlay.querySelector("[data-state-select-all]")?.addEventListener("click", () => {
+      const inputs = Array.from(overlay.querySelectorAll("[data-state-select]"));
+      const allSelected = inputs.length > 0 && inputs.every(input => input.checked);
+      inputs.forEach(input => { input.checked = !allSelected; });
+      update();
+    });
+    update();
+    return () => Array.from(overlay.querySelectorAll("[data-state-select]:checked")).map(input => input.value);
+  }
+
+  async openArchivedTopics() {
+    const space = this.reviewSpace();
+    if (!space) return this.showToast(window.t("topic.chooseSpace"), true);
+    const overlay = this.createStateMaintenanceModal(
+      "archived-topic-maintenance-overlay",
+      "maintenance.archivedTopicsTitle",
+      "maintenance.archivedTopicsIntro",
+    );
+    try {
+      const data = await this.topicPage.api.get("topics", {
+        memory_space_id: space,
+        status: "archived",
+        limit: 500,
+      });
+      const items = data.items || [];
+      overlay.querySelector(".modal-body").innerHTML = items.length
+        ? `<div class="timeline-staged-list">${items.map(item => `<label class="timeline-staged-row"><input type="checkbox" data-state-select value="${esc(item.topic_uid)}"><span><strong>${esc(item.title || item.topic_uid)}</strong><small>${esc(item.topic_uid)} · r${Number(item.revision || 0)}</small><span>${esc(item.summary || "--")}</span></span></label>`).join("")}</div>`
+        : `<div class="identity-state">${esc(window.t("maintenance.archivedTopicsEmpty"))}</div>`;
+      const selected = this.bindStateMaintenanceSelection(overlay, "maintenance.deleteArchivedTopics");
+      overlay.querySelector("[data-state-submit]")?.addEventListener("click", async event => {
+        const topicUids = selected();
+        if (!topicUids.length) return;
+        const confirmed = await this.confirmDialog.show({
+          title: window.t("maintenance.deleteArchivedConfirmTitle"),
+          message: window.t("maintenance.deleteArchivedConfirmMessage", topicUids.length),
+          confirmLabel: window.t("common.delete"),
+          danger: true,
+        });
+        if (!confirmed) return;
+        event.currentTarget.disabled = true;
+        try {
+          const result = await this.topicPage.api.post("topics/archived/delete", {
+            memory_space_id: space,
+            topic_uids: topicUids,
+          });
+          this.showToast(window.t("maintenance.archivedTopicsDeleted", Number(result.deleted_count || 0)));
+          overlay.classList.remove("visible");
+          await this.topicPage.fetch();
+          this.syncTopicSpaces();
+          await this.loadTopicMaintenanceCounts();
+        } catch (error) {
+          this.showToast(error.message, true);
+          event.currentTarget.disabled = false;
+        }
+      });
+    } catch (error) {
+      overlay.querySelector(".modal-body").innerHTML = `<div class="identity-state identity-state-error">${esc(error.message)}</div>`;
+    }
+  }
+
+  async openInactiveTimelines() {
+    const space = document.getElementById("timeline-rebuild-space")?.value || "";
+    if (!space) return this.showToast(window.t("topic.chooseSpace"), true);
+    const overlay = this.createStateMaintenanceModal(
+      "inactive-timeline-maintenance-overlay",
+      "maintenance.inactiveTimelinesTitle",
+      "maintenance.inactiveTimelinesIntro",
+    );
+    try {
+      const data = await this.topicPage.api.get("timeline/inactive", {
+        memory_space_id: space,
+        limit: 500,
+      });
+      const items = data.items || [];
+      overlay.querySelector(".modal-body").innerHTML = items.length
+        ? `<div class="timeline-staged-list">${items.map(item => `<label class="timeline-staged-row"><input type="checkbox" data-state-select value="${Number(item.memory_id)}"><span><strong>Timeline #${Number(item.memory_id)}</strong><small>${esc(item.status)} · r${Number(item.revision || 0)} · Topic ${Number(item.topic_count || 0)}</small><span>${esc(item.excerpt || "--")}</span></span></label>`).join("")}</div>`
+        : `<div class="identity-state">${esc(window.t("maintenance.inactiveTimelinesEmpty"))}</div>`;
+      const selected = this.bindStateMaintenanceSelection(overlay, "maintenance.restoreSelected");
+      const submit = overlay.querySelector("[data-state-submit]");
+      submit?.classList.remove("btn-danger");
+      submit?.classList.add("btn-primary");
+      submit?.addEventListener("click", async event => {
+        const memoryIds = selected().map(Number).filter(Number.isFinite);
+        if (!memoryIds.length) return;
+        const confirmed = await this.confirmDialog.show({
+          title: window.t("maintenance.restoreInactiveConfirmTitle"),
+          message: window.t("maintenance.restoreInactiveConfirmMessage", memoryIds.length),
+          confirmLabel: window.t("common.restore"),
+        });
+        if (!confirmed) return;
+        event.currentTarget.disabled = true;
+        try {
+          const result = await this.topicPage.api.post("timeline/inactive/restore", {
+            memory_space_id: space,
+            memory_ids: memoryIds,
+          });
+          this.showToast(window.t("maintenance.inactiveTimelinesRestored", Number(result.restored_count || 0)));
+          overlay.classList.remove("visible");
+        } catch (error) {
+          this.showToast(error.message, true);
+          event.currentTarget.disabled = false;
+        }
+      });
+    } catch (error) {
+      overlay.querySelector(".modal-body").innerHTML = `<div class="identity-state identity-state-error">${esc(error.message)}</div>`;
     }
   }
 
