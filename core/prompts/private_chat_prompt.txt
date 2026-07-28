@@ -71,10 +71,14 @@
     {"fact_index": 0, "subject_refs": [{"actor_ref": "A2", "display_name_snapshot": "张三"}], "claim_type": "speaker_self", "confidence": 1.0},
     {"fact_index": 1, "subject_refs": [{"actor_ref": "unresolved", "display_name_snapshot": "李经理"}], "claim_type": "speaker_reports_other", "confidence": 0.8}
   ],
+  "key_fact_profiles": [
+    {"fact_index": 0, "fact_type": "plan", "durability": "high", "selection_reason": "future_utility"},
+    {"fact_index": 1, "fact_type": "relationship_interaction", "durability": "medium", "selection_reason": "relationship_significance"}
+  ],
   "message_coverage": [
-    {"message_ref": "M1", "disposition": "fact", "fact_indexes": [0], "reason": "直接支持事实0"},
-    {"message_ref": "M2", "disposition": "context", "fact_indexes": [], "reason": "确认上下文"},
-    {"message_ref": "M3", "disposition": "omitted", "fact_indexes": [], "reason": "无实质信息的寒暄"}
+    {"message_ref": "M1", "disposition": "fact", "fact_indexes": [0], "reason_code": "durable_fact", "reason": "直接支持事实0"},
+    {"message_ref": "M2", "disposition": "context", "fact_indexes": [], "reason_code": "supporting_context", "reason": "确认上下文"},
+    {"message_ref": "M3", "disposition": "omitted", "fact_indexes": [], "reason_code": "noise", "reason": "无实质信息的寒暄"}
   ],
   "sentiment": "positive|neutral|negative",
   "importance": 0.7
@@ -117,10 +121,16 @@
     {"fact_index": 2, "subject_refs": [{"actor_ref": "A2", "display_name_snapshot": "张三"}], "claim_type": "speaker_requests_other", "confidence": 0.95},
     {"fact_index": 3, "subject_refs": [{"actor_ref": "A2", "display_name_snapshot": "张三"}], "claim_type": "speaker_requests_other", "confidence": 0.95}
   ],
+  "key_fact_profiles": [
+    {"fact_index": 0, "fact_type": "plan", "durability": "high", "selection_reason": "future_utility"},
+    {"fact_index": 1, "fact_type": "observation", "durability": "medium", "selection_reason": "specific_grounded_observation"},
+    {"fact_index": 2, "fact_type": "plan", "durability": "high", "selection_reason": "future_utility"},
+    {"fact_index": 3, "fact_type": "commitment", "durability": "high", "selection_reason": "commitment_or_decision"}
+  ],
   "message_coverage": [
-    {"message_ref": "M1", "disposition": "fact", "fact_indexes": [0, 2], "reason": "会议时间和文档要求"},
-    {"message_ref": "M2", "disposition": "context", "fact_indexes": [1], "reason": "询问并确认会议地点"},
-    {"message_ref": "M3", "disposition": "fact", "fact_indexes": [1, 3], "reason": "确认地点并提出约见要求"}
+    {"message_ref": "M1", "disposition": "fact", "fact_indexes": [0, 2], "reason_code": "durable_fact", "reason": "会议时间和文档要求"},
+    {"message_ref": "M2", "disposition": "context", "fact_indexes": [1], "reason_code": "supporting_context", "reason": "询问并确认会议地点"},
+    {"message_ref": "M3", "disposition": "fact", "fact_indexes": [1, 3], "reason_code": "durable_fact", "reason": "确认地点并提出约见要求"}
   ],
   "sentiment": "neutral",
   "importance": 0.85
@@ -140,12 +150,14 @@
 - **记忆内容应符合你的人格设定**:使用你的语气、关注点、表达习惯来描述记忆
 - 直接输出JSON,不要其他内容
 - 确保JSON格式正确可解析
-- topics和key_facts最多各5项,应涵盖对话的核心要点
+- topics最多5项；key_facts最多8项，不要为填满数量生成无意义事实
 - key_fact_evidence必须逐项覆盖key_facts；每项只能引用真正支持该事实的M编号
 - key_fact_attributions必须逐项覆盖key_facts；subject_refs只能引用代码提供的A编号，来源只提到但未绑定的第三人使用unresolved并保留原称谓，没有人物主语时使用none
+- key_fact_profiles必须逐项覆盖key_facts；fact_type只能是event/state/preference/plan/commitment/relationship_interaction/affect/observation，durability只能是low/medium/high，selection_reason只能是future_utility/stable_personal_fact/completed_action/repeated_completed_action/commitment_or_decision/relationship_significance/affective_significance/specific_grounded_observation
+- 事实取舍优先级：未来仍有用的计划/承诺/稳定偏好，已完成或重复发生的具体行为，以及有关系或情绪意义的互动。Bot的一次性客套、简单确认和泛化建议不单独成为事实；已完成、重复或对关系有明确意义的Bot主动行为至少保留一条
 - claim_type=speaker_self时主语必须是证据消息的发送者；speaker_requests_other表示证据消息发送者提出了请求，不得把请求对象写成已经完成动作
 - 每次输出前逐条核对“事实主语—动作—证据消息发送者”，不确定时使用uncertain并降低confidence，不得猜测
-- message_coverage必须逐一且仅一次覆盖所有M编号；省略消息时必须说明理由
+- message_coverage必须逐一且仅一次覆盖所有M编号；reason_code只能是durable_fact/durable_interaction/supporting_context/routine_response/duplicate_detail/noise；省略消息时必须说明理由
 - importance必须在0.0-1.0之间,保留1-2位小数
 
 现在请以符合你人格设定的第一人称视角回顾上述对话并输出JSON:

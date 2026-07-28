@@ -413,6 +413,10 @@ async def test_maintenance_review_identity_ignores_volatile_run_details(tmp_path
         topic_uids=["topic-b", "topic-a"],
         details={"run_uid": "run-2", "scores": [0.63, 0.62]},
     )
+    await store.update_maintenance_run(
+        "run-2",
+        status=TopicMaintenanceStatus.COMPLETED_WITH_REVIEW,
+    )
     reviews = await store.list_maintenance_reviews(
         "space-1",
         timeline_uids=["timeline-1"],
@@ -426,26 +430,150 @@ async def test_maintenance_review_identity_ignores_volatile_run_details(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_maintenance_reviews_resolve_only_after_full_timeline_scope(tmp_path: Path):
+async def test_maintenance_reviews_resolve_only_the_published_component(tmp_path: Path):
     store = TopicMemoryStore(str(tmp_path / "maintenance-review-resolution.db"))
     await store.initialize()
-    review_uid = await store.enqueue_maintenance_review(
+    first_uid = await store.enqueue_maintenance_review(
         memory_space_id="space-1",
-        review_type="incremental_scope_too_large",
-        timeline_uids=["timeline-1", "timeline-2"],
-        topic_uids=[],
-        details={},
+        review_type="ambiguous_topic_match",
+        timeline_uids=["timeline-1"],
+        topic_uids=["topic-a", "topic-b"],
+        component_uid="component-a",
+        details={"fragment_uids": ["fragment-a"]},
+    )
+    second_uid = await store.enqueue_maintenance_review(
+        memory_space_id="space-1",
+        review_type="ambiguous_topic_match",
+        timeline_uids=["timeline-1"],
+        topic_uids=["topic-a", "topic-b"],
+        component_uid="component-b",
+        details={"fragment_uids": ["fragment-b"]},
     )
 
+    assert first_uid != second_uid
     assert await store.resolve_maintenance_reviews(
-        "space-1", timeline_uids=["timeline-1"]
-    ) == 0
-    assert await store.resolve_maintenance_reviews(
-        "space-1", timeline_uids=["timeline-1", "timeline-2"]
+        "space-1", component_uids=["component-a"]
     ) == 1
-    assert await store.list_maintenance_reviews("space-1") == []
+    pending = await store.list_maintenance_reviews("space-1")
+    assert [item["review_uid"] for item in pending] == [second_uid]
+    assert pending[0]["details"]["component_uid"] == "component-b"
+
     resolved = await store.list_maintenance_reviews("space-1", status="resolved")
-    assert [item["review_uid"] for item in resolved] == [review_uid]
+    assert [item["review_uid"] for item in resolved] == [first_uid]
+
+
+@pytest.mark.asyncio
+async def test_pending_review_topic_is_preserved_and_marked_during_full_publish(
+    tmp_path: Path,
+):
+    db_path = str(tmp_path / "pending-review-preservation.db")
+    space_id = await _register_timeline(
+        db_path,
+        memory_uid="timeline-pending",
+        document_id=1,
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    pending_topic = await store.save_topic_snapshot(
+        TopicMemory(
+            topic_uid="topic-pending",
+            memory_space_id=space_id,
+            title="Pending",
+            summary="Pending",
+        ),
+        atoms=[],
+        links=[],
+        atom_sources=[],
+    )
+    other_topic = await store.save_topic_snapshot(
+        TopicMemory(
+            topic_uid="topic-other",
+            memory_space_id=space_id,
+            title="Other",
+            summary="Other",
+        ),
+        atoms=[],
+        links=[],
+        atom_sources=[],
+    )
+    await store.create_maintenance_run(
+        TopicMaintenanceRun(
+            run_uid="run-review",
+            memory_space_id=space_id,
+            mode=TopicMaintenanceMode.FULL,
+        )
+    )
+
+    publication = await store.publish_topic_build(
+        run_uid="run-review",
+        memory_space_id=space_id,
+        mode=TopicMaintenanceMode.FULL,
+        snapshots=[],
+        relations=[],
+        reset_topics=True,
+        sync_pending_topic_uids={pending_topic.topic_uid},
+        additional_decisions=[
+            {
+                "decision_uid": "decision-pending",
+                "topic_uid": pending_topic.topic_uid,
+                "action": "pending_review",
+                "fragment_uids": ["fragment-1"],
+                "metadata": {"component_uid": "component-1"},
+            }
+        ],
+        completion_status=TopicMaintenanceStatus.COMPLETED_WITH_REVIEW,
+    )
+
+    preserved = await store.get_topic(pending_topic.topic_uid)
+    archived = await store.get_topic(other_topic.topic_uid)
+    run = await store.get_maintenance_run("run-review")
+    assert preserved.status is TopicMemoryStatus.ACTIVE
+    assert preserved.metadata["sync_pending"]["reason"] == "pending_review"
+    assert archived.status is TopicMemoryStatus.ARCHIVED
+    assert run["status"] == "completed_with_review"
+    assert publication["reset"]["deferred"] is True
+    assert publication["reset"]["reason"] == "pending_review"
+    async with aiosqlite.connect(db_path) as db:
+        decision = await (
+            await db.execute(
+                "SELECT action, metadata FROM topic_build_decisions "
+                "WHERE decision_uid = 'decision-pending'"
+            )
+        ).fetchone()
+    assert decision[0] == "pending_review"
+    assert "component-1" in decision[1]
+
+
+@pytest.mark.asyncio
+async def test_build_owned_review_is_hidden_until_atomic_publication_completes(
+    tmp_path: Path,
+):
+    store = TopicMemoryStore(str(tmp_path / "review-visibility.db"))
+    await store.initialize()
+    await store.create_maintenance_run(
+        TopicMaintenanceRun(
+            run_uid="run-pending-review",
+            memory_space_id="space-1",
+            mode=TopicMaintenanceMode.INCREMENTAL,
+        )
+    )
+    review_uid = await store.enqueue_maintenance_review(
+        memory_space_id="space-1",
+        review_type="ambiguous_topic_match",
+        timeline_uids=["timeline-1"],
+        topic_uids=[],
+        component_uid="component-1",
+        details={"run_uid": "run-pending-review"},
+    )
+
+    assert await store.list_maintenance_reviews("space-1") == []
+
+    await store.update_maintenance_run(
+        "run-pending-review",
+        status=TopicMaintenanceStatus.COMPLETED_WITH_REVIEW,
+    )
+    reviews = await store.list_maintenance_reviews("space-1")
+    assert [item["review_uid"] for item in reviews] == [review_uid]
 
 
 @pytest.mark.asyncio
@@ -902,6 +1030,154 @@ async def test_get_topic_counts_for_timelines_only_counts_active_links(
         await db.commit()
 
     assert await store.get_topic_counts_for_timelines(["timeline-counted"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_archiving_topic_archives_visible_topic_dependencies(tmp_path: Path):
+    db_path = str(tmp_path / "archive-topic-dependencies.db")
+    space_id = await _register_timeline(
+        db_path, memory_uid="timeline-archive", document_id=1
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    topic = TopicMemory(
+        topic_uid="topic-archive",
+        memory_space_id=space_id,
+        title="Archived Topic",
+        summary="This Topic and all of its visible projections are archived together.",
+    )
+    atom = TopicMemoryAtom(
+        atom_uid="atom-archive",
+        topic_uid=topic.topic_uid,
+        atom_type="factual",
+        content="Archived fact",
+    )
+    fragment = TopicFragmentDraft(
+        fragment_uid="fragment-archive",
+        run_uid="run-archive",
+        candidate_group_uid="group-archive",
+        memory_space_id=space_id,
+        label="Archived fragment",
+        summary="Archived fragment summary",
+        timeline_uids=["timeline-archive"],
+        source_revisions={"timeline-archive": 1},
+        facts=[{"content": "Archived fact"}],
+    )
+    await store.save_topic_snapshot(
+        topic,
+        atoms=[atom],
+        links=[
+            TopicTimelineLink(
+                topic_uid=topic.topic_uid,
+                timeline_uid="timeline-archive",
+                time_cluster_key="cluster-archive",
+            )
+        ],
+        atom_sources=[
+            TopicAtomSource(
+                topic_atom_uid=atom.atom_uid,
+                timeline_uid="timeline-archive",
+                source_atom_fingerprint="archive-fingerprint",
+            )
+        ],
+        fragments=[fragment],
+    )
+
+    assert await store.archive_topic_uids_not_in(
+        space_id, {topic.topic_uid}, set()
+    ) == 1
+
+    async with aiosqlite.connect(db_path) as db:
+        statuses = {}
+        for table, key_column, key_value in (
+            ("topic_memories", "topic_uid", topic.topic_uid),
+            ("topic_memory_atoms", "topic_uid", topic.topic_uid),
+            ("topic_timeline_links", "topic_uid", topic.topic_uid),
+            ("topic_fragment_links", "topic_uid", topic.topic_uid),
+            ("topic_fragments", "fragment_uid", fragment.fragment_uid),
+        ):
+            statuses[table] = (
+                await (
+                    await db.execute(
+                        f"SELECT status FROM {table} WHERE {key_column} = ?",
+                        (key_value,),
+                    )
+                ).fetchone()
+            )[0]
+
+    assert statuses == {
+        "topic_memories": "archived",
+        "topic_memory_atoms": "archived",
+        "topic_timeline_links": "archived",
+        "topic_fragment_links": "archived",
+        "topic_fragments": "archived",
+    }
+
+
+@pytest.mark.asyncio
+async def test_delete_archived_topics_never_deletes_active_topics(tmp_path: Path):
+    db_path = str(tmp_path / "delete-archived-topics.db")
+    space_id = await _register_timeline(
+        db_path, memory_uid="timeline-archive", document_id=1
+    )
+    await _register_timeline(
+        db_path, memory_uid="timeline-active", document_id=2
+    )
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    archived = TopicMemory(
+        topic_uid="topic-archived",
+        memory_space_id=space_id,
+        title="Archived",
+        summary="Archived summary",
+    )
+    active = TopicMemory(
+        topic_uid="topic-active",
+        memory_space_id=space_id,
+        title="Active",
+        summary="Active summary",
+    )
+    fragment = TopicFragmentDraft(
+        fragment_uid="fragment-to-delete",
+        run_uid="run-delete",
+        candidate_group_uid="group-delete",
+        memory_space_id=space_id,
+        label="Archived fragment",
+        summary="Archived fragment",
+        timeline_uids=["timeline-archive"],
+        source_revisions={"timeline-archive": 1},
+        facts=[],
+    )
+    await store.save_topic_snapshot(
+        archived,
+        atoms=[],
+        links=[TopicTimelineLink(topic_uid=archived.topic_uid, timeline_uid="timeline-archive", time_cluster_key="archive")],
+        atom_sources=[],
+        fragments=[fragment],
+    )
+    await store.save_topic_snapshot(
+        active,
+        atoms=[],
+        links=[TopicTimelineLink(topic_uid=active.topic_uid, timeline_uid="timeline-active", time_cluster_key="active")],
+        atom_sources=[],
+    )
+    await store.archive_topic_uids_not_in(space_id, {archived.topic_uid}, set())
+
+    deleted = await store.delete_archived_topics(
+        space_id, [archived.topic_uid, active.topic_uid]
+    )
+
+    assert deleted == 1
+    assert await store.get_topic(archived.topic_uid) is None
+    assert (await store.get_topic(active.topic_uid)).status is TopicMemoryStatus.ACTIVE
+    async with aiosqlite.connect(db_path) as db:
+        orphan = await (
+            await db.execute(
+                "SELECT 1 FROM topic_fragments WHERE fragment_uid = ?",
+                (fragment.fragment_uid,),
+            )
+        ).fetchone()
+    assert orphan is None
 
 
 @pytest.mark.asyncio

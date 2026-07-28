@@ -226,6 +226,18 @@
             </div>
             <div id="topic-progress" class="system-panel hidden mb-4"></div>
             <div class="topic-list-toolbar">
+              <div class="topic-status-filters">
+                <label class="topic-status-filter">
+                  <span data-i18n="topic.statusFilter">状态</span>
+                  <select id="topic-status-filter" class="select input input-sm">
+                    <option value="active" data-i18n="topic.statusActive">活跃</option>
+                    <option value="archived" data-i18n="topic.statusArchived">已归档</option>
+                    <option value="stale" data-i18n="topic.statusStale">待同步</option>
+                    <option value="error" data-i18n="topic.statusError">错误</option>
+                    <option value="all" data-i18n="topic.statusAll">全部</option>
+                  </select>
+                </label>
+              </div>
               <div class="topic-list-filter">
                 <span data-i18n="topic.actorFilter">按人物筛选</span>
                 <div class="topic-actor-filter-control">
@@ -333,6 +345,10 @@
                   <div><strong data-i18n="maintenance.governanceTitle">Topic 拆分 / 合并</strong><p data-i18n="maintenance.governanceIntro">按正式片段预览并执行 Topic 合并或拆分，操作失败时保持原数据不变。</p></div>
                   <button class="btn btn-secondary" id="maintenance-open-governance" type="button" data-i18n="maintenance.governance">拆分 / 合并</button>
                 </div>
+                <div class="maintenance-topic-action-row">
+                  <div><strong data-i18n="maintenance.archivedTopicsTitle">已归档 Topic</strong><p data-i18n="maintenance.archivedTopicsIntro">查看已退出召回的 Topic，并永久清理确认不再需要的派生数据。</p></div>
+                  <button class="btn btn-secondary" id="maintenance-open-archived-topics" type="button" data-i18n="maintenance.manageArchived">查看 / 清理</button>
+                </div>
                 <div class="maintenance-topic-action-row maintenance-topic-action-danger">
                   <div><strong data-i18n="topic.clearTopicsTitle">清空 Topic 记忆</strong><p data-i18n="topic.clearTopicsIntro">永久删除当前空间的全部 Topic、正式片段、人物索引、关系和构建断点，不影响 Timeline 记忆。</p></div>
                   <button class="btn btn-danger" id="topic-clear-topics" type="button" data-i18n="topic.clearTopics">清空</button>
@@ -352,10 +368,13 @@
                     <option value="low" data-i18n="maintenance.lowQualityOnly">仅低质量</option>
                   </select>
                   <button class="btn btn-primary btn-sm" id="timeline-rebuild-preview" type="button" data-i18n="maintenance.detectRebuildable">检测可重构项</button>
+                  <button class="btn btn-secondary btn-sm" id="timeline-inactive-open" type="button" data-i18n="maintenance.inactiveTimelines">不活跃 Timeline</button>
+                  <button class="btn btn-secondary btn-sm maintenance-count-button" id="timeline-staged-open" type="button"><span data-i18n="maintenance.stagedEdits">查看暂存修改</span><span class="maintenance-action-count" id="timeline-staged-count">0</span></button>
                 </div>
               </div>
               <div id="timeline-rebuild-summary" class="text-secondary"></div>
               <div class="timeline-rebuild-options hidden" id="timeline-rebuild-options">
+                <button class="btn btn-secondary" id="timeline-rebuild-select-all" type="button" data-i18n="common.selectAll">全选</button>
                 <label>
                   <span data-i18n="maintenance.topicSyncMode">Topic 同步方式</span>
                   <select id="timeline-rebuild-topic-mode" class="select input input-sm">

@@ -60,6 +60,8 @@ class FakeMemoryEngine:
         self.memories = memories
         self.topic_build_manager = FakeTopicBuilder()
         self.rewrites = []
+        self.updates = []
+        self.maintenance_calls = []
 
     async def get_memory(self, memory_id):
         return self.memories.get(memory_id)
@@ -80,6 +82,28 @@ class FakeMemoryEngine:
         }
         self.rewrites.append((memory_id, kwargs))
         return memory_id
+
+    async def update_memory(self, memory_id, updates):
+        if memory_id not in self.memories:
+            return False
+        self.memories[memory_id]["metadata"].update(updates.get("metadata", {}))
+        self.updates.append((memory_id, updates))
+        return True
+
+    def _schedule_topic_maintenance(self, memory_space_id, **kwargs):
+        self.maintenance_calls.append((memory_space_id, kwargs))
+
+
+class BlockingMemoryEngine(FakeMemoryEngine):
+    def __init__(self, memories):
+        super().__init__(memories)
+        self.write_started = asyncio.Event()
+        self.release_write = asyncio.Event()
+
+    async def rewrite_memory_in_place(self, memory_id, **kwargs):
+        self.write_started.set()
+        await self.release_write.wait()
+        return await super().rewrite_memory_in_place(memory_id, **kwargs)
 
 
 async def create_source_db(path, *, complete=True, linked=True):
@@ -129,6 +153,20 @@ async def create_source_db(path, *, complete=True, linked=True):
         await db.commit()
 
 
+async def add_second_timeline(path, *, linked=True):
+    now = time.time()
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            "INSERT INTO memory_registry VALUES (?, ?, 'timeline', ?, 1, 'active', ?, ?)",
+            ("memory-2", 2, "space-1", now, now),
+        )
+        if linked:
+            await db.execute(
+                "INSERT INTO topic_timeline_links VALUES ('topic-2', 'memory-2', 'active')"
+            )
+        await db.commit()
+
+
 def source_messages():
     return [
         Message(10, "bot:FriendMessage:user", "user", "第一条", "user", "用户", platform="qq"),
@@ -162,6 +200,26 @@ def source_memory():
     }
 
 
+def second_source_memory():
+    memory = source_memory()
+    memory["id"] = 2
+    memory["text"] = "第二条旧 Timeline"
+    memory["metadata"] = dict(memory["metadata"])
+    memory["metadata"]["memory_uid"] = "memory-2"
+    return memory
+
+
+def staged_payload(memory, content):
+    metadata = dict(memory["metadata"])
+    return {
+        "content": content,
+        "metadata": metadata,
+        "importance": 0.8,
+        "session_id": metadata["session_id"],
+        "persona_id": metadata["persona_id"],
+    }
+
+
 async def wait_task(manager, task_uid):
     for _ in range(100):
         task = await manager.get_task(task_uid)
@@ -183,6 +241,67 @@ async def test_preview_blocks_partial_source_span(tmp_path):
     preview = await manager.preview([1])
     assert preview["reconstructable_count"] == 0
     assert "完整的原始消息 ID 边界" in preview["items"][0]["blocked_reasons"][0]
+
+
+@pytest.mark.asyncio
+async def test_inactive_timeline_listing_and_restore_are_space_scoped(tmp_path):
+    db_path = tmp_path / "inactive.db"
+    now = time.time()
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(
+            """
+            CREATE TABLE documents (id INTEGER PRIMARY KEY, text TEXT, metadata TEXT);
+            CREATE TABLE memory_registry (
+                memory_uid TEXT PRIMARY KEY, document_id INTEGER,
+                memory_layer TEXT, memory_space_id TEXT, revision INTEGER,
+                status TEXT, created_at REAL, updated_at REAL
+            );
+            CREATE TABLE topic_timeline_links (
+                topic_uid TEXT, timeline_uid TEXT, status TEXT
+            );
+            """
+        )
+        await db.executemany(
+            "INSERT INTO documents VALUES (?, ?, ?)",
+            [
+                (1, "已归档 Timeline", '{"summary_quality":"low"}'),
+                (2, "其他空间 Timeline", '{}'),
+                (3, "仍活跃 Timeline", '{}'),
+            ],
+        )
+        await db.executemany(
+            "INSERT INTO memory_registry VALUES (?, ?, 'timeline', ?, 1, ?, ?, ?)",
+            [
+                ("memory-1", 1, "space-1", "archived", now, now),
+                ("memory-2", 2, "space-2", "archived", now, now),
+                ("memory-3", 3, "space-1", "active", now, now),
+            ],
+        )
+        await db.execute(
+            "INSERT INTO topic_timeline_links VALUES ('topic-1', 'memory-1', 'active')"
+        )
+        await db.commit()
+    memory = source_memory()
+    memory["text"] = "已归档 Timeline"
+    memory["metadata"]["status"] = "archived"
+    engine = FakeMemoryEngine({1: memory})
+    manager = TimelineRebuildManager(
+        str(db_path), FakeConversationManager([]), engine, FakeProcessor()
+    )
+    await manager.initialize()
+
+    items = await manager.list_inactive_timelines("space-1")
+
+    assert [item["memory_id"] for item in items] == [1]
+    assert items[0]["topic_count"] == 1
+    assert items[0]["summary_quality"] == "low"
+    restored = await manager.restore_inactive_timelines("space-1", [1, 2])
+    assert restored["restored_count"] == 1
+    assert restored["failed_ids"] == [2]
+    assert engine.updates == [(1, {"metadata": {"status": "active"}})]
+    assert engine.maintenance_calls == [
+        ("space-1", {"full": False, "timeline_uids": ["memory-1"]})
+    ]
 
 
 @pytest.mark.asyncio
@@ -288,3 +407,99 @@ async def test_failed_rebuild_is_resumable_without_changing_id(tmp_path):
     assert completed["status"] == "completed"
     assert engine.memories[1]["id"] == 1
     assert engine.memories[1]["text"] == "重构后的 Timeline"
+
+
+@pytest.mark.asyncio
+async def test_staged_edits_do_not_write_until_batch_apply_and_sync_once(tmp_path):
+    db_path = tmp_path / "memory.db"
+    await create_source_db(db_path)
+    await add_second_timeline(db_path)
+    memories = {1: source_memory(), 2: second_source_memory()}
+    engine = FakeMemoryEngine(memories)
+    manager = TimelineRebuildManager(
+        str(db_path), FakeConversationManager(source_messages()), engine, FakeProcessor()
+    )
+    await manager.initialize()
+
+    first = await manager.stage_edit(
+        memory_id=1,
+        prepared_payload=staged_payload(memories[1], "暂存后的 Timeline 一"),
+    )
+    second = await manager.stage_edit(
+        memory_id=2,
+        prepared_payload=staged_payload(memories[2], "暂存后的 Timeline 二"),
+    )
+
+    assert engine.rewrites == []
+    assert engine.memories[1]["text"] == "旧 Timeline"
+    assert {item["edit_uid"] for item in await manager.list_staged_edits()} == {
+        first["edit_uid"],
+        second["edit_uid"],
+    }
+
+    started = await manager.start_staged_task(
+        [first["edit_uid"], second["edit_uid"]], topic_mode="local"
+    )
+    finished = await wait_task(manager, started["task_uid"])
+
+    assert finished["status"] == "completed"
+    assert [memory_id for memory_id, _ in engine.rewrites] == [1, 2]
+    assert engine.memories[1]["text"] == "暂存后的 Timeline 一"
+    assert engine.memories[2]["text"] == "暂存后的 Timeline 二"
+    assert len(engine.topic_build_manager.calls) == 1
+    assert engine.topic_build_manager.calls[0][1]["timeline_uids"] == [
+        "memory-1",
+        "memory-2",
+    ]
+    assert await manager.list_staged_edits() == []
+
+
+@pytest.mark.asyncio
+async def test_staged_edit_can_be_deleted_without_writing(tmp_path):
+    db_path = tmp_path / "memory.db"
+    await create_source_db(db_path)
+    memory = source_memory()
+    engine = FakeMemoryEngine({1: memory})
+    manager = TimelineRebuildManager(
+        str(db_path), FakeConversationManager(source_messages()), engine, FakeProcessor()
+    )
+    await manager.initialize()
+    staged = await manager.stage_edit(
+        memory_id=1,
+        prepared_payload=staged_payload(memory, "不会应用的内容"),
+    )
+
+    assert await manager.delete_staged_edits([staged["edit_uid"]]) == 1
+    assert await manager.list_staged_edits() == []
+    assert engine.rewrites == []
+
+
+@pytest.mark.asyncio
+async def test_cancelling_after_staged_timeline_write_stops_before_topic_sync(tmp_path):
+    db_path = tmp_path / "memory.db"
+    await create_source_db(db_path)
+    memory = source_memory()
+    engine = BlockingMemoryEngine({1: memory})
+    manager = TimelineRebuildManager(
+        str(db_path), FakeConversationManager(source_messages()), engine, FakeProcessor()
+    )
+    await manager.initialize()
+    staged = await manager.stage_edit(
+        memory_id=1,
+        prepared_payload=staged_payload(memory, "已应用但尚未同步 Topic"),
+    )
+
+    started = await manager.start_staged_task([staged["edit_uid"]])
+    await asyncio.wait_for(engine.write_started.wait(), timeout=2)
+    with pytest.raises(ValueError, match="正在执行维护任务"):
+        await manager.stage_edit(
+            memory_id=1,
+            prepared_payload=staged_payload(memory, "不应在任务中重复暂存"),
+        )
+    assert await manager.cancel_task(started["task_uid"]) is True
+    engine.release_write.set()
+    finished = await wait_task(manager, started["task_uid"])
+
+    assert finished["status"] == "cancelled"
+    assert engine.memories[1]["text"] == "已应用但尚未同步 Topic"
+    assert engine.topic_build_manager.calls == []

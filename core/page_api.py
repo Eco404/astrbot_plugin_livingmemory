@@ -142,6 +142,12 @@ class PluginPageApi:
             "LivingMemory Page update memory",
         )
         register(
+            f"{PAGE_API_PREFIX}/memories/update/stage",
+            self.stage_memory_update,
+            ["POST"],
+            "LivingMemory Page stage Timeline edit",
+        )
+        register(
             f"{PAGE_API_PREFIX}/memories/related",
             self.detect_related_memories,
             ["POST"],
@@ -230,6 +236,36 @@ class PluginPageApi:
             self.clear_timeline_rebuild_tasks,
             ["POST"],
             "LivingMemory Page clear Timeline reconstruction tasks",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/staged-edits",
+            self.list_timeline_staged_edits,
+            ["GET"],
+            "LivingMemory Page staged Timeline edits",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/staged-edits/apply",
+            self.apply_timeline_staged_edits,
+            ["POST"],
+            "LivingMemory Page apply staged Timeline edits",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/staged-edits/delete",
+            self.delete_timeline_staged_edits,
+            ["POST"],
+            "LivingMemory Page delete staged Timeline edits",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/inactive",
+            self.list_inactive_timelines,
+            ["GET"],
+            "LivingMemory Page inactive Timeline memories",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/timeline/inactive/restore",
+            self.restore_inactive_timelines,
+            ["POST"],
+            "LivingMemory Page restore inactive Timeline memories",
         )
         register(
             f"{PAGE_API_PREFIX}/settings",
@@ -406,6 +442,12 @@ class PluginPageApi:
             "LivingMemory Page clear Topic memories",
         )
         register(
+            f"{PAGE_API_PREFIX}/topics/archived/delete",
+            self.delete_archived_topics,
+            ["POST"],
+            "LivingMemory Page permanently delete archived Topics",
+        )
+        register(
             f"{PAGE_API_PREFIX}/topics/build/start",
             self.start_topic_build,
             ["POST"],
@@ -546,6 +588,16 @@ class PluginPageApi:
             ready["memory_engine"], ready["memory_processor"]
         )
 
+    async def stage_memory_update(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.memory_handler.stage_memory_update(
+            ready["memory_engine"],
+            ready["memory_processor"],
+            ready["timeline_rebuild_manager"],
+        )
+
     async def detect_related_memories(self):
         """检测所选会话或人格范围内的关联记忆。"""
         ready, error = await self._ensure_plugin_ready()
@@ -658,6 +710,46 @@ class PluginPageApi:
         if error:
             return error
         return await self.timeline_handler.clear_rebuild_tasks(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def list_timeline_staged_edits(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.list_staged_edits(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def apply_timeline_staged_edits(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.apply_staged_edits(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def delete_timeline_staged_edits(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.delete_staged_edits(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def list_inactive_timelines(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.list_inactive(
+            ready["timeline_rebuild_manager"]
+        )
+
+    async def restore_inactive_timelines(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.timeline_handler.restore_inactive(
             ready["timeline_rebuild_manager"]
         )
 
@@ -861,6 +953,14 @@ class PluginPageApi:
         if error:
             return error
         return await self.topic_handler.clear_topics(ready["memory_engine"])
+
+    async def delete_archived_topics(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.topic_handler.delete_archived_topics(
+            ready["memory_engine"]
+        )
 
     async def list_models(self):
         """列出插件运行时实际使用的模型，包括默认回退来源。"""

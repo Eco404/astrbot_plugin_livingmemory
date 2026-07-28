@@ -263,6 +263,7 @@ export class PeekPanel {
 
     html += '<div class="memory-detail-actions">';
     html += '<button class="btn btn-sm btn-primary" id="peek-save-btn">' + window.t("detail.saveBtn") + '</button>';
+    html += '<button class="btn btn-sm btn-secondary" id="peek-stage-btn">' + window.t("detail.stageBtn") + '</button>';
     html += '<button class="btn btn-sm btn-ghost" id="peek-cancel-btn">' + window.t("detail.cancelBtn") + '</button>';
     html += '</div>';
 
@@ -339,8 +340,10 @@ export class PeekPanel {
     });
 
     const saveBtn = document.getElementById("peek-save-btn");
+    const stageBtn = document.getElementById("peek-stage-btn");
     const cancelBtn = document.getElementById("peek-cancel-btn");
     if (saveBtn) saveBtn.addEventListener("click", () => this.saveEdit(detail));
+    if (stageBtn) stageBtn.addEventListener("click", () => this.stageEdit(detail, stageBtn));
     if (cancelBtn) cancelBtn.addEventListener("click", () => this.renderDetailView(detail));
   }
 
@@ -416,6 +419,12 @@ export class PeekPanel {
    * @param {Object} detail - 原始记忆详情
    */
   async saveEdit(detail) {
+    const updatePayload = this.collectEditPayload(detail);
+    if (!updatePayload) return;
+    this.openSaveDialog(updatePayload);
+  }
+
+  collectEditPayload(detail) {
     const newContent = document.getElementById("edit-content-area").value.trim();
     const topicEdit = this.collectEditableMemoryItems("edit-topics-list", "topics");
     const factEdit = this.collectEditableMemoryItems("edit-key-facts-list", "key_facts");
@@ -429,10 +438,9 @@ export class PeekPanel {
     const reason = document.getElementById("peek-edit-reason").value.trim();
     if (!newContent) {
       this.showToast(window.t("detail.contentRequired"), true);
-      return;
+      return null;
     }
-
-    this.openSaveDialog({
+    return {
       memory_id: detail.memory_id,
       value: {
         summary: newContent,
@@ -448,7 +456,26 @@ export class PeekPanel {
       },
       field_changes: topicEdit.changes.concat(factEdit.changes),
       reason: reason
-    });
+    };
+  }
+
+  async stageEdit(detail, button) {
+    const updatePayload = this.collectEditPayload(detail);
+    if (!updatePayload) return;
+    button.disabled = true;
+    try {
+      const result = await this.api.post("memories/update/stage", {
+        ...updatePayload,
+        field: "structured",
+        update_mode: "in_place"
+      });
+      this.showToast(result.message || window.t("detail.staged"));
+      this.close();
+      window.dispatchEvent(new CustomEvent("livingmemory:timeline-staged-updated"));
+    } catch (error) {
+      this.showToast(error.message || window.t("edit.updateFailed"), true);
+      button.disabled = false;
+    }
   }
 
   openSaveDialog(updatePayload) {

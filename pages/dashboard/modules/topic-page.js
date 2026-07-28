@@ -27,13 +27,20 @@ export class TopicPage {
     this.settingsResetAll = false;
     this.actorFilter = "";
     this.actorCatalog = [];
+    this.statusFilter = "active";
   }
 
   initEventListeners() {
     document.getElementById("topic-refresh")?.addEventListener("click", () => this.fetch());
     document.getElementById("topic-space")?.addEventListener("change", () => {
       this.actorFilter = "";
+      this.statusFilter = "active";
+      this.syncStatusFilterControls();
       this.fetch();
+    });
+    document.getElementById("topic-status-filter")?.addEventListener("change", event => {
+      this.statusFilter = event.currentTarget.value || "active";
+      this.fetchTopics();
     });
     document.getElementById("topic-actor-filter")?.addEventListener("click", event => {
       event.stopPropagation();
@@ -125,6 +132,11 @@ export class TopicPage {
     return document.getElementById("topic-space")?.value || "";
   }
 
+  syncStatusFilterControls() {
+    const select = document.getElementById("topic-status-filter");
+    if (select) select.value = this.statusFilter;
+  }
+
   actorFilterIsOpen() {
     return !document.getElementById("topic-actor-filter-menu")?.classList.contains("hidden");
   }
@@ -188,6 +200,8 @@ export class TopicPage {
       this.renderOverview(data);
       await this.fetchTopics();
     } catch (e) {
+      const body = document.getElementById("topics-body");
+      if (body) body.innerHTML = `<tr><td colspan="6" class="table-empty table-empty-error">${esc(window.t("topic.loadFailed"))}</td></tr>`;
       this.showToast(e.message || "Topic 数据加载失败", true);
     }
   }
@@ -270,9 +284,11 @@ export class TopicPage {
       const data = await this.api.get("topics", {
         memory_space_id: space,
         actor_id: this.actorFilter,
+        status: this.statusFilter,
         limit: 200,
       });
       const items = data.items || [];
+      const spaceTotal = Math.max(0, Number(data.space_total ?? this.topicCount));
       this.actorCatalog = data.actors || [];
       if (this.actorFilter && !this.actorCatalog.some(actor => actor.actor_id === this.actorFilter)) this.actorFilter = "";
       this.updateActorFilterLabel();
@@ -285,7 +301,7 @@ export class TopicPage {
           <td>${Number(item.importance || 0).toFixed(2)}</td>
           <td>${item.support?.time_cluster_count || 0} / ${item.support?.timeline_count || 0}</td>
           <td>r${item.revision}</td>
-      </tr>`).join("") : `<tr><td colspan="6" class="table-empty">${esc(window.t("topic.empty"))}</td></tr>`;
+      </tr>`).join("") : `<tr><td colspan="6" class="table-empty">${esc(window.t(spaceTotal > 0 ? "topic.emptyFiltered" : "topic.emptySpace"))}</td></tr>`;
       body.querySelectorAll(".topic-row").forEach(row => {
         row.addEventListener("click", () => this.showDetail(row.dataset.topicUid));
         row.addEventListener("keydown", event => {
@@ -295,7 +311,8 @@ export class TopicPage {
         });
       });
     } catch (e) {
-      body.innerHTML = `<tr><td colspan="6" class="table-empty">${esc(e.message)}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="6" class="table-empty table-empty-error">${esc(window.t("topic.loadFailed"))}</td></tr>`;
+      this.showToast(e.message || window.t("topic.loadFailed"), true);
     }
   }
 
@@ -1167,10 +1184,10 @@ export class TopicPage {
     try {
       const job = await this.api.get("topics/build/progress", { job_uid: jobUid });
       this.renderProgress(job);
-      if (["completed", "failed", "cancelled"].includes(job.status)) {
+      if (["completed", "completed_with_review", "failed", "cancelled"].includes(job.status)) {
         this.stopPolling();
         this.setBuildButtonsDisabled(!this.currentSpace() || !this.buildEnabled);
-        if (job.status === "completed" || job.reset_topics) {
+        if (["completed", "completed_with_review"].includes(job.status) || job.reset_topics) {
           await this.fetch();
           window.dispatchEvent(new CustomEvent("livingmemory:topic-maintenance-updated", {
             detail: { memory_space_id: job.memory_space_id || this.currentSpace() },

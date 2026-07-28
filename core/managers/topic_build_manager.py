@@ -1246,12 +1246,15 @@ class TopicBuildManager:
                         total_batches=total_batches,
                     )
                     results.append(result)
-                await self._resolve_maintenance_reviews_safely(
-                    memory_space_id,
-                    timeline_uids=selected,
-                )
                 return {
-                    "status": "completed",
+                    "status": (
+                        "completed_with_review"
+                        if any(
+                            item.get("status") == "completed_with_review"
+                            for item in results
+                        )
+                        else "completed"
+                    ),
                     "memory_space_id": memory_space_id,
                     "batch_count": total_batches,
                     "run_uids": [item["run_uid"] for item in results],
@@ -1259,6 +1262,13 @@ class TopicBuildManager:
                     "fragment_count": sum(item.get("fragment_count", 0) for item in results),
                     "topic_count": sum(item.get("topic_count", 0) for item in results),
                     "topics": [topic for item in results for topic in item.get("topics", [])],
+                    "component_outcomes": {
+                        component_uid: outcome
+                        for item in results
+                        for component_uid, outcome in (
+                            item.get("component_outcomes") or {}
+                        ).items()
+                    },
                     "pipeline": "bounded_delta_batches",
                 }
             return await self._build_space_locked(
@@ -1386,7 +1396,10 @@ class TopicBuildManager:
             if run is None:
                 raise ValueError(f"Topic maintenance run not found: {run_uid}")
             status = str(run.get("status") or "")
-            if status == TopicMaintenanceStatus.COMPLETED.value:
+            if status in {
+                TopicMaintenanceStatus.COMPLETED.value,
+                TopicMaintenanceStatus.COMPLETED_WITH_REVIEW.value,
+            }:
                 raise ValueError("Completed Topic maintenance runs cannot be resumed")
             stage = str(run.get("stage") or "candidate_scan")
             groups = await self.store.list_candidate_groups(run_uid)
@@ -1548,6 +1561,8 @@ class TopicBuildManager:
                 and seed_timeline_uids
             )
             used_existing: set[str] = set()
+            component_outcomes: dict[str, dict[str, Any]] = {}
+            pending_review_topic_uids: set[str] = set()
             component_fragment_sets = [
                 [fragments[index] for index in component]
                 for component in components
@@ -1639,6 +1654,7 @@ class TopicBuildManager:
                 1,
             ):
                 component_fragments = list(initial_fragments)
+                component_uid = self._component_uid(component_fragments)
                 match_pool = existing
                 if run_mode is TopicMaintenanceMode.INCREMENTAL:
                     match_pool = await self._incremental_existing_candidates(
@@ -1656,6 +1672,10 @@ class TopicBuildManager:
                     incremental=(run_mode is TopicMaintenanceMode.INCREMENTAL),
                 )
                 if ambiguous:
+                    review_topic_uids = [
+                        item[1].topic_uid for item in match_scores[:2]
+                    ]
+                    pending_review_topic_uids.update(review_topic_uids)
                     await self.store.enqueue_maintenance_review(
                         memory_space_id=memory_space_id,
                         review_type="ambiguous_topic_match",
@@ -1666,8 +1686,10 @@ class TopicBuildManager:
                                 for uid in fragment.timeline_uids
                             }
                         ),
-                        topic_uids=[item[1].topic_uid for item in match_scores[:2]],
+                        topic_uids=review_topic_uids,
+                        component_uid=component_uid,
                         details={
+                            "component_uid": component_uid,
                             "run_uid": run_uid,
                             "fragment_uids": [
                                 fragment.fragment_uid
@@ -1681,6 +1703,13 @@ class TopicBuildManager:
                             ],
                         },
                     )
+                    component_outcomes[component_uid] = {
+                        "status": "pending_review",
+                        "fragment_uids": self._component_fragment_uids(
+                            component_fragments
+                        ),
+                        "topic_uids": review_topic_uids,
+                    }
                     # Do not publish a duplicate Topic merely because the local
                     # match is ambiguous. With no active link the Timeline stays
                     # eligible for a later confirmed/full maintenance run.
@@ -1698,6 +1727,13 @@ class TopicBuildManager:
                         and matched.topic_uid in seed_topic_uids
                     )
                 ):
+                    component_outcomes[component_uid] = {
+                        "status": "retained_old",
+                        "reason": "outside_incremental_seed_scope",
+                        "fragment_uids": self._component_fragment_uids(
+                            component_fragments
+                        ),
+                    }
                     continue
                 if matched is not None and run_mode is TopicMaintenanceMode.INCREMENTAL:
                     existing_fragment = await self._existing_topic_fragment(
@@ -1742,8 +1778,14 @@ class TopicBuildManager:
                         "matched": matched,
                         "fragments": component_fragments,
                         "synthesis": synthesis,
+                        "component_uid": component_uid,
                     }
                 )
+                component_outcomes[component_uid] = {
+                    "status": "published_update" if matched else "published_create",
+                    "fragment_uids": self._component_fragment_uids(initial_fragments),
+                    "topic_uids": [matched.topic_uid] if matched else [],
+                }
                 if matched:
                     used_existing.add(matched.topic_uid)
                 await self.store.update_maintenance_run(
@@ -1868,6 +1910,16 @@ class TopicBuildManager:
                                 if any(uid in key for uid in fragment_uids)
                             },
                             "llm_output": plan["synthesis"],
+                            "metadata": {
+                                "component_uid": str(
+                                    plan.get("component_uid") or ""
+                                ),
+                                "component_outcome": (
+                                    "published_update"
+                                    if matched
+                                    else "published_create"
+                                ),
+                            },
                         },
                     },
                 )
@@ -1885,7 +1937,23 @@ class TopicBuildManager:
                     len(plans),
                 )
 
+            expected_component_uids = {
+                self._component_uid(items) for items in component_fragment_sets
+            }
+            missing_component_uids = sorted(
+                expected_component_uids - component_outcomes.keys()
+            )
+            if missing_component_uids:
+                raise TopicBuildValidationError(
+                    "Topic component coverage incomplete: "
+                    + ", ".join(missing_component_uids[:8])
+                )
+
             publication_affected_topic_uids = set(affected_topic_uids)
+            if run_mode is TopicMaintenanceMode.INCREMENTAL:
+                # An unresolved component cannot authorize archiving any of its
+                # candidate Topics. Keep their current snapshots until reviewed.
+                publication_affected_topic_uids -= pending_review_topic_uids
             relation_scope_topic_uids: set[str] | None = None
             if run_mode is TopicMaintenanceMode.INCREMENTAL:
                 relation_scope_topic_uids = {
@@ -1923,6 +1991,38 @@ class TopicBuildManager:
                 item_kind="topic_generation",
                 topic_count=len(snapshots),
             )
+            completion_status = (
+                TopicMaintenanceStatus.COMPLETED_WITH_REVIEW
+                if any(
+                    outcome.get("status") == "pending_review"
+                    for outcome in component_outcomes.values()
+                )
+                else TopicMaintenanceStatus.COMPLETED
+            )
+            additional_decisions = [
+                {
+                    "decision_uid": str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"livingmemory:topic-build:{run_uid}:{component_uid}",
+                        )
+                    ),
+                    "topic_uid": (
+                        (outcome.get("topic_uids") or [None])[0]
+                    ),
+                    "action": str(outcome.get("status") or "unknown"),
+                    "fragment_uids": list(outcome.get("fragment_uids") or []),
+                    "candidate_scores": {},
+                    "llm_output": {},
+                    "metadata": {
+                        "component_uid": component_uid,
+                        "reason": str(outcome.get("reason") or ""),
+                        "topic_uids": list(outcome.get("topic_uids") or []),
+                    },
+                }
+                for component_uid, outcome in component_outcomes.items()
+                if not str(outcome.get("status") or "").startswith("published_")
+            ]
             publication = await self.store.publish_topic_build(
                 run_uid=run_uid,
                 memory_space_id=memory_space_id,
@@ -1932,21 +2032,19 @@ class TopicBuildManager:
                 affected_topic_uids=publication_affected_topic_uids,
                 reset_topics=reset_topics,
                 relation_scope_topic_uids=relation_scope_topic_uids,
+                sync_pending_topic_uids=pending_review_topic_uids,
+                additional_decisions=additional_decisions,
+                completion_status=completion_status,
             )
-            published_timeline_uids = {
-                link.timeline_uid
-                for snapshot in snapshots
-                for link in snapshot["links"]
-            }
-            resolved_timeline_uids = (
-                published_timeline_uids
-                if run_mode is TopicMaintenanceMode.FULL
-                else published_timeline_uids & seed_timeline_uids
-            )
-            if resolved_timeline_uids:
+            published_component_uids = [
+                component_uid
+                for component_uid, outcome in component_outcomes.items()
+                if str(outcome.get("status") or "").startswith("published_")
+            ]
+            if published_component_uids:
                 await self._resolve_maintenance_reviews_safely(
                     memory_space_id,
-                    timeline_uids=sorted(resolved_timeline_uids),
+                    component_uids=published_component_uids,
                 )
             if self.vector_index is not None:
                 self.vector_index.invalidate(memory_space_id)
@@ -1974,7 +2072,7 @@ class TopicBuildManager:
                 )
             return {
                 "run_uid": run_uid,
-                "status": "completed",
+                "status": completion_status.value,
                 "memory_space_id": memory_space_id,
                 "timeline_count": len(candidates),
                 "fragment_count": len(fragments),
@@ -1984,6 +2082,7 @@ class TopicBuildManager:
                 "topics": built,
                 "related_topic_count": publication["relation_count"],
                 "rerank_used": self.rerank_provider is not None,
+                "component_outcomes": component_outcomes,
                 **(
                     {"reset": publication["reset"]}
                     if publication.get("reset") is not None
@@ -4649,9 +4748,35 @@ class TopicBuildManager:
         incremental: bool = False,
     ) -> tuple[TopicMemory | None, list[tuple[float, TopicMemory]], bool]:
         source_uids = {uid for item in fragments for uid in item.timeline_uids}
+        incoming_fingerprints = {
+            str(value)
+            for fragment in fragments
+            for fact in fragment.facts
+            for value in fact.get("source_atom_fingerprints", [])
+            if str(value)
+        }
+        incoming_actors = {
+            str(ref.get("actor_id") or ref.get("actor_ref") or "")
+            for fragment in fragments
+            for key in ("participant_refs", "mentioned_actor_refs")
+            for ref in fragment.metadata.get(key, [])
+            if isinstance(ref, dict)
+            and str(ref.get("actor_id") or ref.get("actor_ref") or "")
+        }
         ranked: list[tuple[float, TopicMemory]] = []
         target_vector = self._average_vectors([item.embedding for item in fragments])
+        incoming_terms = {
+            self._norm(value)
+            for value in [
+                synthesis.get("title"),
+                *(synthesis.get("keywords") or []),
+            ]
+            if self._norm(value)
+        }
+        provenance_loader = getattr(self.store, "get_topic_provenance", None)
         for topic in existing:
+            if topic.topic_uid in used:
+                continue
             metadata = topic.metadata
             previous_sources = set(metadata.get("source_timeline_uids", []))
             overlap = len(source_uids & previous_sources) / max(1, len(source_uids | previous_sources))
@@ -4659,12 +4784,63 @@ class TopicBuildManager:
                 continue
             stored_vector = metadata.get("embedding", [])
             semantic = self._cosine(target_vector, stored_vector) if stored_vector else 0.0
-            title = 1.0 if self._norm(topic.title) == self._norm(synthesis["title"]) else 0.0
-            score = (
-                0.50 * overlap + 0.40 * semantic + 0.10 * title
-                if overlap > 0.0
-                else 0.85 * semantic + 0.15 * title
+            existing_terms = {
+                self._norm(value)
+                for value in [topic.title, *(metadata.get("keywords") or [])]
+                if self._norm(value)
+            }
+            lexical = (
+                len(incoming_terms & existing_terms) / max(1, len(incoming_terms))
+                if incoming_terms
+                else 0.0
             )
+            provenance = (
+                await provenance_loader(topic.topic_uid)
+                if callable(provenance_loader)
+                else {}
+            )
+            existing_fingerprints = {
+                str(row.get("source_atom_fingerprint") or "")
+                for row in provenance.get("atom_sources", [])
+                if str(row.get("source_atom_fingerprint") or "")
+            }
+            continuity = (
+                len(incoming_fingerprints & existing_fingerprints)
+                / len(incoming_fingerprints)
+                if incoming_fingerprints
+                else 0.0
+            )
+            existing_actors = {
+                str(row.get("actor_id") or "")
+                for row in provenance.get("actor_links", [])
+                if str(row.get("actor_id") or "")
+            }
+            actor_affinity = (
+                len(incoming_actors & existing_actors)
+                / max(1, len(incoming_actors | existing_actors))
+                if incoming_actors and existing_actors
+                else 0.0
+            )
+            actor_time = 0.5 * actor_affinity + 0.5 * self._topic_fragment_time_affinity(
+                topic, fragments
+            )
+            if incoming_fingerprints and existing_fingerprints:
+                score = (
+                    0.40 * continuity
+                    + 0.40 * semantic
+                    + 0.10 * lexical
+                    + 0.05 * actor_time
+                    + 0.05 * overlap
+                )
+            else:
+                # Legacy snapshots may not have fact provenance. Fall back to
+                # semantics without allowing a broad shared Timeline to dominate.
+                score = (
+                    0.75 * semantic
+                    + 0.15 * lexical
+                    + 0.05 * actor_time
+                    + 0.05 * overlap
+                )
             ranked.append((score, topic))
         ranked.sort(key=lambda item: (-item[0], item[1].topic_uid))
         threshold = float(
@@ -4677,12 +4853,6 @@ class TopicBuildManager:
         )
         if not ranked or ranked[0][0] < threshold:
             return None, ranked, False
-        if incremental and ranked[0][1].topic_uid in used:
-            review_threshold = max(
-                threshold,
-                float(self.config.get("incremental_topic_review_threshold", 0.72)),
-            )
-            return None, ranked, ranked[0][0] >= review_threshold
         margin = float(self.config.get("incremental_topic_match_margin", 0.04))
         close_candidates = bool(
             incremental
@@ -4703,6 +4873,47 @@ class TopicBuildManager:
             )
             return None, ranked, ranked[1][0] >= review_threshold
         return ranked[0][1], ranked, False
+
+    @classmethod
+    def _component_fragment_uids(
+        cls, fragments: list[TopicFragmentDraft]
+    ) -> list[str]:
+        return sorted(
+            {
+                str(fragment.logical_fragment_uid or fragment.fragment_uid)
+                for fragment in fragments
+            }
+        )
+
+    @classmethod
+    def _component_uid(cls, fragments: list[TopicFragmentDraft]) -> str:
+        identity = "|".join(cls._component_fragment_uids(fragments))
+        return str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"livingmemory:topic-component:{identity}",
+            )
+        )
+
+    @staticmethod
+    def _topic_fragment_time_affinity(
+        topic: TopicMemory, fragments: list[TopicFragmentDraft]
+    ) -> float:
+        starts = [item.started_at for item in fragments if item.started_at is not None]
+        ends = [item.ended_at for item in fragments if item.ended_at is not None]
+        if not starts or not ends or topic.started_at is None or topic.ended_at is None:
+            return 0.0
+        fragment_start = min(float(value) for value in starts)
+        fragment_end = max(float(value) for value in ends)
+        overlap_start = max(float(topic.started_at), fragment_start)
+        overlap_end = min(float(topic.ended_at), fragment_end)
+        if overlap_end < overlap_start:
+            return 0.0
+        union_start = min(float(topic.started_at), fragment_start)
+        union_end = max(float(topic.ended_at), fragment_end)
+        return (overlap_end - overlap_start + 1.0) / max(
+            1.0, union_end - union_start + 1.0
+        )
 
     async def _match_existing_topic(
         self,
@@ -4954,13 +5165,13 @@ class TopicBuildManager:
         self,
         memory_space_id: str,
         *,
-        timeline_uids: list[str],
+        component_uids: list[str],
     ) -> None:
         """Keep optional queue bookkeeping from invalidating a published build."""
         try:
             await self.store.resolve_maintenance_reviews(
                 memory_space_id,
-                timeline_uids=timeline_uids,
+                component_uids=component_uids,
             )
         except asyncio.CancelledError:
             raise
@@ -7522,8 +7733,8 @@ Semantic rules:
    the actor meaning before choosing perspective. A rendering such as
    `对方请<Bot昵称>估算，<Bot昵称>回复了结果` is wrong and must become
    `对方请我估算，我回复了结果`; ordinary text that merely contains the
-   same characters must remain unchanged. An explicit identity fact such as
-   `我说明了自己的名字` also keeps the source name.
+   same characters must remain unchanged. An explicit statement of the
+   assistant's own display name also keeps the source name.
 16. Before returning, verify actor-by-actor that every action, opinion, feeling and
    relationship remains attached to the same source actor. If attribution is unclear,
    preserve the source wording and lower confidence instead of guessing.
@@ -7727,9 +7938,9 @@ Semantic rules:
     not by its persona display name as a third-person subject or object. Keep a persona
     name only when the claim is explicitly about the name itself or preserves a quote.
     Treat assistant names as actor bindings, never as character-level replacement
-    targets. For an assistant named `唯`, rewrite `空雨请唯估算，唯回复了结果`
-    as `空雨请我估算，我回复了结果`, but preserve `唯一方案` and the
-    identity claim `我说明自己是唯` exactly.
+    targets. Rewrite `对方请<Bot昵称>估算，<Bot昵称>回复了结果` as
+    `对方请我估算，我回复了结果`, but preserve unrelated words that merely
+    contain the same characters and explicit claims about the display name itself.
 
 Reference rules:
 - Treat F1, F2, ... as opaque local identifiers.
@@ -8023,12 +8234,121 @@ INPUT:
                 }
                 actor_refs[actor_ref] = normalized
                 actor_payload.append(normalized)
+        actor_ref_by_id = {
+            str(actor.get("actor_id") or ""): actor_ref
+            for actor_ref, actor in actor_refs.items()
+            if str(actor.get("actor_id") or "")
+        }
+        inputs_by_uid = {item.memory_uid: item for item in inputs}
+        for timeline in timelines:
+            timeline_uid = timeline_refs[str(timeline["ref"])]
+            item = inputs_by_uid[timeline_uid]
+            for source_fact in timeline["source_facts"]:
+                source_fact["attribution"] = self._localize_source_attribution(
+                    source_fact.get("attribution"),
+                    item=item,
+                    actor_ref_by_id=actor_ref_by_id,
+                )
+                source_refs[str(source_fact["ref"])]["attribution"] = dict(
+                    source_fact["attribution"]
+                )
         return {
             "supplemental_identity_hints": self._candidate_identity_payload(inputs),
             "conversation_roles": prompt_roles,
             "actor_refs": actor_payload,
             "timelines": timelines,
         }, timeline_refs, source_refs, actor_refs
+
+    def _localize_source_attribution(
+        self,
+        attribution: Any,
+        *,
+        item: TimelineTopicCandidate,
+        actor_ref_by_id: dict[str, str],
+    ) -> dict[str, Any]:
+        """Rebind Timeline-local actor refs to this fragment prompt scope."""
+        if not isinstance(attribution, dict):
+            return {}
+        localized = {
+            key: value
+            for key, value in attribution.items()
+            if key != "subject_refs"
+        }
+        localized_subjects: list[dict[str, Any]] = []
+        for raw_subject in attribution.get("subject_refs", []):
+            if not isinstance(raw_subject, dict):
+                continue
+            raw_ref = str(raw_subject.get("actor_ref") or "").strip()
+            actor_id = str(raw_subject.get("actor_id") or "").strip()
+            normalized_actor_id = self._normalize_source_actor_id(
+                item,
+                actor_id=actor_id,
+                actor_ref=raw_ref,
+            )
+            local_ref = actor_ref_by_id.get(normalized_actor_id, "")
+            if raw_ref in {"none", "unresolved"} and not local_ref:
+                local_ref = raw_ref
+            if not local_ref:
+                local_ref = "unresolved"
+            subject = {
+                "actor_ref": local_ref,
+                "display_name_snapshot": str(
+                    raw_subject.get("display_name_snapshot") or ""
+                ).strip(),
+            }
+            if normalized_actor_id and local_ref not in {"none", "unresolved"}:
+                subject["actor_id"] = normalized_actor_id
+            localized_subjects.append(subject)
+        localized["subject_refs"] = localized_subjects
+        localized["actor_ref_scope"] = "fragment_prompt"
+        return localized
+
+    @staticmethod
+    def _normalize_source_actor_id(
+        item: TimelineTopicCandidate,
+        *,
+        actor_id: str,
+        actor_ref: str,
+    ) -> str:
+        """Resolve a stored Timeline actor into the stable Topic actor namespace."""
+        bindings = item.role_bindings if isinstance(item.role_bindings, dict) else {}
+        if not actor_id and actor_ref in {"", "none", "unresolved"}:
+            return ""
+        source_actor_id = actor_id
+        if not source_actor_id and actor_ref.startswith("A"):
+            try:
+                actor_index = int(actor_ref[1:]) - 1
+            except ValueError:
+                actor_index = -1
+            actors = [
+                actor
+                for actor in bindings.get("actors", [])
+                if isinstance(actor, dict)
+            ]
+            if 0 <= actor_index < len(actors):
+                source_actor_id = str(actors[actor_index].get("actor_id") or "")
+
+        private_scope = TopicBuildManager._private_session_scope(item.session_id)
+        session_platform = private_scope.split("\0", 1)[0] if private_scope else ""
+        narrator_actor_id = str(bindings.get("narrator_actor_id") or "")
+        for actor in bindings.get("actors", []):
+            if not isinstance(actor, dict):
+                continue
+            bound_actor_id = str(actor.get("actor_id") or "").strip()
+            if source_actor_id not in {bound_actor_id, ""}:
+                continue
+            actor_type = str(actor.get("actor_type") or "human")
+            sender_id = str(actor.get("sender_id") or "").strip()
+            if actor_type == "assistant" and item.persona_id:
+                return f"assistant-persona:{item.persona_id}"
+            if sender_id:
+                platform = canonical_platform(actor.get("platform")) or session_platform
+                return stable_actor_id(platform, sender_id, actor_type)
+            if bound_actor_id:
+                return bound_actor_id
+        if source_actor_id and source_actor_id == narrator_actor_id and item.persona_id:
+            return f"assistant-persona:{item.persona_id}"
+        return source_actor_id
 
     def _decode_fragment_refs(
         self,

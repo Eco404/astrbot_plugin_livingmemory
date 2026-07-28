@@ -884,11 +884,20 @@ class TopicMemoryStore:
         reset_topics: bool = False,
         relation_scope_topic_uids: set[str] | None = None,
         review_resolution: dict[str, Any] | None = None,
+        sync_pending_topic_uids: set[str] | None = None,
+        additional_decisions: list[dict[str, Any]] | None = None,
+        completion_status: TopicMaintenanceStatus | str = TopicMaintenanceStatus.COMPLETED,
     ) -> dict[str, Any]:
         """Publish one completed build as a single visible database change."""
         run_uid = str(run_uid or "").strip()
         memory_space_id = str(memory_space_id or "").strip()
         mode = TopicMaintenanceMode(mode)
+        completion_status = TopicMaintenanceStatus(completion_status)
+        if completion_status not in {
+            TopicMaintenanceStatus.COMPLETED,
+            TopicMaintenanceStatus.COMPLETED_WITH_REVIEW,
+        }:
+            raise ValueError("Topic publication requires a completed status")
         if not run_uid or not memory_space_id:
             raise ValueError("run_uid and memory_space_id are required")
         normalized_snapshots: list[dict[str, Any]] = []
@@ -942,6 +951,12 @@ class TopicMemoryStore:
         reset_result = None
         archived_topics = 0
         now = time.time()
+        sync_pending = set(sync_pending_topic_uids or set())
+        # A reset build normally replaces all old Topic data. If any component
+        # still needs review, deleting the old candidate snapshots would make
+        # that review irreversible. Defer the destructive reset and publish as
+        # a full atomic replacement while preserving only the pending Topics.
+        effective_reset = bool(reset_topics and not sync_pending)
 
         async with self._connect() as db:
             try:
@@ -993,7 +1008,7 @@ class TopicMemoryStore:
                                 "Topic review preview is stale; refresh before applying it"
                             )
 
-                if reset_topics:
+                if effective_reset:
                     topic_count = await (
                         await db.execute(
                             "SELECT COUNT(*) FROM topic_memories WHERE memory_space_id = ?",
@@ -1023,6 +1038,13 @@ class TopicMemoryStore:
                     reset_result = {
                         "deleted_topics": int(topic_count[0] if topic_count else 0),
                         "deleted_runs": int(run_count[0] if run_count else 0),
+                    }
+                elif reset_topics:
+                    reset_result = {
+                        "deleted_topics": 0,
+                        "deleted_runs": 0,
+                        "deferred": True,
+                        "reason": "pending_review",
                     }
 
                 for snapshot in normalized_snapshots:
@@ -1057,13 +1079,56 @@ class TopicMemoryStore:
                             },
                         )
 
-                if mode is TopicMaintenanceMode.FULL and not reset_topics:
+                for decision in additional_decisions or []:
+                    await self._record_build_decision_tx(
+                        db,
+                        decision_uid=str(decision["decision_uid"]),
+                        run_uid=run_uid,
+                        topic_uid=(
+                            str(decision["topic_uid"])
+                            if decision.get("topic_uid")
+                            else None
+                        ),
+                        action=str(decision.get("action") or "unknown"),
+                        fragment_uids=list(decision.get("fragment_uids") or []),
+                        candidate_scores=dict(
+                            decision.get("candidate_scores") or {}
+                        ),
+                        llm_output=dict(decision.get("llm_output") or {}),
+                        metadata=dict(decision.get("metadata") or {}),
+                    )
+
+                if mode is TopicMaintenanceMode.FULL and not effective_reset:
                     archived_topics = await self._archive_topics_not_in_tx(
-                        db, memory_space_id, active_uids, now
+                        db,
+                        memory_space_id,
+                        active_uids | sync_pending,
+                        now,
                     )
                 elif affected:
                     archived_topics = await self._archive_topic_uids_not_in_tx(
                         db, memory_space_id, affected, active_uids, now
+                    )
+                for topic_uid in sorted(sync_pending):
+                    row = await (
+                        await db.execute(
+                            "SELECT metadata FROM topic_memories "
+                            "WHERE topic_uid = ? AND memory_space_id = ?",
+                            (topic_uid, memory_space_id),
+                        )
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    metadata = self._decode_json(row["metadata"], {})
+                    metadata["sync_pending"] = {
+                        "reason": "pending_review",
+                        "run_uid": run_uid,
+                        "updated_at": now,
+                    }
+                    await db.execute(
+                        "UPDATE topic_memories SET metadata = ?, updated_at = ? "
+                        "WHERE topic_uid = ? AND memory_space_id = ?",
+                        (self._to_json(metadata), now, topic_uid, memory_space_id),
                     )
                 await self._replace_topic_relations_tx(
                     db,
@@ -1093,13 +1158,15 @@ class TopicMemoryStore:
                 await db.execute(
                     """
                     UPDATE topic_maintenance_runs
-                    SET status = 'completed', stage = 'completed',
+                    SET status = ?, stage = ?,
                         current_group_index = ?, total_groups = ?,
                         created_topics = ?, updated_topics = ?,
                         completed_at = ?, updated_at = ?, error = ''
                     WHERE run_uid = ?
                     """,
                     (
+                        completion_status.value,
+                        completion_status.value,
                         len(saved_topics),
                         len(saved_topics),
                         created_topics,
@@ -1365,13 +1432,21 @@ class TopicMemoryStore:
         )
 
     async def list_topic_actors(
-        self, memory_space_id: str
+        self,
+        memory_space_id: str,
+        *,
+        status: TopicMemoryStatus | str | None = TopicMemoryStatus.ACTIVE,
     ) -> list[dict[str, Any]]:
         """Return stable actors and display-only groups of unresolved mentions."""
+        status_clause = ""
+        params: list[Any] = [memory_space_id]
+        if status is not None:
+            status_clause = " AND t.status = ?"
+            params.append(self._enum_value(status))
         async with self._connect() as db:
             rows = await (
                 await db.execute(
-                    """
+                    f"""
                     SELECT a.actor_id,
                            COALESCE(NULLIF(a.display_name_snapshot, ''), a.actor_id)
                                AS display_name,
@@ -1380,10 +1455,10 @@ class TopicMemoryStore:
                            a.topic_uid
                     FROM topic_actor_links a
                     JOIN topic_memories t ON t.topic_uid = a.topic_uid
-                    WHERE t.memory_space_id = ? AND t.status = 'active'
+                    WHERE t.memory_space_id = ?{status_clause}
                     ORDER BY display_name COLLATE NOCASE, a.actor_id, a.topic_uid
                     """,
-                    (memory_space_id,),
+                    params,
                 )
             ).fetchall()
         actors: dict[str, dict[str, Any]] = {}
@@ -1483,6 +1558,79 @@ class TopicMemoryStore:
                 item["actor_id"],
             ),
         )
+
+    async def count_topics(
+        self,
+        memory_space_id: str,
+        *,
+        status: TopicMemoryStatus | str | None = None,
+    ) -> int:
+        where = "memory_space_id = ?"
+        params: list[Any] = [memory_space_id]
+        if status is not None:
+            where += " AND status = ?"
+            params.append(self._enum_value(status))
+        async with self._connect() as db:
+            row = await (
+                await db.execute(
+                    f"SELECT COUNT(*) FROM topic_memories WHERE {where}",
+                    params,
+                )
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    async def delete_archived_topics(
+        self,
+        memory_space_id: str,
+        topic_uids: list[str],
+    ) -> int:
+        """Permanently delete selected archived Topics and unreferenced fragments."""
+        normalized = sorted({str(uid).strip() for uid in topic_uids if str(uid).strip()})
+        if not normalized:
+            return 0
+        placeholders = ",".join("?" * len(normalized))
+        async with self._connect() as db:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                fragment_rows = await (
+                    await db.execute(
+                        f"""
+                        SELECT DISTINCT l.fragment_uid
+                        FROM topic_fragment_links l
+                        JOIN topic_memories t ON t.topic_uid = l.topic_uid
+                        WHERE t.memory_space_id = ? AND t.status = 'archived'
+                          AND t.topic_uid IN ({placeholders})
+                        """,
+                        [memory_space_id, *normalized],
+                    )
+                ).fetchall()
+                fragment_uids = sorted({str(row[0]) for row in fragment_rows})
+                cursor = await db.execute(
+                    f"""
+                    DELETE FROM topic_memories
+                    WHERE memory_space_id = ? AND status = 'archived'
+                      AND topic_uid IN ({placeholders})
+                    """,
+                    [memory_space_id, *normalized],
+                )
+                if fragment_uids:
+                    fragment_placeholders = ",".join("?" * len(fragment_uids))
+                    await db.execute(
+                        f"""
+                        DELETE FROM topic_fragments
+                        WHERE fragment_uid IN ({fragment_placeholders})
+                          AND NOT EXISTS (
+                              SELECT 1 FROM topic_fragment_links l
+                              WHERE l.fragment_uid = topic_fragments.fragment_uid
+                          )
+                        """,
+                        fragment_uids,
+                    )
+                await db.commit()
+                return int(cursor.rowcount or 0)
+            except Exception:
+                await db.rollback()
+                raise
 
     async def get_topics_by_uids(
         self,
@@ -1692,12 +1840,20 @@ class TopicMemoryStore:
         timeline_uids: list[str],
         topic_uids: list[str],
         details: dict[str, Any],
+        component_uid: str | None = None,
     ) -> str:
+        normalized_component_uid = str(
+            component_uid or details.get("component_uid") or ""
+        ).strip()
+        normalized_details = dict(details)
+        if normalized_component_uid:
+            normalized_details["component_uid"] = normalized_component_uid
         identity_payload = self._to_json(
             {
                 "review_type": review_type,
                 "timelines": sorted(set(timeline_uids)),
                 "topics": sorted(set(topic_uids)),
+                "component_uid": normalized_component_uid,
             }
         )
         review_uid = str(
@@ -1744,7 +1900,7 @@ class TopicMemoryStore:
                     review_type,
                     self._to_json(sorted(set(timeline_uids))),
                     self._to_json(normalized_topic_uids),
-                    self._to_json(details),
+                    self._to_json(normalized_details),
                     self._to_json(expected_revisions),
                     now,
                     now,
@@ -1765,6 +1921,16 @@ class TopicMemoryStore:
         await self.cleanup_orphaned_maintenance_reviews(memory_space_id)
         where = ["memory_space_id = ?", "status = ?"]
         params: list[Any] = [memory_space_id, status]
+        if status == "pending":
+            # Build-owned reviews are actionable only after the corresponding
+            # atomic publication completed. Failed/pending runs retain their
+            # checkpoint reviews for resume, but must not appear as user work.
+            where.append(
+                "(COALESCE(json_extract(details, '$.run_uid'), '') = '' OR "
+                "EXISTS (SELECT 1 FROM topic_maintenance_runs review_run "
+                "WHERE review_run.run_uid = json_extract(topic_maintenance_queue.details, '$.run_uid') "
+                "AND review_run.status = 'completed_with_review'))"
+            )
         normalized = sorted(
             {str(uid).strip() for uid in timeline_uids or [] if str(uid).strip()}
         )
@@ -2077,11 +2243,11 @@ class TopicMemoryStore:
         self,
         memory_space_id: str,
         *,
-        timeline_uids: list[str],
+        component_uids: list[str],
     ) -> int:
-        """Resolve pending reviews fully covered by a successful publication."""
+        """Resolve only reviews for components explicitly published by this run."""
         normalized = sorted(
-            {str(uid).strip() for uid in timeline_uids if str(uid).strip()}
+            {str(uid).strip() for uid in component_uids if str(uid).strip()}
         )
         if not normalized:
             return 0
@@ -2093,13 +2259,8 @@ class TopicMemoryStore:
                 SET status = 'resolved', resolution_action = 'automatic_publish',
                     resolution_payload = '{}', resolved_at = ?, updated_at = ?
                 WHERE memory_space_id = ? AND status = 'pending'
-                  AND json_array_length(timeline_uids) > 0
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM json_each(topic_maintenance_queue.timeline_uids) item
-                      WHERE item.value NOT IN (
-                          SELECT value FROM json_each(?)
-                      )
+                  AND json_extract(details, '$.component_uid') IN (
+                      SELECT value FROM json_each(?)
                   )
                 """,
                 (now, now, memory_space_id, self._to_json(normalized)),
@@ -3344,6 +3505,7 @@ class TopicMemoryStore:
                 fields.append("completed_at = NULL")
             if status_value in {
                 TopicMaintenanceStatus.COMPLETED.value,
+                TopicMaintenanceStatus.COMPLETED_WITH_REVIEW.value,
                 TopicMaintenanceStatus.FAILED.value,
                 TopicMaintenanceStatus.CANCELLED.value,
             }:
@@ -4038,6 +4200,20 @@ class TopicMemoryStore:
     ) -> int:
         if active_topic_uids:
             placeholders = ",".join("?" * len(active_topic_uids))
+            target_rows = await (
+                await db.execute(
+                    f"""
+                    SELECT topic_uid FROM topic_memories
+                    WHERE memory_space_id = ? AND status != 'archived'
+                      AND topic_uid NOT IN ({placeholders})
+                    """,
+                    [memory_space_id, *sorted(active_topic_uids)],
+                )
+            ).fetchall()
+            target_uids = {str(row[0]) for row in target_rows}
+            await TopicMemoryStore._archive_topic_dependencies_tx(
+                db, target_uids, now
+            )
             cursor = await db.execute(
                 f"""
                 UPDATE topic_memories SET status = 'archived', updated_at = ?
@@ -4047,6 +4223,19 @@ class TopicMemoryStore:
                 [now, memory_space_id, *sorted(active_topic_uids)],
             )
         else:
+            target_rows = await (
+                await db.execute(
+                    """
+                    SELECT topic_uid FROM topic_memories
+                    WHERE memory_space_id = ? AND status != 'archived'
+                    """,
+                    (memory_space_id,),
+                )
+            ).fetchall()
+            target_uids = {str(row[0]) for row in target_rows}
+            await TopicMemoryStore._archive_topic_dependencies_tx(
+                db, target_uids, now
+            )
             cursor = await db.execute(
                 """
                 UPDATE topic_memories SET status = 'archived', updated_at = ?
@@ -4089,6 +4278,9 @@ class TopicMemoryStore:
         if not targets:
             return 0
         placeholders = ",".join("?" * len(targets))
+        await TopicMemoryStore._archive_topic_dependencies_tx(
+            db, set(targets), now
+        )
         cursor = await db.execute(
             f"""
             UPDATE topic_memories SET status = 'archived', updated_at = ?
@@ -4098,6 +4290,77 @@ class TopicMemoryStore:
             [now, memory_space_id, *targets],
         )
         return int(cursor.rowcount or 0)
+
+    @staticmethod
+    async def _archive_topic_dependencies_tx(
+        db: aiosqlite.Connection,
+        topic_uids: set[str],
+        now: float,
+    ) -> None:
+        """Archive status-bearing Topic projections in the same transaction."""
+        targets = sorted({str(uid) for uid in topic_uids if str(uid)})
+        if not targets:
+            return
+        placeholders = ",".join("?" * len(targets))
+        fragment_rows = await (
+            await db.execute(
+                f"""
+                SELECT DISTINCT fragment_uid FROM topic_fragment_links
+                WHERE topic_uid IN ({placeholders})
+                """,
+                targets,
+            )
+        ).fetchall()
+        fragment_uids = sorted({str(row[0]) for row in fragment_rows})
+        params = [now, *targets]
+        await db.execute(
+            f"""
+            UPDATE topic_memory_atoms SET status = 'archived', updated_at = ?
+            WHERE topic_uid IN ({placeholders}) AND status != 'archived'
+            """,
+            params,
+        )
+        await db.execute(
+            f"""
+            UPDATE topic_timeline_links SET status = 'archived', updated_at = ?
+            WHERE topic_uid IN ({placeholders}) AND status != 'archived'
+            """,
+            params,
+        )
+        await db.execute(
+            f"""
+            UPDATE topic_fragment_links SET status = 'archived', updated_at = ?
+            WHERE topic_uid IN ({placeholders}) AND status != 'archived'
+            """,
+            params,
+        )
+        await db.execute(
+            f"""
+            UPDATE topic_relations SET status = 'archived', updated_at = ?
+            WHERE (left_topic_uid IN ({placeholders})
+                   OR right_topic_uid IN ({placeholders}))
+              AND status != 'archived'
+            """,
+            [now, *targets, *targets],
+        )
+        if fragment_uids:
+            fragment_placeholders = ",".join("?" * len(fragment_uids))
+            await db.execute(
+                f"""
+                UPDATE topic_fragments AS f
+                SET status = 'archived', updated_at = ?
+                WHERE f.fragment_uid IN ({fragment_placeholders})
+                  AND f.status != 'archived'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM topic_fragment_links l
+                      JOIN topic_memories t ON t.topic_uid = l.topic_uid
+                      WHERE l.fragment_uid = f.fragment_uid
+                        AND l.status = 'active'
+                        AND t.status = 'active'
+                  )
+                """,
+                [now, *fragment_uids],
+            )
 
     async def _load_timeline_registry(
         self, db: aiosqlite.Connection, timeline_uids: set[str]

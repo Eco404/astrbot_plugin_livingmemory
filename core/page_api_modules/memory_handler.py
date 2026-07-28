@@ -391,9 +391,8 @@ class MemoryHandler:
                 break
         return result
 
-    async def _replace_structured_memory(
+    def _prepare_structured_memory(
         self,
-        memory_engine,
         memory_processor,
         memory: dict[str, Any],
         structured_value: dict[str, Any],
@@ -401,7 +400,7 @@ class MemoryHandler:
         update_mode: str = "rebuild",
     ) -> dict[str, Any]:
         if memory_processor is None:
-            return self.utils.error("MemoryProcessor 未初始化")
+            raise RuntimeError("MemoryProcessor 未初始化")
 
         memory_id = int(memory["id"])
         current_metadata = self.utils.normalize_metadata(memory.get("metadata"))
@@ -414,14 +413,11 @@ class MemoryHandler:
 
         summary = str(structured_value.get("summary", "")).strip()
         if not summary:
-            return self.utils.error("记忆摘要不能为空")
-        try:
-            importance = self._normalize_importance_update(
-                structured_value.get("importance", current_metadata.get("importance", 0.5)),
-                str(structured_value.get("importance_scale", "stored")),
-            )
-        except ValueError as exc:
-            return self.utils.error(str(exc))
+            raise ValueError("记忆摘要不能为空")
+        importance = self._normalize_importance_update(
+            structured_value.get("importance", current_metadata.get("importance", 0.5)),
+            str(structured_value.get("importance_scale", "stored")),
+        )
 
         structured_data = {
             "summary": summary,
@@ -443,7 +439,7 @@ class MemoryHandler:
             structured_value.get("status", current_metadata.get("status", "active"))
         ).strip() or "active"
         if status not in {"active", "archived", "deleted"}:
-            return self.utils.error("状态必须是 active、archived 或 deleted")
+            raise ValueError("状态必须是 active、archived 或 deleted")
 
         try:
             content, generated_metadata, normalized_importance = (
@@ -472,8 +468,7 @@ class MemoryHandler:
             ).strip() or "GENERAL"
             replacement_metadata["status"] = status
         except Exception as exc:
-            logger.error(f"[PageAPI] 重建结构化记忆失败: {exc}", exc_info=True)
-            return self.utils.error(str(exc))
+            raise ValueError(str(exc)) from exc
         replacement_metadata["update_history"] = self.utils.append_update_history(
             current_metadata,
             field="structured",
@@ -494,15 +489,48 @@ class MemoryHandler:
             replacement_metadata["update_reason"] = reason
 
         if update_mode not in {"rebuild", "in_place"}:
-            return self.utils.error("update_mode 必须是 rebuild 或 in_place")
+            raise ValueError("update_mode 必须是 rebuild 或 in_place")
         replacement_metadata["last_update_mode"] = update_mode
+
+        return {
+            "content": content,
+            "metadata": replacement_metadata,
+            "importance": normalized_importance,
+            "session_id": session_id,
+            "persona_id": persona_id,
+        }
+
+    async def _replace_structured_memory(
+        self,
+        memory_engine,
+        memory_processor,
+        memory: dict[str, Any],
+        structured_value: dict[str, Any],
+        reason: str,
+        update_mode: str = "rebuild",
+    ) -> dict[str, Any]:
+        try:
+            prepared = self._prepare_structured_memory(
+                memory_processor,
+                memory,
+                structured_value,
+                reason,
+                update_mode,
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+
+        memory_id = int(memory["id"])
+        content = str(prepared["content"])
+        replacement_metadata = dict(prepared["metadata"])
+        normalized_importance = float(prepared["importance"])
 
         try:
             atoms = memory_processor.classify_atoms_from_metadata(
                 metadata=replacement_metadata,
                 parent_importance=normalized_importance,
-                session_id=session_id,
-                persona_id=persona_id,
+                session_id=prepared.get("session_id"),
+                persona_id=prepared.get("persona_id"),
             )
             if update_mode == "in_place":
                 new_memory_id = await memory_engine.rewrite_memory_in_place(
@@ -1313,6 +1341,52 @@ class MemoryHandler:
                 "field": field,
             }
         )
+
+    async def stage_memory_update(
+        self,
+        memory_engine,
+        memory_processor,
+        timeline_rebuild_manager,
+    ) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        try:
+            memory_id = int(payload.get("memory_id"))
+        except (TypeError, ValueError):
+            return self.utils.error("memory_id 必须是整数")
+        if str(payload.get("field") or "") != "structured":
+            return self.utils.error("暂存仅支持 Timeline 结构化编辑")
+        value = payload.get("value")
+        if not isinstance(value, dict):
+            return self.utils.error("structured 字段必须是对象")
+        memory = await self._get_memory_record(memory_id, memory_engine)
+        if not memory:
+            return self.utils.error("记忆不存在")
+        try:
+            prepared = self._prepare_structured_memory(
+                memory_processor,
+                memory,
+                value,
+                str(payload.get("reason") or "").strip(),
+                "in_place",
+            )
+            staged = await timeline_rebuild_manager.stage_edit(
+                memory_id=memory_id,
+                prepared_payload=prepared,
+                field_changes=(
+                    payload.get("field_changes")
+                    if isinstance(payload.get("field_changes"), list)
+                    else []
+                ),
+                reason=str(payload.get("reason") or "").strip(),
+            )
+            return self.utils.ok(
+                {
+                    **staged,
+                    "message": f"Timeline #{memory_id} 的修改已暂存",
+                }
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
 
     async def batch_delete_memories(self, memory_engine) -> dict[str, Any]:
         """

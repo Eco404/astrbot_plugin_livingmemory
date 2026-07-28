@@ -28,7 +28,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.21"
+    CURRENT_VERSION = "9.22"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -62,6 +62,7 @@ class DBMigration:
         "9.19": "Source-verified and resumable Timeline reconstruction",
         "9.20": "Collision-safe Topic fragment identity and affect provenance repair",
         "9.21": "Multi-source graph edges and user-controlled database repair",
+        "9.22": "Component-safe Topic reconciliation and staged Timeline edits",
     }
 
     def __init__(self, db_path: str):
@@ -379,6 +380,8 @@ class DBMigration:
                     migration_steps.append(self._migrate_v9_19_to_v9_20)
                 if current_key <= self.version_key("9.20"):
                     migration_steps.append(self._migrate_v9_20_to_v9_21)
+                if current_key <= self.version_key("9.21"):
+                    migration_steps.append(self._migrate_v9_21_to_v9_22)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -2004,6 +2007,44 @@ class DBMigration:
         if progress_callback:
             progress_callback("建立图谱边的多来源索引", 1, 1)
         logger.info("v9.20 -> v9.21 迁移完成（孤立引用未自动修复）")
+
+    async def _migrate_v9_21_to_v9_22(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        logger.info("执行迁移步骤: v9.21 -> v9.22")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS timeline_staged_edits (
+                    edit_uid TEXT PRIMARY KEY,
+                    memory_id INTEGER NOT NULL,
+                    memory_uid TEXT NOT NULL,
+                    memory_space_id TEXT NOT NULL,
+                    source_revision INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    prepared_payload TEXT NOT NULL DEFAULT '{}',
+                    field_changes TEXT NOT NULL DEFAULT '[]',
+                    reason TEXT NOT NULL DEFAULT '',
+                    source_excerpt TEXT NOT NULL DEFAULT '',
+                    last_error TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    applied_at REAL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_timeline_staged_edits_pending
+                ON timeline_staged_edits(memory_id)
+                WHERE status IN ('pending', 'failed')
+                """
+            )
+            await db.commit()
+        if progress_callback:
+            progress_callback("建立 Timeline 暂存修改队列", 1, 1)
+        logger.info("v9.21 -> v9.22 迁移完成")
 
     @staticmethod
     def _migration_json_object(value: Any) -> dict[str, Any]:

@@ -135,5 +135,74 @@ class TimelineHandler:
         except (TypeError, ValueError, RuntimeError) as exc:
             return self.utils.error(str(exc))
 
+    async def list_staged_edits(self, manager: Any) -> dict[str, Any]:
+        try:
+            items = await manager.list_staged_edits(
+                memory_space_id=self.utils.optional_text(
+                    request.args.get("memory_space_id")
+                ),
+                limit=min(2000, max(1, int(request.args.get("limit", 500)))),
+            )
+            return self.utils.ok({"items": items, "total": len(items)})
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+
+    async def apply_staged_edits(self, manager: Any) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        edit_uids = payload.get("edit_uids", [])
+        if not isinstance(edit_uids, list):
+            return self.utils.error("edit_uids 必须是数组")
+        try:
+            return self.utils.ok(
+                await manager.start_staged_task(
+                    edit_uids,
+                    topic_mode=str(payload.get("topic_mode") or "local"),
+                )
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+
+    async def delete_staged_edits(self, manager: Any) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        edit_uids = payload.get("edit_uids", [])
+        if not isinstance(edit_uids, list):
+            return self.utils.error("edit_uids 必须是数组")
+        try:
+            return self.utils.ok(
+                {"deleted_count": await manager.delete_staged_edits(edit_uids)}
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+
+    async def list_inactive(self, manager: Any) -> dict[str, Any]:
+        memory_space_id = self.utils.optional_text(
+            request.args.get("memory_space_id")
+        )
+        if not memory_space_id:
+            return self.utils.error("缺少 memory_space_id")
+        try:
+            items = await manager.list_inactive_timelines(
+                memory_space_id,
+                limit=min(2000, max(1, int(request.args.get("limit", 500)))),
+            )
+            return self.utils.ok({"items": items, "total": len(items)})
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+
+    async def restore_inactive(self, manager: Any) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        memory_ids = payload.get("memory_ids", [])
+        if not isinstance(memory_ids, list):
+            return self.utils.error("memory_ids 必须是数组")
+        try:
+            return self.utils.ok(
+                await manager.restore_inactive_timelines(
+                    str(payload.get("memory_space_id") or ""),
+                    memory_ids,
+                )
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            return self.utils.error(str(exc))
+
 
 __all__ = ["TimelineHandler"]

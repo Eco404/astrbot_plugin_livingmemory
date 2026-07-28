@@ -58,6 +58,7 @@ class TopicMaintenanceStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    COMPLETED_WITH_REVIEW = "completed_with_review"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
