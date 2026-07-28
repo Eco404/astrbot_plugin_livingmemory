@@ -7,8 +7,6 @@ import hashlib
 import inspect
 import json
 import re
-import time
-import unicodedata
 import uuid
 from collections import Counter
 from collections.abc import Callable
@@ -28,11 +26,13 @@ from ..models.topic_memory import (
     TopicMaintenanceRun,
     TopicMaintenanceStatus,
 )
-
+from ..topic_similarity import (
+    canonical_text,
+    jaccard_similarity,
+    lexical_tokens,
+)
 
 ProgressCallback = Callable[[dict[str, Any]], Any]
-_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
-_WORD_RE = re.compile(r"[a-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]+")
 
 
 class TopicMaintenanceManager:
@@ -923,8 +923,7 @@ class TopicMaintenanceManager:
 
     @classmethod
     def normalize_text(cls, value: str) -> str:
-        normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
-        return "".join(character for character in normalized if character.isalnum())
+        return canonical_text(value)
 
     @classmethod
     def fingerprint_text(cls, value: str) -> str:
@@ -932,24 +931,11 @@ class TopicMaintenanceManager:
 
     @classmethod
     def tokenize(cls, value: str) -> set[str]:
-        normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
-        tokens: set[str] = set()
-        for chunk in _WORD_RE.findall(normalized):
-            if _CJK_RE.fullmatch(chunk):
-                if len(chunk) == 1:
-                    tokens.add(chunk)
-                else:
-                    tokens.update(chunk[index : index + 2] for index in range(len(chunk) - 1))
-            elif len(chunk) >= 2:
-                tokens.add(chunk)
-        return tokens
+        return lexical_tokens(value)
 
     @staticmethod
     def _jaccard(left: Any, right: Any) -> float:
-        left_set, right_set = set(left or []), set(right or [])
-        if not left_set or not right_set:
-            return 0.0
-        return len(left_set & right_set) / len(left_set | right_set)
+        return jaccard_similarity(set(left or []), set(right or []))
 
     @staticmethod
     def _shared_signals(members: list[TimelineTopicCandidate]) -> list[str]:

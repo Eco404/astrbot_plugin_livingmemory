@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..topic_similarity import jaccard_similarity, retrieval_text_features
 from .hybrid_retriever import HybridResult
 from .temporal_constraint import TemporalConstraint, timeline_time_anchor
 
@@ -674,20 +675,11 @@ class RecallPipeline:
 
     @staticmethod
     def _text_features(text: str) -> set[str]:
-        normalized = str(text or "").casefold()
-        latin = set(re.findall(r"[a-z0-9_]{2,}", normalized))
-        chinese_chunks = re.findall(r"[\u4e00-\u9fff]+", normalized)
-        chinese: set[str] = set()
-        for chunk in chinese_chunks:
-            if len(chunk) == 1:
-                chinese.add(chunk)
-            else:
-                chinese.update(chunk[index : index + 2] for index in range(len(chunk) - 1))
-        return latin | chinese or {"<empty>"}
+        return retrieval_text_features(text)
 
     @staticmethod
     def _jaccard(left: set[str], right: set[str]) -> float:
-        return len(left & right) / max(1, len(left | right))
+        return jaccard_similarity(left, right)
 
     @staticmethod
     def _clamp(value: float) -> float:
