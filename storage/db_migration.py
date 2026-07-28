@@ -28,7 +28,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "9.22"
+    CURRENT_VERSION = "10"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -63,6 +63,7 @@ class DBMigration:
         "9.20": "Collision-safe Topic fragment identity and affect provenance repair",
         "9.21": "Multi-source graph edges and user-controlled database repair",
         "9.22": "Component-safe Topic reconciliation and staged Timeline edits",
+        "10": "Stable Timeline and Topic memory architecture release",
     }
 
     def __init__(self, db_path: str):
@@ -382,6 +383,8 @@ class DBMigration:
                     migration_steps.append(self._migrate_v9_20_to_v9_21)
                 if current_key <= self.version_key("9.21"):
                     migration_steps.append(self._migrate_v9_21_to_v9_22)
+                if current_key <= self.version_key("9.22"):
+                    migration_steps.append(self._migrate_v9_22_to_v10)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -2045,6 +2048,16 @@ class DBMigration:
         if progress_callback:
             progress_callback("建立 Timeline 暂存修改队列", 1, 1)
         logger.info("v9.21 -> v9.22 迁移完成")
+
+    async def _migrate_v9_22_to_v10(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Close the v9 incremental schema series without rewriting user data."""
+        logger.info("执行迁移步骤: v9.22 -> v10")
+        if progress_callback:
+            progress_callback("完成 v10 数据库版本收束", 1, 1)
+        logger.info("v9.22 -> v10 迁移完成")
 
     @staticmethod
     def _migration_json_object(value: Any) -> dict[str, Any]:

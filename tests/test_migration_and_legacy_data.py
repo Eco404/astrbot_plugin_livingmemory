@@ -190,8 +190,47 @@ async def test_migrate_v9_16_to_v9_17_backfills_importance_contract_idempotently
 def test_database_version_segments_do_not_use_float_ordering():
     assert DBMigration.normalize_version("v9.02") == "9.2"
     assert DBMigration.version_key("9.10") > DBMigration.version_key("9.2")
+    assert DBMigration.version_key("10") > DBMigration.version_key("9.22")
     assert DBMigration.version_key(9) < DBMigration.version_key("9.1")
     assert DBMigration.storage_version("9.2") == "v9.2"
+
+
+@pytest.mark.asyncio
+async def test_migrate_v9_22_to_v10_records_release_boundary(tmp_path):
+    db_path = str(tmp_path / "v9_22.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE db_version (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL,
+                description TEXT,
+                migrated_at TEXT NOT NULL,
+                migration_duration_seconds REAL
+            )
+            """
+        )
+        await db.execute(
+            """
+            INSERT INTO db_version(version, description, migrated_at)
+            VALUES ('v9.22', 'test fixture', '2026-07-28T00:00:00+00:00')
+            """
+        )
+        await db.commit()
+
+    progress: list[tuple[str, int, int]] = []
+    migration = DBMigration(db_path)
+
+    def record_progress(message: str, current: int, total: int) -> None:
+        progress.append((message, current, total))
+
+    result = await migration.migrate(record_progress)
+
+    assert result["success"] is True
+    assert result["from_version"] == "9.22"
+    assert result["to_version"] == "10"
+    assert await migration.get_db_version() == "10"
+    assert progress == [("完成 v10 数据库版本收束", 1, 1)]
 
 
 @pytest.mark.asyncio
