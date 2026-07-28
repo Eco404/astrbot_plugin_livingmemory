@@ -2316,6 +2316,105 @@ async def test_fact_continuity_measures_coverage_of_the_incoming_fragment():
     assert requires_review is False
 
 
+@pytest.mark.asyncio
+async def test_new_timeline_uses_semantic_extension_when_provenance_does_not_overlap():
+    async def provenance(topic_uid):
+        assert topic_uid == "topic-existing"
+        return {
+            "atom_sources": [{"source_atom_fingerprint": "old-fingerprint"}],
+            "actor_links": [{"actor_id": "actor-user"}],
+        }
+
+    formal = TopicFragmentDraft(
+        run_uid="run-old",
+        candidate_group_uid="group-old",
+        memory_space_id="space-1",
+        fragment_uid="fragment-old",
+        label="上班通勤",
+        summary="用户早晨上班并在到达后报平安",
+        timeline_uids=["timeline-old"],
+        source_revisions={"timeline-old": 1},
+        facts=[],
+        embedding=[0.98, 0.2],
+    )
+    store = SimpleNamespace(
+        get_topic_provenance=AsyncMock(side_effect=provenance),
+        list_active_fragments_for_topics=AsyncMock(
+            return_value=[{"topic_uid": "topic-existing", "fragment": formal}]
+        ),
+    )
+    manager = TopicBuildManager(":memory:", store, None)
+    incoming = TopicFragmentDraft(
+        run_uid="run-new",
+        candidate_group_uid="group-new",
+        memory_space_id="space-1",
+        fragment_uid="fragment-new",
+        label="到岗报备",
+        summary="用户今天到达公司后主动报平安",
+        timeline_uids=["timeline-new"],
+        source_revisions={"timeline-new": 1},
+        facts=[
+            {
+                "source_atom_fingerprints": ["new-fingerprint"],
+            }
+        ],
+        metadata={
+            "participant_refs": [{"actor_id": "actor-user"}],
+        },
+        embedding=[1.0, 0.0],
+    )
+    existing = TopicMemory(
+        topic_uid="topic-existing",
+        memory_space_id="space-1",
+        title="用户的上班通勤与到达报备",
+        summary="记录历次上班、通勤和到岗报平安",
+        metadata={
+            "embedding": [0.96, 0.28],
+            "source_timeline_uids": ["timeline-old"],
+            "keywords": ["上班", "到岗", "报平安"],
+        },
+    )
+    diagnostics = {}
+
+    matched, ranked, requires_review = await manager._match_existing_topic_decision(
+        {
+            "title": "上班报平安与路上关怀",
+            "summary": "用户到达公司后报平安",
+            "keywords": ["上班", "到岗", "报平安"],
+        },
+        [incoming],
+        [existing],
+        set(),
+        incremental=True,
+        diagnostics=diagnostics,
+    )
+
+    assert matched is existing
+    assert ranked[0][0] >= 0.55
+    assert requires_review is False
+    assert diagnostics[existing.topic_uid]["lane"] == "semantic_extension"
+    assert diagnostics[existing.topic_uid]["source_continuity"] == 0.0
+    assert diagnostics[existing.topic_uid]["timeline_overlap"] == 0.0
+    assert diagnostics[existing.topic_uid]["formal_fragment_count"] == 1
+
+
+def test_existing_topic_representative_support_requires_every_incoming_fragment():
+    manager = TopicBuildManager(":memory:", None, None)
+    incoming = [
+        replace(_topic_fragment(1), embedding=[1.0, 0.0]),
+        replace(_topic_fragment(2), embedding=[0.0, 1.0]),
+    ]
+    existing = [replace(_topic_fragment(3), embedding=[1.0, 0.0])]
+
+    score = manager._existing_topic_representative_support(
+        incoming,
+        existing,
+        fallback=1.0,
+    )
+
+    assert score == pytest.approx(0.35)
+
+
 def test_related_topic_graph_rejects_one_generic_keyword_without_semantic_support():
     manager = TopicBuildManager(
         ":memory:",
@@ -4737,6 +4836,83 @@ async def test_incremental_build_preserves_topic_uid_and_prior_sources(tmp_path:
     unchanged_rust = await store.get_topic(rust.topic_uid)
     assert unchanged_rust is not None
     assert unchanged_rust.revision == rust.revision == 1
+
+
+@pytest.mark.asyncio
+async def test_incremental_components_targeting_one_topic_publish_one_update(
+    tmp_path: Path,
+):
+    db_path, space_id = await _create_timeline_db(tmp_path)
+    store = TopicMemoryStore(db_path)
+    manager = TopicBuildManager(
+        db_path,
+        store,
+        TopicMaintenanceManager(db_path, store),
+        llm_provider=_GroundedLLM(),
+        embedding_provider=_Embedding(),
+    )
+    await manager.build_space(space_id)
+    travel = next(
+        topic for topic in await store.list_topics(space_id) if topic.title == "京都旅行"
+    )
+    manager.config["fragment_similarity_threshold"] = 1.01
+
+    identity = MemoryIdentityStore(db_path)
+    for document_id, timeline_uid, created_at, detail in [
+        (4, "timeline-travel-3", 1400.0, "用户补充京都旅行交通预算。"),
+        (5, "timeline-travel-4", 1500.0, "用户补充京都旅行住宿预算。"),
+    ]:
+        metadata = {
+            "session_id": "bot:FriendMessage:user-1",
+            "persona_id": "persona-1",
+            "canonical_summary": detail,
+            "topics": ["旅行计划"],
+            "key_facts": [detail],
+        }
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                "INSERT INTO documents(id, doc_id, text, metadata) VALUES (?, ?, ?, ?)",
+                (document_id, f"doc-{document_id}", detail, json.dumps(metadata)),
+            )
+            await db.commit()
+        await identity.upsert_memory(
+            memory_uid=timeline_uid,
+            document_id=document_id,
+            memory_layer="timeline",
+            memory_space_id=space_id,
+            revision=1,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        await identity.upsert_source_span(
+            timeline_uid,
+            {
+                "session_id": metadata["session_id"],
+                "started_at": created_at,
+                "ended_at": created_at + 10,
+            },
+        )
+
+    result = await manager.build_space(
+        space_id,
+        mode=TopicMaintenanceMode.INCREMENTAL,
+        since=1399.0,
+    )
+
+    assert result["topic_count"] == 1
+    updated = await store.get_topic(travel.topic_uid)
+    assert updated is not None
+    assert updated.revision == travel.revision + 1
+    provenance = await store.get_topic_provenance(travel.topic_uid)
+    assert {row["timeline_uid"] for row in provenance["links"]} == {
+        "timeline-travel-1",
+        "timeline-travel-2",
+        "timeline-travel-3",
+        "timeline-travel-4",
+    }
+    assert {
+        outcome["status"] for outcome in result["component_outcomes"].values()
+    } == {"published_update"}
 
 
 @pytest.mark.asyncio

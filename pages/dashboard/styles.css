@@ -3595,6 +3595,14 @@ select.timeline-setting-input { width: min(220px, 100%); }
   line-height: 1.55;
 }
 .maintenance-topic-action-row > .btn { min-width: 132px; }
+.maintenance-timeline-action-list { margin-top: var(--space-5); }
+.maintenance-timeline-action-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.maintenance-timeline-action-control .select { width: 154px; }
+.maintenance-timeline-action-control .btn { min-width: 88px; }
 .maintenance-topic-action-danger strong { color: var(--danger); }
 .maintenance-count-button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; }
 .maintenance-action-count {
@@ -3795,6 +3803,12 @@ select.timeline-setting-input { width: min(220px, 100%); }
   .maintenance-topic-controls { min-width: 0; width: 100%; }
   .maintenance-review-toolbar { align-items: stretch; flex-direction: column; }
   .maintenance-review-layout { grid-template-columns: 1fr; }
+  .maintenance-timeline-action-control {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .maintenance-timeline-action-control .select,
+  .maintenance-timeline-action-control .btn { width: 100%; }
   .maintenance-review-list { max-height: 260px; border-right: 0; border-bottom: 1px solid var(--border-normal); }
 }
 .topic-progress-failure {
