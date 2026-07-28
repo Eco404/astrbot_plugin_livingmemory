@@ -193,6 +193,47 @@ def test_database_version_segments_do_not_use_float_ordering():
     assert DBMigration.version_key("10") > DBMigration.version_key("9.22")
     assert DBMigration.version_key(9) < DBMigration.version_key("9.1")
     assert DBMigration.storage_version("9.2") == "v9.2"
+    assert all("." not in str(version) for version in DBMigration.VERSION_HISTORY)
+
+
+@pytest.mark.asyncio
+async def test_v9_to_v10_uses_one_public_migration_boundary(monkeypatch, tmp_path):
+    migration = DBMigration(str(tmp_path / "v10.db"))
+    stage_names = [
+        "_migrate_v9_to_v9_1",
+        "_migrate_v9_1_to_v9_2",
+        "_migrate_v9_2_to_v9_3",
+        "_migrate_v9_3_to_v9_4",
+        "_migrate_v9_4_to_v9_5",
+        "_migrate_v9_5_to_v9_6",
+        "_migrate_v9_6_to_v9_7",
+        "_migrate_v9_7_to_v9_8",
+        "_migrate_v9_8_to_v9_9",
+        "_migrate_v9_9_to_v9_10",
+        "_migrate_v9_10_to_v9_11",
+        "_migrate_v9_11_to_v9_12",
+        "_migrate_v9_12_to_v9_13",
+        "_migrate_v9_13_to_v9_14",
+        "_migrate_v9_14_to_v9_15",
+        "_migrate_v9_15_to_v9_16",
+        "_migrate_v9_16_to_v9_17",
+        "_migrate_v9_17_to_v9_18",
+        "_migrate_v9_18_to_v9_19",
+        "_migrate_v9_19_to_v9_20",
+        "_migrate_v9_20_to_v9_21",
+        "_migrate_v9_21_to_v9_22",
+    ]
+    called: list[str] = []
+
+    for stage_name in stage_names:
+        async def record_stage(_progress, *, name=stage_name):
+            called.append(name)
+
+        monkeypatch.setattr(migration, stage_name, record_stage)
+
+    await migration._migrate_v9_to_v10(None)
+
+    assert called == stage_names
 
 
 @pytest.mark.asyncio

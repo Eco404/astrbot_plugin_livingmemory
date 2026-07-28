@@ -22,6 +22,9 @@
 
 ---
 
+LivingMemory 3.0 将可溯源 Topic 记忆、统一维护中心和 Topic 优先召回纳入正式架构。
+已有数据库 v8 会在自动备份后，按照正式的 `v8 → v9 → v10` 路径完成迁移。
+
 ## 核心特性
 
 - **混合检索**: 结合 BM25 稀疏检索和 Faiss 向量检索，使用 RRF 融合算法
@@ -71,7 +74,7 @@
 - 新增、修改或删除资料不会主动重构现有 Timeline/Topic。它们对之后新建的 Timeline 和新启动的全量或增量 Topic 构建生效；每个 Topic 构建任务会固定一份资料快照，运行期间可继续编辑而不会混用两版资料。
 - 未命中资料且来源没有明确代词时，提示词要求模型重复显示名，不根据昵称、人格或表达习惯推断性别。
 
-**实验性 Topic 记忆**:
+**Topic 记忆**:
 - 开启 `topic_memory.enabled` 后，在 Topic 记忆页面执行一次全量构建；`topic_memory.auto_maintenance` 控制后续自动维护。
 - `topic_memory.recall_enabled` 默认开启：正式召回优先返回活跃 Topic，当前消息独立决定候选资格，跨轮上下文只提供有上限的排序奖励；Rerank 的相对名次奖励会按本轮分数区分度自动降权。没有可用 Topic 或检索失败时自动回退纯 Timeline。
 - Topic 召回复用已保存的 Embedding，可选使用当前 Rerank Provider 精排，不调用 LLM。候选会按本轮最佳相关度动态停止；片段正文与父 Topic 高度近似时只注入片段附带的关键事实，正文不重复注入；没有事实的纯重复片段才会跳过。当前上下文来源覆盖、相关度门槛和多样性策略统一在 Topic 参数面板中调整。
@@ -89,7 +92,7 @@
 - 构建失败、取消或因插件重启中断后，Topic 页面会显示“从断点继续”。候选片段、向量、匹配、组件合成和已写入 Topic 都会按原 `run_uid` 复用；配置、Prompt、Provider、模型或输入发生变化时，只重算受影响阶段。
 - LLM 输出中的可验证结构错误会使用输入来源确定性修复并写入 `validation_repairs`；无法验证的模型引用会被丢弃，不会作为 Topic 来源保存。
 - 片段提取以“一个未来检索意图”为边界；相关话题关系综合语义近邻、全库关键词区分度、正文重合与 Timeline 来源，并限制每个 Topic 的最大连接数，不会仅因一个泛化关键词或共享 Timeline 建边。Topic 与原子置信度按独立时间簇校准，避免同一段连续对话被误当成多次独立证据。
-- 数据库 v9.11 为正式片段增加稳定逻辑 ID 与 revision，并规范无层级相关话题关系；迁移不调用模型，也不生成或改写 Topic。新构建会把 Timeline 明确解释为 Bot 第一人称叙述，再依据稳定账号、人格与来源证据锚定角色，无需强制改写成第三人称；是否参与召回由 `topic_memory.enabled` 与 `topic_memory.recall_enabled` 控制。
+- 数据库 v10 为正式片段增加稳定逻辑 ID 与 revision，并规范无层级相关话题关系；迁移不调用模型，也不生成 Topic 内容。新构建会把 Timeline 明确解释为 Bot 第一人称叙述，再依据稳定账号、人格与来源证据锚定角色，无需强制改写成第三人称；是否参与召回由 `topic_memory.enabled` 与 `topic_memory.recall_enabled` 控制。
 
 管理界面通过 AstrBot 官方插件页面（插件 → LivingMemory → Pages → dashboard）访问，无需额外配置。
 

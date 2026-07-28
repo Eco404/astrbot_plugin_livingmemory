@@ -22,6 +22,11 @@
 
 ---
 
+LivingMemory 3.0 makes source-grounded Topic memory, unified maintenance, and
+Topic-first recall part of the stable architecture. Existing database v8
+installations are backed up and migrated through the public `v8 -> v9 -> v10`
+path automatically.
+
 ## Core Features
 
 - **Hybrid Retrieval**: Combines BM25 sparse retrieval and Faiss vector retrieval with RRF fusion.
@@ -65,7 +70,7 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 - Adding, changing, or deleting a profile never triggers a rebuild of existing Timeline or Topic memory. Changes apply to future Timeline generation and newly started full or incremental Topic builds. Each Topic build captures one profile snapshot, so profiles may be edited while it runs without mixing versions.
 - When neither an exact stable-ID profile nor an explicit source pronoun exists, prompts require the model to repeat the display name instead of inferring gender from a name, persona, or writing style.
 
-**Experimental Topic memory**:
+**Topic memory**:
 - Enable `topic_memory.enabled`, then run one full build from the Topic Memory page. Automatic maintenance can be controlled by `topic_memory.auto_maintenance`.
 - `topic_memory.recall_enabled` defaults to on. The current query independently qualifies Topic candidates; recent context provides only a bounded ranking bonus, while relative Rerank boosts are confidence-gated by each call's score separation. Missing or failed Topic retrieval falls back to Timeline-only recall.
 - Topic recall reuses stored embeddings, optionally reranks candidates, and never invokes an LLM. A dynamic relative floor stops weak tail results. When a fragment body duplicates its parent Topic, only the fragment's attached key facts are injected; a pure duplicate with no facts is skipped. Visible-source overlap, relevance thresholds, and diversity controls are managed from the Topic settings panel.
@@ -83,7 +88,7 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 - Failed, cancelled, or restart-interrupted builds expose a **Resume from checkpoint** action. Candidate fragments, embeddings, matching, component synthesis, and completed materialization are reused under the same `run_uid`; changed input, prompts, Provider, model, or relevant configuration invalidates only the affected checkpoint.
 - Recoverable LLM structure errors are deterministically repaired from supplied sources and recorded in `validation_repairs`. Unverifiable model references are discarded rather than persisted as Topic provenance.
 - Fragment extraction targets one future retrieval intent per fragment. Related-topic edges combine semantic neighbors, corpus-aware keyword rarity, lexical overlap, and Timeline provenance under a per-Topic degree limit instead of requiring reciprocal Top-N as a hard gate. Topic and atom confidence is calibrated by independent time-cluster evidence so several nearby memories do not masquerade as repeated confirmation.
-- Database v9.11 gives formal fragments stable logical IDs and revisions and normalizes related-topic edges to a non-hierarchical relation. Migration does not invoke a model or rewrite Topics. New builds explicitly interpret Timeline text as the Bot's first-person narration, then anchor roles through stable accounts, persona identity, and source evidence without forcing third-person rewriting; `topic_memory.enabled` and `topic_memory.recall_enabled` control recall.
+- Database v10 gives formal fragments stable logical IDs and revisions and normalizes related-topic edges to a non-hierarchical relation. Migration does not invoke a model or generate Topic content. New builds explicitly interpret Timeline text as the Bot's first-person narration, then anchor roles through stable accounts, persona identity, and source evidence without forcing third-person rewriting; `topic_memory.enabled` and `topic_memory.recall_enabled` control recall.
 
 **Memory injection compatibility**:
 - `fake_tool_call` automatically falls back to `extra_user_content` for Gemini providers to avoid tool-message protocol incompatibility.
