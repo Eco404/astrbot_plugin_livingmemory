@@ -174,6 +174,33 @@ class DecayScheduler:
                         f"[衰减调度] 自动清理失败: {cleanup_err}", exc_info=True
                     )
 
+            if self.memory_engine.config.get(
+                "auto_cleanup_completed_build_artifacts", True
+            ):
+                try:
+                    artifact_result = (
+                        await self.memory_engine.cleanup_completed_storage_artifacts()
+                    )
+                    cleaned_runs = int(
+                        artifact_result.get("topic_build_artifacts", {}).get(
+                            "cleaned_run_count", 0
+                        )
+                    )
+                    compacted_ops = int(
+                        artifact_result.get("compacted_write_ops", 0)
+                    )
+                    logger.info(
+                        "[衰减调度] 构建中间数据清理完成，任务 %s 个，写操作 %s 条",
+                        cleaned_runs,
+                        compacted_ops,
+                    )
+                except Exception as artifact_cleanup_err:
+                    logger.error(
+                        "[衰减调度] 构建中间数据自动清理失败: %s",
+                        artifact_cleanup_err,
+                        exc_info=True,
+                    )
+
             await self._set_last_decay_date(self._get_today_str())
 
             # 每日执行备份

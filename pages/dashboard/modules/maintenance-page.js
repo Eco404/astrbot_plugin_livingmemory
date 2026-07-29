@@ -18,6 +18,9 @@ export class MaintenancePage {
     this.databaseHealth = null;
     this.databaseRepairPoller = null;
     this.databaseRepairTaskUid = null;
+    this.databaseStoragePreview = null;
+    this.databaseStoragePoller = null;
+    this.databaseStorageTaskUid = null;
     this.topicMaintenanceRequestId = 0;
   }
 
@@ -77,6 +80,10 @@ export class MaintenancePage {
     document.getElementById("database-health-refresh")?.addEventListener("click", () => this.loadDatabaseHealth());
     document.getElementById("database-health-repair")?.addEventListener("click", () => this.repairDatabaseIssues());
     document.getElementById("database-health-issues")?.addEventListener("change", () => this.updateDatabaseSelection());
+    document.getElementById("database-storage-refresh")?.addEventListener("click", () => this.loadDatabaseStoragePreview());
+    document.getElementById("database-storage-cleanup")?.addEventListener("click", () => this.startDatabaseStorageMaintenance("cleanup_completed_artifacts"));
+    document.getElementById("database-storage-vacuum")?.addEventListener("click", () => this.startDatabaseStorageMaintenance("vacuum"));
+    document.getElementById("database-storage-progress-clear")?.addEventListener("click", () => this.clearDatabaseStorageProgress());
     document.getElementById("session-maintenance-operation")?.addEventListener("change", () => this.resetSessionPreview());
     document.getElementById("session-maintenance-close")?.addEventListener("click", () => this.closeSessionMaintenance());
     document.getElementById("session-maintenance-cancel")?.addEventListener("click", () => this.closeSessionMaintenance());
@@ -120,7 +127,10 @@ export class MaintenancePage {
       this.loadTimelineRebuildTasks();
       this.loadTimelineStagedCount();
     }
-    if (this.tab === "database") this.resumeDatabaseRepair();
+    if (this.tab === "database") {
+      this.resumeDatabaseRepair();
+      this.resumeDatabaseStorageMaintenance();
+    }
   }
 
   selectTab(tab) {
@@ -144,7 +154,10 @@ export class MaintenancePage {
       this.loadTimelineRebuildTasks();
       this.loadTimelineStagedCount();
     }
-    if (tab === "database" && !this.databaseHealth) this.resumeDatabaseRepair();
+    if (tab === "database") {
+      if (!this.databaseHealth) this.resumeDatabaseRepair();
+      if (!this.databaseStoragePreview) this.resumeDatabaseStorageMaintenance();
+    }
   }
 
   selectedDatabaseIssues() {
@@ -366,6 +379,202 @@ export class MaintenancePage {
     } catch (error) {
       this.showToast(error.message, true);
       button.disabled = false;
+    }
+  }
+
+  updateDatabaseStorageButtons() {
+    const topic = this.databaseStoragePreview?.topic_build_artifacts || {};
+    const writeOps = this.databaseStoragePreview?.completed_write_ops || {};
+    const cleanable = Number(topic.eligible_run_count || 0) + Number(writeOps.row_count || 0);
+    const busy = Boolean(this.databaseStorageTaskUid);
+    const cleanup = document.getElementById("database-storage-cleanup");
+    const vacuum = document.getElementById("database-storage-vacuum");
+    const refresh = document.getElementById("database-storage-refresh");
+    if (cleanup) cleanup.disabled = busy || cleanable === 0;
+    if (vacuum) vacuum.disabled = busy;
+    if (refresh) refresh.disabled = busy;
+  }
+
+  renderDatabaseStoragePreview() {
+    const target = document.getElementById("database-storage-preview");
+    const data = this.databaseStoragePreview;
+    if (!target || !data) return;
+    const topic = data.topic_build_artifacts || {};
+    const writeOps = data.completed_write_ops || {};
+    const database = data.database || {};
+    const estimated = Number(topic.estimated_payload_bytes || 0) + Number(writeOps.payload_bytes || 0);
+    target.innerHTML = [
+      [window.t("maintenance.cleanableBuildRuns"), Number(topic.eligible_run_count || 0), window.t("maintenance.cleanableBuildRows", Object.values(topic.row_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0))],
+      [window.t("maintenance.waitingReviewRuns"), Number(topic.waiting_review_run_count || 0), window.t("maintenance.waitingReviewHint")],
+      [window.t("maintenance.completedWriteOps"), Number(writeOps.row_count || 0), window.t("maintenance.completedWriteOpsHint")],
+      [window.t("maintenance.estimatedPayload"), this.formatDatabaseBytes(estimated), window.t("maintenance.databaseFreeSpace", this.formatDatabaseBytes(database.free_bytes || 0), (Number(database.free_ratio || 0) * 100).toFixed(1))],
+    ].map(([label, value, hint]) => `<div class="database-storage-metric"><span class="text-secondary">${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(hint)}</small></div>`).join("");
+    this.updateDatabaseStorageButtons();
+  }
+
+  async loadDatabaseStoragePreview() {
+    const target = document.getElementById("database-storage-preview");
+    if (target && !this.databaseStoragePreview) target.innerHTML = `<div class="identity-state">${esc(window.t("maintenance.databaseStorageLoading"))}</div>`;
+    try {
+      this.databaseStoragePreview = await this.topicPage.api.get("database/storage");
+      this.renderDatabaseStoragePreview();
+    } catch (error) {
+      if (target) target.innerHTML = `<div class="identity-state identity-state-error">${esc(error.message)}</div>`;
+      this.showToast(error.message, true);
+    }
+  }
+
+  renderDatabaseStorageProgress(job) {
+    const panel = document.getElementById("database-storage-progress");
+    if (!panel || !job) return;
+    panel.classList.remove("hidden");
+    const percent = Math.max(0, Math.min(100, Number(job.percent || 0)));
+    const stage = document.getElementById("database-storage-progress-stage");
+    const percentElement = document.getElementById("database-storage-progress-percent");
+    const bar = document.getElementById("database-storage-progress-bar");
+    const step = document.getElementById("database-storage-progress-step");
+    const count = document.getElementById("database-storage-progress-count");
+    const elapsed = document.getElementById("database-storage-progress-elapsed");
+    const error = document.getElementById("database-storage-progress-error");
+    const clearButton = document.getElementById("database-storage-progress-clear");
+    const failed = ["failed", "cancelled"].includes(job.status);
+    const stageKey = job.status === "failed"
+      ? "maintenance.databaseStorageStageFailed"
+      : job.status === "cancelled"
+        ? "maintenance.databaseStorageStageCancelled"
+        : "maintenance.databaseStorageProgress";
+    if (stage) stage.textContent = window.t(stageKey);
+    if (percentElement) percentElement.textContent = `${percent.toFixed(1)}%`;
+    if (bar) bar.style.width = `${percent}%`;
+    if (step) step.textContent = job.current_step || "";
+    if (count) count.textContent = job.total ? `${Number(job.current || 0)} / ${Number(job.total || 0)}` : "";
+    if (elapsed) {
+      const now = Date.now() / 1000;
+      elapsed.textContent = window.t("maintenance.operationElapsed", this.formatElapsed(now - Number(job.created_at || now)));
+    }
+    if (error) error.textContent = job.error || "";
+    if (clearButton) {
+      clearButton.classList.toggle("hidden", !failed);
+      clearButton.dataset.jobUid = failed ? String(job.job_uid || "") : "";
+    }
+  }
+
+  hideDatabaseStorageProgress() {
+    document.getElementById("database-storage-progress")?.classList.add("hidden");
+    const clearButton = document.getElementById("database-storage-progress-clear");
+    if (clearButton) {
+      clearButton.classList.add("hidden");
+      clearButton.dataset.jobUid = "";
+    }
+  }
+
+  async clearDatabaseStorageProgress(jobUid = "", { silent = false } = {}) {
+    const clearButton = document.getElementById("database-storage-progress-clear");
+    const targetUid = String(jobUid || clearButton?.dataset.jobUid || "");
+    this.hideDatabaseStorageProgress();
+    try {
+      await this.topicPage.api.post("database/storage/progress/clear", {
+        job_uid: targetUid,
+      });
+    } catch (error) {
+      if (!silent) {
+        this.showToast(error.message, true);
+        const job = await this.topicPage.api.get("database/storage/progress", {
+          job_uid: targetUid,
+        }).catch(() => null);
+        if (job && job.status !== "idle") this.renderDatabaseStorageProgress(job);
+      }
+    }
+  }
+
+  async resumeDatabaseStorageMaintenance() {
+    try {
+      const job = await this.topicPage.api.get("database/storage/progress");
+      if (["pending", "running"].includes(job.status)) {
+        this.databaseStorageTaskUid = job.job_uid;
+        this.renderDatabaseStorageProgress(job);
+        this.updateDatabaseStorageButtons();
+        this.pollDatabaseStorageMaintenance(job.job_uid);
+        return;
+      }
+      if (["failed", "cancelled"].includes(job.status)) {
+        this.renderDatabaseStorageProgress(job);
+      } else {
+        this.hideDatabaseStorageProgress();
+        if (job.status === "completed") {
+          await this.clearDatabaseStorageProgress(job.job_uid, { silent: true });
+        }
+      }
+      if (job.preview) {
+        this.databaseStoragePreview = job.preview;
+        this.renderDatabaseStoragePreview();
+      } else {
+        await this.loadDatabaseStoragePreview();
+      }
+    } catch (_) {
+      await this.loadDatabaseStoragePreview();
+    }
+  }
+
+  pollDatabaseStorageMaintenance(jobUid) {
+    clearTimeout(this.databaseStoragePoller);
+    this.databaseStorageTaskUid = jobUid;
+    this.updateDatabaseStorageButtons();
+    const poll = async () => {
+      try {
+        const job = await this.topicPage.api.get("database/storage/progress", { job_uid: jobUid });
+        this.renderDatabaseStorageProgress(job);
+        if (!["completed", "failed", "cancelled"].includes(job.status)) {
+          this.databaseStoragePoller = setTimeout(poll, 800);
+          return;
+        }
+        this.databaseStorageTaskUid = null;
+        this.databaseStoragePoller = null;
+        if (job.preview) {
+          this.databaseStoragePreview = job.preview;
+          this.renderDatabaseStoragePreview();
+        } else {
+          await this.loadDatabaseStoragePreview();
+        }
+        if (job.status === "completed") {
+          this.hideDatabaseStorageProgress();
+          this.showToast(window.t("maintenance.databaseStorageComplete"));
+          await this.loadDatabaseHealth();
+          await this.clearDatabaseStorageProgress(job.job_uid, { silent: true });
+        } else {
+          this.renderDatabaseStorageProgress(job);
+          this.showToast(job.error || window.t("maintenance.databaseStorageFailed"), true);
+        }
+        this.updateDatabaseStorageButtons();
+      } catch (error) {
+        this.databaseStorageTaskUid = null;
+        this.databaseStoragePoller = null;
+        this.updateDatabaseStorageButtons();
+        this.showToast(error.message, true);
+      }
+    };
+    this.databaseStoragePoller = setTimeout(poll, 250);
+  }
+
+  async startDatabaseStorageMaintenance(action) {
+    const vacuum = action === "vacuum";
+    const confirmed = await this.confirmDialog.show({
+      title: window.t(vacuum ? "maintenance.confirmVacuumTitle" : "maintenance.confirmCleanupArtifactsTitle"),
+      message: window.t(vacuum ? "maintenance.confirmVacuumMessage" : "maintenance.confirmCleanupArtifactsMessage"),
+      confirmLabel: window.t(vacuum ? "maintenance.vacuumDatabase" : "maintenance.cleanupBuildArtifacts"),
+      danger: vacuum,
+    });
+    if (!confirmed) return;
+    try {
+      const job = await this.topicPage.api.post("database/storage/maintenance", { action });
+      this.databaseStorageTaskUid = job.job_uid;
+      this.renderDatabaseStorageProgress(job);
+      this.updateDatabaseStorageButtons();
+      this.pollDatabaseStorageMaintenance(job.job_uid);
+    } catch (error) {
+      this.databaseStorageTaskUid = null;
+      this.updateDatabaseStorageButtons();
+      this.showToast(error.message, true);
     }
   }
 

@@ -152,6 +152,9 @@ class MemoryEngine:
         # check and remember completed sessions for this process lifetime.
         self._session_migration_lock = asyncio.Lock()
         self._session_migration_checked: set[str] = set()
+        # Serialize scheduled and user-triggered storage maintenance. VACUUM
+        # needs exclusive database access and must not overlap another cleanup.
+        self._storage_maintenance_lock = asyncio.Lock()
 
         # 初始化组件(在initialize中完成)
         self.text_processor = None
@@ -446,7 +449,12 @@ class MemoryEngine:
                     fields.append("retry_count = retry_count + 1")
             elif status == "completed":
                 fields.append("error = NULL")
-            if payload_patch:
+            if status == "completed":
+                # Completed operations are no longer replayable work. Keep the
+                # compact operation header while discarding the potentially
+                # large document/atom recovery payload.
+                fields.append("payload = '{}'")
+            elif payload_patch:
                 fields.append("payload = ?")
                 params.append(json.dumps(current_payload, ensure_ascii=False))
             params.append(op_id)
@@ -795,6 +803,9 @@ class MemoryEngine:
             "forgetting_agent.cleanup_days_threshold": "cleanup_days_threshold",
             "forgetting_agent.cleanup_importance_threshold": "cleanup_importance_threshold",
             "forgetting_agent.auto_cleanup_enabled": "auto_cleanup_enabled",
+            "maintenance.auto_cleanup_completed_build_artifacts": (
+                "auto_cleanup_completed_build_artifacts"
+            ),
             "graph_memory.document_route_weight": "document_route_weight",
             "graph_memory.graph_route_weight": "graph_route_weight",
             "graph_memory.cross_route_bonus": "cross_route_bonus",
@@ -3315,9 +3326,150 @@ class MemoryEngine:
                 "graph_memory_enabled": bool(self.graph_store is not None),
             }
 
-    async def maintain_storage(self, *, vacuum: bool = False) -> dict[str, Any]:
+    async def preview_storage_maintenance(self) -> dict[str, Any]:
+        """Return removable build/write artifacts and current SQLite free space."""
+        if self.db_connection is None:
+            raise RuntimeError("database connection is not initialized")
+        topic = await self.topic_memory_store.preview_completed_build_artifact_cleanup()
+        write_row = await (
+            await self.db_connection.execute(
+                """
+                SELECT COUNT(*), COALESCE(SUM(LENGTH(payload)), 0)
+                FROM memory_write_ops
+                WHERE status = 'completed' AND LENGTH(COALESCE(payload, '')) > 2
+                """
+            )
+        ).fetchone()
+        page_count_row = await (
+            await self.db_connection.execute("PRAGMA page_count")
+        ).fetchone()
+        free_page_row = await (
+            await self.db_connection.execute("PRAGMA freelist_count")
+        ).fetchone()
+        page_size_row = await (
+            await self.db_connection.execute("PRAGMA page_size")
+        ).fetchone()
+        page_count = int(page_count_row[0] if page_count_row else 0)
+        free_pages = int(free_page_row[0] if free_page_row else 0)
+        page_size = int(page_size_row[0] if page_size_row else 0)
+        return {
+            "topic_build_artifacts": topic,
+            "completed_write_ops": {
+                "row_count": int(write_row[0] if write_row else 0),
+                "payload_bytes": int(write_row[1] if write_row else 0),
+            },
+            "database": {
+                "size_bytes": (
+                    Path(self.db_path).stat().st_size
+                    if Path(self.db_path).exists()
+                    else 0
+                ),
+                "page_count": page_count,
+                "free_page_count": free_pages,
+                "free_bytes": free_pages * page_size,
+                "free_ratio": (free_pages / page_count if page_count else 0.0),
+            },
+        }
+
+    async def cleanup_completed_storage_artifacts(
+        self,
+        *,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        """Compact successful build/write logs without touching formal memories."""
+
+        async with self._storage_maintenance_lock:
+            return await self._cleanup_completed_storage_artifacts_locked(
+                progress_callback=progress_callback
+            )
+
+    async def _cleanup_completed_storage_artifacts_locked(
+        self,
+        *,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        """Run artifact cleanup while holding the storage-maintenance lock."""
+
+        async def emit(stage: str, current: int, total: int, step: str) -> None:
+            if progress_callback is None:
+                return
+            value = progress_callback(stage, current, total, step)
+            if hasattr(value, "__await__"):
+                await value
+
+        preview = await self.preview_storage_maintenance()
+        run_total = int(
+            preview["topic_build_artifacts"].get("eligible_run_count", 0)
+        )
+        total = max(1, run_total + 2)
+        await emit("cleanup", 0, total, "正在准备清理已完成构建任务")
+
+        async def topic_progress(current: int, _total: int, step: str) -> None:
+            await emit("cleanup", current, total, step)
+
+        topic_result = await self.topic_memory_store.cleanup_completed_build_artifacts(
+            progress_callback=topic_progress
+        )
+        await emit(
+            "cleanup",
+            run_total + 1,
+            total,
+            "正在压缩已完成的 Timeline 写操作日志",
+        )
+        cursor = await self.db_connection.execute(
+            """
+            UPDATE memory_write_ops
+            SET payload = '{}', updated_at = ?
+            WHERE status = 'completed' AND LENGTH(COALESCE(payload, '')) > 2
+            """,
+            (time.time(),),
+        )
+        await self.db_connection.commit()
+        await emit("cleanup", total, total, "已完成中间数据清理")
+        return {
+            "topic_build_artifacts": topic_result,
+            "compacted_write_ops": int(cursor.rowcount or 0),
+            "estimated_payload_bytes": (
+                int(
+                    preview["topic_build_artifacts"].get(
+                        "estimated_payload_bytes", 0
+                    )
+                )
+                + int(preview["completed_write_ops"].get("payload_bytes", 0))
+            ),
+        }
+
+    async def maintain_storage(
+        self,
+        *,
+        vacuum: bool = False,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
         """Run SQLite storage maintenance and return size diagnostics."""
+
+        async with self._storage_maintenance_lock:
+            return await self._maintain_storage_locked(
+                vacuum=vacuum,
+                progress_callback=progress_callback,
+            )
+
+    async def _maintain_storage_locked(
+        self,
+        *,
+        vacuum: bool = False,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        """Run SQLite maintenance while holding the maintenance lock."""
         try:
+            async def emit(
+                stage: str, current: int, total: int, step: str
+            ) -> None:
+                if progress_callback is None:
+                    return
+                value = progress_callback(stage, current, total, step)
+                if hasattr(value, "__await__"):
+                    await value
+
             db_path = Path(self.db_path)
             wal_path = Path(f"{self.db_path}-wal")
             before_size = db_path.stat().st_size if db_path.exists() else 0
@@ -3329,6 +3481,7 @@ class MemoryEngine:
                     "error": "database connection is not initialized",
                 }
 
+            await emit("optimizing", 0, 4, "正在优化全文检索索引")
             for fts_table in (
                 "livingmemory_memories_fts",
                 "livingmemory_graph_entries_fts",
@@ -3347,14 +3500,31 @@ class MemoryEngine:
                     )
 
             await self.db_connection.commit()
-            await self.db_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            await emit("checkpoint", 1, 4, "正在合并 SQLite WAL")
+            checkpoint_cursor = await self.db_connection.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            )
+            try:
+                await checkpoint_cursor.fetchall()
+            finally:
+                await checkpoint_cursor.close()
 
             if vacuum:
-                await self.db_connection.execute("VACUUM")
+                await emit("vacuum", 2, 4, "正在压缩数据库文件")
+                # VACUUM runs on a dedicated connection. The shared runtime
+                # connection may have unrelated readers, and SQLite rejects
+                # VACUUM whenever its own connection has an active statement.
+                async with aiosqlite.connect(
+                    self.db_path, timeout=30.0
+                ) as vacuum_db:
+                    vacuum_cursor = await vacuum_db.execute("VACUUM")
+                    await vacuum_cursor.close()
+                    await vacuum_db.commit()
+            await emit("verifying", 3, 4, "正在统计维护后的数据库大小")
 
             after_size = db_path.stat().st_size if db_path.exists() else 0
             after_wal_size = wal_path.stat().st_size if wal_path.exists() else 0
-            return {
+            result = {
                 "success": True,
                 "vacuum": vacuum,
                 "db_size_before": before_size,
@@ -3366,6 +3536,8 @@ class MemoryEngine:
                     before_size + before_wal_size - after_size - after_wal_size,
                 ),
             }
+            await emit("completed", 4, 4, "数据库存储维护已完成")
+            return result
         except asyncio.CancelledError:
             raise
         except Exception as e:

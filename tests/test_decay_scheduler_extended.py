@@ -19,10 +19,17 @@ def mock_memory_engine():
     engine.maintain_storage = AsyncMock(
         return_value={"success": True, "bytes_reclaimed": 1024 * 1024}
     )
+    engine.cleanup_completed_storage_artifacts = AsyncMock(
+        return_value={
+            "topic_build_artifacts": {"cleaned_run_count": 2},
+            "compacted_write_ops": 3,
+        }
+    )
     engine.config = {
         "auto_cleanup_enabled": True,
         "cleanup_days_threshold": 30,
         "cleanup_importance_threshold": 0.3,
+        "auto_cleanup_completed_build_artifacts": True,
     }
     return engine
 
@@ -210,6 +217,7 @@ class TestDecaySchedulerExecution:
         mock_memory_engine.apply_daily_decay.assert_called_once_with(0.01, 1)
         mock_memory_engine.cleanup_old_memories.assert_called_once()
         mock_memory_engine.maintain_storage.assert_called_once()
+        mock_memory_engine.cleanup_completed_storage_artifacts.assert_called_once()
         mock_db_migration.create_backup.assert_called_once()
 
     @pytest.mark.asyncio

@@ -474,6 +474,38 @@
                 <div id="database-repair-progress-error" class="text-danger"></div>
               </div>
               <div id="database-health-databases" class="database-health-databases"></div>
+              <div class="database-storage-section">
+                <div class="maintenance-review-toolbar">
+                  <div>
+                    <h3 data-i18n="maintenance.databaseStorageTitle">存储空间维护</h3>
+                    <p class="text-secondary" data-i18n="maintenance.databaseStorageIntro">清理已完成任务的可重建中间数据；压缩数据库需手动执行，期间会短暂锁定数据库。</p>
+                  </div>
+                  <div class="maintenance-topic-controls">
+                    <button class="btn btn-secondary btn-sm" id="database-storage-refresh" type="button" data-i18n="common.refresh">刷新</button>
+                    <button class="btn btn-secondary btn-sm" id="database-storage-cleanup" type="button" disabled data-i18n="maintenance.cleanupBuildArtifacts">清理中间数据</button>
+                    <button class="btn btn-danger btn-sm" id="database-storage-vacuum" type="button" data-i18n="maintenance.vacuumDatabase">压缩数据库</button>
+                  </div>
+                </div>
+                <div id="database-storage-preview" class="database-storage-preview">
+                  <div class="identity-state" data-i18n="maintenance.databaseStorageLoading">正在读取存储状态...</div>
+                </div>
+                <div id="database-storage-progress" class="database-repair-progress hidden" aria-live="polite">
+                  <div class="database-repair-progress-head">
+                    <strong id="database-storage-progress-stage" data-i18n="maintenance.databaseStorageProgress">存储维护进度</strong>
+                    <div class="database-storage-progress-actions">
+                      <span id="database-storage-progress-percent">0.0%</span>
+                      <button class="btn btn-secondary btn-sm hidden" id="database-storage-progress-clear" type="button" data-i18n="maintenance.clearStorageProgress">清除</button>
+                    </div>
+                  </div>
+                  <div class="topic-progress-track"><span id="database-storage-progress-bar" style="width:0%"></span></div>
+                  <div class="database-repair-progress-meta">
+                    <span id="database-storage-progress-step"></span>
+                    <span id="database-storage-progress-count">0 / 0</span>
+                  </div>
+                  <small id="database-storage-progress-elapsed" class="text-tertiary"></small>
+                  <div id="database-storage-progress-error" class="text-danger"></div>
+                </div>
+              </div>
               <div class="maintenance-history-heading database-health-issues-heading">
                 <h3 data-i18n="maintenance.databaseIssues">发现的问题</h3>
                 <span id="database-health-selection" class="text-secondary"></span>

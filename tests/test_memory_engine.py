@@ -118,6 +118,52 @@ def test_memory_engine_atom_enabled_honors_explicit_false(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_maintain_storage_vacuum_uses_finished_checkpoint(
+    tmp_path: Path,
+):
+    db_path = tmp_path / "vacuum.db"
+    engine = MemoryEngine(
+        db_path=str(db_path),
+        faiss_db=_FakeFaissDB(),
+        config={},
+    )
+    engine.db_connection = await aiosqlite.connect(db_path)
+    try:
+        await engine.db_connection.execute("PRAGMA journal_mode = WAL")
+        await engine.db_connection.execute("PRAGMA busy_timeout = 10000")
+        await engine.db_connection.execute(
+            "CREATE TABLE payloads (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        await engine.db_connection.executemany(
+            "INSERT INTO payloads(value) VALUES (?)",
+            [("x" * 4096,) for _ in range(128)],
+        )
+        await engine.db_connection.execute("DELETE FROM payloads")
+        await engine.db_connection.commit()
+
+        progress: list[tuple[str, int, int, str]] = []
+
+        async def report(stage: str, current: int, total: int, step: str):
+            progress.append((stage, current, total, step))
+
+        result = await engine.maintain_storage(
+            vacuum=True,
+            progress_callback=report,
+        )
+
+        assert result["success"] is True
+        assert result["vacuum"] is True
+        assert progress[-1][0] == "completed"
+        cursor = await engine.db_connection.execute("PRAGMA integrity_check")
+        try:
+            assert (await cursor.fetchone())[0] == "ok"
+        finally:
+            await cursor.close()
+    finally:
+        await engine.db_connection.close()
+
+
+@pytest.mark.asyncio
 async def test_initialize_drops_legacy_documents_fts_triggers(tmp_path: Path):
     db_path = tmp_path / "legacy_trigger.db"
     async with aiosqlite.connect(db_path) as db:
@@ -644,7 +690,7 @@ async def test_memory_engine_write_ops_record_completed_add(tmp_path: Path):
 
     cursor = await engine.db_connection.execute(
         """
-        SELECT op_type, memory_id, status, step
+        SELECT op_type, memory_id, status, step, payload
         FROM memory_write_ops
         ORDER BY id DESC
         LIMIT 1
@@ -655,6 +701,7 @@ async def test_memory_engine_write_ops_record_completed_add(tmp_path: Path):
     assert row["memory_id"] == mid
     assert row["status"] == "completed"
     assert row["step"] == "completed"
+    assert row["payload"] == "{}"
 
     await engine.close()
 

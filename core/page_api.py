@@ -352,6 +352,30 @@ class PluginPageApi:
             "LivingMemory Page database repair progress",
         )
         register(
+            f"{PAGE_API_PREFIX}/database/storage",
+            self.get_database_storage_preview,
+            ["GET"],
+            "LivingMemory Page database storage preview",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/database/storage/maintenance",
+            self.start_database_storage_maintenance,
+            ["POST"],
+            "LivingMemory Page database storage maintenance",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/database/storage/progress",
+            self.get_database_storage_progress,
+            ["GET"],
+            "LivingMemory Page database storage maintenance progress",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/database/storage/progress/clear",
+            self.clear_database_storage_progress,
+            ["POST"],
+            "LivingMemory Page clear database storage maintenance progress",
+        )
+        register(
             f"{PAGE_API_PREFIX}/topics/overview",
             self.get_topic_overview,
             ["GET"],
@@ -849,6 +873,28 @@ class PluginPageApi:
 
     async def get_database_repair_progress(self):
         return await self.database_handler.get_repair_progress()
+
+    async def get_database_storage_preview(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.database_handler.get_storage_preview(
+            ready["memory_engine"]
+        )
+
+    async def start_database_storage_maintenance(self):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.database_handler.start_storage_maintenance(
+            ready["memory_engine"]
+        )
+
+    async def get_database_storage_progress(self):
+        return await self.database_handler.get_storage_maintenance_progress()
+
+    async def clear_database_storage_progress(self):
+        return await self.database_handler.clear_storage_maintenance_progress()
 
     async def get_topic_overview(self):
         ready, error = await self._ensure_plugin_ready()

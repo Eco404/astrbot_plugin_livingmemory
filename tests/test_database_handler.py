@@ -73,6 +73,44 @@ class _FakeMemoryEngine:
         self.cache_invalidated = True
 
 
+class _StorageTopicBuildManager:
+    @staticmethod
+    def has_active_builds() -> bool:
+        return False
+
+
+class _StorageMemoryEngine:
+    def __init__(self) -> None:
+        self.topic_build_manager = _StorageTopicBuildManager()
+        self.cleanup_calls = 0
+
+    async def preview_storage_maintenance(self):
+        return {
+            "topic_build_artifacts": {
+                "eligible_run_count": max(0, 1 - self.cleanup_calls),
+                "waiting_review_run_count": 1,
+                "row_counts": {"topic_fragment_drafts": max(0, 4 - self.cleanup_calls * 4)},
+                "estimated_payload_bytes": max(0, 4096 - self.cleanup_calls * 4096),
+            },
+            "completed_write_ops": {
+                "row_count": max(0, 2 - self.cleanup_calls * 2),
+                "payload_bytes": max(0, 1024 - self.cleanup_calls * 1024),
+            },
+            "database": {"size_bytes": 8192, "free_bytes": 0, "free_ratio": 0.0},
+        }
+
+    async def cleanup_completed_storage_artifacts(self, *, progress_callback):
+        await progress_callback("cleanup", 0, 2, "preparing")
+        await progress_callback("cleanup", 1, 2, "cleaning")
+        self.cleanup_calls += 1
+        await progress_callback("cleanup", 2, 2, "completed")
+        return {"compacted_write_ops": 2}
+
+    async def maintain_storage(self, *, vacuum, progress_callback):
+        await progress_callback("vacuum", 1, 1, "completed")
+        return {"success": True, "vacuum": vacuum}
+
+
 @pytest.mark.asyncio
 async def test_database_health_keeps_graph_orphan_as_selectable_issue(tmp_path: Path):
     db_path = tmp_path / "health.db"
@@ -148,4 +186,78 @@ async def test_database_repair_exposes_background_progress(tmp_path: Path):
     assert progress["data"]["percent"] == 100.0
     assert progress["data"]["current"] == progress["data"]["total"]
     assert progress["data"]["health"]["summary"]["status"] == "healthy"
+    await handler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_database_storage_cleanup_exposes_background_progress():
+    handler = DatabaseHandler(PageApiUtils())
+    engine = _StorageMemoryEngine()
+    app = Quart(__name__)
+
+    async with app.test_request_context(
+        "/",
+        method="POST",
+        json={"action": "cleanup_completed_artifacts"},
+    ):
+        started = await handler.start_storage_maintenance(engine)
+
+    assert started["status"] == "ok"
+    job_uid = started["data"]["job_uid"]
+    for _ in range(100):
+        async with app.test_request_context(f"/?job_uid={job_uid}", method="GET"):
+            progress = await handler.get_storage_maintenance_progress()
+        if progress["data"]["status"] not in {"pending", "running"}:
+            break
+        await asyncio.sleep(0.01)
+
+    assert progress["data"]["status"] == "completed"
+    assert progress["data"]["percent"] == 100.0
+    assert progress["data"]["result"] == {"compacted_write_ops": 2}
+    assert progress["data"]["preview"]["topic_build_artifacts"][
+        "eligible_run_count"
+    ] == 0
+    async with app.test_request_context(
+        "/", method="POST", json={"job_uid": job_uid}
+    ):
+        cleared = await handler.clear_storage_maintenance_progress()
+    assert cleared["status"] == "ok"
+    assert cleared["data"]["cleared"] is True
+    async with app.test_request_context(
+        f"/?job_uid={job_uid}", method="GET"
+    ):
+        empty = await handler.get_storage_maintenance_progress()
+    assert empty["data"]["status"] == "idle"
+    await handler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_database_storage_progress_is_retained_until_cleared():
+    handler = DatabaseHandler(PageApiUtils())
+    app = Quart(__name__)
+    job_uid = "failed-storage-job"
+    handler._storage_jobs[job_uid] = {
+        "job_uid": job_uid,
+        "status": "failed",
+        "stage": "failed",
+        "error": "vacuum failed",
+        "current_step": "数据库存储维护任务失败",
+    }
+    handler._latest_storage_job_uid = job_uid
+
+    async with app.test_request_context("/", method="GET"):
+        progress = await handler.get_storage_maintenance_progress()
+    assert progress["data"]["status"] == "failed"
+    assert progress["data"]["error"] == "vacuum failed"
+
+    async with app.test_request_context(
+        "/", method="POST", json={"job_uid": job_uid}
+    ):
+        cleared = await handler.clear_storage_maintenance_progress()
+    assert cleared["status"] == "ok"
+    assert cleared["data"]["cleared"] is True
+
+    async with app.test_request_context("/", method="GET"):
+        empty = await handler.get_storage_maintenance_progress()
+    assert empty["data"]["status"] == "idle"
     await handler.shutdown()

@@ -27,6 +27,9 @@ class DatabaseHandler:
         self._repair_jobs: dict[str, dict[str, Any]] = {}
         self._repair_tasks: dict[str, asyncio.Task] = {}
         self._latest_repair_job_uid: str | None = None
+        self._storage_jobs: dict[str, dict[str, Any]] = {}
+        self._storage_tasks: dict[str, asyncio.Task] = {}
+        self._latest_storage_job_uid: str | None = None
 
     @staticmethod
     async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
@@ -360,6 +363,8 @@ class DatabaseHandler:
         active = self._active_repair_job()
         if active is not None:
             return self.utils.error("已有数据库修复任务正在运行")
+        if self._active_storage_job() is not None:
+            return self.utils.error("数据库存储维护期间不能执行修复")
 
         selected_uids = list(
             dict.fromkeys(
@@ -618,13 +623,195 @@ class DatabaseHandler:
             return self.utils.ok({"status": "idle"})
         return self.utils.ok(dict(self._repair_jobs[job_uid]))
 
+    def _active_storage_job(self) -> dict[str, Any] | None:
+        return next(
+            (
+                job
+                for job in self._storage_jobs.values()
+                if job.get("status") in {"pending", "running"}
+            ),
+            None,
+        )
+
+    async def get_storage_preview(self, memory_engine: MemoryEngine) -> dict[str, Any]:
+        """Preview removable build artifacts without modifying SQLite."""
+        try:
+            return self.utils.ok(await memory_engine.preview_storage_maintenance())
+        except Exception as exc:  # noqa: BLE001 - page boundary.
+            logger.error("[PageAPI] 数据库存储维护预览失败", exc_info=True)
+            return self.utils.error(str(exc))
+
+    def _update_storage_job(
+        self,
+        job_uid: str,
+        *,
+        stage: str,
+        current: int,
+        total: int,
+        current_step: str,
+    ) -> None:
+        job = self._storage_jobs[job_uid]
+        safe_total = max(1, int(total))
+        safe_current = max(0, min(safe_total, int(current)))
+        job.update(
+            {
+                "status": "running",
+                "stage": stage,
+                "current": safe_current,
+                "total": safe_total,
+                "percent": round(safe_current / safe_total * 100, 1),
+                "current_step": current_step,
+                "updated_at": time.time(),
+            }
+        )
+
+    async def start_storage_maintenance(
+        self, memory_engine: MemoryEngine
+    ) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        action = str(payload.get("action") or "").strip()
+        if action not in {"cleanup_completed_artifacts", "vacuum"}:
+            return self.utils.error("不支持的数据库存储维护操作")
+        if self._active_storage_job() is not None:
+            return self.utils.error("已有数据库存储维护任务正在运行")
+        if self._active_repair_job() is not None:
+            return self.utils.error("数据库修复期间不能执行存储维护")
+        if action == "vacuum" and memory_engine.topic_build_manager.has_active_builds():
+            return self.utils.error("Topic 构建期间不能压缩数据库，请等待构建完成")
+
+        job_uid = str(uuid.uuid4())
+        now = time.time()
+        job = {
+            "job_uid": job_uid,
+            "action": action,
+            "status": "pending",
+            "stage": "preparing",
+            "current": 0,
+            "total": 1,
+            "percent": 0.0,
+            "current_step": "正在准备数据库维护",
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._storage_jobs[job_uid] = job
+        self._latest_storage_job_uid = job_uid
+        task = asyncio.create_task(
+            self._run_storage_maintenance_job(job_uid, memory_engine),
+            name=f"livingmemory-storage-maintenance-{job_uid[:8]}",
+        )
+        self._storage_tasks[job_uid] = task
+        task.add_done_callback(lambda _task: self._storage_tasks.pop(job_uid, None))
+        return self.utils.ok(dict(job))
+
+    async def _run_storage_maintenance_job(
+        self,
+        job_uid: str,
+        memory_engine: MemoryEngine,
+    ) -> None:
+        job = self._storage_jobs[job_uid]
+        action = str(job["action"])
+
+        async def progress(
+            stage: str, current: int, total: int, step: str
+        ) -> None:
+            self._update_storage_job(
+                job_uid,
+                stage=stage,
+                current=current,
+                total=total,
+                current_step=step,
+            )
+
+        try:
+            if action == "cleanup_completed_artifacts":
+                result = await memory_engine.cleanup_completed_storage_artifacts(
+                    progress_callback=progress
+                )
+            else:
+                result = await memory_engine.maintain_storage(
+                    vacuum=True,
+                    progress_callback=progress,
+                )
+                if not result.get("success"):
+                    raise RuntimeError(
+                        str(result.get("error") or "数据库压缩失败")
+                    )
+            preview = await memory_engine.preview_storage_maintenance()
+            now = time.time()
+            job.update(
+                {
+                    "status": "completed",
+                    "stage": "completed",
+                    "current": int(job.get("total") or 1),
+                    "percent": 100.0,
+                    "current_step": "数据库存储维护已完成",
+                    "result": result,
+                    "preview": preview,
+                    "updated_at": now,
+                    "completed_at": now,
+                }
+            )
+        except asyncio.CancelledError:
+            now = time.time()
+            job.update(
+                {
+                    "status": "cancelled",
+                    "stage": "cancelled",
+                    "current_step": "插件停止，数据库维护任务已取消",
+                    "updated_at": now,
+                    "completed_at": now,
+                }
+            )
+            raise
+        except Exception as exc:  # noqa: BLE001 - task boundary.
+            logger.error("[PageAPI] 数据库存储维护任务失败", exc_info=True)
+            now = time.time()
+            job.update(
+                {
+                    "status": "failed",
+                    "stage": "failed",
+                    "error": str(exc),
+                    "current_step": "数据库存储维护任务失败",
+                    "updated_at": now,
+                    "completed_at": now,
+                }
+            )
+
+    async def get_storage_maintenance_progress(self) -> dict[str, Any]:
+        job_uid = str(request.args.get("job_uid") or "").strip()
+        if not job_uid:
+            job_uid = self._latest_storage_job_uid or ""
+        if not job_uid or job_uid not in self._storage_jobs:
+            return self.utils.ok({"status": "idle"})
+        return self.utils.ok(dict(self._storage_jobs[job_uid]))
+
+    async def clear_storage_maintenance_progress(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        job_uid = str(
+            payload.get("job_uid") or self._latest_storage_job_uid or ""
+        ).strip()
+        if not job_uid or job_uid not in self._storage_jobs:
+            return self.utils.ok({"cleared": False, "job_uid": job_uid})
+        job = self._storage_jobs[job_uid]
+        if job.get("status") in {"pending", "running"}:
+            return self.utils.error("数据库存储维护仍在运行，不能清除进度")
+        self._storage_jobs.pop(job_uid, None)
+        self._storage_tasks.pop(job_uid, None)
+        if self._latest_storage_job_uid == job_uid:
+            self._latest_storage_job_uid = next(reversed(self._storage_jobs), None)
+        return self.utils.ok({"cleared": True, "job_uid": job_uid})
+
     async def shutdown(self) -> None:
         tasks = [task for task in self._repair_tasks.values() if not task.done()]
+        tasks.extend(
+            task for task in self._storage_tasks.values() if not task.done()
+        )
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._repair_tasks.clear()
+        self._storage_tasks.clear()
 
     async def repair(
         self,
