@@ -59,6 +59,8 @@ def _placement(owner: str, key: str, definition: dict[str, Any]) -> tuple[str, s
     if category == "index":
         return "index", "timeline_index"
     if category == "maintenance":
+        if key.startswith("maintenance."):
+            return "maintenance", "database_maintenance"
         return "maintenance", "backup"
     if category == "performance" and key.startswith("recall_engine.search_cache_"):
         return "recall", "recall_cache"
@@ -85,6 +87,7 @@ _GROUP_LABELS = {
     "rerank_model": "settings.group.rerankModel",
     "timeline_index": "settings.group.timelineIndex",
     "backup": "settings.group.backup",
+    "database_maintenance": "settings.group.databaseMaintenance",
 }
 
 

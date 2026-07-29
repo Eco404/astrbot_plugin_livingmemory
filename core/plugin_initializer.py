@@ -873,7 +873,14 @@ class PluginInitializer:
             auto_cleanup_enabled = self.config_manager.get(
                 "forgetting_agent.auto_cleanup_enabled", True
             )
-            if self.memory_engine and (decay_rate > 0 or auto_cleanup_enabled):
+            artifact_cleanup_enabled = self.config_manager.get(
+                "maintenance.auto_cleanup_completed_build_artifacts", True
+            )
+            if self.memory_engine and (
+                decay_rate > 0
+                or auto_cleanup_enabled
+                or artifact_cleanup_enabled
+            ):
                 backup_enabled = self.config_manager.get(
                     "backup_settings.enabled", True
                 )
@@ -1027,6 +1034,9 @@ class PluginInitializer:
         cleanup_enabled = bool(
             effective["forgetting_agent.auto_cleanup_enabled"]
         )
+        artifact_cleanup_enabled = bool(
+            effective["maintenance.auto_cleanup_completed_build_artifacts"]
+        )
         if self.decay_scheduler is not None:
             self.decay_scheduler.decay_rate = decay_rate
             self.decay_scheduler.backup_keep_days = int(
@@ -1035,11 +1045,15 @@ class PluginInitializer:
                     self.decay_scheduler.backup_keep_days,
                 )
             )
-            if decay_rate <= 0 and not cleanup_enabled:
+            if decay_rate <= 0 and not cleanup_enabled and not artifact_cleanup_enabled:
                 await self.decay_scheduler.stop()
                 self.decay_scheduler = None
             return
-        if not self.memory_engine or (decay_rate <= 0 and not cleanup_enabled):
+        if not self.memory_engine or (
+            decay_rate <= 0
+            and not cleanup_enabled
+            and not artifact_cleanup_enabled
+        ):
             return
         scheduler = DecayScheduler(
             memory_engine=self.memory_engine,

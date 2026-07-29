@@ -3414,6 +3414,11 @@ select.timeline-setting-input { width: min(220px, 100%); }
 }
 .database-repair-progress-meta { color: var(--text-secondary); font-size: 13px; }
 .database-repair-progress-error:empty { display: none; }
+.database-storage-progress-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .database-health-state {
   display: flex;
   align-items: center;
@@ -3447,6 +3452,28 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .database-health-database > span:first-child { display: grid; gap: 3px; min-width: 0; }
 .database-health-database small { color: var(--text-tertiary); overflow-wrap: anywhere; }
 .database-health-database > small { grid-column: 1 / -1; }
+.database-storage-section {
+  margin-top: var(--space-6);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border-normal);
+}
+.database-storage-section h3 { margin: 0; }
+.database-storage-preview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.database-storage-metric {
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-normal);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+.database-storage-metric strong { font-size: 18px; }
+.database-storage-metric small { color: var(--text-secondary); line-height: 1.45; }
 .database-health-issues-heading { margin-top: var(--space-6); }
 .database-health-issues { display: grid; gap: var(--space-2); }
 .database-health-issue {

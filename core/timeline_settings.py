@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TIMELINE_SETTINGS_REVISION = 4
+TIMELINE_SETTINGS_REVISION = 5
 
 SHARED_QUERY_SETTING_KEYS = frozenset(
     {
@@ -70,6 +70,7 @@ TIMELINE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "cloudflare_rerank.max_retries": {"default": 2, "type": "int", "min": 0, "max": 8, "category": "model", "label": "Cloudflare 临时错误重试", "description": "网络错误、HTTP 429 和 5xx 的自动重试次数。"},
     "cloudflare_rerank.retry_base_delay": {"default": 1.0, "type": "float", "min": 0.0, "max": 60.0, "step": 0.5, "category": "model", "label": "Cloudflare 重试等待（秒）", "description": "插件内置 Rerank 客户端重试的基础退避时间。"},
     "backup_settings.keep_days": {"default": 7, "type": "int", "min": 1, "max": 3650, "category": "maintenance", "label": "自动备份保留天数", "description": "超过该天数的自动备份会在维护时清理。"},
+    "maintenance.auto_cleanup_completed_build_artifacts": {"default": True, "type": "bool", "category": "maintenance", "label": "自动清理构建中间数据", "description": "每日维护时清理已成功发布且没有待审查项的 Topic 草稿、候选与断点；不会压缩数据库文件，也不会删除正式 Timeline 或 Topic。"},
     "fusion_strategy.rrf_k": {"default": 60, "type": "int", "min": 1, "max": 1000, "category": "recall", "label": "RRF 融合参数", "description": "值越小越强调排名靠前的关键词或向量结果，值越大融合越平滑。"},
     "filtering_settings.use_persona_filtering": {"default": True, "type": "bool", "category": "isolation", "label": "按人格隔离", "description": "开启后只召回与当前人格对应的 Timeline。"},
     "filtering_settings.use_session_filtering": {"default": True, "type": "bool", "category": "isolation", "label": "按会话隔离", "description": "开启后只召回当前会话中的 Timeline。"},

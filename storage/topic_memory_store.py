@@ -3366,6 +3366,375 @@ class TopicMemoryStore:
             result.append(item)
         return result
 
+    @staticmethod
+    def _compact_build_decision_payload(
+        candidate_scores: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> tuple[dict[str, float], dict[str, Any]]:
+        """Keep a small audit trail after resumable build state is no longer needed."""
+        ranked_scores: list[tuple[str, float]] = []
+        for key, value in candidate_scores.items():
+            try:
+                score = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(score):
+                ranked_scores.append((str(key), score))
+        ranked_scores.sort(key=lambda item: (-item[1], item[0]))
+
+        compact_metadata: dict[str, Any] = {}
+        for key in (
+            "component_uid",
+            "component_uids",
+            "component_outcome",
+            "reason",
+            "topic_uids",
+            "topic_revision",
+        ):
+            if key in metadata:
+                compact_metadata[key] = metadata[key]
+        match_details = metadata.get("existing_topic_match")
+        if isinstance(match_details, dict):
+            compact_decisions: dict[str, Any] = {}
+            for component_uid, details in match_details.items():
+                if not isinstance(details, dict):
+                    continue
+                decision = details.get("_decision")
+                if not isinstance(decision, dict):
+                    continue
+                compact_decisions[str(component_uid)] = {
+                    key: decision[key]
+                    for key in (
+                        "action",
+                        "reason",
+                        "threshold",
+                        "review_threshold",
+                        "margin",
+                        "topic_uid",
+                    )
+                    if key in decision
+                }
+            if compact_decisions:
+                compact_metadata["match_decisions"] = compact_decisions
+        return dict(ranked_scores[:5]), compact_metadata
+
+    @staticmethod
+    def _compact_maintenance_run_payload(
+        config: dict[str, Any],
+        metadata: dict[str, Any],
+        *,
+        cleaned_at: float,
+        deleted_by_table: dict[str, int],
+        compacted_decisions: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        compact_config = {
+            key: config[key]
+            for key in (
+                "settings_revision",
+                "pipeline_version",
+                "provider_id",
+                "model_id",
+                "embedding_signature",
+            )
+            if key in config
+        }
+        compact_metadata = {
+            key: metadata[key]
+            for key in (
+                "pipeline",
+                "reset_topics",
+                "source_mode",
+                "settings_revision",
+                "published_component_uids",
+            )
+            if key in metadata
+        }
+        compact_metadata["artifact_cleanup"] = {
+            "completed_at": cleaned_at,
+            "deleted_by_table": deleted_by_table,
+            "compacted_decisions": compacted_decisions,
+        }
+        return compact_config, compact_metadata
+
+    async def preview_completed_build_artifact_cleanup(self) -> dict[str, Any]:
+        """Estimate safely removable artifacts owned by fully published runs."""
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT r.run_uid
+                    FROM topic_maintenance_runs AS r
+                    WHERE r.status IN ('completed', 'completed_with_review')
+                      AND r.stage IN ('completed', 'completed_with_review')
+                      AND COALESCE(
+                            CASE WHEN json_valid(r.metadata)
+                                 THEN json_extract(
+                                     r.metadata,
+                                     '$.artifact_cleanup.completed_at'
+                                 ) END,
+                            0
+                          ) = 0
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM topic_maintenance_queue AS q
+                            WHERE q.status = 'pending'
+                              AND json_valid(q.details)
+                              AND json_extract(q.details, '$.run_uid') = r.run_uid
+                          )
+                    ORDER BY r.completed_at, r.run_uid
+                    """
+                )
+            ).fetchall()
+            run_uids = [str(row["run_uid"]) for row in rows]
+            waiting_row = await (
+                await db.execute(
+                    """
+                    SELECT COUNT(DISTINCT r.run_uid)
+                    FROM topic_maintenance_runs AS r
+                    JOIN topic_maintenance_queue AS q
+                      ON q.status = 'pending'
+                     AND json_valid(q.details)
+                     AND json_extract(q.details, '$.run_uid') = r.run_uid
+                    WHERE r.status = 'completed_with_review'
+                      AND r.stage = 'completed_with_review'
+                    """
+                )
+            ).fetchone()
+            active_row = await (
+                await db.execute(
+                    """
+                    SELECT COUNT(*) FROM topic_maintenance_runs
+                    WHERE status IN ('pending', 'running', 'failed', 'cancelled')
+                    """
+                )
+            ).fetchone()
+            counts: dict[str, int] = {}
+            estimated_bytes = 0
+            if run_uids:
+                for offset in range(0, len(run_uids), 400):
+                    batch = run_uids[offset : offset + 400]
+                    placeholders = ",".join("?" * len(batch))
+                    table_specs = {
+                        "topic_maintenance_items": (
+                            "candidate_payload", "error"
+                        ),
+                        "topic_candidate_groups": (
+                            "label", "timeline_uids", "time_cluster_keys",
+                            "shared_signals", "metadata",
+                        ),
+                        "topic_build_group_jobs": (
+                            "input_hash", "prompt_hash", "provider_id",
+                            "model_id", "error",
+                        ),
+                        "topic_fragment_drafts": (
+                            "label", "summary", "timeline_uids",
+                            "source_revisions", "facts", "keywords",
+                            "time_cluster_keys", "embedding", "prompt_hash",
+                            "input_hash", "embedding_signature",
+                            "affect_events", "affect_signature", "metadata",
+                        ),
+                        "topic_build_checkpoints": (
+                            "checkpoint_key", "stage", "input_hash",
+                            "payload", "metadata",
+                        ),
+                        "topic_build_decisions": (
+                            "fragment_uids", "candidate_scores", "llm_output",
+                            "metadata",
+                        ),
+                    }
+                    for table, columns in table_specs.items():
+                        byte_expr = " + ".join(
+                            f"COALESCE(LENGTH({column}), 0)" for column in columns
+                        )
+                        row = await (
+                            await db.execute(
+                                f"SELECT COUNT(*), COALESCE(SUM({byte_expr}), 0) "
+                                f"FROM {table} WHERE run_uid IN ({placeholders})",
+                                batch,
+                            )
+                        ).fetchone()
+                        counts[table] = counts.get(table, 0) + int(row[0] or 0)
+                        estimated_bytes += int(row[1] or 0)
+                    review_row = await (
+                        await db.execute(
+                            f"""
+                            SELECT COUNT(*), COALESCE(SUM(
+                                LENGTH(details) + LENGTH(expected_topic_revisions)
+                                + LENGTH(resolution_payload)
+                            ), 0)
+                            FROM topic_maintenance_queue
+                            WHERE status != 'pending'
+                              AND json_valid(details)
+                              AND json_extract(details, '$.run_uid')
+                                  IN ({placeholders})
+                            """,
+                            batch,
+                        )
+                    ).fetchone()
+                    counts["topic_maintenance_queue"] = (
+                        counts.get("topic_maintenance_queue", 0)
+                        + int(review_row[0] or 0)
+                    )
+                    estimated_bytes += int(review_row[1] or 0)
+            return {
+                "eligible_run_count": len(run_uids),
+                "waiting_review_run_count": int(waiting_row[0] if waiting_row else 0),
+                "resumable_or_failed_run_count": int(active_row[0] if active_row else 0),
+                "row_counts": counts,
+                "estimated_payload_bytes": estimated_bytes,
+            }
+
+    async def cleanup_completed_build_artifacts(
+        self,
+        *,
+        progress_callback: Any | None = None,
+    ) -> dict[str, Any]:
+        """Remove resumable artifacts after final publication is no longer reversible."""
+        preview = await self.preview_completed_build_artifact_cleanup()
+        total_runs = int(preview["eligible_run_count"])
+        deleted_by_table: dict[str, int] = {}
+        compacted_decisions = 0
+        if not total_runs:
+            return {
+                **preview,
+                "cleaned_run_count": 0,
+                "deleted_by_table": {},
+                "compacted_decisions": 0,
+            }
+
+        async def emit(current: int, step: str) -> None:
+            if progress_callback is None:
+                return
+            value = progress_callback(current, total_runs, step)
+            if hasattr(value, "__await__"):
+                await value
+
+        async with self._connect() as db:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                rows = await (
+                    await db.execute(
+                        """
+                        SELECT r.run_uid, r.config, r.metadata
+                        FROM topic_maintenance_runs AS r
+                        WHERE r.status IN ('completed', 'completed_with_review')
+                          AND r.stage IN ('completed', 'completed_with_review')
+                          AND COALESCE(
+                                CASE WHEN json_valid(r.metadata)
+                                     THEN json_extract(
+                                         r.metadata,
+                                         '$.artifact_cleanup.completed_at'
+                                     ) END,
+                                0
+                              ) = 0
+                          AND NOT EXISTS (
+                                SELECT 1
+                                FROM topic_maintenance_queue AS q
+                                WHERE q.status = 'pending'
+                                  AND json_valid(q.details)
+                                  AND json_extract(q.details, '$.run_uid') = r.run_uid
+                              )
+                        ORDER BY r.completed_at, r.run_uid
+                        """
+                    )
+                ).fetchall()
+                total_runs = len(rows)
+                for index, run in enumerate(rows, 1):
+                    run_uid = str(run["run_uid"])
+                    await emit(index - 1, f"正在清理构建任务 {index}/{total_runs}")
+                    decision_rows = await (
+                        await db.execute(
+                            """
+                            SELECT decision_uid, candidate_scores, metadata
+                            FROM topic_build_decisions WHERE run_uid = ?
+                            """,
+                            (run_uid,),
+                        )
+                    ).fetchall()
+                    for decision in decision_rows:
+                        scores, metadata = self._compact_build_decision_payload(
+                            self._from_json(decision["candidate_scores"]),
+                            self._from_json(decision["metadata"]),
+                        )
+                        await db.execute(
+                            """
+                            UPDATE topic_build_decisions
+                            SET candidate_scores = ?, llm_output = '{}', metadata = ?
+                            WHERE decision_uid = ?
+                            """,
+                            (
+                                self._to_json(scores),
+                                self._to_json(metadata),
+                                str(decision["decision_uid"]),
+                            ),
+                        )
+                    compacted_decisions += len(decision_rows)
+
+                    run_deleted: dict[str, int] = {}
+                    review_cursor = await db.execute(
+                        """
+                        DELETE FROM topic_maintenance_queue
+                        WHERE status != 'pending'
+                          AND json_valid(details)
+                          AND json_extract(details, '$.run_uid') = ?
+                        """,
+                        (run_uid,),
+                    )
+                    run_deleted["topic_maintenance_queue"] = int(
+                        review_cursor.rowcount or 0
+                    )
+                    for table in (
+                        "topic_fragment_drafts",
+                        "topic_build_group_jobs",
+                        "topic_build_checkpoints",
+                        "topic_maintenance_items",
+                        "topic_candidate_groups",
+                    ):
+                        cursor = await db.execute(
+                            f"DELETE FROM {table} WHERE run_uid = ?", (run_uid,)
+                        )
+                        run_deleted[table] = int(cursor.rowcount or 0)
+                    for table, count in run_deleted.items():
+                        deleted_by_table[table] = (
+                            deleted_by_table.get(table, 0) + count
+                        )
+
+                    cleaned_at = time.time()
+                    compact_config, compact_metadata = (
+                        self._compact_maintenance_run_payload(
+                            self._from_json(run["config"]),
+                            self._from_json(run["metadata"]),
+                            cleaned_at=cleaned_at,
+                            deleted_by_table=run_deleted,
+                            compacted_decisions=len(decision_rows),
+                        )
+                    )
+                    await db.execute(
+                        """
+                        UPDATE topic_maintenance_runs
+                        SET config = ?, metadata = ?, updated_at = ?
+                        WHERE run_uid = ?
+                        """,
+                        (
+                            self._to_json(compact_config),
+                            self._to_json(compact_metadata),
+                            cleaned_at,
+                            run_uid,
+                        ),
+                    )
+                    await emit(index, f"已清理构建任务 {index}/{total_runs}")
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            **preview,
+            "cleaned_run_count": total_runs,
+            "deleted_by_table": deleted_by_table,
+            "deleted_row_count": sum(deleted_by_table.values()),
+            "compacted_decisions": compacted_decisions,
+        }
+
     async def mark_timeline_stale(self, timeline_uid: str) -> list[str]:
         """Invalidate only Topics derived from a rebuilt Timeline memory."""
         now = time.time()
