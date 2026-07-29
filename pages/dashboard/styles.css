@@ -831,6 +831,18 @@ body {
   flex-wrap: wrap;
 }
 
+.memory-transfer-actions > .btn > [data-lucide],
+.memory-transfer-actions > .btn > svg,
+.memory-transfer-actions > .btn::after {
+  flex: 0 0 14px;
+  width: 14px;
+}
+
+.memory-transfer-actions > .btn::after {
+  content: "";
+  height: 1px;
+}
+
 .memory-transfer-select { width: 86px; }
 .memory-duplicate-select { width: 138px; }
 
