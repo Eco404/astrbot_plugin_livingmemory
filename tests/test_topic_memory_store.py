@@ -16,6 +16,7 @@ from astrbot_plugin_livingmemory.core.models.topic_memory import (
     TimelineTopicCandidate,
     TopicActorLink,
     TopicAtomActorLink,
+    TopicCandidateGroup,
     TopicFragmentDraft,
     TopicAtomSource,
     TopicMaintenanceMode,
@@ -1833,3 +1834,152 @@ async def test_revector_publish_rolls_back_topic_update_when_fragment_changed(
     unchanged = await store.get_topic(topic.topic_uid)
     assert unchanged.metadata["embedding"] == [1.0, 0.0]
     assert unchanged.embedding_signature == {"provider_id": "old"}
+
+
+@pytest.mark.asyncio
+async def test_completed_build_cleanup_preserves_audit_and_review_dependencies(
+    tmp_path: Path,
+):
+    db_path = str(tmp_path / "artifact-cleanup.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "CREATE TABLE memory_registry (memory_uid TEXT PRIMARY KEY)"
+        )
+        await db.commit()
+    store = TopicMemoryStore(db_path)
+    await store.initialize()
+    space_id = "space-cleanup"
+
+    async def create_run(
+        run_uid: str,
+        *,
+        status: TopicMaintenanceStatus,
+        stage: str,
+    ) -> None:
+        await store.create_maintenance_run(
+            TopicMaintenanceRun(
+                run_uid=run_uid,
+                memory_space_id=space_id,
+                mode=TopicMaintenanceMode.INCREMENTAL,
+                status=status,
+                config={"settings_revision": 8, "large": "x" * 2000},
+                metadata={"pipeline": "topic", "large": "y" * 2000},
+            )
+        )
+        await store.update_maintenance_run(
+            run_uid,
+            status=status,
+            stage=stage,
+        )
+        await store.replace_candidate_groups(
+            run_uid,
+            [
+                TopicCandidateGroup(
+                    group_uid=f"group-{run_uid}",
+                    run_uid=run_uid,
+                    group_index=0,
+                    memory_space_id=space_id,
+                    label="候选组",
+                    timeline_uids=[],
+                    time_cluster_keys=[],
+                    cohesion=0.8,
+                )
+            ],
+        )
+        await store.save_build_checkpoint(
+            run_uid=run_uid,
+            checkpoint_key="matching",
+            stage="matching",
+            input_hash="hash",
+            payload={"matrix": "z" * 2000},
+        )
+        await store.record_build_decision(
+            decision_uid=f"decision-{run_uid}",
+            run_uid=run_uid,
+            topic_uid=None,
+            action="create",
+            fragment_uids=["fragment-1"],
+            candidate_scores={f"candidate-{index}": index / 10 for index in range(10)},
+            llm_output={"summary": "large" * 500},
+                metadata={
+                    "component_uid": "component-1",
+                    "existing_topic_match": {
+                        "component-1": {
+                            "candidate-1": {"score": 0.9},
+                            "_decision": {
+                                "action": "create",
+                                "reason": "below_match_threshold",
+                                "threshold": 0.55,
+                            },
+                            "large": "value" * 500,
+                        }
+                    },
+                },
+        )
+
+    await create_run(
+        "published",
+        status=TopicMaintenanceStatus.COMPLETED,
+        stage="completed",
+    )
+    await create_run(
+        "scan-only",
+        status=TopicMaintenanceStatus.COMPLETED,
+        stage="candidate_scan",
+    )
+    await create_run(
+        "waiting-review",
+        status=TopicMaintenanceStatus.COMPLETED_WITH_REVIEW,
+        stage="completed_with_review",
+    )
+    await store.enqueue_maintenance_review(
+        memory_space_id=space_id,
+        review_type="topic_match_ambiguity",
+        timeline_uids=[],
+        topic_uids=[],
+        details={"run_uid": "waiting-review", "component_uid": "component-review"},
+    )
+
+    preview = await store.preview_completed_build_artifact_cleanup()
+    assert preview["eligible_run_count"] == 1
+    assert preview["waiting_review_run_count"] == 1
+    assert preview["row_counts"]["topic_candidate_groups"] == 1
+
+    result = await store.cleanup_completed_build_artifacts()
+    assert result["cleaned_run_count"] == 1
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        groups = await (
+            await db.execute(
+                "SELECT run_uid FROM topic_candidate_groups ORDER BY run_uid"
+            )
+        ).fetchall()
+        assert [row["run_uid"] for row in groups] == ["scan-only", "waiting-review"]
+        decision = await (
+            await db.execute(
+                "SELECT candidate_scores, llm_output, metadata "
+                "FROM topic_build_decisions WHERE run_uid = 'published'"
+            )
+        ).fetchone()
+        assert len(store._from_json(decision["candidate_scores"])) == 5
+        assert store._from_json(decision["llm_output"]) == {}
+        assert store._from_json(decision["metadata"]) == {
+            "component_uid": "component-1",
+            "match_decisions": {
+                "component-1": {
+                    "action": "create",
+                    "reason": "below_match_threshold",
+                    "threshold": 0.55,
+                }
+            },
+        }
+        run = await (
+            await db.execute(
+                "SELECT config, metadata FROM topic_maintenance_runs "
+                "WHERE run_uid = 'published'"
+            )
+        ).fetchone()
+        assert store._from_json(run["config"]) == {"settings_revision": 8}
+        assert store._from_json(run["metadata"])["artifact_cleanup"][
+            "completed_at"
+        ] > 0

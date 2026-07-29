@@ -18,6 +18,7 @@ export class ApiClient {
     const labels = [
       ["database/health", "operation.databaseHealth"],
       ["database/repair", "operation.databaseRepair"],
+      ["database/storage", "operation.databaseMaintenance"],
       ["recall/test", "operation.recallTest"],
       ["models/test", "operation.modelTest"],
       ["timeline/rebuild/preview", "operation.timelineScan"],
