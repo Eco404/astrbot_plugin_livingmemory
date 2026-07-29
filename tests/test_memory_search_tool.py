@@ -206,14 +206,14 @@ async def test_memory_search_tool_records_topic_access_after_serializing_result(
         memory_engine=memory_engine,
     )
     topic = SimpleNamespace(
-        title="工资核对",
-        summary="核对工资天数",
+        title="报销核对",
+        summary="核对报销天数",
         importance=0.8,
     )
     topic_result = SimpleNamespace(
         topic_uid="topic-wage",
         topic=topic,
-        content="工资核对\n核对工资天数",
+        content="报销核对\n核对报销天数",
         final_score=0.8,
         sources=[],
         affect_match_score=0.0,
@@ -239,7 +239,7 @@ async def test_memory_search_tool_records_topic_access_after_serializing_result(
         new_callable=AsyncMock,
     ) as get_persona:
         get_persona.return_value = "persona_a"
-        raw_result = await tool.call(_make_run_context(), query="工资")
+        raw_result = await tool.call(_make_run_context(), query="报销")
 
     result = json.loads(raw_result)
     assert result["results"][0]["memory_layer"] == "topic"

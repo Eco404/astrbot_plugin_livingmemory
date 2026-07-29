@@ -185,10 +185,10 @@ def test_logical_fragment_collision_is_split_by_semantic_facet():
         candidate_group_uid="group-1",
         memory_space_id="space-1",
         label="亲密互动",
-        summary="示例甲表达了亲近和安心",
+        summary="示例甲表达了亲近和放心",
         timeline_uids=["timeline-1"],
         source_revisions={"timeline-1": 1},
-        facts=[{**facts[0], "content": "示例甲表达了亲近和安心"}],
+        facts=[{**facts[0], "content": "示例甲表达了亲近和放心"}],
         logical_fragment_uid=base_uid,
     )
     second = TopicFragmentDraft(
@@ -196,10 +196,10 @@ def test_logical_fragment_collision_is_split_by_semantic_facet():
         candidate_group_uid="group-1",
         memory_space_id="space-1",
         label="天气准备",
-        summary="示例甲担心台风并准备雨具",
+        summary="示例甲担心暴雨并准备雨具",
         timeline_uids=["timeline-1"],
         source_revisions={"timeline-1": 1},
-        facts=[{**facts[0], "content": "示例甲担心台风并准备雨具"}],
+        facts=[{**facts[0], "content": "示例甲担心暴雨并准备雨具"}],
         logical_fragment_uid=base_uid,
     )
 
@@ -659,15 +659,15 @@ class _GroundedLLM:
                 timeline_ref = (
                     "unknown-timeline" if self.hallucinate else item["ref"]
                 )
-                travel = "京都" in item["summary"]
+                travel = "示例市" in item["summary"]
                 fragments.append(
                     {
-                        "label": "京都旅行" if travel else "Rust 学习",
+                        "label": "示例市旅行" if travel else "Rust 学习",
                         "summary": item["summary"],
                         "importance": 0.8 if travel else 0.6,
                         "confidence": 0.9,
                         "timeline_refs": [timeline_ref],
-                        "keywords": ["京都" if travel else "Rust"],
+                        "keywords": ["示例市" if travel else "Rust"],
                         "facts": [
                             {
                                 "type": "planned" if travel else "factual",
@@ -849,7 +849,7 @@ class _CheckpointStore:
 
 class _Embedding:
     async def get_embeddings(self, texts: list[str]):
-        return [[1.0, 0.0] if "京都" in text else [0.0, 1.0] for text in texts]
+        return [[1.0, 0.0] if "示例市" in text else [0.0, 1.0] for text in texts]
 
 
 class _OtherEmbedding(_Embedding):
@@ -966,7 +966,7 @@ async def test_full_build_splits_merges_and_materializes_exact_sources(tmp_path:
     assert result["fragment_count"] == 3
     assert result["topic_count"] == 2
     topics = await store.list_topics(space_id)
-    travel = next(topic for topic in topics if topic.title == "京都旅行")
+    travel = next(topic for topic in topics if topic.title == "示例市旅行")
     provenance = await store.get_topic_provenance(travel.topic_uid)
     assert len(provenance["fragments"]) == 2
     assert all(fragment["facts"] for fragment in provenance["fragments"])
@@ -2031,16 +2031,16 @@ def test_related_topic_graph_uses_reciprocal_neighbors_without_merging_topics():
         TopicMemory(
             topic_uid="topic-a",
             memory_space_id="space-1",
-            title="BW 行程",
+            title="Expo 行程",
             summary="天气与出发准备",
-            metadata={"embedding": [1.0, 0.0], "keywords": ["BW 2026"]},
+            metadata={"embedding": [1.0, 0.0], "keywords": ["Expo 2026"]},
         ),
         TopicMemory(
             topic_uid="topic-b",
             memory_space_id="space-1",
-            title="BW 展台",
+            title="Expo 展台",
             summary="现场逛展",
-            metadata={"embedding": [0.8, 0.6], "keywords": ["BW"]},
+            metadata={"embedding": [0.8, 0.6], "keywords": ["Expo"]},
         ),
         TopicMemory(
             topic_uid="topic-c",
@@ -2687,8 +2687,8 @@ def test_related_topic_context_uses_source_overlap_not_shared_source_alone():
         ),
         TopicMemory(
             memory_space_id="space-1",
-            title="长期陪伴需求",
-            summary="多次讨论情绪陪伴",
+            title="长期协助需求",
+            summary="多次讨论情绪协助",
             metadata={
                 "source_timeline_uids": ["shared", *[f"chat-{i}" for i in range(15)]]
             },
@@ -2844,16 +2844,16 @@ async def test_fragment_validation_uses_two_correction_attempts_by_default():
         source_revision=1,
         memory_space_id="space-1",
         session_id="session-1",
-        content="示例甲计划周末去京都。",
-        summary="示例甲计划周末去京都。",
-        key_facts=["示例甲计划周末去京都。"],
+        content="示例甲计划周末去示例市。",
+        summary="示例甲计划周末去示例市。",
+        key_facts=["示例甲计划周末去示例市。"],
         time_cluster_key="cluster-1",
     )
     group = TopicCandidateGroup(
         run_uid="run-1",
         group_index=1,
         memory_space_id="space-1",
-        label="京都旅行",
+        label="示例市旅行",
         timeline_uids=[candidate.memory_uid],
         time_cluster_keys=["cluster-1"],
         cohesion=0.8,
@@ -2904,9 +2904,9 @@ def test_fragment_prompt_uses_local_refs_and_restores_exact_provenance():
         source_revision=3,
         memory_space_id="space-1",
         session_id="session-1",
-        content="用户喜欢黑咖啡",
-        summary="用户讨论咖啡偏好",
-        key_facts=["用户喜欢黑咖啡", "用户不加糖"],
+        content="用户喜欢原味茶",
+        summary="用户讨论茶饮偏好",
+        key_facts=["用户喜欢原味茶", "用户不加糖"],
         key_fact_attributions=[
             {
                 "fact_index": index,
@@ -2923,7 +2923,7 @@ def test_fragment_prompt_uses_local_refs_and_restores_exact_provenance():
             }
             for index in range(2)
         ],
-        atom_contents=["用户喜欢黑咖啡"],
+        atom_contents=["用户喜欢原味茶"],
         atom_fingerprints=[fingerprint],
     )
 
@@ -2948,13 +2948,13 @@ def test_fragment_prompt_uses_local_refs_and_restores_exact_provenance():
         {
             "fragments": [
                 {
-                    "label": "咖啡偏好",
-                    "summary": "用户偏好不加糖的黑咖啡",
+                    "label": "茶饮偏好",
+                    "summary": "用户偏好不加糖的原味茶",
                     "timeline_refs": ["T1"],
                     "facts": [
                         {
                             "type": "preference",
-                            "content": "用户偏好不加糖的黑咖啡",
+                            "content": "用户偏好不加糖的原味茶",
                             "source_refs": ["T1.A1", "T1.K1"],
                         }
                     ],
@@ -3091,9 +3091,9 @@ def test_fragment_actor_refs_are_constrained_and_unresolved_ids_are_fragment_loc
         source_revision=1,
         memory_space_id="space-1",
         session_id="qq:FriendMessage:u1",
-        content="示例甲提到了朋友小林",
-        summary="示例甲提到了朋友小林",
-        key_facts=["示例甲提到了朋友小林"],
+        content="示例甲提到了同事甲",
+        summary="示例甲提到了同事甲",
+        key_facts=["示例甲提到了同事甲"],
         role_bindings={
             "narrator_actor_id": "qq:assistant:bot-1",
             "actors": [
@@ -3123,11 +3123,11 @@ def test_fragment_actor_refs_are_constrained_and_unresolved_ids_are_fragment_loc
             "fragments": [
                 {
                     "label": "朋友近况",
-                    "summary": "示例甲提到了朋友小林",
+                    "summary": "示例甲提到了同事甲",
                     "timeline_refs": ["T1"],
                     "facts": [
                         {
-                            "content": "示例甲提到了朋友小林",
+                            "content": "示例甲提到了同事甲",
                             "source_refs": ["T1.K1"],
                             "actor_refs": [
                                 {
@@ -3193,8 +3193,8 @@ def test_private_unbound_timeline_inherits_matching_role_binding_from_peer_timel
         source_revision=1,
         memory_space_id="space-1",
         session_id="QQ20000001:FriendMessage:10000001",
-        content="我和示例甲讨论咖啡",
-        summary="我和示例甲讨论咖啡",
+        content="我和示例甲讨论茶饮",
+        summary="我和示例甲讨论茶饮",
         role_bindings={
             "actors": [
                 {
@@ -3211,8 +3211,8 @@ def test_private_unbound_timeline_inherits_matching_role_binding_from_peer_timel
         bound,
         memory_uid="timeline-legacy",
         role_bindings={},
-        content="示例甲想喝我的咖啡",
-        summary="示例甲想喝我的咖啡",
+        content="示例甲想喝我的茶饮",
+        summary="示例甲想喝我的茶饮",
     )
     context = manager._private_session_identity_context([bound, legacy])
     actor = _pending_actor("示例甲")
@@ -3245,8 +3245,8 @@ def test_private_unbound_same_name_is_session_scoped_across_fragments():
         source_revision=1,
         memory_space_id="space-1",
         session_id="qq:FriendMessage:u1",
-        content="示例甲讨论咖啡",
-        summary="示例甲讨论咖啡",
+        content="示例甲讨论茶饮",
+        summary="示例甲讨论茶饮",
     )
     second = replace(first, memory_uid="timeline-legacy-2")
     context = manager._private_session_identity_context([first, second])
@@ -3298,8 +3298,8 @@ def test_private_profile_name_resolves_legacy_actor_to_session_peer():
         source_revision=1,
         memory_space_id="space-1",
         session_id="QQ20000001:FriendMessage:10000001",
-        content="示例甲说想喝我的咖啡",
-        summary="示例甲说想喝我的咖啡",
+        content="示例甲说想喝我的茶饮",
+        summary="示例甲说想喝我的茶饮",
     )
     context = manager._private_session_identity_context([candidate])
     actor = _pending_actor("示例甲")
@@ -3328,8 +3328,8 @@ def test_group_and_conflicting_private_bindings_keep_fragment_local_identity():
         source_revision=1,
         memory_space_id="space-1",
         session_id="qq:GroupMessage:g1",
-        content="示例甲讨论咖啡",
-        summary="示例甲讨论咖啡",
+        content="示例甲讨论茶饮",
+        summary="示例甲讨论茶饮",
     )
     first = replace(
         group,
@@ -3385,9 +3385,9 @@ def test_fragment_affect_events_are_source_and_actor_grounded():
         source_revision=1,
         memory_space_id="space-1",
         session_id="qq:FriendMessage:u1",
-        content="示例甲说有人陪着会让他安心",
-        summary="示例甲明确表示陪伴让他安心",
-        key_facts=["示例甲明确表示陪伴让他安心"],
+        content="示例甲说有人陪着会让他放心",
+        summary="示例甲明确表示协助让他放心",
+        key_facts=["示例甲明确表示协助让他放心"],
         role_bindings={
             "narrator_actor_id": "qq:assistant:bot-1",
             "actors": [
@@ -3416,12 +3416,12 @@ def test_fragment_affect_events_are_source_and_actor_grounded():
         {
             "fragments": [
                 {
-                    "label": "陪伴带来的安心",
-                    "summary": "示例甲因获得陪伴而感到安心",
+                    "label": "协助带来的放心",
+                    "summary": "示例甲因获得协助而感到放心",
                     "timeline_refs": ["T1"],
                     "facts": [
                         {
-                            "content": "示例甲明确表示陪伴让他安心",
+                            "content": "示例甲明确表示协助让他放心",
                             "source_refs": ["T1.K1"],
                             "actor_refs": [],
                         }
@@ -3430,9 +3430,9 @@ def test_fragment_affect_events_are_source_and_actor_grounded():
                         {
                             "actor_ref": human_ref,
                             "display_name_snapshot": "示例甲",
-                            "emotion": "安心",
-                            "description": "因获得陪伴而感到安心",
-                            "trigger": "获得陪伴",
+                            "emotion": "放心",
+                            "description": "因获得协助而感到放心",
+                            "trigger": "获得协助",
                             "target": "睡眠",
                             "evidence_type": "model_inferred",
                             "temporal_status": "historical",
@@ -3458,7 +3458,7 @@ def test_fragment_affect_events_are_source_and_actor_grounded():
         run_uid="run-affect",
         group_index=0,
         memory_space_id="space-1",
-        label="陪伴带来的安心",
+        label="协助带来的放心",
         timeline_uids=[candidate.memory_uid],
         time_cluster_keys=[],
         cohesion=1.0,
@@ -3492,9 +3492,9 @@ def test_unresolved_affect_actor_reuses_matching_fact_actor_identity():
         source_revision=1,
         memory_space_id="space-1",
         session_id="qq:FriendMessage:u1",
-        content="示例甲说看到我让他安心",
-        summary="示例甲明确表示看到我让他安心",
-        key_facts=["示例甲明确表示看到我让他安心"],
+        content="示例甲说看到我让他放心",
+        summary="示例甲明确表示看到我让他放心",
+        key_facts=["示例甲明确表示看到我让他放心"],
     )
     _, timeline_refs, source_refs, actor_refs = manager._fragment_llm_context(
         [candidate]
@@ -3503,12 +3503,12 @@ def test_unresolved_affect_actor_reuses_matching_fact_actor_identity():
         {
             "fragments": [
                 {
-                    "label": "看到我时的安心",
-                    "summary": "示例甲明确表示看到我让他安心",
+                    "label": "看到我时的放心",
+                    "summary": "示例甲明确表示看到我让他放心",
                     "timeline_refs": ["T1"],
                     "facts": [
                         {
-                            "content": "示例甲明确表示看到我让他安心",
+                            "content": "示例甲明确表示看到我让他放心",
                             "source_refs": ["T1.K1"],
                             "actor_refs": [
                                 {
@@ -3524,8 +3524,8 @@ def test_unresolved_affect_actor_reuses_matching_fact_actor_identity():
                         {
                             "actor_ref": "unresolved",
                             "display_name_snapshot": "示例甲",
-                            "emotion": "安心",
-                            "description": "示例甲看到我时感到安心",
+                            "emotion": "放心",
+                            "description": "示例甲看到我时感到放心",
                             "trigger": "看到我",
                             "target": "我",
                             "evidence_type": "explicit",
@@ -3550,7 +3550,7 @@ def test_unresolved_affect_actor_reuses_matching_fact_actor_identity():
         run_uid="run-affect-unresolved",
         group_index=0,
         memory_space_id="space-1",
-        label="安心",
+        label="放心",
         timeline_uids=[candidate.memory_uid],
         time_cluster_keys=[],
         cohesion=1.0,
@@ -4033,11 +4033,11 @@ def test_fragment_source_attribution_rebinds_timeline_local_actor_refs():
         memory_space_id="space-1",
         session_id="QQ:FriendMessage:10000001",
         persona_id="测试助手",
-        content="我提醒示例甲按时吃晚饭",
-        summary="我提醒示例甲按时吃晚饭",
+        content="我提醒示例甲按时提交结果",
+        summary="我提醒示例甲按时提交结果",
         key_facts=[
-            "示例甲准备找晚饭",
-            "我主动提醒示例甲按时吃晚饭",
+            "示例甲准备提交结果",
+            "我主动提醒示例甲按时提交结果",
         ],
         key_fact_attributions=[
             {
@@ -4764,7 +4764,7 @@ async def test_incremental_build_preserves_topic_uid_and_prior_sources(tmp_path:
     )
     await manager.build_space(space_id)
     travel = next(
-        topic for topic in await store.list_topics(space_id) if topic.title == "京都旅行"
+        topic for topic in await store.list_topics(space_id) if topic.title == "示例市旅行"
     )
     rust = next(
         topic for topic in await store.list_topics(space_id) if topic.title == "Rust 学习"
@@ -4788,9 +4788,9 @@ async def test_incremental_build_preserves_topic_uid_and_prior_sources(tmp_path:
     metadata = {
         "session_id": "bot:FriendMessage:user-1",
         "persona_id": "persona-1",
-        "canonical_summary": "用户再次讨论京都旅行预算。",
+        "canonical_summary": "用户再次讨论示例市旅行预算。",
         "topics": ["旅行计划"],
-        "key_facts": ["用户正在规划京都旅行预算"],
+        "key_facts": ["用户正在规划示例市旅行预算"],
     }
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
@@ -4853,14 +4853,14 @@ async def test_incremental_components_targeting_one_topic_publish_one_update(
     )
     await manager.build_space(space_id)
     travel = next(
-        topic for topic in await store.list_topics(space_id) if topic.title == "京都旅行"
+        topic for topic in await store.list_topics(space_id) if topic.title == "示例市旅行"
     )
     manager.config["fragment_similarity_threshold"] = 1.01
 
     identity = MemoryIdentityStore(db_path)
     for document_id, timeline_uid, created_at, detail in [
-        (4, "timeline-travel-3", 1400.0, "用户补充京都旅行交通预算。"),
-        (5, "timeline-travel-4", 1500.0, "用户补充京都旅行住宿预算。"),
+        (4, "timeline-travel-3", 1400.0, "用户补充示例市旅行交通预算。"),
+        (5, "timeline-travel-4", 1500.0, "用户补充示例市旅行住宿预算。"),
     ]:
         metadata = {
             "session_id": "bot:FriendMessage:user-1",
@@ -4930,7 +4930,7 @@ async def test_incremental_edit_removes_old_topic_source_and_rehomes_new_revisio
     )
     await manager.build_space(space_id)
     travel = next(
-        topic for topic in await store.list_topics(space_id) if topic.title == "京都旅行"
+        topic for topic in await store.list_topics(space_id) if topic.title == "示例市旅行"
     )
     rust = next(
         topic for topic in await store.list_topics(space_id) if topic.title == "Rust 学习"

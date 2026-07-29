@@ -1316,14 +1316,14 @@ class TestStructuredUpdateWorkflow:
                 "scope": "session",
                 "value": {
                     "summary": "edited",
-                    "key_facts": ["用户住在上海"],
+                    "key_facts": ["用户住在示例市"],
                 },
                 "field_changes": [
                     {
                         "field": "key_facts",
                         "operation": "replace",
                         "before": "用户住在北京",
-                        "after": "用户住在上海",
+                        "after": "用户住在示例市",
                     }
                 ],
             }
@@ -1343,7 +1343,7 @@ class TestStructuredUpdateWorkflow:
         assert [item["memory_id"] for item in result["data"]["items"]] == [2]
         assert result["data"]["items"][0]["modification_type"] == "exact_replace"
         assert result["data"]["items"][0]["proposed_value"]["key_facts"] == [
-            "用户住在上海"
+            "用户住在示例市"
         ]
         assert result["data"]["plan_id"]
 
@@ -1414,7 +1414,7 @@ class TestStructuredUpdateWorkflow:
                     "field": "key_facts",
                     "operation": "replace",
                     "before": "用户目前居住在北京",
-                    "after": "用户目前居住在上海",
+                    "after": "用户目前居住在示例市",
                 }
             ],
         )
@@ -1422,7 +1422,7 @@ class TestStructuredUpdateWorkflow:
         assert planned is not None
         assert planned["modification_type"] == "near_replace"
         assert planned["default_selected"] is False
-        assert planned["proposed_value"]["key_facts"] == ["用户目前居住在上海"]
+        assert planned["proposed_value"]["key_facts"] == ["用户目前居住在示例市"]
 
     @pytest.mark.asyncio
     async def test_start_job_tracks_current_memory_progress(self, api):
@@ -1761,7 +1761,7 @@ class TestTestRecall:
         engine.topic_memory_enabled = True
         timeline = SimpleNamespace(
             doc_id=7,
-            content="工资核对的 Timeline",
+            content="报销核对的 Timeline",
             final_score=0.8,
             rrf_score=0.8,
             bm25_score=0.2,
@@ -1774,15 +1774,15 @@ class TestTestRecall:
             find_memory_spaces_for_session=AsyncMock(return_value=["space-1"])
         )
         topic = SimpleNamespace(
-            title="工资核对",
-            summary="工资核对详情",
+            title="报销核对",
+            summary="报销核对详情",
             importance=0.8,
             status=SimpleNamespace(value="active"),
         )
         topic_result = SimpleNamespace(
             topic_uid="topic-1",
             topic=topic,
-            content="工资核对\n工资核对详情",
+            content="报销核对\n报销核对详情",
             final_score=0.9,
             relevance_score=0.8,
             embedding_score=0.7,
@@ -1813,7 +1813,7 @@ class TestTestRecall:
         )
         req = _mock_page_request(
             get_json={
-                "query": "工资",
+                "query": "报销",
                 "mode": "current",
                 "session_id": "bot:FriendMessage:user",
                 "k": 5,
@@ -1847,7 +1847,7 @@ class TestTestRecall:
         )
         api.plugin.initializer.recall_trace_store = trace_store
         req = _mock_page_request(
-            get_json={"query": "六月工资", "k": 3, "mode": "timeline"}
+            get_json={"query": "六月报销", "k": 3, "mode": "timeline"}
         )
 
         with _patch_page_request(req):
@@ -1858,7 +1858,7 @@ class TestTestRecall:
         saved = trace_store.record.await_args.kwargs
         assert saved["trace_type"] == "test"
         assert saved["status"] == "completed"
-        assert saved["query_text"] == "六月工资"
+        assert saved["query_text"] == "六月报销"
         assert saved["request_data"]["mode"] == "timeline"
         assert saved["result_data"]["diagnostics"]["mode"] == "timeline"
 

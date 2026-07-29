@@ -94,6 +94,7 @@ docs/.vitepress/cache/
 data/
 .claude/
 pyproject.toml
+.privacy-denylist.local
 
 
 .spec-workflow/

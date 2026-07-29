@@ -125,7 +125,7 @@ def test_classify_planned_atom() -> None:
 
 
 def test_classify_preference_atom() -> None:
-    atom_type, confidence, event_time = _classify_single("张三喜欢喝咖啡")
+    atom_type, confidence, event_time = _classify_single("张三喜欢喝茶饮")
     assert atom_type == AtomType.PREFERENCE
     assert confidence >= 0.8
     assert event_time is None
@@ -150,7 +150,7 @@ def test_classify_episodic_atom() -> None:
 def test_classify_atoms_batch() -> None:
     facts = [
         "明天下午3点开会",
-        "张三喜欢喝咖啡",
+        "张三喜欢喝茶饮",
         "张三和李四是同事",
         "张三的生日是5月20日",
         "张三讨论了Q3计划",
@@ -231,13 +231,13 @@ async def test_atom_store_fts_search(tmp_path: Path) -> None:
     store = AtomStore(db_path)
     await store.initialize()
 
-    await store.insert(MemoryAtom(parent_memory_id=1, content="张三喜欢喝咖啡"))
+    await store.insert(MemoryAtom(parent_memory_id=1, content="张三喜欢喝茶饮"))
     await store.insert(MemoryAtom(parent_memory_id=1, content="李四喜欢吃火锅"))
     await store.insert(MemoryAtom(parent_memory_id=2, content="明天项目deadline"))
 
-    results = await store.search_fts("咖啡", limit=5)
+    results = await store.search_fts("茶饮", limit=5)
     assert len(results) >= 1
-    assert any("咖啡" in r.content for r in results)
+    assert any("茶饮" in r.content for r in results)
 
 
 @pytest.mark.asyncio
@@ -349,7 +349,7 @@ async def test_atom_retriever_search(tmp_path: Path) -> None:
         MemoryAtom(
             parent_memory_id=3,
             atom_type=AtomType.PREFERENCE,
-            content="张三喜欢咖啡",
+            content="张三喜欢茶饮",
             importance=0.7,
         )
     )
@@ -403,7 +403,7 @@ def test_classify_unknown_type() -> None:
 
 
 def test_classify_planned_wins_over_preference() -> None:
-    atom_type, confidence, event_time = _classify_single("明天下午去喝咖啡")
+    atom_type, confidence, event_time = _classify_single("明天下午去喝茶饮")
     assert atom_type == AtomType.PLANNED
     assert event_time is not None
 
@@ -537,7 +537,7 @@ async def test_lifecycle_manager_reinforcement_jaccard_match(tmp_path: Path) -> 
     # Insert an existing atom
     existing = MemoryAtom(
         parent_memory_id=1,
-        content="张三喜欢喝咖啡每天都要喝",
+        content="张三喜欢喝茶饮每天都要喝",
         confidence=0.7,
     )
     await store.insert(existing)
@@ -546,7 +546,7 @@ async def test_lifecycle_manager_reinforcement_jaccard_match(tmp_path: Path) -> 
     # New atom with very similar content
     new_atom = MemoryAtom(
         parent_memory_id=2,
-        content="张三喜欢喝咖啡",
+        content="张三喜欢喝茶饮",
         confidence=0.9,
     )
     count = await mgr.run_manual_reinforcement([new_atom], similarity_threshold=0.3)

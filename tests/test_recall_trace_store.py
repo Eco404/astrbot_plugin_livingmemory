@@ -15,11 +15,11 @@ async def test_recall_trace_store_defaults_off_and_round_trips_records(tmp_path)
     uid = await store.record(
         trace_type="production",
         status="injected",
-        query_text="六月工资",
+        query_text="六月报销",
         session_id="qq:FriendMessage:1",
         result_count=1,
         request_data={"top_k": 5},
-        result_data={"items": [{"content": "工资补发"}]},
+        result_data={"items": [{"content": "报销补记"}]},
         diagnostics={"selected": 1},
         injection={"content": "exact injected text"},
     )
@@ -30,7 +30,7 @@ async def test_recall_trace_store_defaults_off_and_round_trips_records(tmp_path)
     detail = await store.get_record(uid)
     assert detail is not None
     assert detail["injection"]["content"] == "exact injected text"
-    assert detail["result"]["items"][0]["content"] == "工资补发"
+    assert detail["result"]["items"][0]["content"] == "报销补记"
 
     assert await store.delete_record(uid, trace_type="production") is True
     assert await store.get_record(uid) is None

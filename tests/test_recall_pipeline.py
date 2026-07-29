@@ -171,8 +171,8 @@ def test_query_branches_allow_undated_context_when_age_limit_is_disabled():
 
 @pytest.mark.asyncio
 async def test_pipeline_filters_weak_candidates_and_tracks_only_selected():
-    weather = _result(1, "上海暴雨和雷电天气", score=0.9, vector=0.88)
-    duplicate_weather = _result(2, "上海暴雨雷电和雨天出行", score=0.84, vector=0.82)
+    weather = _result(1, "示例市暴雨和雷电天气", score=0.9, vector=0.88)
+    duplicate_weather = _result(2, "示例市暴雨雷电和雨天出行", score=0.84, vector=0.82)
     coding = _result(3, "AstrBot 记忆插件代码优化", score=0.8, vector=0.78)
     weak = _result(4, "睡前故事和早餐", score=0.72, vector=0.18)
     engine = _FakeEngine(

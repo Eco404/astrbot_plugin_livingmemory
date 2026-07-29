@@ -60,8 +60,8 @@ async def test_incremental_scope_stays_bounded_to_selected_timelines():
             source_revision=1,
             memory_space_id="space-1",
             session_id="session-1",
-            content="京都旅行" if index < 3 else "Rust 学习",
-            summary="京都旅行" if index < 3 else "Rust 学习",
+            content="示例市旅行" if index < 3 else "Rust 学习",
+            summary="示例市旅行" if index < 3 else "Rust 学习",
             started_at=started,
             ended_at=started + 100,
             features={"normalized_topics": [], "fact_fingerprints": [], "lexical_tokens": []},
@@ -115,17 +115,17 @@ async def _create_timeline_db(tmp_path: Path) -> tuple[str, str]:
     memories = [
         {
             "uid": "timeline-travel-1",
-            "text": "用户计划秋季去京都旅行。",
+            "text": "用户计划秋季去示例市旅行。",
             "topics": ["旅行计划"],
-            "facts": ["用户计划秋季去京都"],
+            "facts": ["用户计划秋季去示例市"],
             "started": 1000.0,
             "ended": 1100.0,
         },
         {
             "uid": "timeline-travel-2",
-            "text": "继续讨论京都住宿和交通。",
+            "text": "继续讨论示例市住宿和交通。",
             "topics": ["旅行计划"],
-            "facts": ["用户计划秋季去京都"],
+            "facts": ["用户计划秋季去示例市"],
             "started": 1200.0,
             "ended": 1300.0,
         },
@@ -267,9 +267,9 @@ async def test_resume_reprocesses_changed_timeline_revision(tmp_path: Path):
         metadata = {
             "session_id": "bot:FriendMessage:user-1",
             "persona_id": "persona-1",
-            "canonical_summary": "用户取消了秋季京都旅行。",
+            "canonical_summary": "用户取消了秋季示例市旅行。",
             "topics": ["旅行计划"],
-            "key_facts": ["用户取消秋季京都旅行"],
+            "key_facts": ["用户取消秋季示例市旅行"],
         }
         await db.execute(
             "UPDATE documents SET text = ?, metadata = ? WHERE id = 1",

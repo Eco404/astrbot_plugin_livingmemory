@@ -43,8 +43,8 @@ def _event(
 
 
 def test_query_affect_only_uses_explicit_cues_or_affect_intent():
-    neutral = extract_query_affect("六月工资少发了多少？")
-    explicit = extract_query_affect("当时工资少发后我是不是很生气？")
+    neutral = extract_query_affect("六月报销少记了多少？")
+    explicit = extract_query_affect("当时报销少记后我是不是很生气？")
     intent = extract_query_affect("那件事里我的感受如何？")
 
     assert neutral["needs_affect"] is False
