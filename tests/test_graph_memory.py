@@ -3,6 +3,8 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import aiosqlite
 import pytest
@@ -115,6 +117,67 @@ class _FakeFaissDB:
 
     async def close(self) -> None:
         return None
+
+
+@pytest.mark.asyncio
+async def test_graph_vector_retriever_uses_bulk_faiss_operations():
+    vector_db = SimpleNamespace(
+        insert_batch=AsyncMock(return_value=[11, 12]),
+        delete_documents=AsyncMock(),
+    )
+    retriever = GraphVectorRetriever(vector_db)
+
+    ids = await retriever.add_entries(
+        [
+            ("entry one", {"source_memory_id": 7}),
+            ("entry two", {"source_memory_id": 7}),
+        ]
+    )
+    await retriever.delete_entries(7, ids)
+
+    assert ids == [11, 12]
+    vector_db.insert_batch.assert_awaited_once_with(
+        contents=["entry one", "entry two"],
+        metadatas=[{"source_memory_id": 7}, {"source_memory_id": 7}],
+    )
+    vector_db.delete_documents.assert_awaited_once_with(
+        metadata_filters={"source_memory_id": 7}
+    )
+
+
+@pytest.mark.asyncio
+async def test_graph_vector_retriever_skips_empty_bulk_delete():
+    vector_db = SimpleNamespace(delete_documents=AsyncMock())
+    retriever = GraphVectorRetriever(vector_db)
+
+    await retriever.delete_entries(7, [])
+
+    vector_db.delete_documents.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_graph_vector_retriever_batches_multiple_source_deletes():
+    document_storage = SimpleNamespace(
+        get_documents=AsyncMock(
+            return_value=[
+                {"id": 11, "doc_id": "uuid-11"},
+                {"id": 12, "doc_id": "uuid-12"},
+            ]
+        ),
+        delete_document_by_doc_id=AsyncMock(),
+    )
+    embedding_storage = SimpleNamespace(delete=AsyncMock())
+    retriever = GraphVectorRetriever(
+        SimpleNamespace(
+            document_storage=document_storage,
+            embedding_storage=embedding_storage,
+        )
+    )
+
+    await retriever.delete_entries_batch({7: [11], 8: [12]})
+
+    embedding_storage.delete.assert_awaited_once_with([11, 12])
+    assert document_storage.delete_document_by_doc_id.await_count == 2
 
 
 @pytest.mark.asyncio

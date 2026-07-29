@@ -2,14 +2,14 @@
 Tests for EventHandler core behaviors.
 """
 
+import time
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from astrbot.api.platform import MessageType
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.event_handler import EventHandler
 from astrbot_plugin_livingmemory.core.models.conversation_models import Message
-
-from astrbot.api.platform import MessageType
 
 
 @pytest.fixture
@@ -1722,11 +1722,16 @@ async def test_context_expansion_enriches_query(
     cm_mock.update_session_metadata = AsyncMock()
     cm_mock.invalidate_cache = AsyncMock()
     # get_context 按时间升序返回；最后一条是刚存入的当前消息。
+    now = time.time()
     cm_mock.get_context = AsyncMock(
         return_value=[
-            {"role": "user", "content": "用户之前说的事情"},
-            {"role": "assistant", "content": "Bot 的上一条回复"},
-            {"role": "user", "content": "当前用户消息"},
+            {"role": "user", "content": "用户之前说的事情", "timestamp": now - 120},
+            {
+                "role": "assistant",
+                "content": "Bot 的上一条回复",
+                "timestamp": now - 60,
+            },
+            {"role": "user", "content": "当前用户消息", "timestamp": now},
         ]
     )
 

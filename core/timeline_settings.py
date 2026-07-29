@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 
-TIMELINE_SETTINGS_REVISION = 5
+TIMELINE_SETTINGS_REVISION = 6
 
 SHARED_QUERY_SETTING_KEYS = frozenset(
     {
         "recall_engine.inject_with_recent_context",
+        "recall_engine.recent_context_max_age_seconds",
         "recall_engine.assistant_context_mode",
         "recall_engine.recent_user_weight",
         "recall_engine.recent_assistant_weight",
@@ -23,6 +24,7 @@ TIMELINE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "recall_engine.importance_weight": {"default": 1.0, "type": "float", "min": 0.0, "max": 10.0, "step": 0.1, "category": "recall", "label": "重要性权重", "description": "Timeline 混合评分中记忆重要性的权重；越大越偏向重要记忆。"},
     "recall_engine.fallback_to_vector": {"default": True, "type": "bool", "category": "recall", "label": "失败时回退纯向量", "description": "混合检索失败或没有结果时尝试纯向量检索。"},
     "recall_engine.inject_with_recent_context": {"default": False, "type": "bool", "category": "recall", "label": "跨轮次上下文扩展", "description": "使用最近对话补充查询分支；当前消息始终为主查询。"},
+    "recall_engine.recent_context_max_age_seconds": {"default": 7200, "type": "int", "min": 0, "max": 604800, "category": "recall", "label": "扩展上下文最大间隔（秒）", "description": "只使用该时间范围内的历史消息扩展召回，避免旧话题干扰；0 表示不限制时间。"},
     "recall_engine.assistant_context_mode": {"default": "exclude", "type": "select", "options": ["exclude", "low_weight", "normal"], "category": "recall", "label": "跨轮扩展中的 Bot 回复", "option_labels": {"exclude": "不查询", "low_weight": "低权重", "normal": "正常查询"}, "description": "控制 Bot 回复是否参与跨轮次扩展，仅在开启跨轮扩展时生效。"},
     "recall_engine.recent_user_weight": {"default": 0.45, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "recall", "label": "recent_user 查询权重", "description": "最近历史用户消息查询分支的权重；当前用户消息始终为 1.0。"},
     "recall_engine.recent_assistant_weight": {"default": 0.40, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "recall", "label": "recent_assistant 查询权重", "description": "Bot 历史回复在“正常查询”下的权重；“低权重”模式使用该值的一半。"},

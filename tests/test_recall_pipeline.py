@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 
 import pytest
-
 from astrbot_plugin_livingmemory.core.retrieval.hybrid_retriever import HybridResult
 from astrbot_plugin_livingmemory.core.retrieval.recall_pipeline import RecallPipeline
 from astrbot_plugin_livingmemory.core.utils import (
@@ -51,7 +51,9 @@ class _FakeEngine:
 
 
 def test_query_branches_remove_current_and_control_assistant_weight():
-    pipeline = RecallPipeline(_FakeEngine({}))
+    pipeline = RecallPipeline(
+        _FakeEngine({}), {"recent_context_max_age_seconds": 0}
+    )
     messages = [
         {"role": "user", "content": "之前说下雨了"},
         {"role": "assistant", "content": "雷暴时不要出门"},
@@ -98,6 +100,7 @@ def test_query_branch_weights_are_runtime_configurable():
         {
             "recent_user_weight": 0.25,
             "recent_assistant_weight": 0.30,
+            "recent_context_max_age_seconds": 0,
         },
     )
     messages = [
@@ -119,6 +122,51 @@ def test_query_branch_weights_are_runtime_configurable():
         assistant_mode="low_weight",
     )
     assert low[2].weight == pytest.approx(0.15)
+
+
+def test_query_branches_exclude_stale_and_undated_context():
+    now = time.time()
+    pipeline = RecallPipeline(
+        _FakeEngine({}),
+        {
+            "inject_with_recent_context": True,
+            "recent_context_max_age_seconds": 7200,
+            "assistant_context_mode": "normal",
+        },
+    )
+
+    branches = pipeline.build_query_branches(
+        "当前问题",
+        [
+            {"role": "user", "content": "一小时内", "timestamp": now - 3600},
+            {"role": "assistant", "content": "三小时前", "timestamp": now - 10800},
+            {"role": "user", "content": "缺少时间"},
+            {"role": "user", "content": "当前问题", "timestamp": now},
+        ],
+    )
+
+    assert [branch.name for branch in branches] == ["current", "recent_user"]
+    assert branches[1].text == "一小时内"
+
+
+def test_query_branches_allow_undated_context_when_age_limit_is_disabled():
+    pipeline = RecallPipeline(
+        _FakeEngine({}),
+        {
+            "inject_with_recent_context": True,
+            "recent_context_max_age_seconds": 0,
+        },
+    )
+
+    branches = pipeline.build_query_branches(
+        "当前问题",
+        [
+            {"role": "user", "content": "没有时间但允许使用"},
+            {"role": "user", "content": "当前问题"},
+        ],
+    )
+
+    assert branches[1].text == "没有时间但允许使用"
 
 
 @pytest.mark.asyncio

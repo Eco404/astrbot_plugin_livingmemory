@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from ..topic_similarity import jaccard_similarity, retrieval_text_features
 from .hybrid_retriever import HybridResult
 from .temporal_constraint import TemporalConstraint, timeline_time_anchor
-
 
 ASSISTANT_CONTEXT_MODES = {"exclude", "low_weight", "normal"}
 
@@ -174,7 +175,23 @@ class RecallPipeline:
         )
         normalized_messages = self._recent_history_without_current(
             recent_messages, current
-        )[-4:]
+        )
+        max_age_seconds = max(
+            0,
+            int(self._config("recent_context_max_age_seconds", 7200)),
+        )
+        if max_age_seconds > 0:
+            cutoff = time.time() - max_age_seconds
+            normalized_messages = [
+                message
+                for message in normalized_messages
+                if (timestamp := self._message_timestamp_seconds(
+                    message.get("timestamp")
+                ))
+                is not None
+                and timestamp >= cutoff
+            ]
+        normalized_messages = normalized_messages[-4:]
         user_parts = self._unique_role_parts(normalized_messages, "user")
         assistant_parts = self._unique_role_parts(normalized_messages, "assistant")
         user_weight = self._clamp(
@@ -620,8 +637,8 @@ class RecallPipeline:
         cls,
         messages: list[dict[str, Any]],
         current_query: str,
-    ) -> list[dict[str, str]]:
-        normalized: list[dict[str, str]] = []
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
         for message in messages:
             if not isinstance(message, dict):
                 continue
@@ -630,7 +647,13 @@ class RecallPipeline:
                 continue
             content = cls._clean_text(message.get("content"))
             if content:
-                normalized.append({"role": role, "content": content})
+                normalized.append(
+                    {
+                        "role": role,
+                        "content": content,
+                        "timestamp": message.get("timestamp"),
+                    }
+                )
         if (
             normalized
             and normalized[-1]["role"] == "user"
@@ -641,8 +664,33 @@ class RecallPipeline:
         return normalized
 
     @staticmethod
+    def _message_timestamp_seconds(value: Any) -> float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+        elif isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                timestamp = float(stripped)
+            except ValueError:
+                try:
+                    timestamp = datetime.fromisoformat(
+                        stripped.replace("Z", "+00:00")
+                    ).timestamp()
+                except ValueError:
+                    return None
+        else:
+            return None
+        if timestamp > 100_000_000_000:
+            timestamp /= 1000.0
+        return timestamp if timestamp > 0 and math.isfinite(timestamp) else None
+
+    @staticmethod
     def _unique_role_parts(
-        messages: list[dict[str, str]], role: str
+        messages: list[dict[str, Any]], role: str
     ) -> list[str]:
         output: list[str] = []
         seen: set[str] = set()
