@@ -29,7 +29,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "10"
+    CURRENT_VERSION = "10.1"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -43,6 +43,7 @@ class DBMigration:
         8: "Write-operation log and access-aware metadata indexes",
         9: "Stable timeline identity registry and source-span provenance",
         "10": "Stable Timeline and Topic memory architecture release",
+        "10.1": "Durable Timeline source snapshots",
     }
 
     def __init__(self, db_path: str):
@@ -305,6 +306,8 @@ class DBMigration:
                     migration_steps.append(
                         partial(self._migrate_v9_to_v10, from_version=v10_start)
                     )
+                if current_key < self.version_key("10.1"):
+                    migration_steps.append(self._migrate_v10_to_v10_1)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -2013,6 +2016,21 @@ class DBMigration:
         if progress_callback:
             progress_callback("完成 v10 数据库版本收束", 1, 1)
         logger.info(f"v{start_version} -> v10 迁移完成")
+
+    async def _migrate_v10_to_v10_1(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Add durable source snapshots keyed by stable Timeline identity."""
+        logger.info("执行迁移步骤: v10 -> v10.1 (Timeline source snapshots)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await MemoryIdentityStore.create_tables(db)
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建 Timeline 来源快照与导入导出结构", 1, 1)
+        logger.info("v10 -> v10.1 迁移完成")
 
     @staticmethod
     def _migration_json_object(value: Any) -> dict[str, Any]:

@@ -13,6 +13,7 @@ import aiosqlite
 
 from astrbot.api import logger
 
+from ..memory_source import restore_source_messages
 from ..models.conversation_identity import audit_message_identity
 from ..models.topic_memory import TopicMaintenanceMode
 
@@ -224,12 +225,17 @@ class TimelineRebuildManager:
                            s.session_id, s.first_message_id, s.last_message_id,
                            s.start_index, s.end_index, s.traceability,
                            s.metadata AS source_metadata,
+                           ss.source_revision AS retained_source_revision,
+                           ss.message_count AS retained_message_count,
+                           ss.retention_reason AS retained_source_reason,
                            (SELECT COUNT(DISTINCT l.topic_uid)
                               FROM topic_timeline_links l
                              WHERE l.timeline_uid = r.memory_uid
                                AND l.status = 'active') AS topic_count
                     FROM memory_registry r
                     LEFT JOIN memory_source_spans s ON s.memory_uid = r.memory_uid
+                    LEFT JOIN memory_source_snapshots ss
+                      ON ss.memory_uid = r.memory_uid
                     WHERE {' AND '.join(clauses)}
                     ORDER BY r.document_id DESC
                     LIMIT ?
@@ -364,18 +370,21 @@ class TimelineRebuildManager:
             source = {}
         session_id = str(record.get("session_id") or source.get("session_id") or "")
         reasons: list[str] = []
+        raw_reasons: list[str] = []
         messages: list[Any] = []
+        source_kind = "conversations"
+        retained_snapshot: dict[str, Any] | None = None
         first_id = record.get("first_message_id")
         last_id = record.get("last_message_id")
         if not memory:
             reasons.append("Timeline 正文不存在")
         if str(record.get("traceability") or "") != "full":
-            reasons.append("缺少完整的原始消息 ID 边界")
+            raw_reasons.append("缺少完整的原始消息 ID 边界")
         if not session_id:
-            reasons.append("缺少来源会话 ID")
+            raw_reasons.append("缺少来源会话 ID")
         if first_id is None or last_id is None:
-            reasons.append("缺少首尾原始消息 ID")
-        if not reasons:
+            raw_reasons.append("缺少首尾原始消息 ID")
+        if not raw_reasons:
             expected = self._expected_message_count(source, record)
             messages = await self.conversation_manager.get_messages_by_id_span(
                 session_id,
@@ -384,15 +393,29 @@ class TimelineRebuildManager:
                 limit=max(100, expected + 1, 2000),
             )
             if not messages:
-                reasons.append("原始消息已不存在")
+                raw_reasons.append("原始消息已不存在")
             else:
                 ids = [int(message.id) for message in messages]
                 if ids[0] != int(first_id) or ids[-1] != int(last_id):
-                    reasons.append("原始消息首尾边界不完整")
+                    raw_reasons.append("原始消息首尾边界不完整")
                 if expected and len(messages) != expected:
-                    reasons.append(
+                    raw_reasons.append(
                         f"原始消息数量不完整（期望 {expected}，实际 {len(messages)}）"
                     )
+        if raw_reasons and int(record.get("retained_message_count") or 0) > 0:
+            retained_snapshot = (
+                await self.memory_engine.memory_identity_store.get_source_snapshot(
+                    str(record["memory_uid"])
+                )
+            )
+            retained_messages = restore_source_messages(
+                list((retained_snapshot or {}).get("messages") or [])
+            )
+            if retained_messages:
+                messages = retained_messages
+                source_kind = "retained_snapshot"
+                raw_reasons = []
+        reasons.extend(raw_reasons)
         identity_issues = sorted(
             {
                 issue
@@ -416,12 +439,28 @@ class TimelineRebuildManager:
             or "GroupMessage" in session_id,
             "topic_count": int(record.get("topic_count") or 0),
             "summary_quality": str(metadata.get("summary_quality") or "unknown"),
+            "source_kind": source_kind,
+            "retained_source_revision": (
+                int((retained_snapshot or {}).get("source_revision") or 0)
+                if source_kind == "retained_snapshot"
+                else int(record.get("retained_source_revision") or 0)
+            ),
+            "retained_source_reason": str(
+                (retained_snapshot or {}).get("retention_reason")
+                or record.get("retained_source_reason")
+                or ""
+            ),
         }
         return {
             **snapshot,
             "excerpt": excerpt[:180],
             "topic_count": int(record.get("topic_count") or 0),
             "identity_warnings": identity_issues,
+            "source_warning": (
+                "原始聊天记录不可用，将使用保留的来源快照重构"
+                if source_kind == "retained_snapshot"
+                else None
+            ),
             "summary_quality": snapshot["summary_quality"],
             "reconstructable": not reasons,
             "blocked_reasons": reasons,
@@ -1058,12 +1097,22 @@ class TimelineRebuildManager:
         ):
             if current.get(key) != snapshot.get(key):
                 raise ValueError(f"预检后来源发生变化：{key}")
-        messages = await self.conversation_manager.get_messages_by_id_span(
-            snapshot["session_id"],
-            int(snapshot["first_message_id"]),
-            int(snapshot["last_message_id"]),
-            limit=max(100, int(snapshot["message_count"]) + 1, 2000),
-        )
+        if str(snapshot.get("source_kind") or "") == "retained_snapshot":
+            retained = await self.memory_engine.memory_identity_store.get_source_snapshot(
+                str(snapshot["memory_uid"])
+            )
+            messages = restore_source_messages(
+                list((retained or {}).get("messages") or [])
+            )
+        else:
+            messages = await self.conversation_manager.get_messages_by_id_span(
+                snapshot["session_id"],
+                int(snapshot["first_message_id"]),
+                int(snapshot["last_message_id"]),
+                limit=max(100, int(snapshot["message_count"]) + 1, 2000),
+            )
+        if not messages:
+            raise ValueError("重构来源消息已不可用，请重新检测")
         content, metadata, importance = await self.memory_processor.process_conversation(
             messages=messages,
             is_group_chat=bool(snapshot.get("is_group_chat")),
@@ -1100,6 +1149,8 @@ class TimelineRebuildManager:
             importance=importance,
             atoms=atoms,
             schedule_topic_maintenance=False,
+            source_messages=messages,
+            source_retention_reason="timeline_rebuild",
         )
         return {
             "memory_id": int(item["memory_id"]),

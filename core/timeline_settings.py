@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TIMELINE_SETTINGS_REVISION = 6
+TIMELINE_SETTINGS_REVISION = 7
 
 SHARED_QUERY_SETTING_KEYS = frozenset(
     {
@@ -38,6 +38,7 @@ TIMELINE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "reflection_engine.idle_summary_delay_minutes": {"default": 30.0, "type": "float", "min": 1.0, "max": 10080.0, "step": 1.0, "category": "generation", "label": "空闲触发时间（分钟）", "description": "会话最后一条消息经过该时间后进入空闲总结检查。"},
     "reflection_engine.idle_summary_min_rounds": {"default": 3, "type": "int", "min": 1, "max": 100, "category": "generation", "label": "空闲总结最少轮次", "description": "只有未总结对话达到该轮数时才执行空闲总结，避免插件刚启用时产生过碎的 Timeline。"},
     "reflection_engine.idle_summary_scan_interval_seconds": {"default": 60, "type": "int", "min": 30, "max": 3600, "category": "performance", "label": "空闲会话扫描间隔（秒）", "description": "后台检查空闲会话的时间间隔；只执行本地数据库查询，命中后才调用 LLM。"},
+    "reflection_engine.source_retention_importance_threshold": {"default": 0.8, "type": "float", "min": 0.0, "max": 1.0, "step": 0.05, "category": "generation", "label": "来源快照重要性阈值", "description": "达到该基础重要性的 Timeline 会保留结构化来源消息，供原始聊天记录清理后的审计、重构和导出使用；0 表示全部保留。"},
     "session_manager.max_sessions": {"default": 100, "type": "int", "min": 1, "max": 10000, "category": "session", "label": "最大缓存会话数", "description": "内存中最多缓存的会话数量；淘汰缓存不会删除数据库数据。"},
     "session_manager.session_ttl": {"default": 3600, "type": "int", "min": 60, "max": 86400, "category": "session", "label": "会话缓存空闲时间（秒）", "description": "缓存超过该时间未被访问后失效；不会删除会话或原始消息。"},
     "session_manager.context_window_size": {"default": 50, "type": "int", "min": 1, "max": 1000, "category": "session", "label": "对话上下文窗口", "description": "插件读取近期对话时最多使用的消息条数。"},

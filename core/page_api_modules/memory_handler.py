@@ -318,7 +318,26 @@ class MemoryHandler:
             "update_history": metadata.get("update_history", []),
             "topic_count": 0,
             "related_topics": [],
+            "retained_source": None,
         }
+
+        try:
+            source_snapshot = await memory_engine.get_memory_source_snapshot(memory_id)
+            if source_snapshot:
+                detail["retained_source"] = {
+                    "source_revision": int(
+                        source_snapshot.get("source_revision") or 1
+                    ),
+                    "message_count": int(source_snapshot.get("message_count") or 0),
+                    "retention_reason": str(
+                        source_snapshot.get("retention_reason") or ""
+                    ),
+                    "created_at": float(source_snapshot.get("created_at") or 0.0),
+                    "updated_at": float(source_snapshot.get("updated_at") or 0.0),
+                    "messages": list(source_snapshot.get("messages") or []),
+                }
+        except Exception as exc:
+            logger.warning(f"[PageAPI] 获取 Timeline 来源快照失败: {exc}")
 
         topic_store = getattr(memory_engine, "topic_memory_store", None)
         memory_uid = str(metadata.get("memory_uid") or "").strip()

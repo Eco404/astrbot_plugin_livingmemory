@@ -26,6 +26,7 @@ from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
 from ..models.memory_identity import resolve_memory_space
 from ..models.identity_profile import SupplementalIdentityStore
 from ..importance_policy import IMPORTANCE_POLICY_VERSION
+from ..memory_source import serialize_source_messages
 from ..processors.graph_extractor import GraphExtractor
 from ..processors.text_processor import TextProcessor
 from ..retrieval.atom_retriever import AtomRetriever
@@ -1259,6 +1260,14 @@ class MemoryEngine:
             )
             return False
 
+        failed_vector_doc_uuids = [
+            str(value).strip()
+            for value in (payload.get("failed_vector_doc_uuids") or [])
+            if str(value).strip()
+        ]
+        for uuid_doc_id in failed_vector_doc_uuids:
+            await self.faiss_db.delete(uuid_doc_id)
+
         await self._delete_document_indexes_for_batch(memory_ids)
         await self._delete_graph_and_atoms_for_batch(memory_ids)
         await self.memory_identity_store.delete_by_document_ids(memory_ids)
@@ -1498,6 +1507,8 @@ class MemoryEngine:
         metadata: dict[str, Any] | None = None,
         atoms: list | None = None,
         preserve_create_time: bool = False,
+        source_messages: list[Any] | None = None,
+        source_retention_reason: str = "importance_threshold",
     ) -> int:
         """
         添加新记忆
@@ -1509,6 +1520,7 @@ class MemoryEngine:
             importance: 重要性(0-1)
             metadata: 额外元数据
             preserve_create_time: 内部替换操作是否保留 metadata 中的原创建时间
+            source_messages: 可选的结构化来源消息；只保存到独立来源快照表
 
         Returns:
             int: 记忆ID(doc_id)
@@ -1713,8 +1725,10 @@ class MemoryEngine:
                 memory_id=doc_id,
             )
 
+        identity_registered = False
         try:
             await self._register_memory_identity(doc_id, full_metadata)
+            identity_registered = True
             await self._advance_write_op(
                 op_id,
                 "identity_registered",
@@ -1737,6 +1751,38 @@ class MemoryEngine:
                 exc_info=True,
             )
 
+        serialized_source = serialize_source_messages(list(source_messages or []))
+        if serialized_source and identity_registered:
+            try:
+                await self.memory_identity_store.save_source_snapshot(
+                    str(full_metadata["memory_uid"]),
+                    serialized_source,
+                    source_revision=int(full_metadata.get("revision", 1)),
+                    retention_reason=source_retention_reason,
+                )
+                await self._advance_write_op(
+                    op_id,
+                    "source_snapshot_saved",
+                    status="needs_repair" if needs_repair else "pending",
+                    memory_id=doc_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                needs_repair = True
+                await self._advance_write_op(
+                    op_id,
+                    "source_snapshot_failed",
+                    status="needs_repair",
+                    memory_id=doc_id,
+                    error=str(e),
+                )
+                logger.error(
+                    f"[MemoryEngine] Timeline 来源快照保存失败，已标记待修复 "
+                    f"(memory_id={doc_id})",
+                    exc_info=True,
+                )
+
         if not needs_repair:
             await self._advance_write_op(
                 op_id,
@@ -1751,6 +1797,19 @@ class MemoryEngine:
         )
         self._invalidate_search_cache()
         return doc_id
+
+    async def get_memory_source_snapshot(
+        self, memory_id: int
+    ) -> dict[str, Any] | None:
+        """Return the retained source snapshot for one physical Timeline ID."""
+        return await self.memory_identity_store.get_source_snapshot_by_document_id(
+            int(memory_id)
+        )
+
+    async def get_memory_source(self, memory_id: int) -> list[dict[str, Any]]:
+        """Return retained source messages without exposing storage internals."""
+        snapshot = await self.get_memory_source_snapshot(memory_id)
+        return list(snapshot.get("messages") or []) if snapshot else []
 
     async def search_memories(
         self,
@@ -2093,6 +2152,8 @@ class MemoryEngine:
         importance: float,
         atoms: list | None = None,
         schedule_topic_maintenance: bool = True,
+        source_messages: list[Any] | None = None,
+        source_retention_reason: str = "timeline_rebuild",
     ) -> int:
         """Rebuild a memory and every derived index while preserving its ID."""
         current = await self.get_memory(memory_id)
@@ -2212,6 +2273,14 @@ class MemoryEngine:
                 )
 
             await self._register_memory_identity(memory_id, replacement_metadata)
+            serialized_source = serialize_source_messages(list(source_messages or []))
+            if serialized_source:
+                await self.memory_identity_store.save_source_snapshot(
+                    str(replacement_metadata["memory_uid"]),
+                    serialized_source,
+                    source_revision=int(replacement_metadata.get("revision", 1)),
+                    retention_reason=source_retention_reason,
+                )
             await self._mark_dependent_topics_stale(
                 str(replacement_metadata.get("memory_uid") or ""),
                 reason="timeline_rewritten_in_place",
@@ -2810,6 +2879,8 @@ class MemoryEngine:
                 },
             )
             batch_deleted = 0
+            vector_delete_error: str | None = None
+            failed_vector_doc_uuids: list[str] = []
 
             try:
                 registry_cursor = await self.db_connection.execute(
@@ -2843,18 +2914,36 @@ class MemoryEngine:
                 uuid_rows = await cursor.fetchall()
                 found_ids = [int(row["id"]) for row in uuid_rows]
                 if found_ids:
-                    deleted_vector_ids = await self.vector_retriever.delete_documents(
-                        found_ids
-                    )
-                    if set(deleted_vector_ids) != set(found_ids):
-                        raise RuntimeError(
-                            "批量向量删除不完整: "
-                            f"expected={found_ids}, deleted={deleted_vector_ids}"
+                    try:
+                        deleted_vector_ids = (
+                            await self.vector_retriever.delete_documents(found_ids)
+                        )
+                        if set(deleted_vector_ids) != set(found_ids):
+                            raise RuntimeError(
+                                "批量向量删除不完整: "
+                                f"expected={found_ids}, deleted={deleted_vector_ids}"
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        vector_delete_error = str(exc)
+                        failed_vector_doc_uuids = [
+                            str(row["doc_id"])
+                            for row in uuid_rows
+                            if row["doc_id"]
+                        ]
+                        logger.warning(
+                            "[批量删除] 向量索引删除失败，已继续删除主记录并标记待修复",
+                            exc_info=True,
                         )
                 await self._advance_write_op(
                     op_id,
                     "faiss_deleted",
-                    payload_patch={"memory_ids": batch, "found_ids": found_ids},
+                    payload_patch={
+                        "memory_ids": batch,
+                        "found_ids": found_ids,
+                        "failed_vector_doc_uuids": failed_vector_doc_uuids,
+                    },
                 )
 
                 # 3. Batch delete from documents table
@@ -2931,12 +3020,28 @@ class MemoryEngine:
                 )
                 raise
 
-            await self._advance_write_op(
-                op_id,
-                "completed",
-                status="completed",
-                payload_patch={"memory_ids": batch, "deleted_count": batch_deleted},
-            )
+            if vector_delete_error:
+                await self._advance_write_op(
+                    op_id,
+                    "vector_delete_failed",
+                    status="needs_repair",
+                    error=vector_delete_error,
+                    payload_patch={
+                        "memory_ids": batch,
+                        "deleted_count": batch_deleted,
+                        "failed_vector_doc_uuids": failed_vector_doc_uuids,
+                    },
+                )
+            else:
+                await self._advance_write_op(
+                    op_id,
+                    "completed",
+                    status="completed",
+                    payload_patch={
+                        "memory_ids": batch,
+                        "deleted_count": batch_deleted,
+                    },
+                )
             total_deleted += batch_deleted
 
         if total_deleted:

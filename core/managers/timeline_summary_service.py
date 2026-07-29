@@ -261,6 +261,16 @@ class TimelineSummaryService:
                     session_id=session_id,
                     persona_id=effective_persona,
                 )
+                retention_threshold = float(
+                    self.config_manager.get(
+                        "reflection_engine.source_retention_importance_threshold",
+                        0.8,
+                    )
+                )
+                normalized_importance = float(importance)
+                if normalized_importance > 1.0:
+                    normalized_importance /= 10.0
+                retain_source = normalized_importance >= retention_threshold
                 await self.memory_engine.add_memory(
                     content=content,
                     session_id=session_id,
@@ -268,6 +278,8 @@ class TimelineSummaryService:
                     importance=importance,
                     metadata=metadata,
                     atoms=atoms,
+                    source_messages=history if retain_source else None,
+                    source_retention_reason="importance_threshold",
                 )
                 await self.conversation_manager.update_session_metadata_values(
                     session_id,
