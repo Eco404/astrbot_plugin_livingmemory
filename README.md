@@ -103,6 +103,12 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 1. Open the AstrBot official WebUI.
 2. Go to `Plugins -> LivingMemory -> Pages -> dashboard`.
 
+**Timeline import and export**:
+- The Timeline Memory page exports either all memories or the current selection. JSON preserves topics, facts, actors, emotion, temporal data, and available source snapshots for migration or backup; CSV is intended for inspection and spreadsheet workflows.
+- Import accepts LivingMemory JSON/CSV plus common long/short-term memory collections, message arrays, and paired user/Bot text. A preview reports valid, duplicate, invalid, and summary-required entries before the user chooses to skip or allow exact duplicates.
+- Source-only entries invoke the current LLM to create a Timeline summary; entries that already contain a summary do not invoke an LLM. Each import is limited to 10,000 entries and 50 MiB.
+- Only semantic data is portable. Document IDs, `memory_uid`, memory-space identities, revisions, indexes, access counters, and synchronization state are never reused; imported memories receive fresh local identities and source snapshots.
+
 ---
 
 ## Commands

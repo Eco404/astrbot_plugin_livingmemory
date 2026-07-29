@@ -21,6 +21,8 @@ export class ApiClient {
       ["database/storage", "operation.databaseMaintenance"],
       ["recall/test", "operation.recallTest"],
       ["models/test", "operation.modelTest"],
+      ["memories/import", "operation.memoryImport"],
+      ["memories/export", "operation.memoryExport"],
       ["timeline/rebuild/preview", "operation.timelineScan"],
       ["sessions/maintenance/preview", "operation.sessionPreview"],
       ["topics/maintenance/unindexed", "operation.topicScan"],

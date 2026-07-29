@@ -41,6 +41,7 @@ import {
       status: "all",
       type: "all",
       sort: "created_desc",
+      selectedIds: new Set(),
     },
     selectedMemory: null,
     isEditing: false,
@@ -58,7 +59,7 @@ import {
   const confirmDialog = new ConfirmDialog();
   const topicPage = new TopicPage(api, showToast);
   const peekPanel = new PeekPanel(state, api, topicPage);
-  const memoryPage = new MemoryPage(state, api, peekPanel);
+  const memoryPage = new MemoryPage(state, api, peekPanel, confirmDialog);
   const identityPage = new IdentityPage(api, showToast);
   const modelPage = new ModelPage(api, showToast);
   const systemPage = new SystemPage(state, api);

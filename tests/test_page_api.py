@@ -13,13 +13,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
 import pytest
+from astrbot_plugin_livingmemory.core.models.identity_profile import (
+    SupplementalIdentityStore,
+)
 from astrbot_plugin_livingmemory.core.page_api import (
     PAGE_API_PREFIX,
     PLUGIN_NAME,
     PluginPageApi,
-)
-from astrbot_plugin_livingmemory.core.models.identity_profile import (
-    SupplementalIdentityStore,
 )
 
 # ---------------------------------------------------------------------------
@@ -72,6 +72,25 @@ class FakeMemoryEngine:
 
     async def batch_delete_memories(self, memory_ids: list[int]):
         return len(memory_ids)
+
+    async def get_memory_transfer_records(self, memory_ids=None):
+        records = [
+            {
+                "original_id": 1,
+                "content": "portable memory",
+                "importance": 0.7,
+                "session_id": "s1",
+                "persona_id": "p1",
+                "metadata": {"topics": ["portable"]},
+                "source_messages": [],
+            }
+        ]
+        if memory_ids is None or 1 in memory_ids:
+            return records
+        return []
+
+    async def get_memory_import_keys(self):
+        return {("existing memory", "s1", "p1")}
 
     async def close(self):
         pass
@@ -1562,6 +1581,84 @@ class TestBatchDeleteMemories:
         assert "abc" in result["data"]["failed_ids"]
 
 
+class TestMemoryTransfer:
+    @pytest.mark.asyncio
+    async def test_export_selected_json(self, api):
+        req = _mock_page_request(get_json={"format": "json", "memory_ids": [1]})
+        with _patch_page_request(req):
+            result = await api.export_memories()
+
+        assert result["status"] == "ok"
+        assert result["data"]["memory_count"] == 1
+        payload = json.loads(result["data"]["content"])
+        assert payload["format"] == "livingmemory"
+        assert payload["memories"][0]["content"] == "portable memory"
+
+    @pytest.mark.asyncio
+    async def test_import_preview_counts_duplicate_and_invalid(self, api):
+        content = json.dumps(
+            [
+                {"content": "existing memory", "session_id": "s1", "persona_id": "p1"},
+                {"content": "new memory", "session_id": "s1", "persona_id": "p1"},
+                {"messages": [{"role": "user"}]},
+            ]
+        )
+        req = _mock_page_request(
+            get_json={
+                "format": "json",
+                "content": content,
+                "duplicate_strategy": "skip",
+                "dry_run": True,
+            }
+        )
+        with _patch_page_request(req):
+            result = await api.import_memories()
+
+        assert result["status"] == "ok"
+        assert result["data"]["valid_count"] == 2
+        assert result["data"]["invalid_count"] == 1
+        assert result["data"]["duplicate_count"] == 1
+        assert result["data"]["planned_import_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_import_execute_writes_new_identity_safe_metadata(self, api):
+        content = json.dumps(
+            {
+                "content": "new imported memory",
+                "session_id": "s2",
+                "metadata": {
+                    "memory_uid": "remote-uid",
+                    "memory_space_id": "remote-space",
+                    "memory_layer": "topic",
+                    "importance_revision": 8,
+                    "topics": ["import"],
+                },
+            }
+        )
+        engine = api.plugin.initializer.memory_engine
+        engine.add_memory = AsyncMock(return_value=77)
+        req = _mock_page_request(
+            get_json={
+                "format": "json",
+                "content": content,
+                "duplicate_strategy": "skip",
+                "dry_run": False,
+            }
+        )
+        with _patch_page_request(req):
+            result = await api.import_memories()
+
+        assert result["status"] == "ok"
+        assert result["data"]["imported_ids"] == [77]
+        kwargs = engine.add_memory.await_args.kwargs
+        assert "memory_uid" not in kwargs["metadata"]
+        assert "memory_space_id" not in kwargs["metadata"]
+        assert "memory_layer" not in kwargs["metadata"]
+        assert kwargs["metadata"]["importance_revision"] == 1
+        assert kwargs["metadata"]["importance_reason"] == "memory_import"
+        assert kwargs["source_retention_reason"] == "memory_import"
+
+
 class TestTestRecall:
     @pytest.mark.asyncio
     async def test_empty_query(self, api):
@@ -2222,7 +2319,7 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 74
+        assert len(plugin._api_routes) == 76
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
@@ -2247,6 +2344,8 @@ class TestRouteRegistration:
         assert f"{prefix}/timeline/inactive/restore" in paths
         assert f"{prefix}/memories/update/progress" in paths
         assert f"{prefix}/memories/batch-delete" in paths
+        assert f"{prefix}/memories/export" in paths
+        assert f"{prefix}/memories/import" in paths
         assert f"{prefix}/timeline/settings" in paths
         assert f"{prefix}/timeline/settings/update" in paths
         assert f"{prefix}/timeline/rebuild/preview" in paths

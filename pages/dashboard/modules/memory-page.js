@@ -6,10 +6,14 @@
 import { normalizeImportance, esc, statusPill, typeLabel, debounce } from "./utils.js";
 
 export class MemoryPage {
-  constructor(state, apiClient, peekPanel) {
+  constructor(state, apiClient, peekPanel, confirmDialog) {
     this.state = state;
     this.api = apiClient;
     this.peek = peekPanel;
+    this.confirmDialog = confirmDialog;
+    if (!(this.state.memory.selectedIds instanceof Set)) {
+      this.state.memory.selectedIds = new Set();
+    }
 
     // 虚拟滚动配置
     this.ROW_HEIGHT = 56;
@@ -111,7 +115,9 @@ export class MemoryPage {
         const impNum = Math.min(10, Math.max(0, parseFloat(imp) || 0));
         const impCls = impNum >= 7 ? "high" : impNum >= 4 ? "medium" : "low";
 
-        html += '<tr data-key="' + key + '" style="height:' + this.ROW_HEIGHT + 'px">';
+        const selected = this.state.memory.selectedIds.has(item.memory_id);
+        html += '<tr data-key="' + key + '" class="' + (selected ? 'is-selected' : '') + '" style="height:' + this.ROW_HEIGHT + 'px">';
+        html += '<td class="cell-select"><input type="checkbox" class="memory-select" data-memory-id="' + item.memory_id + '" ' + (selected ? 'checked' : '') + ' aria-label="' + esc(window.t("transfer.selectOne", item.memory_id)) + '" /></td>';
         html += '<td class="cell-mono cell-id">' + item.memory_id + '</td>';
         const qualityFlag = item.summary_quality === "low"
           ? '<span class="timeline-quality-flag" title="' + esc(window.t("memory.lowQualityHint")) + '" aria-label="' + esc(window.t("memory.lowQuality")) + '"></span>'
@@ -130,6 +136,7 @@ export class MemoryPage {
       tbody.innerHTML = html;
       tbody.style.paddingTop = padTop + "px";
       tbody.style.paddingBottom = padBottom + "px";
+      this.updateSelectionControls();
     };
 
     // 绑定滚动事件（仅绑定一次）
@@ -148,9 +155,159 @@ export class MemoryPage {
    */
   renderEmpty() {
     const tbody = document.getElementById("memories-body");
-    tbody.innerHTML = '<tr><td colspan="7" class="table-empty">' + window.t("table.noData") + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="table-empty">' + window.t("table.noData") + '</td></tr>';
     tbody.style.paddingTop = "0";
     tbody.style.paddingBottom = "0";
+    this.updateSelectionControls();
+  }
+
+  updateSelectionControls() {
+    const selectedIds = this.state.memory.selectedIds;
+    const pageIds = this.state.memory.items.map(item => item.memory_id);
+    const selectedOnPage = pageIds.filter(id => selectedIds.has(id)).length;
+    const selectAll = document.getElementById("mem-select-all");
+    if (selectAll) {
+      selectAll.checked = pageIds.length > 0 && selectedOnPage === pageIds.length;
+      selectAll.indeterminate = selectedOnPage > 0 && selectedOnPage < pageIds.length;
+      selectAll.disabled = pageIds.length === 0;
+    }
+
+    const selectedCount = selectedIds.size;
+    const deleteButton = document.getElementById("mem-delete-selected");
+    if (deleteButton) deleteButton.disabled = selectedCount === 0;
+    const deleteLabel = document.getElementById("mem-delete-selected-label");
+    if (deleteLabel) {
+      deleteLabel.textContent = selectedCount
+        ? window.t("transfer.deleteSelectedCount", selectedCount)
+        : window.t("transfer.deleteSelected");
+    }
+    const summary = document.getElementById("mem-selection-summary");
+    if (summary) {
+      summary.textContent = selectedCount
+        ? window.t("transfer.selectedCount", selectedCount)
+        : window.t("transfer.noneSelected");
+    }
+  }
+
+  toggleAllOnPage(checked) {
+    for (const item of this.state.memory.items) {
+      if (checked) this.state.memory.selectedIds.add(item.memory_id);
+      else this.state.memory.selectedIds.delete(item.memory_id);
+    }
+    this.renderVirtual();
+  }
+
+  async deleteSelected() {
+    const ids = Array.from(this.state.memory.selectedIds);
+    if (!ids.length) return;
+    const confirmed = await this.confirmDialog.show({
+      title: window.t("transfer.deleteConfirmTitle"),
+      message: window.t("transfer.deleteConfirm", ids.length),
+      confirmLabel: window.t("common.delete"),
+      danger: true,
+    });
+    if (!confirmed) return;
+
+    const button = document.getElementById("mem-delete-selected");
+    if (button) button.disabled = true;
+    try {
+      const result = await this.api.post("memories/batch-delete", { memory_ids: ids });
+      const deleted = Number(result.deleted_count || 0);
+      const failed = ids.length - deleted;
+      this.showToast(
+        failed
+          ? window.t("transfer.deletePartial", deleted, failed)
+          : window.t("transfer.deleteSuccess", deleted),
+        failed > 0
+      );
+      for (const id of ids) this.state.memory.selectedIds.delete(id);
+      await this.fetch();
+    } catch (error) {
+      this.showToast(error.message || window.t("transfer.failed"), true);
+      this.updateSelectionControls();
+    }
+  }
+
+  async exportMemories() {
+    const button = document.getElementById("mem-export");
+    const format = document.getElementById("mem-transfer-format").value || "json";
+    const selectedIds = Array.from(this.state.memory.selectedIds);
+    if (button) button.disabled = true;
+    try {
+      const payload = { format };
+      if (selectedIds.length) payload.memory_ids = selectedIds;
+      const result = await this.api.post("memories/export", payload);
+      const blob = new Blob([result.content || ""], {
+        type: result.mime_type || "application/octet-stream"
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = result.filename || ("livingmemory-export." + format);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      this.showToast(window.t("transfer.exportSuccess", Number(result.memory_count || 0)));
+    } catch (error) {
+      this.showToast(error.message || window.t("transfer.failed"), true);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async importFile(file) {
+    if (!file) return;
+    if (file.size > 50 * 1024 * 1024) {
+      this.showToast(window.t("transfer.fileTooLarge"), true);
+      return;
+    }
+    const format = file.name.toLowerCase().endsWith(".csv") ? "csv" : "json";
+    const duplicateStrategy = document.getElementById("mem-import-duplicates").value || "skip";
+    const content = await file.text();
+    const requestPayload = { format, content, duplicate_strategy: duplicateStrategy };
+    const button = document.getElementById("mem-import");
+    if (button) button.disabled = true;
+    try {
+      const preview = await this.api.post("memories/import", {
+        ...requestPayload,
+        dry_run: true,
+      });
+      const confirmed = await this.confirmDialog.show({
+        title: window.t("transfer.importPreviewTitle"),
+        message: window.t(
+          "transfer.importPreview",
+          preview.valid_count || 0,
+          preview.planned_import_count || 0,
+          preview.duplicate_count || 0,
+          preview.invalid_count || 0,
+          preview.summary_required_count || 0
+        ),
+        confirmLabel: window.t("transfer.importConfirm"),
+        danger: false,
+      });
+      if (!confirmed) return;
+
+      const result = await this.api.post("memories/import", {
+        ...requestPayload,
+        dry_run: false,
+      });
+      const failed = Number(result.failed_count || 0);
+      this.showToast(
+        window.t(
+          "transfer.importSuccess",
+          Number(result.imported_count || 0),
+          Number(result.skipped_duplicate_count || 0),
+          failed
+        ),
+        failed > 0
+      );
+      await this.fetch();
+    } catch (error) {
+      this.showToast(error.message || window.t("transfer.failed"), true);
+    } finally {
+      if (button) button.disabled = false;
+    }
   }
 
   /**
@@ -184,6 +341,15 @@ export class MemoryPage {
     const tbody = document.getElementById("memories-body");
     if (tbody) {
       tbody.addEventListener("click", (e) => {
+        const checkbox = e.target.closest(".memory-select");
+        if (checkbox) {
+          const id = Number(checkbox.dataset.memoryId);
+          if (checkbox.checked) this.state.memory.selectedIds.add(id);
+          else this.state.memory.selectedIds.delete(id);
+          checkbox.closest("tr")?.classList.toggle("is-selected", checkbox.checked);
+          this.updateSelectionControls();
+          return;
+        }
         const tr = e.target.closest("tr");
         if (!tr || !tr.dataset.key) return;
 
@@ -191,6 +357,24 @@ export class MemoryPage {
         if (item) this.peek.renderMemory(item);
       });
     }
+
+    document.getElementById("mem-select-all")?.addEventListener("change", event => {
+      this.toggleAllOnPage(event.target.checked);
+    });
+    document.getElementById("mem-delete-selected")?.addEventListener("click", () => {
+      this.deleteSelected();
+    });
+    document.getElementById("mem-export")?.addEventListener("click", () => {
+      this.exportMemories();
+    });
+    const importInput = document.getElementById("mem-import-file");
+    document.getElementById("mem-import")?.addEventListener("click", () => {
+      importInput.value = "";
+      importInput.click();
+    });
+    importInput?.addEventListener("change", () => {
+      this.importFile(importInput.files && importInput.files[0]);
+    });
 
     // 筛选：关键词
     document.getElementById("mem-keyword").addEventListener("input", debounce(() => {

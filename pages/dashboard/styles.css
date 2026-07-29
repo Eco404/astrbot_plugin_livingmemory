@@ -730,7 +730,25 @@ body {
   background: color-mix(in srgb, var(--accent-light) 45%, var(--bg-card));
 }
 
-.data-table .cell-id { width: 64px; }
+.data-table tbody tr.is-selected {
+  background: color-mix(in srgb, var(--accent-light) 70%, var(--bg-card));
+}
+
+.data-table .cell-select {
+  width: 44px;
+  padding-left: var(--space-3);
+  padding-right: var(--space-2);
+  text-align: center;
+}
+
+.data-table .cell-select input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.data-table .cell-id { width: 92px; }
 .data-table .cell-summary { width: auto; min-width: 320px; }
 .data-table .cell-topics { width: 92px; text-align: center; }
 .data-table .cell-type { width: 100px; }
@@ -785,6 +803,37 @@ body {
 }
 
 .memory-page-body .filter-bar { flex: 0 0 auto; margin-bottom: 0; }
+
+.memory-transfer-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: 38px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+.memory-selection-summary {
+  min-width: 220px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.memory-transfer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.memory-transfer-select { width: 86px; }
+.memory-duplicate-select { width: 138px; }
+
 .memory-page-body .table-container {
   display: flex;
   flex: 1 1 auto;
