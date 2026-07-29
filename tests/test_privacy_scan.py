@@ -31,3 +31,31 @@ def test_scan_text_detects_local_literal_without_storing_it_in_rules():
 def test_sensitive_database_suffix_is_rejected():
     assert privacy_scan._is_sensitive_path(Path("fixtures/example.db")) is True
     assert privacy_scan._is_sensitive_path(Path("fixtures/example.json")) is False
+
+
+def test_history_scan_excludes_unrelated_local_remotes(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_run_git(root, *args):
+        calls.append((root, args))
+        return b""
+
+    monkeypatch.setattr(privacy_scan, "_run_git", fake_run_git)
+
+    assert privacy_scan.scan_history(tmp_path, ()) == []
+    assert calls == [
+        (
+            tmp_path,
+            (
+                "log",
+                "--branches",
+                "--tags",
+                "--remotes=origin",
+                "--format=commit:%H",
+                "--root",
+                "-p",
+                "--no-ext-diff",
+                "--no-textconv",
+            ),
+        )
+    ]

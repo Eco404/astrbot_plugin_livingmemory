@@ -123,7 +123,9 @@ def scan_history(root: Path, denylist: Iterable[str]) -> list[Finding]:
         payload = _run_git(
             root,
             "log",
-            "--all",
+            "--branches",
+            "--tags",
+            "--remotes=origin",
             "--format=commit:%H",
             "--root",
             "-p",
@@ -141,7 +143,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--history",
         action="store_true",
-        help="also scan patches reachable from all local refs",
+        help="also scan patches reachable from branches, tags, and origin",
     )
     return parser.parse_args()
 
