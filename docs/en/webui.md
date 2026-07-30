@@ -1,33 +1,19 @@
-# WebUI
+# WebUI tour
 
-LivingMemory uses AstrBot official Plugin Pages for its dashboard. No extra web server is required.
+Open `Plugins → LivingMemory → Pages → dashboard` in AstrBot.
 
-## Entry
+## Daily pages
 
-Open AstrBot WebUI:
-
-`Plugins -> LivingMemory -> Pages -> dashboard`
-
-AstrBot `4.24.2` or later is recommended. Older versions can still run the plugin, but the dashboard may be unavailable.
-
-## Dashboard areas
-
-| Area | Purpose |
+| Page | Purpose |
 | --- | --- |
-| Memory management | Inspect, search, and delete long-term memories |
-| Recall debugging | Enter a query and inspect returned memories and ranking |
-| Graph view | Browse entities, relationships, and memory connections |
-| System status | Review indexes, backups, statistics, and runtime status |
+| Knowledge graph | Inspect Timeline-derived entities and relations |
+| Timeline memory | Search, edit, stage, import, export, and inspect Topic links |
+| Topic memory | Inspect read-only Topics, fragments, facts, actors, affect, and provenance |
+| Supplemental profiles | Add stable-ID hints for otherwise ambiguous actor information |
+| System overview | Review memory, models, indexes, maintenance, and database status |
 
-## What the graph view is good for
+## Maintenance
 
-| Observation | Example |
-| --- | --- |
-| High-frequency entities | Users, projects, places, group topics |
-| Stable relationships | "A person likes something", "a project depends on a technology" |
-| Cross-memory links | The same entity appearing across multiple conversations |
-| Aging risk | Low-importance relationships that have not been accessed for a long time |
+The bottom sidebar keeps **Settings** and **Maintenance** separate from daily browsing. Maintenance includes Topic and Timeline operations, session audit, database health, recent production recall, recall tests, and model tests.
 
-::: tip
-Dashboard operations reuse the plugin runtime MemoryEngine and GraphStore, so they do not bypass backend data safety logic.
-:::
+Long-running tasks expose stage, processed count, and state. Failed records retain a readable error and can be manually cleared.

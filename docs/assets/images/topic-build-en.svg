@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="800" viewBox="0 0 1440 800" role="img" aria-labelledby="title desc">
+  <title id="title">Timeline-to-Topic construction</title><desc id="desc">Timeline becomes fragments, matches existing Topics, is synthesized and validated, then atomically published as update, create, or review.</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#17303a" flood-opacity="0.09"/></filter>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L8 4L0 8Z" fill="#8797a1"/></marker>
+    <style>.title{font:700 34px Inter,"Noto Sans SC",sans-serif;fill:#17212b}.sub{font:400 17px Inter,"Noto Sans SC",sans-serif;fill:#64717d}.h{font:700 18px Inter,"Noto Sans SC",sans-serif;fill:#17212b}.p{font:400 14px Inter,"Noto Sans SC",sans-serif;fill:#586873}.tag{font:700 12px Inter,"Noto Sans SC",sans-serif;letter-spacing:.8px}.line{stroke:#8797a1;stroke-width:2;fill:none;marker-end:url(#arrow)}.dash{stroke:#a9b4bb;stroke-width:2;fill:none;stroke-dasharray:6 7;marker-end:url(#arrow)}</style>
+  </defs>
+  <rect width="1440" height="800" fill="#fff"/><text x="64" y="66" class="title">Topic build: finish first, publish once</text><text x="64" y="99" class="sub">Full and incremental builds share extraction, matching, synthesis, and validation; only their input scope differs.</text>
+  <g filter="url(#shadow)">
+    <rect x="64" y="150" width="226" height="166" rx="8" fill="#f4fbfa" stroke="#c8e2df"/><text x="88" y="184" class="tag" fill="#187b78">1 · INPUT</text><text x="88" y="220" class="h">Select Timeline</text><text x="88" y="251" class="p">Full: all Timeline in scope</text><text x="88" y="277" class="p">Incremental: new revisions</text>
+    <rect x="334" y="150" width="226" height="166" rx="8" fill="#f5f7ff" stroke="#d4dcf4"/><text x="358" y="184" class="tag" fill="#3769d6">2 · EXTRACT</text><text x="358" y="220" class="h">Extract fragments</text><text x="358" y="251" class="p">One retrieval intent each</text><text x="358" y="277" class="p">Bind facts, actors, and affect</text>
+    <rect x="604" y="150" width="226" height="166" rx="8" fill="#fffaf3" stroke="#eadcc7"/><text x="628" y="184" class="tag" fill="#b56d17">3 · MATCH</text><text x="628" y="220" class="h">Vector matching</text><text x="628" y="251" class="p">Fact continuity + semantics</text><text x="628" y="277" class="p">Optional Rerank review</text>
+    <rect x="874" y="150" width="226" height="166" rx="8" fill="#fff8f6" stroke="#efd8d2"/><text x="898" y="184" class="tag" fill="#c84f3d">4 · SYNTHESIZE</text><text x="898" y="220" class="h">Component synthesis</text><text x="898" y="251" class="p">Generate body and own atoms</text><text x="898" y="277" class="p">Cover every formal fragment</text>
+    <rect x="1144" y="150" width="232" height="166" rx="8" fill="#f7f8fa" stroke="#dce3e8"/><text x="1168" y="184" class="tag" fill="#64717d">5 · VALIDATE</text><text x="1168" y="220" class="h">Deterministic checks</text><text x="1168" y="251" class="p">Reject unknown references</text><text x="1168" y="277" class="p">Track repairs and omissions</text>
+  </g>
+  <path d="M302 233H321" class="line"/><path d="M572 233H591" class="line"/><path d="M842 233H861" class="line"/><path d="M1112 233H1131" class="line"/>
+
+  <text x="64" y="382" class="tag" fill="#64717d">COMPONENT DECISION</text>
+  <g>
+    <rect x="86" y="416" width="330" height="130" rx="8" fill="#f1faf6" stroke="#cce2d8"/><circle cx="116" cy="450" r="10" fill="#2f8f63"/><text x="142" y="457" class="h">Update existing Topic</text><text x="116" y="491" class="p">High confidence; keep stable Topic UID</text><text x="116" y="517" class="p">Resynthesize from all valid fragments</text>
+    <rect x="555" y="416" width="330" height="130" rx="8" fill="#f5f7ff" stroke="#d4dcf4"/><circle cx="585" cy="450" r="10" fill="#3769d6"/><text x="611" y="457" class="h">Create Topic</text><text x="585" y="491" class="p">No qualified match; never merge to fill a quota</text><text x="585" y="517" class="p">Create body, atoms, and provenance</text>
+    <rect x="1024" y="416" width="330" height="130" rx="8" fill="#fff8f6" stroke="#efd8d2"/><circle cx="1054" cy="450" r="10" fill="#c84f3d"/><text x="1080" y="457" class="h">Send to review</text><text x="1054" y="491" class="p">Only true ambiguity; keep old Topics active</text><text x="1054" y="517" class="p">Track and resolve by component_uid</text>
+  </g>
+  <path d="M1248 328V375H251V403" class="dash"/><path d="M1248 328V375H720V403" class="dash"/><path d="M1248 328V375H1189V403" class="dash"/>
+
+  <g filter="url(#shadow)">
+    <rect x="317" y="626" width="806" height="112" rx="8" fill="#17212b"/>
+    <text x="351" y="665" class="tag" fill="#7bd1ca">ATOMIC PUBLISH</text><text x="351" y="704" style="font:700 22px Inter,'Noto Sans SC',sans-serif;fill:#fff">One transaction publishes all derived records</text>
+    <rect x="912" y="652" width="177" height="54" rx="7" fill="#25343e"/><text x="938" y="685" style="font:600 14px Inter,'Noto Sans SC',sans-serif;fill:#d9e3e8">Rollback on failure</text>
+  </g>
+  <path d="M251 558V608H647" class="line"/><path d="M720 558V613" class="line"/><path d="M1189 558V608H793" class="line"/>
+</svg>

@@ -1,43 +1,61 @@
 ---
 layout: home
 title: LivingMemory
-titleTemplate: Intelligent long-term memory plugin
+titleTemplate: Source-grounded long-term memory
 hero:
   name: LivingMemory
-  text: Intelligent long-term memory for AstrBot
-  tagline: Preserve durable preferences, relationships, agreements, and project context while keeping memory fresh through a controllable lifecycle.
+  text: Memory that can remember and reorganize
+  tagline: Conversations become Timeline memories, then source-grounded Topics. Recall stays concise while provenance, maintenance, and recovery remain visible.
   image:
-    src: https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/raw/master/logo.png
-    alt: LivingMemory logo
+    src: /logo.png
+    alt: LivingMemory
   actions:
     - theme: brand
-      text: Quick Start
+      text: Get started
       link: /en/guide/getting-started
     - theme: alt
-      text: Architecture
+      text: Understand the architecture
       link: /en/architecture
 features:
-  - title: Automatic long-term memory
-    details: Conversations are summarized into searchable long-term memories after the configured trigger rounds.
-  - title: Agent recall and write tools
-    details: Registers recall_long_term_memory and memorize_long_term_memory for agent/tool-loop scenarios.
-  - title: Dual-route retrieval
-    details: Document and graph routes each support keyword and vector retrieval, then merge rankings with RRF.
-  - title: Time-aware lifecycle
-    details: Memory atoms have TTL, decay, access reinforcement, and cleanup behavior.
-  - title: Plugin Pages dashboard
-    details: Manage memories, debug recall, inspect graph relationships, and review system status from AstrBot Pages.
-  - title: Data safety
-    details: Version backups, pre-migration backups, index rollback, and transactional deletion reduce upgrade risk.
+  - title: Timeline preserves experience
+    details: Summarizes continuous conversations with facts, affect, time ranges, actor bindings, and source snapshots.
+  - title: Topic reorganizes themes
+    details: Converts Timeline into formal fragments and merges related material across time without losing provenance.
+  - title: Topic-first recall
+    details: The current message qualifies candidates; optional reranking, facts, and fragments restore useful detail and tone.
+  - title: Inspectable maintenance
+    details: Full and incremental builds, rebuilds, reviews, session cleanup, and database checks expose preview and progress.
 ---
 
-<img class="diagram" src="/images/architecture-flow.svg" alt="LivingMemory runtime architecture">
+<section class="home-band">
+  <span class="home-kicker">Memory architecture</span>
+  <h2>Two memory layers, one traceable chain</h2>
+  <p>Timeline records what happened. Topic reorganizes related events for retrieval. Formal fragments, facts, actors, and stable revisions keep both layers connected.</p>
 
-## Who is this for?
+![LivingMemory architecture](../assets/images/architecture-overview-en.svg){.diagram}
 
-Start with [Quick Start](/en/guide/getting-started) if you want to install and use the plugin.  
-Read [Features](/en/features) and [Architecture](/en/architecture) if you want to understand how the memory system stores facts, retrieves relationships, and ages older context.
+  <div class="home-memory-grid">
+    <div><h3>Timeline is the source layer</h3><p>Round, idle, or manual summarization produces editable memories with source ranges and stable identity.</p></div>
+    <div><h3>Topic is the derived layer</h3><p>Topics are read-only. Changes flow from Timeline through formal fragments into atomically published Topic snapshots.</p></div>
+  </div>
+</section>
 
-::: tip Documentation scope
-This site keeps the user guide, feature explanation, and architecture overview. Old phase notes, internal development docs, and outdated API drafts are intentionally left out.
-:::
+<section class="home-band">
+  <span class="home-kicker">Recall</span>
+  <h2>Relevance first, context preserved</h2>
+  <p>The current message controls eligibility. Recent context adds bounded support; formal fragments and facts restore concrete events and affect.</p>
+
+![Topic-first recall](../assets/images/recall-flow-en.svg){.diagram}
+</section>
+
+<section class="home-band">
+  <span class="home-kicker">Operations</span>
+  <h2>Long-running memory needs maintenance</h2>
+  <p>The maintenance center separates routine browsing from rebuilds, reviews, cleanup, database work, and diagnostics.</p>
+  <div class="home-ops-grid">
+    <div><h3>Build and repair</h3><p>Atomic full builds, bounded incremental updates, and in-place Timeline reconstruction.</p></div>
+    <div><h3>Audit and diagnose</h3><p>Review ambiguity, inspect real recall traces, test models, and audit sessions.</p></div>
+    <div><h3>Clean and archive</h3><p>Remove completed build artifacts, manage inactive memories, and compact storage on demand.</p></div>
+    <div><h3>Migrate and recover</h3><p>Backed-up migrations follow v8 to v9 to v10, then the current v10.x schema.</p></div>
+  </div>
+</section>

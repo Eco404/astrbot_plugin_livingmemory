@@ -1,104 +1,103 @@
 import { defineConfig } from 'vitepress'
 
-const repo = 'https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory'
+const repo = 'https://github.com/Eco404/astrbot_plugin_livingmemory'
 
 export default defineConfig({
   title: 'LivingMemory',
-  description: 'Intelligent long-term memory plugin for AstrBot',
+  description: 'Source-grounded Timeline and Topic memory for AstrBot',
   base: process.env.DOCS_BASE || '/astrbot_plugin_livingmemory/',
   cleanUrls: true,
   lastUpdated: true,
   ignoreDeadLinks: false,
   head: [
-    ['meta', { name: 'theme-color', content: '#3d7f8f' }]
+    ['meta', { name: 'theme-color', content: '#187b78' }],
+    ['meta', { name: 'color-scheme', content: 'light dark' }],
   ],
   locales: {
     root: {
       label: '简体中文',
       lang: 'zh-CN',
       title: 'LivingMemory',
-      description: '为 AstrBot 打造的智能长期记忆插件',
-      themeConfig: {
+      description: '为 AstrBot 构建可溯源、可维护的长期记忆',
+      themeConfig: localeTheme({
         nav: navZh(),
         sidebar: sidebarZh(),
-        outline: {
-          label: '本页目录',
-          level: [2, 3]
-        },
-        lastUpdated: {
-          text: '最后更新',
-          formatOptions: {
-            dateStyle: 'medium',
-            timeStyle: 'short'
-          }
-        },
-        docFooter: {
-          prev: '上一页',
-          next: '下一页'
-        },
-        editLink: {
-          pattern: `${repo}/edit/master/docs/:path`,
-          text: '在 GitHub 上编辑此页'
-        }
-      }
+        outline: '本页目录',
+        lastUpdated: '最后更新',
+        prev: '上一页',
+        next: '下一页',
+        edit: '在 GitHub 上编辑此页',
+        pathPrefix: 'docs',
+      }),
     },
     en: {
       label: 'English',
       lang: 'en-US',
       title: 'LivingMemory',
-      description: 'Intelligent long-term memory plugin for AstrBot',
-      themeConfig: {
+      description: 'Source-grounded, maintainable long-term memory for AstrBot',
+      themeConfig: localeTheme({
         nav: navEn(),
         sidebar: sidebarEn(),
-        outline: {
-          label: 'On this page',
-          level: [2, 3]
-        },
-        lastUpdated: {
-          text: 'Last updated',
-          formatOptions: {
-            dateStyle: 'medium',
-            timeStyle: 'short'
-          }
-        },
-        docFooter: {
-          prev: 'Previous',
-          next: 'Next'
-        },
-        editLink: {
-          pattern: `${repo}/edit/master/docs/:path`,
-          text: 'Edit this page on GitHub'
-        }
-      }
-    }
+        outline: 'On this page',
+        lastUpdated: 'Last updated',
+        prev: 'Previous',
+        next: 'Next',
+        edit: 'Edit this page on GitHub',
+        pathPrefix: 'docs',
+      }),
+    },
   },
   themeConfig: {
-    logo: `${repo}/raw/master/logo.png`,
+    logo: '/logo.png',
     siteTitle: 'LivingMemory',
-    socialLinks: [
-      { icon: 'github', link: repo }
-    ],
-    search: {
-      provider: 'local'
-    }
-  }
+    socialLinks: [{ icon: 'github', link: repo }],
+    search: { provider: 'local' },
+  },
 })
+
+function localeTheme(options: {
+  nav: any[]
+  sidebar: any[]
+  outline: string
+  lastUpdated: string
+  prev: string
+  next: string
+  edit: string
+  pathPrefix: string
+}) {
+  return {
+    nav: options.nav,
+    sidebar: options.sidebar,
+    outline: { label: options.outline, level: [2, 3] as [number, number] },
+    lastUpdated: {
+      text: options.lastUpdated,
+      formatOptions: { dateStyle: 'medium', timeStyle: 'short' },
+    },
+    docFooter: { prev: options.prev, next: options.next },
+    editLink: {
+      pattern: `${repo}/edit/master/${options.pathPrefix}/:path`,
+      text: options.edit,
+    },
+  }
+}
 
 function navZh() {
   return [
-    { text: '指南', link: '/guide/getting-started' },
-    { text: '功能', link: '/features' },
-    { text: '架构', link: '/architecture' },
-    { text: 'GitHub', link: repo }
+    { text: '开始使用', link: '/guide/getting-started' },
+    { text: '记忆架构', link: '/architecture' },
+    { text: '召回', link: '/recall' },
+    { text: '维护', link: '/maintenance' },
+    { text: 'GitHub', link: repo },
   ]
 }
 
 function navEn() {
   return [
-    { text: 'Guide', link: '/en/guide/getting-started' },
-    { text: 'Features', link: '/en/features' },
+    { text: 'Get started', link: '/en/guide/getting-started' },
     { text: 'Architecture', link: '/en/architecture' },
-    { text: 'GitHub', link: repo }
+    { text: 'Recall', link: '/en/recall' },
+    { text: 'Maintenance', link: '/en/maintenance' },
+    { text: 'GitHub', link: repo },
   ]
 }
 
@@ -108,40 +107,56 @@ function sidebarZh() {
       text: '开始使用',
       items: [
         { text: '快速开始', link: '/guide/getting-started' },
+        { text: 'WebUI 导览', link: '/webui' },
         { text: '配置参考', link: '/configuration' },
-        { text: '命令速查', link: '/commands' },
-        { text: 'WebUI 管理', link: '/webui' }
-      ]
+      ],
     },
     {
-      text: '深入了解',
+      text: '记忆系统',
       items: [
-        { text: '功能说明', link: '/features' },
-        { text: '技术架构', link: '/architecture' },
-        { text: '部署文档站', link: '/deployment' }
-      ]
-    }
+        { text: '整体架构', link: '/architecture' },
+        { text: 'Timeline 记忆', link: '/timeline-memory' },
+        { text: 'Topic 记忆', link: '/topic-memory' },
+        { text: '召回与注入', link: '/recall' },
+      ],
+    },
+    {
+      text: '运维与数据',
+      items: [
+        { text: '维护中心', link: '/maintenance' },
+        { text: '数据安全与迁移', link: '/data-safety' },
+        { text: '命令速查', link: '/commands' },
+      ],
+    },
   ]
 }
 
 function sidebarEn() {
   return [
     {
-      text: 'Get Started',
+      text: 'Get started',
       items: [
-        { text: 'Quick Start', link: '/en/guide/getting-started' },
+        { text: 'Quick start', link: '/en/guide/getting-started' },
+        { text: 'WebUI tour', link: '/en/webui' },
         { text: 'Configuration', link: '/en/configuration' },
-        { text: 'Commands', link: '/en/commands' },
-        { text: 'WebUI', link: '/en/webui' }
-      ]
+      ],
     },
     {
-      text: 'Deep Dive',
+      text: 'Memory system',
       items: [
-        { text: 'Features', link: '/en/features' },
         { text: 'Architecture', link: '/en/architecture' },
-        { text: 'Docs Deployment', link: '/en/deployment' }
-      ]
-    }
+        { text: 'Timeline memory', link: '/en/timeline-memory' },
+        { text: 'Topic memory', link: '/en/topic-memory' },
+        { text: 'Recall and injection', link: '/en/recall' },
+      ],
+    },
+    {
+      text: 'Operations and data',
+      items: [
+        { text: 'Maintenance center', link: '/en/maintenance' },
+        { text: 'Data safety and migration', link: '/en/data-safety' },
+        { text: 'Command reference', link: '/en/commands' },
+      ],
+    },
   ]
 }

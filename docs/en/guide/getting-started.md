@@ -1,48 +1,56 @@
-# Quick Start
+# Quick start
 
-LivingMemory is a long-term memory plugin for AstrBot. It maintains a searchable memory store outside the immediate chat window so the bot can remember stable preferences, long-running projects, relationships, group context, and past agreements.
+This page covers the minimum setup needed to verify the complete memory path before tuning thresholds.
+
+## Requirements
+
+| Component | Requirement |
+| --- | --- |
+| AstrBot | `4.24.2` or newer |
+| Python | `3.10+` |
+| LLM Provider | Timeline summarization and Topic construction |
+| Embedding Provider | Timeline, formal-fragment, and Topic vectors |
+| Rerank Provider | Optional candidate refinement |
 
 ## Install
 
-1. Put the plugin directory under AstrBot's `data/plugins/` directory.
-2. Restart or reload AstrBot.
-3. AstrBot will install Python dependencies from `requirements.txt`.
-4. Open the AstrBot plugin configuration page and select `LivingMemory`.
+Installing through the AstrBot WebUI is recommended; you do not need to copy the plugin directory manually.
 
-## Required configuration
+### Install from the Plugin Market
 
-| Key | Purpose | Recommendation |
-| --- | --- | --- |
-| `provider_settings.embedding_provider_id` | Generates vectors for semantic retrieval | Leave empty to use AstrBot's default embedding provider |
-| `provider_settings.llm_provider_id` | Summarizes conversations and evaluates memory | Leave empty to use the default LLM; a stable reasoning model is recommended |
-| `bot_language` | Language for command and status replies | `zh`, `en`, or `ru` |
+1. Start AstrBot and open its admin panel. The default address is `http://localhost:6185`; replace `localhost` with the server IP address or domain when AstrBot runs on another host.
+2. Open **Plugins** from the sidebar and select the **Plugin Market** tab.
+3. Search for `LivingMemory` or `astrbot_plugin_livingmemory`, open the plugin details, and install it.
+4. Wait for dependency installation and plugin loading to finish, then verify that LivingMemory appears in the installed-plugin list.
 
-## Recommended settings
+### Install from a URL or archive
 
-| Scenario | Recommendation |
-| --- | --- |
-| Private assistant | Enable persona and session filtering to avoid cross-persona memories |
-| Long-running group chat | Enable `enable_full_group_capture` to capture context that does not directly mention the bot |
-| Agent / tool loop | Keep agent memory tools enabled so the model can recall or write memory when useful |
-| Gemini provider | `fake_tool_call` automatically falls back to `extra_user_content` |
-| DeepSeek V4 thinking | Use normal `fake_tool_call`; the legacy `fake_tool_call_deepseek_v4` option is only a compatibility alias |
+Use manual installation when the market does not yet contain the required version or when you need a specific branch:
 
-## Open the dashboard
+1. Open **Plugins** in the AstrBot WebUI and click the `+` button in the lower-right corner.
+2. Install from a repository URL, or upload a ZIP archive downloaded from the repository.
+3. Check the plugin status after installation. If loading fails, fix the reported problem and use **Try one-click reload fix** instead of restarting the whole AstrBot process.
 
-AstrBot `4.24.2` or later is recommended. Open:
+::: tip Download or dependency failures
+AstrBot distributes plugins through GitHub. If network access is restricted, configure an HTTP proxy in AstrBot's other settings or upload a downloaded ZIP archive. If a Python dependency is missing, inspect the platform log first and then use the WebUI Pip-package installer when needed.
+:::
 
-`Plugins -> LivingMemory -> Pages -> dashboard`
+See the [official AstrBot WebUI documentation](https://docs.astrbot.app/en/use/webui.html#plugins) for the current plugin-management workflow.
 
-The dashboard lets you inspect memories, debug recall, manage backups, and browse graph relationships.
+## Configure
 
-## Verify the setup
+In plugin configuration, select the LLM and Embedding providers or leave them empty to use AstrBot defaults. Enable Topic construction, Topic-first recall, and automatic maintenance when ready.
 
-After several turns of conversation, try:
+## First run
 
-```text
-/lmem status
-/lmem summarize
-/lmem search your keywords
-```
+1. Accumulate enough conversation or run `/lmem summarize`.
+2. Confirm a structured entry on **Timeline memory**.
+3. Validate LLM, Embedding, and optional Rerank in **Maintenance → Model test**.
+4. Run one full build from **Topic memory**.
+5. Compare Timeline-only, Topic-only, and current behavior in **Recall test**.
 
-If status and search results appear, the basic pipeline is working.
+<div class="status-strip">
+  <div><strong>Timeline exists</strong><span>Summary, facts, time, and session ownership are correct.</span></div>
+  <div><strong>Topic is traceable</strong><span>Formal fragments open their source Timeline.</span></div>
+  <div><strong>Recall is explainable</strong><span>Diagnostics show thresholds, filters, and actual injection.</span></div>
+</div>

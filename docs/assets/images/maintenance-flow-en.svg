@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="800" viewBox="0 0 1440 800" role="img" aria-labelledby="title desc">
+  <title id="title">LivingMemory maintenance center</title><desc id="desc">After selecting a memory space, users preview, confirm, and monitor Topic, Timeline, session, database, and diagnostic operations.</desc>
+  <defs><filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#17303a" flood-opacity="0.09"/></filter><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L8 4L0 8Z" fill="#8797a1"/></marker><style>.title{font:700 34px Inter,"Noto Sans SC",sans-serif;fill:#17212b}.sub{font:400 17px Inter,"Noto Sans SC",sans-serif;fill:#64717d}.h{font:700 18px Inter,"Noto Sans SC",sans-serif;fill:#17212b}.p{font:400 14px Inter,"Noto Sans SC",sans-serif;fill:#586873}.tag{font:700 12px Inter,"Noto Sans SC",sans-serif;letter-spacing:.8px}.route{stroke:#8797a1;stroke-width:2;fill:none}.line{stroke:#8797a1;stroke-width:2;fill:none;marker-end:url(#arrow)}</style></defs>
+  <rect width="1440" height="800" fill="#fff"/><text x="64" y="66" class="title">Maintenance shares one safety contract</text><text x="64" y="99" class="sub">Actions stay disabled without a memory space; long jobs expose stage, count, state, and recoverable outcomes.</text>
+  <text x="64" y="142" class="tag" fill="#64717d">MAINTENANCE AREAS</text>
+  <g>
+    <rect x="64" y="166" width="244" height="104" rx="8" fill="#f4fbfa" stroke="#c8e2df"/><text x="86" y="200" class="h">Topic maintenance</text><text x="86" y="231" class="p">build · review · merge · split</text><text x="86" y="255" class="p">vectors · relations · archive · clear</text>
+    <rect x="331" y="166" width="244" height="104" rx="8" fill="#f5f7ff" stroke="#d4dcf4"/><text x="353" y="200" class="h">Timeline maintenance</text><text x="353" y="231" class="p">quality check · in-place rebuild</text><text x="353" y="255" class="p">staged edits · inactive items</text>
+    <rect x="598" y="166" width="244" height="104" rx="8" fill="#fffaf3" stroke="#eadcc7"/><text x="620" y="200" class="h">Session audit</text><text x="620" y="231" class="p">chat cleanup · alias merge</text><text x="620" y="255" class="p">persistent cross-database jobs</text>
+    <rect x="865" y="166" width="244" height="104" rx="8" fill="#fff8f6" stroke="#efd8d2"/><text x="887" y="200" class="h">Database</text><text x="887" y="231" class="p">health check · selected repairs</text><text x="887" y="255" class="p">artifact cleanup · compaction</text>
+    <rect x="1132" y="166" width="244" height="104" rx="8" fill="#f7f8fa" stroke="#dce3e8"/><text x="1154" y="200" class="h">Diagnostics and tests</text><text x="1154" y="231" class="p">recent recall · recall test</text><text x="1154" y="255" class="p">model test · JSON export</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="64" y="322" width="250" height="154" rx="8" fill="#f7f9fa" stroke="#dce3e8"/><text x="88" y="357" class="tag" fill="#64717d">1 · SCOPE</text><text x="88" y="394" class="h">Select memory space</text><text x="88" y="426" class="p">No selection: muted and disabled</text><text x="88" y="452" class="p">Selected: load counts and state</text>
+    <rect x="376" y="322" width="250" height="154" rx="8" fill="#f4fbfa" stroke="#c8e2df"/><text x="400" y="357" class="tag" fill="#187b78">2 · PREVIEW</text><text x="400" y="394" class="h">Inspect and preview</text><text x="400" y="426" class="p">List targets, impact, and risk</text><text x="400" y="452" class="p">Use conservative defaults</text>
+    <rect x="688" y="322" width="250" height="154" rx="8" fill="#fffaf3" stroke="#eadcc7"/><text x="712" y="357" class="tag" fill="#b56d17">3 · CONFIRM</text><text x="712" y="394" class="h">User confirmation</text><text x="712" y="426" class="p">Confirm risky operations twice</text><text x="712" y="452" class="p">Adjust selection or cancel</text>
+    <rect x="1000" y="322" width="376" height="154" rx="8" fill="#f5f7ff" stroke="#d4dcf4"/><text x="1024" y="357" class="tag" fill="#3769d6">4 · BACKGROUND JOB</text><text x="1024" y="394" class="h">Execute with live progress</text><text x="1024" y="426" class="p">Stage · processed / total · elapsed</text><text x="1024" y="452" class="p">Resume status after refresh or restart</text>
+  </g>
+  <path d="M326 399H363" class="line"/><path d="M638 399H675" class="line"/><path d="M950 399H987" class="line"/>
+
+  <g filter="url(#shadow)">
+    <rect x="64" y="566" width="624" height="112" rx="8" fill="#f1faf6" stroke="#cce2d8"/><circle cx="100" cy="605" r="11" fill="#2f8f63"/><text x="126" y="612" class="h">Completed</text><text x="100" y="647" class="p">Refresh formal data and counts; clean completed artifacts automatically or manually</text>
+    <rect x="752" y="566" width="624" height="112" rx="8" fill="#fff8f6" stroke="#efd8d2"/><circle cx="788" cy="605" r="11" fill="#c84f3d"/><text x="814" y="612" class="h">Failed or cancelled</text><text x="788" y="647" class="p">Keep readable errors and checkpoints; formal data stays unchanged; retry or clear the job</text>
+  </g>
+  <path d="M1188 476V522H720" class="route"/><path d="M720 522H376V553" class="line"/><path d="M720 522H1064V553" class="line"/>
+</svg>

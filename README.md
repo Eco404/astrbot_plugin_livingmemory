@@ -1,244 +1,79 @@
 <div align="center">
 
-[中文](README_zh.md) | [English](README.md) | [Русский](README_ru.md)
+<p><a href="README_zh.md">中文</a> &nbsp;/&nbsp; <strong>English</strong> &nbsp;/&nbsp; <a href="README_ru.md">Русский</a></p>
+
+<h1>LivingMemory</h1>
+
+<p><strong>Source-grounded long-term memory for AstrBot: preserve experience, reorganize themes, and recall with context.</strong></p>
+
+<p><sub>CAPTURE &nbsp;&nbsp; ORGANIZE &nbsp;&nbsp; RECALL &nbsp;&nbsp; MAINTAIN</sub></p>
+
+<p>
+  <a href="https://github.com/Eco404/astrbot_plugin_livingmemory/releases"><img src="https://img.shields.io/github/v/release/Eco404/astrbot_plugin_livingmemory?style=flat-square&color=187b78" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/Python-3.10%2B-e8f2f1?style=flat-square&labelColor=264642" alt="Python 3.10 or later">
+  <img src="https://img.shields.io/badge/AstrBot-%3E%3D%204.24.2-f3eee4?style=flat-square&labelColor=544c3d" alt="AstrBot 4.24.2 or later">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-f2e8e5?style=flat-square&labelColor=5b403a" alt="AGPL-3.0 license"></a>
+</p>
+
+<img src="docs/assets/images/architecture-overview-en.svg" width="100%" alt="LivingMemory layered memory architecture">
 
 </div>
 
-# LivingMemory - Intelligent Long-Term Memory Plugin with Dynamic Lifecycle
+## Memory in layers
 
-<p align="center">
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/releases"><img src="https://img.shields.io/github/v/release/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory?color=76bad9" alt="Release"></a>
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
-  <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/"><img src="https://img.shields.io/badge/docs-English%20%7C%20中文-3d7f8f" alt="Documentation"></a>
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/stargazers"><img src="https://img.shields.io/github/stars/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory?style=social" alt="Stars"></a>
-  <a href="https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-red" alt="License AGPLv3"></a>
-</p>
+<table>
+<tr>
+<td width="33%"><strong>TIMELINE PRESERVES</strong><br><br>Continuous conversations become editable memories with facts, affect, time ranges, actor bindings, and source snapshots.</td>
+<td width="33%"><strong>TOPIC ORGANIZES</strong><br><br>Formal fragments connect related experiences across time without losing their Timeline revision or provenance.</td>
+<td width="33%"><strong>RECALL STAYS FOCUSED</strong><br><br>Topic-first retrieval adds only useful facts and fragments, then falls back to Timeline when needed.</td>
+</tr>
+</table>
 
-<p align="center">
-  <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/">English Documentation</a>
-  ·
-  <a href="https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/">中文文档</a>
-</p>
+## One maintainable memory system
 
----
+| Build | Recall | Operate |
+| :--- | :--- | :--- |
+| **Two-layer architecture**<br>Timeline is the editable source; Topic is derived and read-only. | **Current-query control**<br>The current message qualifies candidates; recent context only adds bounded support. | **Atomic publication**<br>Failed or cancelled Topic builds leave the active generation intact. |
+| **Traceable structure**<br>Facts, actors, emotion, formal fragments, and revisions retain source links. | **Optional Rerank**<br>A configured provider or built-in Cloudflare client can refine qualified candidates. | **Unified maintenance**<br>Review, rebuild, session audit, database health, recall traces, and model tests share one workspace. |
+| **Bounded incremental updates**<br>New Timeline revisions match a limited neighborhood of existing Topics. | **Agent-native tools**<br>`recall_long_term_memory` and `memorize_long_term_memory` support active memory use. | **Data lifecycle**<br>Backups, staged edits, import/export, cleanup, archive, and in-place reconstruction are explicit operations. |
 
-LivingMemory 3.0 makes source-grounded Topic memory, unified maintenance, and
-Topic-first recall part of the stable architecture. Existing database v8
-installations are backed up and migrated through the public `v8 -> v9 -> v10`
-path automatically.
+```mermaid
+flowchart LR
+    A[Conversation] --> B[Timeline]
+    B --> C[Formal fragments]
+    C --> D[Topic]
+    D --> E[Topic-first recall]
+    C --> E
+    B --> F[Maintenance and reconstruction]
+    F --> C
+```
 
-## Core Features
+## Start in three moves
 
-- **Hybrid Retrieval**: Combines BM25 sparse retrieval and Faiss vector retrieval with RRF fusion.
-- **Dual-Route Four-Mode Retrieval**: Maintains both document and graph routes, each supporting keyword and vector retrieval before unified ranking.
-- **Intelligent Summarization**: Uses an LLM to summarize conversation history into structured memories.
-- **Dual-Channel Summarization**: Stores `canonical_summary` and `persona_summary` separately for retrieval and prompt injection.
-- **Session Isolation**: Supports persona-level and session-level memory isolation.
-- **Agent Memory Tools**: Exposes `recall_long_term_memory` and `memorize_long_term_memory` so agents can actively recall or write long-term memories when needed.
-- **Auto-Forgetting**: Cleans up stale memories based on time and importance.
-- **Memory Atomization**: Each key fact becomes an independent retrieval unit with its own TTL, decay curve, and lifecycle management.
-- **Time-Aware Graph**: Edge confidence updates dynamically via EMA as new evidence accumulates; cross-memory semantic edge merging; temporal decay in retrieval scoring.
-- **Data Safety**: Automatic backup on plugin version update, pre-migration backup, rollback on index rebuild failure, and transactional deletion.
-- **WebUI Management**: Supports the AstrBot official plugin Pages dashboard with trilingual (zh/en/ru) support and dark mode.
-- **Topic Memory**: Builds read-only, source-grounded topic memories above the existing Timeline layer, with full/incremental maintenance, optional reranking, and Topic-first production recall with lightweight Timeline supplements.
+1. Install LivingMemory from the AstrBot Plugin Market. You can also use the WebUI `+` button to install from this repository URL or a downloaded ZIP archive.
+2. Reload AstrBot and open the plugin configuration. Select an LLM and Embedding provider, or leave their IDs empty to use AstrBot defaults.
+3. Verify Timeline creation, test the configured models, then enable Topic memory and run the first full build.
 
----
-
-## Quick Start
-
-### Installation
-
-Place the plugin folder under AstrBot's `data/plugins` directory. AstrBot installs dependencies automatically.
-
-### Configuration
-
-Configure the plugin from the AstrBot plugin configuration page.
-
-**Required settings**:
-- `embedding_provider_id`: Embedding model ID. Leave empty to use the AstrBot default.
-- `llm_provider_id`: LLM model ID. Leave empty to use the AstrBot default.
-- `rerank_provider_id`: Optional Rerank model ID used to validate cross-time Topic matches.
-
-If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank.enabled` and configure the Cloudflare `account_id` and `api_token` (or the `CLOUDFLARE_AUTH_TOKEN` environment variable). The default model is `@cf/baai/bge-reranker-base`. Cloudflare relevance scores are consumed directly in their documented `[0, 1]` range; temporary failures fall back to Embedding matching.
-
-**Supplemental identity profiles**:
-- Manage optional hints for ambiguous source identities from **Supplemental Profiles** in the plugin WebUI. The legacy `authoritative_identities.json` filename is retained so existing installations load in place; the filename does not grant profiles authority over source evidence.
-- The platform selector combines live AstrBot instances, recorded conversations, and existing profiles. Adapter aliases such as `aiocqhttp` and `qq_official` are canonicalized to `qq`. Blank platforms remain a backwards-compatible cross-platform wildcard but can collide with the same account ID on another service.
-- `user_id` must be the stable platform account ID. A profile is injected only after an exact stable platform/account match; names, aliases, and text similarity are never identity anchors. Optional fields include `gender`, `pronouns`, and `notes`.
-- Use the platform identifier reported by the adapter and the stable account ID supplied by that platform. The display name is only a readable label; gender and pronouns are optional disambiguation hints and should be left blank when the source does not establish them.
-- Messages, Timeline role bindings, raw-message evidence, and existing facts always win. A supplemental profile cannot prove conversation participation, create a fact by itself, or override an explicit identity or pronoun in the source.
-- Adding, changing, or deleting a profile never triggers a rebuild of existing Timeline or Topic memory. Changes apply to future Timeline generation and newly started full or incremental Topic builds. Each Topic build captures one profile snapshot, so profiles may be edited while it runs without mixing versions.
-- When neither an exact stable-ID profile nor an explicit source pronoun exists, prompts require the model to repeat the display name instead of inferring gender from a name, persona, or writing style.
-
-**Topic memory**:
-- Enable `topic_memory.enabled`, then run one full build from the Topic Memory page. Automatic maintenance can be controlled by `topic_memory.auto_maintenance`.
-- `topic_memory.recall_enabled` defaults to on. The current query independently qualifies Topic candidates; recent context provides only a bounded ranking bonus, while relative Rerank boosts are confidence-gated by each call's score separation. Missing or failed Topic retrieval falls back to Timeline-only recall.
-- Topic recall reuses stored embeddings, optionally reranks candidates, and never invokes an LLM. A dynamic relative floor stops weak tail results. When a fragment body duplicates its parent Topic, only the fragment's attached key facts are injected; a pure duplicate with no facts is skipped. Visible-source overlap, relevance thresholds, and diversity controls are managed from the Topic settings panel.
-- Topic memories are derived and read-only. Edit their source Timeline memories instead; dependent Topics are marked stale and rebuilt.
-- Maintenance can reconstruct Timeline memories from raw conversations. It first lists reconstructable and blocked entries from exact message-ID spans, then rebuilds only the user's selection in place with the original Timeline ID. A failed item leaves the old memory intact; successful items trigger at least a local dependent-Topic repair, with an optional full-space Topic rebuild.
-- **Maintenance** checks whether each active Timeline revision has an active Topic index, lists missing entries with all selected by default, and incrementally processes only the confirmed selection instead of using a fixed 24-hour window.
-- Automatic maintenance uses a bounded delta-first pipeline: it processes only Timeline revisions that lack a current Topic index and matches their new fragments against vector-nearest existing Topics. Clear matches are merged locally, low-scoring matches create new Topics, ambiguous top-two matches are queued for confirmation instead of silently duplicating a Topic, and oversized automatic runs wait for WebUI confirmation.
-- Topic and formal-fragment vectors are exposed through disposable runtime FAISS indexes scoped by memory space, model signature, and artifact type. SQLite remains authoritative; recall, incremental matching, and relation rebuilding no longer truncate the corpus to the 2,000/5,000 most important rows.
-- Wide candidate groups are extracted in batches of 12 by default and large Topic components are synthesized hierarchically in batches of 12. Both values are available from **Topic Memory → Settings**, while the page reports the active component, batch, LLM call, and elapsed time.
-- **Topic Memory → Settings** owns recall, build-quality, Rerank, batching, concurrency, and resilience parameters. Sparse overrides can be reset individually or together so updated code defaults apply automatically. Recall settings apply immediately; build settings affect new tasks.
-- LLM and Rerank concurrency both default to 1. Check Provider rate limits before increasing them and lower Rerank concurrency if Cloudflare returns HTTP 429.
-- Topic-fragment matching combines Embedding similarity, native Rerank relevance, and reciprocal relative ranks. Requesting the complete candidate ordering keeps matching useful when a provider's absolute scores are tightly clustered. Merging two established components now raises the required average cohesion gradually with their combined size, while singleton attachment remains unchanged, preventing a few boundary bridges from creating oversized Topics.
-- Related-topic edges are sparse, undirected links without a parent/child hierarchy. They ignore standalone calendar dates, clock values, and split date parts, while named identifiers containing letters, such as `Expo2026`, remain available as evidence.
-- After changing relation thresholds or the maximum degree, use **Topic Memory → Maintenance → Recompute related topics** to replace only the relation graph from stored Topic vectors. It does not invoke LLM, Embedding, or Rerank providers and does not rewrite Topic content.
-- Failed, cancelled, or restart-interrupted builds expose a **Resume from checkpoint** action. Candidate fragments, embeddings, matching, component synthesis, and completed materialization are reused under the same `run_uid`; changed input, prompts, Provider, model, or relevant configuration invalidates only the affected checkpoint.
-- Recoverable LLM structure errors are deterministically repaired from supplied sources and recorded in `validation_repairs`. Unverifiable model references are discarded rather than persisted as Topic provenance.
-- Fragment extraction targets one future retrieval intent per fragment. Related-topic edges combine semantic neighbors, corpus-aware keyword rarity, lexical overlap, and Timeline provenance under a per-Topic degree limit instead of requiring reciprocal Top-N as a hard gate. Topic and atom confidence is calibrated by independent time-cluster evidence so several nearby memories do not masquerade as repeated confirmation.
-- Database v10 gives formal fragments stable logical IDs and revisions and normalizes related-topic edges to a non-hierarchical relation. Migration does not invoke a model or generate Topic content. New builds explicitly interpret Timeline text as the Bot's first-person narration, then anchor roles through stable accounts, persona identity, and source evidence without forcing third-person rewriting; `topic_memory.enabled` and `topic_memory.recall_enabled` control recall.
-
-**Memory injection compatibility**:
-- `fake_tool_call` automatically falls back to `extra_user_content` for Gemini providers to avoid tool-message protocol incompatibility.
-- DeepSeek V4 `thinking` mode can use normal `fake_tool_call` on recent AstrBot versions. The legacy `fake_tool_call_deepseek_v4` option is kept for compatibility and automatically falls back to `fake_tool_call`.
-
-### AstrBot Version Requirement
-
-- The **AstrBot official plugin Pages dashboard** requires **AstrBot >= 4.24.2**.
-
-### Management Entry
-
-1. Open the AstrBot official WebUI.
-2. Go to `Plugins -> LivingMemory -> Pages -> dashboard`.
-
-**Timeline import and export**:
-- The Timeline Memory page exports either all memories or the current selection. JSON preserves topics, facts, actors, emotion, temporal data, and available source snapshots for migration or backup; CSV is intended for inspection and spreadsheet workflows.
-- Import accepts LivingMemory JSON/CSV plus common long/short-term memory collections, message arrays, and paired user/Bot text. A preview reports valid, duplicate, invalid, and summary-required entries before the user chooses to skip or allow exact duplicates.
-- Source-only entries invoke the current LLM to create a Timeline summary; entries that already contain a summary do not invoke an LLM. Each import is limited to 10,000 entries and 50 MiB.
-- Only semantic data is portable. Document IDs, `memory_uid`, memory-space identities, revisions, indexes, access counters, and synchronization state are never reused; imported memories receive fresh local identities and source snapshots.
-
----
-
-## Commands
-
-| Command | Description |
+| Provider | Purpose |
 | :--- | :--- |
-| `/lmem status` | View memory status |
-| `/lmem search <query> [k]` | Search memories (default 5 items) |
-| `/lmem forget <id>` | Delete a specific memory |
-| `/lmem rebuild-index` | Rebuild indexes |
-| `/lmem rebuild-graph` | Rebuild graph memory indexes |
-| `/lmem webui` | View WebUI information |
-| `/lmem summarize` | Trigger immediate summarization for the current session |
-| `/lmem reset` | Reset current session memory context |
-| `/lmem cleanup [preview\|exec]` | Clean injected memory fragments from history |
-| `/lmem help` | Show help |
+| LLM | Timeline summarization, formal-fragment extraction, and Topic construction. |
+| Embedding | Timeline, formal-fragment, and Topic vectors. |
+| Rerank | Optional candidate refinement; the plugin also supports a built-in Cloudflare Workers AI client. |
 
----
+Open the workspace at `Plugins -> LivingMemory -> Pages -> dashboard`. Plugin Pages requires **AstrBot 4.24.2 or later**.
 
-## Architecture
+## Go deeper
 
-### Module Structure
+| Learn | Configure | Recall | Maintain |
+| :--- | :--- | :--- | :--- |
+| [Quick start](https://eco404.github.io/astrbot_plugin_livingmemory/en/guide/getting-started) | [Configuration](https://eco404.github.io/astrbot_plugin_livingmemory/en/configuration) | [Recall pipeline](https://eco404.github.io/astrbot_plugin_livingmemory/en/recall) | [Maintenance center](https://eco404.github.io/astrbot_plugin_livingmemory/en/maintenance) |
 
-```
-astrbot_plugin_livingmemory/
-├── main.py                          # Plugin registration and lifecycle management
-├── core/
-│   ├── base/                        # Base components
-│   ├── managers/                    # Core managers
-│   ├── retrieval/                   # Retrieval layer
-│   ├── validators/                  # Validators
-│   ├── plugin_initializer.py        # Plugin initializer
-│   ├── event_handler.py             # Event handler
-│   └── command_handler.py           # Command handler
-├── storage/                         # Storage layer
-├── pages/dashboard/                 # AstrBot official plugin Pages assets
-├── tests/                           # Test suite
-└── docs/                            # Documentation
-```
+The complete architecture, Timeline and Topic contracts, commands, migration behavior, and data-safety boundaries are documented on the [VitePress site](https://eco404.github.io/astrbot_plugin_livingmemory/en/).
 
-### Core Components
+Database upgrades follow the public `v8 -> v9 -> v10` path and then the current `v10.x` schema. Back up plugin data before testing development builds or destructive maintenance operations.
 
-1. **PluginInitializer**
-   - Non-blocking initialization
-   - Provider wait and retry
-   - Automatic database migration
+## Project
 
-2. **EventHandler**
-   - Group message capture
-   - Memory recall
-   - Memory reflection
+[Documentation](https://eco404.github.io/astrbot_plugin_livingmemory/en/) · [Releases](https://github.com/Eco404/astrbot_plugin_livingmemory/releases) · [Changelog](CHANGELOG.md) · [Issues](https://github.com/Eco404/astrbot_plugin_livingmemory/issues)
 
-3. **Agent Memory Tools**
-   - `recall_long_term_memory`: actively recalls long-term memories, reusing current session/persona filtering settings and returning raw memory results
-   - `memorize_long_term_memory`: actively writes long-term memories, always using the current UMO and persona while reusing the automatic summarization storage format
-   - Useful for scenarios such as “do you remember”, “what did I say before”, and “please remember ...”
-
-4. **CommandHandler**
-   - Unified command responses
-   - Structured error handling
-
-5. **PluginPageApi**
-   - Registers plugin page APIs through `register_web_api`
-   - Reuses the runtime memory engine and graph components
-   - Provides memory management, recall debugging, and graph queries for `pages/dashboard`
-
-6. **ConfigManager**
-   - Centralized configuration loading
-   - Configuration validation
-   - Nested key access
-
----
-
-## Agent Memory Tools
-
-The plugin registers two LLM tools at runtime so agents can actively manage long-term memory:
-
-- `recall_long_term_memory`: actively recalls existing memories. Use it when the user asks what the bot remembers, asks about previous context, or when ambiguous references require checking history. Prefer short keywords such as topics, entities, preferences, or agreements.
-- `memorize_long_term_memory`: actively writes long-term memory. Use it when the user explicitly asks the bot to remember something, or when stable preferences, durable facts, agreements, identity details, or long-lived project context appear.
-
----
-
-## Developer Guide
-
-### Testing
-
-```bash
-# Run all tests
-pytest tests/
-
-# Run a specific test
-pytest tests/test_config_manager.py
-
-# Show coverage
-pytest --cov=core tests/
-```
-
-### Documentation
-
-- [VitePress Documentation Site](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/en/): Quick start, features, WebUI usage, architecture, and docs deployment.
-- [中文文档](https://lxfight-s-astrbot-plugins.github.io/astrbot_plugin_livingmemory/): Chinese documentation site.
-
----
-
-## Data Migration (v1.4.0-v1.4.2)
-
-If you upgrade from v1.4.0-v1.4.2, old data may not migrate automatically. Manual recovery steps:
-
-1. Locate the backup file: `data/plugin_data/astrbot_plugin_livingmemory/backups/livingmemory_backup_<timestamp>.db`
-2. Move it to `data/plugin_data/astrbot_plugin_livingmemory/`
-3. Rename it to `livingmemory.db`
-4. Reload the plugin. The system will load and process the data automatically.
-
----
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md).
-
----
-
-## Support
-
-- **GitHub**: [astrbot_plugin_livingmemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory)
-- **Issues**: [GitHub Issues](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/issues)
-- **QQ Group**: [![Join QQ Group](https://img.shields.io/badge/QQ%20Group-953245617-blue?style=flat-square&logo=tencent-qq)](https://qm.qq.com/cgi-bin/qm/qr?k=WdyqoP-AOEXqGAN08lOFfVSguF2EmBeO&jump_from=webapi&authKey=tPyfv90TVYSGVhbAhsAZCcSBotJuTTLf03wnn7/lQZPUkWfoQ/J8e9nkAipkOzwh)
-  (Password: lxfight)
-
----
-
-## License
-
-This project is licensed under AGPLv3.
+LivingMemory is released under the [AGPL-3.0 license](LICENSE).

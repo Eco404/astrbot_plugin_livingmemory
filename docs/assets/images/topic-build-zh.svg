@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="800" viewBox="0 0 1440 800" role="img" aria-labelledby="title desc">
+  <title id="title">Timeline 到 Topic 的构建流程</title><desc id="desc">Timeline 经片段提取、向量匹配、合成校验后分为更新、新建或待审查，并由原子发布切换正式 Topic。</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#17303a" flood-opacity="0.09"/></filter>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L8 4L0 8Z" fill="#8797a1"/></marker>
+    <style>.title{font:700 34px Inter,"Noto Sans SC",sans-serif;fill:#17212b}.sub{font:400 17px Inter,"Noto Sans SC",sans-serif;fill:#64717d}.h{font:700 18px Inter,"Noto Sans SC",sans-serif;fill:#17212b}.p{font:400 14px Inter,"Noto Sans SC",sans-serif;fill:#586873}.tag{font:700 12px Inter,"Noto Sans SC",sans-serif;letter-spacing:.8px}.line{stroke:#8797a1;stroke-width:2;fill:none;marker-end:url(#arrow)}.dash{stroke:#a9b4bb;stroke-width:2;fill:none;stroke-dasharray:6 7;marker-end:url(#arrow)}</style>
+  </defs>
+  <rect width="1440" height="800" fill="#fff"/><text x="64" y="66" class="title">Topic 构建：先完成，再发布</text><text x="64" y="99" class="sub">全量与增量复用同一套片段、匹配、合成和校验契约；差别只在输入范围。</text>
+  <g filter="url(#shadow)">
+    <rect x="64" y="150" width="226" height="166" rx="8" fill="#f4fbfa" stroke="#c8e2df"/><text x="88" y="184" class="tag" fill="#187b78">1 · INPUT</text><text x="88" y="220" class="h">选择 Timeline</text><text x="88" y="251" class="p">全量：空间内全部有效来源</text><text x="88" y="277" class="p">增量：未覆盖的 revision</text>
+    <rect x="334" y="150" width="226" height="166" rx="8" fill="#f5f7ff" stroke="#d4dcf4"/><text x="358" y="184" class="tag" fill="#3769d6">2 · EXTRACT</text><text x="358" y="220" class="h">提取正式片段</text><text x="358" y="251" class="p">一个检索意图一个片段</text><text x="358" y="277" class="p">绑定事实、人物与情绪</text>
+    <rect x="604" y="150" width="226" height="166" rx="8" fill="#fffaf3" stroke="#eadcc7"/><text x="628" y="184" class="tag" fill="#b56d17">3 · MATCH</text><text x="628" y="220" class="h">向量近邻匹配</text><text x="628" y="251" class="p">事实连续性 + 语义</text><text x="628" y="277" class="p">可选 Rerank 复核</text>
+    <rect x="874" y="150" width="226" height="166" rx="8" fill="#fff8f6" stroke="#efd8d2"/><text x="898" y="184" class="tag" fill="#c84f3d">4 · SYNTHESIZE</text><text x="898" y="220" class="h">组件合成</text><text x="898" y="251" class="p">生成正文与独立原子</text><text x="898" y="277" class="p">覆盖全部正式片段</text>
+    <rect x="1144" y="150" width="232" height="166" rx="8" fill="#f7f8fa" stroke="#dce3e8"/><text x="1168" y="184" class="tag" fill="#64717d">5 · VALIDATE</text><text x="1168" y="220" class="h">确定性校验</text><text x="1168" y="251" class="p">拒绝未知引用</text><text x="1168" y="277" class="p">记录修复与省略原因</text>
+  </g>
+  <path d="M302 233H321" class="line"/><path d="M572 233H591" class="line"/><path d="M842 233H861" class="line"/><path d="M1112 233H1131" class="line"/>
+
+  <text x="64" y="382" class="tag" fill="#64717d">COMPONENT DECISION</text>
+  <g>
+    <rect x="86" y="416" width="330" height="130" rx="8" fill="#f1faf6" stroke="#cce2d8"/><circle cx="116" cy="450" r="10" fill="#2f8f63"/><text x="142" y="457" class="h">更新已有 Topic</text><text x="116" y="491" class="p">高置信匹配；保留稳定 Topic UID</text><text x="116" y="517" class="p">用新旧有效片段重新合成</text>
+    <rect x="555" y="416" width="330" height="130" rx="8" fill="#f5f7ff" stroke="#d4dcf4"/><circle cx="585" cy="450" r="10" fill="#3769d6"/><text x="611" y="457" class="h">新建 Topic</text><text x="585" y="491" class="p">没有合格候选；不为填满数量硬合并</text><text x="585" y="517" class="p">建立新的正文、原子与来源链</text>
+    <rect x="1024" y="416" width="330" height="130" rx="8" fill="#fff8f6" stroke="#efd8d2"/><circle cx="1054" cy="450" r="10" fill="#c84f3d"/><text x="1080" y="457" class="h">进入待审查</text><text x="1054" y="491" class="p">仅限真实候选歧义；旧 Topic 继续保留</text><text x="1054" y="517" class="p">按 component_uid 独立追踪与消项</text>
+  </g>
+  <path d="M1248 328V375H251V403" class="dash"/><path d="M1248 328V375H720V403" class="dash"/><path d="M1248 328V375H1189V403" class="dash"/>
+
+  <g filter="url(#shadow)">
+    <rect x="317" y="626" width="806" height="112" rx="8" fill="#17212b"/>
+    <text x="351" y="665" class="tag" fill="#7bd1ca">ATOMIC PUBLISH</text><text x="351" y="704" style="font:700 22px Inter,'Noto Sans SC',sans-serif;fill:#fff">一次事务写入 Topic、原子、片段、人物与来源关系</text>
+    <rect x="912" y="652" width="177" height="54" rx="7" fill="#25343e"/><text x="947" y="685" style="font:600 14px Inter,'Noto Sans SC',sans-serif;fill:#d9e3e8">失败则完整回滚</text>
+  </g>
+  <path d="M251 558V608H647" class="line"/><path d="M720 558V613" class="line"/><path d="M1189 558V608H793" class="line"/>
+</svg>
