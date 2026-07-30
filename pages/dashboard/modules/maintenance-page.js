@@ -9,6 +9,8 @@ export class MaintenancePage {
     this.confirmDialog = confirmDialog;
     this.tab = "topic";
     this.reviewUid = null;
+    this.reviewPreviewToken = "";
+    this.reviewResolving = false;
     this.governance = null;
     this.sessionAudit = [];
     this.sessionPreview = null;
@@ -1405,6 +1407,7 @@ export class MaintenancePage {
     const overlay = document.getElementById("topic-review-overlay");
     overlay?.classList.remove("visible");
     overlay?.setAttribute("aria-hidden", "true");
+    this.reviewPreviewToken = "";
   }
 
   async loadReviews() {
@@ -1449,6 +1452,7 @@ export class MaintenancePage {
     try {
       const data = await this.topicPage.api.get("topics/reviews/detail", { review_uid: reviewUid });
       const review = data.review || {};
+      this.reviewPreviewToken = String(review.preview_token || "");
       const fragments = review.fragments || [];
       const candidates = review.candidate_topics || [];
       const timelines = review.timelines || [];
@@ -1480,21 +1484,38 @@ export class MaintenancePage {
   }
 
   async resolveReview(action) {
-    if (!this.reviewUid) return;
+    if (!this.reviewUid || this.reviewResolving) return;
     const target = document.querySelector('input[name="review-target-topic"]:checked')?.value || "";
+    this.reviewResolving = true;
+    document.querySelectorAll("#maintenance-review-detail [data-review-action], #maintenance-review-detail input").forEach(element => {
+      element.disabled = true;
+    });
     try {
-      await this.topicPage.api.post("topics/reviews/resolve", {
+      const job = await this.topicPage.api.post("topics/reviews/resolve", {
         review_uid: this.reviewUid,
         action,
         target_topic_uid: target,
+        preview_token: this.reviewPreviewToken,
       });
+      if (job.job_uid) {
+        this.closeReviews();
+        this.topicPage.renderProgress(job);
+        this.topicPage.setBuildButtonsDisabled(true);
+        this.topicPage.resumePolling(job.job_uid);
+        this.showToast(window.t("maintenance.reviewTaskStarted"));
+        return;
+      }
       this.showToast(window.t("maintenance.reviewApplied"));
       this.reviewUid = null;
+      this.reviewPreviewToken = "";
       await this.topicPage.fetch();
       this.syncTopicSpaces();
       await this.loadReviews();
     } catch (error) {
       this.showToast(error.message || window.t("maintenance.reviewFailed"), true);
+      if (this.reviewUid) await this.loadReviewDetail(this.reviewUid);
+    } finally {
+      this.reviewResolving = false;
     }
   }
 

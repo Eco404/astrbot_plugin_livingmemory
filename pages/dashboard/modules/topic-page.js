@@ -1241,7 +1241,7 @@ export class TopicPage {
         </div>` : ""}
         <div class="text-tertiary">${esc(window.t("topic.progress.elapsed"))} ${esc(elapsed)} · ${esc(window.t("topic.progress.updated"))} ${esc(updatedAgo)}</div>
         <div class="text-tertiary">${esc(job.status)} · ${esc(job.memory_space_id || "")}</div>
-        ${job.run_uid && ["failed", "cancelled", "pending"].includes(job.status)
+        ${job.operation !== "resolve_review" && job.run_uid && ["failed", "cancelled", "pending"].includes(job.status)
           ? `<div class="topic-progress-actions">
               <button id="${resumeId}" class="btn btn-primary">${esc(window.t("topic.resumeBuild"))}</button>
               <button id="${discardId}" class="btn btn-danger">${esc(window.t("topic.discardBuild"))}</button>

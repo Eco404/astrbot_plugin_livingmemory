@@ -556,12 +556,38 @@ class TestTopicList:
             result = await api.list_topics()
 
         assert result["status"] == "ok"
-        assert result["data"]["status"] == "active"
+        assert result["data"]["status_filter"] == "active"
         assert result["data"]["total"] == 0
         assert result["data"]["space_total"] == 4
         engine.topic_memory_store.list_topics.assert_awaited_once_with(
             "space-1",
             status="active",
+            limit=100,
+            offset=0,
+            actor_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_status_filter_does_not_collide_with_response_status(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.topic_memory_store = SimpleNamespace(
+            list_topics=AsyncMock(return_value=[]),
+            count_topics=AsyncMock(return_value=0),
+            list_topic_actors=AsyncMock(return_value=[]),
+        )
+        req = _mock_page_request(
+            args={"memory_space_id": "space-1", "status": "error"}
+        )
+
+        with _patch_page_request(req):
+            result = await api.list_topics()
+
+        assert result["status"] == "ok"
+        assert result["data"]["status_filter"] == "error"
+        assert "status" not in result["data"]
+        engine.topic_memory_store.list_topics.assert_awaited_once_with(
+            "space-1",
+            status="error",
             limit=100,
             offset=0,
             actor_id=None,
@@ -873,7 +899,7 @@ class TestListMemories:
                     7,
                     "7",
                     "Timeline detail",
-                    json.dumps({"memory_uid": "timeline-7"}),
+                    json.dumps({"memory_uid": "timeline-7", "revision": 3}),
                     "created",
                     "updated",
                 ),
@@ -891,6 +917,7 @@ class TestListMemories:
                         "link_status": "active",
                         "importance": 0.8,
                         "revision": 2,
+                        "source_timeline_revision": 2,
                     },
                     {
                         "topic_uid": "topic-archived",
@@ -920,6 +947,10 @@ class TestListMemories:
         assert [item["topic_uid"] for item in result["data"]["related_topics"]] == [
             "topic-active"
         ]
+        assert result["data"]["related_topics"][0]["waiting_rebuild"] is True
+        assert (
+            result["data"]["related_topics"][0]["source_timeline_revision"] == 2
+        )
         topic_store.get_topics_for_timeline.assert_awaited_once_with("timeline-7")
 
     @pytest.mark.asyncio

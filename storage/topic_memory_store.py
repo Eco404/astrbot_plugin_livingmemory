@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
@@ -2237,7 +2238,100 @@ class TopicMemoryStore:
         review["fragments"] = [self._fragment_to_dict(item) for item in fragments]
         review["candidate_topics"] = topic_items
         review["timelines"] = timeline_items
+        current_revisions = {
+            str(item["topic_uid"]): int(item["revision"])
+            for item in topic_items
+            if item.get("topic_uid")
+        }
+        review["preview_topic_revisions"] = current_revisions
+        review["preview_token"] = self._maintenance_review_preview_token(
+            review_uid,
+            current_revisions,
+        )
+        review["preview_stale"] = current_revisions != {
+            str(uid): int(revision)
+            for uid, revision in dict(
+                review.get("expected_topic_revisions") or {}
+            ).items()
+        }
         return review
+
+    async def rebase_maintenance_review(
+        self,
+        review_uid: str,
+        *,
+        preview_token: str,
+    ) -> dict[str, int]:
+        """Bind a pending decision to the exact Topic revisions shown in WebUI."""
+        review_uid = str(review_uid or "").strip()
+        preview_token = str(preview_token or "").strip()
+        if not review_uid or not preview_token:
+            raise TopicRevisionConflict(
+                "Topic review preview is missing; refresh before applying it"
+            )
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                row = await (
+                    await db.execute(
+                        """
+                        SELECT status, topic_uids
+                        FROM topic_maintenance_queue
+                        WHERE review_uid = ?
+                        """,
+                        (review_uid,),
+                    )
+                ).fetchone()
+                if row is None or str(row["status"]) != "pending":
+                    raise TopicRevisionConflict(
+                        "Topic review is missing or no longer pending"
+                    )
+                topic_uids = sorted(
+                    {
+                        str(uid)
+                        for uid in self._decode_json(row["topic_uids"], [])
+                        if str(uid)
+                    }
+                )
+                current_revisions: dict[str, int] = {}
+                if topic_uids:
+                    placeholders = ",".join("?" * len(topic_uids))
+                    topic_rows = await (
+                        await db.execute(
+                            f"SELECT topic_uid, revision FROM topic_memories "
+                            f"WHERE topic_uid IN ({placeholders})",
+                            topic_uids,
+                        )
+                    ).fetchall()
+                    current_revisions = {
+                        str(item["topic_uid"]): int(item["revision"])
+                        for item in topic_rows
+                    }
+                current_token = self._maintenance_review_preview_token(
+                    review_uid,
+                    current_revisions,
+                )
+                if preview_token != current_token:
+                    raise TopicRevisionConflict(
+                        "Topic review preview changed; refresh before applying it"
+                    )
+                await db.execute(
+                    """
+                    UPDATE topic_maintenance_queue
+                    SET expected_topic_revisions = ?, updated_at = ?
+                    WHERE review_uid = ? AND status = 'pending'
+                    """,
+                    (
+                        self._to_json(current_revisions),
+                        time.time(),
+                        review_uid,
+                    ),
+                )
+                await db.commit()
+                return current_revisions
+            except BaseException:
+                await db.rollback()
+                raise
 
     async def resolve_maintenance_reviews(
         self,
@@ -5558,6 +5652,25 @@ class TopicMemoryStore:
     @staticmethod
     def _to_json(value: Any) -> str:
         return json.dumps(value if value is not None else {}, ensure_ascii=False)
+
+    @staticmethod
+    def _maintenance_review_preview_token(
+        review_uid: str,
+        topic_revisions: dict[str, int],
+    ) -> str:
+        payload = json.dumps(
+            {
+                "review_uid": str(review_uid),
+                "topic_revisions": {
+                    str(uid): int(revision)
+                    for uid, revision in sorted(topic_revisions.items())
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _from_json(value: Any) -> dict[str, Any]:
