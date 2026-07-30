@@ -339,19 +339,18 @@
               <button class="maintenance-tab" type="button" data-maintenance-tab="models" role="tab" aria-selected="false" data-i18n="nav.models">模型测试</button>
             </div>
             <div class="maintenance-panel active" id="maintenance-panel-topic">
-              <div class="topic-maintenance-page-head">
+              <div class="maintenance-memory-page-head">
                 <div>
-                  <h2 data-i18n="topic.maintenanceTitle">Topic 维护</h2>
+                  <h2 data-i18n="topic.maintenanceTitle">Topic 记忆维护</h2>
                   <p class="text-secondary" data-i18n="maintenance.topicIntro">选择记忆空间后管理 Topic 派生数据、补建任务和人工审查。</p>
                 </div>
-                <label class="topic-maintenance-space-field">
+                <label class="maintenance-memory-space-field">
                   <span data-i18n="maintenance.topicSpaceLabel">记忆空间</span>
                   <select id="maintenance-topic-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
                 </label>
               </div>
               <div class="topic-progress hidden maintenance-topic-progress" id="maintenance-topic-progress" aria-live="polite"></div>
-              <div class="identity-state" id="maintenance-topic-empty" data-i18n="maintenance.chooseTopicSpace">请选择记忆空间后查看维护功能</div>
-              <div class="maintenance-topic-action-list hidden" id="maintenance-topic-actions">
+              <div class="maintenance-topic-action-list maintenance-space-dependent is-space-unselected" id="maintenance-topic-actions" aria-disabled="true">
                 <div class="maintenance-topic-action-row">
                   <div><strong data-i18n="topic.revectorizeTitle">重新向量化并重算关系</strong><p data-i18n="topic.revectorizeIntro">使用当前 Embedding 模型更新正式片段和 Topic 向量，并重算相关话题；不调用 LLM。</p></div>
                   <button class="btn btn-secondary" id="topic-revectorize" type="button" data-i18n="topic.revectorize">开始</button>
@@ -383,17 +382,17 @@
               </div>
             </div>
             <div class="maintenance-panel" id="maintenance-panel-timeline-rebuild">
-              <div class="topic-maintenance-page-head">
+              <div class="maintenance-memory-page-head">
                 <div>
                   <h2 data-i18n="maintenance.timelineRebuildTitle">Timeline 记忆维护</h2>
                   <p class="text-secondary" data-i18n="maintenance.timelineRebuildIntro">先检查原始消息证据是否完整，再选择需要同 ID 重构的 Timeline。重构后会同步修复 Topic。</p>
                 </div>
-                <label class="topic-maintenance-space-field">
+                <label class="maintenance-memory-space-field">
                   <span data-i18n="maintenance.topicSpaceLabel">记忆空间</span>
                   <select id="timeline-rebuild-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
                 </label>
               </div>
-              <div class="maintenance-topic-action-list maintenance-timeline-action-list">
+              <div class="maintenance-topic-action-list maintenance-timeline-action-list maintenance-space-dependent is-space-unselected" id="maintenance-timeline-actions" aria-disabled="true">
                 <div class="maintenance-topic-action-row">
                   <div><strong data-i18n="maintenance.detectRebuildable">检测可重构项</strong><p data-i18n="maintenance.detectRebuildableIntro">核对原始消息证据与记忆质量，再由用户选择需要同 ID 重构的 Timeline。</p></div>
                   <div class="maintenance-timeline-action-control">

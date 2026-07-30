@@ -3643,7 +3643,7 @@ select.timeline-setting-input { width: min(220px, 100%); }
 }
 .maintenance-tool-band h2 { margin: 0 0 var(--space-2); font-size: 18px; letter-spacing: 0; }
 .maintenance-tool-band p { margin: 0; max-width: 720px; }
-.topic-maintenance-page-head {
+.maintenance-memory-page-head {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
@@ -3651,9 +3651,9 @@ select.timeline-setting-input { width: min(220px, 100%); }
   padding-bottom: var(--space-5);
   border-bottom: 1px solid var(--border-normal);
 }
-.topic-maintenance-page-head h2 { margin: 0 0 var(--space-1); font-size: 18px; letter-spacing: 0; }
-.topic-maintenance-page-head p { margin: 0; max-width: 720px; line-height: 1.55; }
-.topic-maintenance-space-field {
+.maintenance-memory-page-head h2 { margin: 0 0 var(--space-1); font-size: 18px; letter-spacing: 0; }
+.maintenance-memory-page-head p { margin: 0; max-width: 720px; line-height: 1.55; }
+.maintenance-memory-space-field {
   display: grid;
   flex: 0 1 560px;
   gap: 6px;
@@ -3661,7 +3661,6 @@ select.timeline-setting-input { width: min(220px, 100%); }
   color: var(--text-secondary);
   font-size: 12px;
 }
-#maintenance-topic-empty { margin-top: var(--space-5); }
 .maintenance-topic-progress { margin-top: var(--space-5); }
 .maintenance-topic-action-list { border-bottom: 1px solid var(--border-normal); }
 .maintenance-topic-action-row {
@@ -3683,7 +3682,14 @@ select.timeline-setting-input { width: min(220px, 100%); }
   line-height: 1.55;
 }
 .maintenance-topic-action-row > .btn { min-width: 132px; }
-.maintenance-timeline-action-list { margin-top: var(--space-5); }
+.maintenance-space-dependent.is-space-unselected .maintenance-topic-action-row strong,
+.maintenance-space-dependent.is-space-unselected .maintenance-topic-action-row p {
+  color: var(--text-tertiary);
+}
+.maintenance-space-dependent.is-space-unselected select {
+  opacity: .55;
+  cursor: not-allowed;
+}
 .maintenance-timeline-action-control {
   display: flex;
   align-items: center;
@@ -3886,8 +3892,8 @@ select.timeline-setting-input { width: min(220px, 100%); }
 @media (max-width: 900px) {
   .settings-page-row { grid-template-columns: 1fr; gap: var(--space-3); }
   .maintenance-tool-band { align-items: stretch; flex-direction: column; }
-  .topic-maintenance-page-head { align-items: stretch; flex-direction: column; gap: var(--space-4); }
-  .topic-maintenance-space-field { flex-basis: auto; min-width: 0; width: 100%; }
+  .maintenance-memory-page-head { align-items: stretch; flex-direction: column; gap: var(--space-4); }
+  .maintenance-memory-space-field { flex-basis: auto; min-width: 0; width: 100%; }
   .maintenance-topic-controls { min-width: 0; width: 100%; }
   .maintenance-review-toolbar { align-items: stretch; flex-direction: column; }
   .maintenance-review-layout { grid-template-columns: 1fr; }
