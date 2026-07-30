@@ -447,16 +447,6 @@ class TopicBuildManager(
     ) -> dict[str, Any]:
         """Apply one user decision without rerunning fragment extraction."""
         action = str(action or "").strip().lower()
-        if action == "defer":
-            changed = await self.store.set_maintenance_review_status(
-                review_uid,
-                status="pending",
-                action="defer",
-                payload={},
-            )
-            if not changed:
-                raise ValueError("Topic review is no longer pending")
-            return {"review_uid": review_uid, "status": "pending", "action": action}
         if action == "ignore":
             changed = await self.store.set_maintenance_review_status(
                 review_uid,

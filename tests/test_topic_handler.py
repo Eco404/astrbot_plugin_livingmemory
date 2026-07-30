@@ -408,6 +408,35 @@ async def test_review_resolution_is_visible_job_and_rejects_duplicate(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_review_resolution_rejects_removed_defer_action(monkeypatch):
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={"review_uid": "review-1", "action": "defer"}
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    manager = SimpleNamespace(
+        resolve_maintenance_review=AsyncMock(),
+    )
+    store = SimpleNamespace(
+        get_maintenance_review=AsyncMock(),
+    )
+    engine = SimpleNamespace(
+        topic_build_manager=manager,
+        topic_memory_store=store,
+    )
+
+    response = await TopicHandler(PageApiUtils()).resolve_review(engine)
+
+    assert response["status"] == "error"
+    assert response["message"] == "Topic 审查操作无效"
+    store.get_maintenance_review.assert_not_awaited()
+    manager.resolve_maintenance_review.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reset_full_build_is_forwarded_to_build_manager(monkeypatch):
     class ResetBuildManager:
         def __init__(self):

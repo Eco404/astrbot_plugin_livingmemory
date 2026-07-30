@@ -389,7 +389,7 @@ class TopicHandler:
         if not review_uid or not action:
             return self.utils.error("review_uid 和 action 不能为空")
         action = action.lower()
-        if action not in {"merge", "new", "sync_sources", "defer", "ignore"}:
+        if action not in {"merge", "new", "sync_sources", "ignore"}:
             return self.utils.error("Topic 审查操作无效")
         try:
             review = await memory_engine.topic_memory_store.get_maintenance_review(
@@ -397,7 +397,7 @@ class TopicHandler:
             )
             if review is None or str(review.get("status") or "") != "pending":
                 return self.utils.error("Topic 审查项不存在或已处理")
-            if action in {"defer", "ignore"}:
+            if action == "ignore":
                 result = (
                     await memory_engine.topic_build_manager.resolve_maintenance_review(
                         review_uid,

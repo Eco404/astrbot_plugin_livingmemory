@@ -1474,7 +1474,6 @@ export class MaintenancePage {
         <div class="maintenance-review-actions">
           ${canMaterialize ? `<button class="btn btn-primary" type="button" data-review-action="merge" ${candidates.length ? "" : "disabled"}>${esc(window.t("maintenance.mergeCandidate"))}</button><button class="btn btn-secondary" type="button" data-review-action="new">${esc(window.t("maintenance.createTopic"))}</button>` : ""}
           ${canSyncSources ? `<button class="btn btn-primary" type="button" data-review-action="sync_sources">${esc(window.t("maintenance.syncSourceRepair"))}</button>` : ""}
-          <button class="btn btn-secondary" type="button" data-review-action="defer">${esc(window.t("maintenance.defer"))}</button>
           <button class="btn btn-ghost" type="button" data-review-action="ignore">${esc(window.t("maintenance.ignore"))}</button>
         </div>`;
       document.querySelectorAll("#maintenance-review-list [data-review-uid]").forEach(item => item.classList.toggle("active", item.dataset.reviewUid === reviewUid));
@@ -1485,6 +1484,15 @@ export class MaintenancePage {
 
   async resolveReview(action) {
     if (!this.reviewUid || this.reviewResolving) return;
+    if (action === "ignore") {
+      const confirmed = await this.confirmDialog.show({
+        title: window.t("maintenance.ignoreConfirmTitle"),
+        message: window.t("maintenance.ignoreConfirmMessage"),
+        confirmLabel: window.t("maintenance.ignore"),
+        danger: true,
+      });
+      if (!confirmed) return;
+    }
     const target = document.querySelector('input[name="review-target-topic"]:checked')?.value || "";
     this.reviewResolving = true;
     document.querySelectorAll("#maintenance-review-detail [data-review-action], #maintenance-review-detail input").forEach(element => {
