@@ -186,6 +186,11 @@ export class MaintenancePage {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   }
 
+  formatDatabaseVersion(value) {
+    const version = String(value || "").trim().replace(/^v+/i, "");
+    return version ? `v${version}` : "";
+  }
+
   renderDatabaseHealth() {
     const data = this.databaseHealth;
     const summary = document.getElementById("database-health-summary");
@@ -202,8 +207,9 @@ export class MaintenancePage {
 
     databases.innerHTML = (data.databases || []).map(database => {
       const ok = database.integrity === "ok" && !(database.foreign_key_violations || []).length;
+      const version = this.formatDatabaseVersion(database.schema_version);
       return `<div class="database-health-database">
-        <span><strong>${esc(database.label || database.filename)}</strong><small>${esc(database.filename || "--")} · ${esc(this.formatDatabaseBytes(database.size_bytes))}${database.schema_version ? ` · v${esc(database.schema_version)}` : ""}</small></span>
+        <span><strong>${esc(database.label || database.filename)}</strong><small>${esc(database.filename || "--")} · ${esc(this.formatDatabaseBytes(database.size_bytes))}${version ? ` · ${esc(version)}` : ""}</small></span>
         <span class="status-badge ${ok ? "status-completed" : "status-failed"}">${esc(ok ? window.t("maintenance.databaseIntegrityOk") : window.t("maintenance.databaseIntegrityIssue"))}</span>
         <small>${esc(window.t("maintenance.databaseForeignKeys", Number((database.foreign_key_violations || []).length)))}</small>
       </div>`;
