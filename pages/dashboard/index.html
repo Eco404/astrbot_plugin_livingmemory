@@ -169,11 +169,38 @@
                 <option value="100" data-i18n="common.perPage100">100 per page</option>
               </select>
             </div>
+            <div class="memory-transfer-bar" aria-label="Timeline 导入导出">
+              <div class="memory-selection-summary" id="mem-selection-summary" data-i18n="transfer.noneSelected">未选择记忆；导出时将包含全部 Timeline</div>
+              <div class="memory-transfer-actions">
+                <select id="mem-transfer-format" class="select input input-sm memory-transfer-select" data-i18n-title="transfer.formatTitle">
+                  <option value="json">JSON</option>
+                  <option value="csv">CSV</option>
+                </select>
+                <button class="btn btn-sm btn-secondary" id="mem-export" data-i18n-title="transfer.exportTitle">
+                  <i data-lucide="download" aria-hidden="true"></i>
+                  <span data-i18n="transfer.export">Export</span>
+                </button>
+                <select id="mem-import-duplicates" class="select input input-sm memory-duplicate-select" data-i18n-title="transfer.duplicateTitle">
+                  <option value="skip" data-i18n="transfer.skipDuplicates">Skip duplicates</option>
+                  <option value="allow" data-i18n="transfer.allowDuplicates">Allow duplicates</option>
+                </select>
+                <button class="btn btn-sm btn-secondary" id="mem-import" data-i18n-title="transfer.importTitle">
+                  <i data-lucide="upload" aria-hidden="true"></i>
+                  <span data-i18n="transfer.import">Import</span>
+                </button>
+                <input type="file" id="mem-import-file" accept=".json,.csv,application/json,text/csv" hidden />
+                <button class="btn btn-sm btn-danger" id="mem-delete-selected" disabled data-i18n-title="transfer.deleteSelectedTitle">
+                  <i data-lucide="trash-2" aria-hidden="true"></i>
+                  <span id="mem-delete-selected-label" data-i18n="transfer.deleteSelected">Delete selected</span>
+                </button>
+              </div>
+            </div>
             <div class="table-container">
               <div class="table-scroll" id="memories-scroll">
               <table class="data-table" id="memories-table">
                 <thead>
                   <tr>
+                    <th class="cell-select"><input type="checkbox" id="mem-select-all" data-i18n-aria="transfer.selectPage" aria-label="Select this page" /></th>
                     <th class="cell-id" data-i18n="table.id">ID</th>
                     <th class="cell-summary" data-i18n="table.summary">Summary</th>
                     <th class="cell-topics" data-i18n="table.topicLinks">关联 Topic</th>
@@ -184,7 +211,7 @@
                   </tr>
                 </thead>
                 <tbody id="memories-body">
-                  <tr><td colspan="7" class="table-empty" data-i18n="table.noData">No data</td></tr>
+                  <tr><td colspan="8" class="table-empty" data-i18n="table.noData">No data</td></tr>
                 </tbody>
               </table>
               </div>
@@ -312,19 +339,18 @@
               <button class="maintenance-tab" type="button" data-maintenance-tab="models" role="tab" aria-selected="false" data-i18n="nav.models">模型测试</button>
             </div>
             <div class="maintenance-panel active" id="maintenance-panel-topic">
-              <div class="topic-maintenance-page-head">
+              <div class="maintenance-memory-page-head">
                 <div>
-                  <h2 data-i18n="topic.maintenanceTitle">Topic 维护</h2>
+                  <h2 data-i18n="topic.maintenanceTitle">Topic 记忆维护</h2>
                   <p class="text-secondary" data-i18n="maintenance.topicIntro">选择记忆空间后管理 Topic 派生数据、补建任务和人工审查。</p>
                 </div>
-                <label class="topic-maintenance-space-field">
+                <label class="maintenance-memory-space-field">
                   <span data-i18n="maintenance.topicSpaceLabel">记忆空间</span>
                   <select id="maintenance-topic-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
                 </label>
               </div>
               <div class="topic-progress hidden maintenance-topic-progress" id="maintenance-topic-progress" aria-live="polite"></div>
-              <div class="identity-state" id="maintenance-topic-empty" data-i18n="maintenance.chooseTopicSpace">请选择记忆空间后查看维护功能</div>
-              <div class="maintenance-topic-action-list hidden" id="maintenance-topic-actions">
+              <div class="maintenance-topic-action-list maintenance-space-dependent is-space-unselected" id="maintenance-topic-actions" aria-disabled="true">
                 <div class="maintenance-topic-action-row">
                   <div><strong data-i18n="topic.revectorizeTitle">重新向量化并重算关系</strong><p data-i18n="topic.revectorizeIntro">使用当前 Embedding 模型更新正式片段和 Topic 向量，并重算相关话题；不调用 LLM。</p></div>
                   <button class="btn btn-secondary" id="topic-revectorize" type="button" data-i18n="topic.revectorize">开始</button>
@@ -356,17 +382,17 @@
               </div>
             </div>
             <div class="maintenance-panel" id="maintenance-panel-timeline-rebuild">
-              <div class="topic-maintenance-page-head">
+              <div class="maintenance-memory-page-head">
                 <div>
                   <h2 data-i18n="maintenance.timelineRebuildTitle">Timeline 记忆维护</h2>
                   <p class="text-secondary" data-i18n="maintenance.timelineRebuildIntro">先检查原始消息证据是否完整，再选择需要同 ID 重构的 Timeline。重构后会同步修复 Topic。</p>
                 </div>
-                <label class="topic-maintenance-space-field">
+                <label class="maintenance-memory-space-field">
                   <span data-i18n="maintenance.topicSpaceLabel">记忆空间</span>
                   <select id="timeline-rebuild-space" class="select input"><option value="" data-i18n="topic.space">选择记忆空间</option></select>
                 </label>
               </div>
-              <div class="maintenance-topic-action-list maintenance-timeline-action-list">
+              <div class="maintenance-topic-action-list maintenance-timeline-action-list maintenance-space-dependent is-space-unselected" id="maintenance-timeline-actions" aria-disabled="true">
                 <div class="maintenance-topic-action-row">
                   <div><strong data-i18n="maintenance.detectRebuildable">检测可重构项</strong><p data-i18n="maintenance.detectRebuildableIntro">核对原始消息证据与记忆质量，再由用户选择需要同 ID 重构的 Timeline。</p></div>
                   <div class="maintenance-timeline-action-control">

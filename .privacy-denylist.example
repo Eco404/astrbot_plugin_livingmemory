@@ -1,0 +1,6 @@
+# Copy this file to .privacy-denylist.local and add one literal value per line.
+# The local file is ignored by Git. Never commit real names, account IDs,
+# private domains, local usernames, or credentials to this example file.
+
+Example Private Display Name
+example-private-domain.invalid

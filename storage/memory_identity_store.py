@@ -94,6 +94,21 @@ class MemoryIdentityStore:
             ON memory_source_spans(session_id, started_at, ended_at)
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_source_snapshots (
+                memory_uid TEXT PRIMARY KEY,
+                source_revision INTEGER NOT NULL DEFAULT 1,
+                source_json TEXT NOT NULL,
+                message_count INTEGER NOT NULL,
+                retention_reason TEXT NOT NULL DEFAULT 'importance_threshold',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY(memory_uid) REFERENCES memory_registry(memory_uid)
+                    ON DELETE CASCADE
+            )
+            """
+        )
 
     async def upsert_memory(
         self,
@@ -256,6 +271,72 @@ class MemoryIdentityStore:
             )
             row = await cursor.fetchone()
         return dict(row) if row else None
+
+    async def save_source_snapshot(
+        self,
+        memory_uid: str,
+        source_messages: list[dict[str, Any]],
+        *,
+        source_revision: int,
+        retention_reason: str,
+    ) -> None:
+        """Persist a source snapshot against the stable Timeline identity."""
+        now = time.time()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO memory_source_snapshots (
+                    memory_uid, source_revision, source_json, message_count,
+                    retention_reason, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(memory_uid) DO UPDATE SET
+                    source_revision = excluded.source_revision,
+                    source_json = excluded.source_json,
+                    message_count = excluded.message_count,
+                    retention_reason = excluded.retention_reason,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    memory_uid,
+                    max(1, int(source_revision)),
+                    json.dumps(source_messages, ensure_ascii=False),
+                    len(source_messages),
+                    str(retention_reason or "importance_threshold"),
+                    now,
+                    now,
+                ),
+            )
+            await db.commit()
+
+    async def get_source_snapshot(self, memory_uid: str) -> dict[str, Any] | None:
+        async with self._connect() as db:
+            row = await (
+                await db.execute(
+                    "SELECT * FROM memory_source_snapshots WHERE memory_uid = ?",
+                    (memory_uid,),
+                )
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            messages = json.loads(result.pop("source_json") or "[]")
+        except (json.JSONDecodeError, TypeError):
+            messages = []
+        result["messages"] = (
+            [dict(item) for item in messages if isinstance(item, dict)]
+            if isinstance(messages, list)
+            else []
+        )
+        return result
+
+    async def get_source_snapshot_by_document_id(
+        self, document_id: int
+    ) -> dict[str, Any] | None:
+        record = await self.get_by_document_id(document_id)
+        if record is None:
+            return None
+        return await self.get_source_snapshot(record.memory_uid)
 
     async def get_time_anchors_by_document_ids(
         self, document_ids: list[int]

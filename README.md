@@ -65,7 +65,7 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 - Manage optional hints for ambiguous source identities from **Supplemental Profiles** in the plugin WebUI. The legacy `authoritative_identities.json` filename is retained so existing installations load in place; the filename does not grant profiles authority over source evidence.
 - The platform selector combines live AstrBot instances, recorded conversations, and existing profiles. Adapter aliases such as `aiocqhttp` and `qq_official` are canonicalized to `qq`. Blank platforms remain a backwards-compatible cross-platform wildcard but can collide with the same account ID on another service.
 - `user_id` must be the stable platform account ID. A profile is injected only after an exact stable platform/account match; names, aliases, and text similarity are never identity anchors. Optional fields include `gender`, `pronouns`, and `notes`.
-- For 示例甲, enter platform `qq`, stable account ID `10000001`, display name `示例甲`, gender `男性`, and pronouns `他, 他的`.
+- Use the platform identifier reported by the adapter and the stable account ID supplied by that platform. The display name is only a readable label; gender and pronouns are optional disambiguation hints and should be left blank when the source does not establish them.
 - Messages, Timeline role bindings, raw-message evidence, and existing facts always win. A supplemental profile cannot prove conversation participation, create a fact by itself, or override an explicit identity or pronoun in the source.
 - Adding, changing, or deleting a profile never triggers a rebuild of existing Timeline or Topic memory. Changes apply to future Timeline generation and newly started full or incremental Topic builds. Each Topic build captures one profile snapshot, so profiles may be edited while it runs without mixing versions.
 - When neither an exact stable-ID profile nor an explicit source pronoun exists, prompts require the model to repeat the display name instead of inferring gender from a name, persona, or writing style.
@@ -102,6 +102,12 @@ If AstrBot does not expose a suitable Rerank Provider, enable `cloudflare_rerank
 
 1. Open the AstrBot official WebUI.
 2. Go to `Plugins -> LivingMemory -> Pages -> dashboard`.
+
+**Timeline import and export**:
+- The Timeline Memory page exports either all memories or the current selection. JSON preserves topics, facts, actors, emotion, temporal data, and available source snapshots for migration or backup; CSV is intended for inspection and spreadsheet workflows.
+- Import accepts LivingMemory JSON/CSV plus common long/short-term memory collections, message arrays, and paired user/Bot text. A preview reports valid, duplicate, invalid, and summary-required entries before the user chooses to skip or allow exact duplicates.
+- Source-only entries invoke the current LLM to create a Timeline summary; entries that already contain a summary do not invoke an LLM. Each import is limited to 10,000 entries and 50 MiB.
+- Only semantic data is portable. Document IDs, `memory_uid`, memory-space identities, revisions, indexes, access counters, and synchronization state are never reused; imported memories receive fresh local identities and source snapshots.
 
 ---
 

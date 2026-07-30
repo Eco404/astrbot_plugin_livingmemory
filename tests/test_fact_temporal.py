@@ -10,7 +10,7 @@ from astrbot_plugin_livingmemory.core.fact_temporal import (
 
 def test_build_key_fact_temporal_uses_cited_message_range():
     rows = build_key_fact_temporal(
-        ["示例甲确认了工资"],
+        ["示例甲确认了报销"],
         [{"fact_index": 0, "message_refs": ["M2", "M1"]}],
         [
             {"message_ref": "M1", "timestamp": 100.0},

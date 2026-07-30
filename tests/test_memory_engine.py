@@ -19,6 +19,9 @@ from astrbot_plugin_livingmemory.core.models.topic_memory import (
     TopicTimelineLink,
 )
 from astrbot_plugin_livingmemory.storage.atom_store import AtomStore
+from astrbot_plugin_livingmemory.storage.memory_identity_store import (
+    MemoryIdentityStore,
+)
 
 
 @dataclass
@@ -105,6 +108,80 @@ class _FakeFaissDB:
                 break
         if target is not None:
             self.docs.pop(target, None)
+
+
+@pytest.mark.asyncio
+async def test_memory_transfer_records_join_stable_source_and_strip_identity(
+    tmp_path: Path,
+):
+    db_path = tmp_path / "transfer.db"
+    engine = MemoryEngine(
+        db_path=str(db_path), faiss_db=_FakeFaissDB(), config={}
+    )
+    engine.db_connection = await aiosqlite.connect(db_path)
+    engine.db_connection.row_factory = aiosqlite.Row
+    try:
+        await engine.db_connection.execute(
+            """
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY,
+                text TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        await MemoryIdentityStore.create_tables(engine.db_connection)
+        metadata = {
+            "session_id": "s1",
+            "persona_id": "p1",
+            "memory_uid": "u1",
+            "memory_space_id": "space-1",
+            "revision": 4,
+            "importance": 0.7,
+            "topics": ["x"],
+        }
+        await engine.db_connection.execute(
+            "INSERT INTO documents VALUES (?, ?, ?, ?, ?)",
+            (1, "portable content", json.dumps(metadata), "created", "updated"),
+        )
+        await engine.db_connection.execute(
+            """
+            INSERT INTO memory_registry VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("u1", 1, "timeline", "space-1", 4, "active", 1.0, 2.0),
+        )
+        await engine.db_connection.execute(
+            """
+            INSERT INTO memory_source_snapshots (
+                memory_uid, source_revision, source_json, message_count,
+                retention_reason, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "u1",
+                4,
+                json.dumps([{"role": "user", "content": "source"}]),
+                1,
+                "test",
+                1.0,
+                2.0,
+            ),
+        )
+        await engine.db_connection.commit()
+
+        records = await engine.get_memory_transfer_records([1])
+        duplicate_keys = await engine.get_memory_import_keys()
+
+        assert records[0]["source_messages"][0]["content"] == "source"
+        assert records[0]["metadata"]["topics"] == ["x"]
+        assert "memory_uid" not in records[0]["metadata"]
+        assert "memory_space_id" not in records[0]["metadata"]
+        assert "revision" not in records[0]["metadata"]
+        assert ("portable content", "s1", "p1") in duplicate_keys
+    finally:
+        await engine.db_connection.close()
 
 
 def test_memory_engine_atom_enabled_honors_explicit_false(tmp_path: Path):

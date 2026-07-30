@@ -15,16 +15,15 @@ from astrbot_plugin_livingmemory.core.utils import format_memories_for_injection
 from astrbot_plugin_livingmemory.storage.db_migration import DBMigration
 
 # ---------------------------------------------------------------------------
-# 真实记忆内容样本（私聊 / 群聊，长文本）
+# 合成记忆内容样本（私聊 / 群聊，长文本）
 # ---------------------------------------------------------------------------
 
 PRIVATE_MEMORY_LONG = (
-    "用户在私聊中详细描述了自己的工作情况：目前在一家互联网公司担任后端工程师，"
-    "主要使用 Python 和 Go 开发微服务，团队规模约 20 人。"
+    "用户在私聊中描述了一个虚构项目：负责后端服务，"
+    "主要使用 Python 和 Go，测试团队共有 5 人。"
     "用户提到最近在学习 Rust，希望将来能用于高性能场景。"
-    "此外用户表示对工作压力较大，每周工作超过 60 小时，希望能找到更好的工作生活平衡。"
-    "用户的家庭情况：已婚，有一个两岁的孩子，住在上海浦东新区。"
-    "用户的兴趣爱好包括：打羽毛球、看科幻小说、偶尔做饭。"
+    "此外用户希望合理安排学习与休息，并为项目补充性能测试和文档。"
+    "用户住在示例市，兴趣包括阅读、拼图和种植绿植。"
 )
 
 GROUP_MEMORY_LONG = (
@@ -39,12 +38,12 @@ GROUP_MEMORY_LONG = (
 
 PRIVATE_METADATA_V1 = {
     "importance": 0.85,
-    "topics": ["工作", "技术学习", "生活压力"],
+    "topics": ["虚构项目", "技术学习", "生活安排"],
     "key_facts": [
         "后端工程师，使用 Python 和 Go",
         "正在学习 Rust",
-        "每周工作超过 60 小时",
-        "住在上海浦东，已婚有孩",
+        "计划补充性能测试和文档",
+        "住在示例市",
     ],
     "sentiment": "mixed",
     "interaction_type": "private_chat",
@@ -69,7 +68,7 @@ GROUP_METADATA_V1 = {
 
 PRIVATE_METADATA_V2 = {
     **PRIVATE_METADATA_V1,
-    "canonical_summary": "用户是后端工程师，使用 Python/Go，正学 Rust，工作压力大，住上海浦东",
+    "canonical_summary": "用户参与虚构后端项目，使用 Python/Go，正学习 Rust，住在示例市",
     "persona_summary": "你是个很努力的工程师呢，还在学 Rust，真厉害！",
     "summary_schema_version": "v2",
     "summary_quality": "normal",
@@ -193,7 +192,9 @@ def test_database_version_segments_do_not_use_float_ordering():
     assert DBMigration.version_key("10") > DBMigration.version_key("9.22")
     assert DBMigration.version_key(9) < DBMigration.version_key("9.1")
     assert DBMigration.storage_version("9.2") == "v9.2"
-    assert all("." not in str(version) for version in DBMigration.VERSION_HISTORY)
+    assert all(
+        not str(version).startswith("9.") for version in DBMigration.VERSION_HISTORY
+    )
 
 
 @pytest.mark.asyncio
@@ -269,9 +270,12 @@ async def test_migrate_v9_22_to_v10_records_release_boundary(tmp_path):
 
     assert result["success"] is True
     assert result["from_version"] == "9.22"
-    assert result["to_version"] == "10"
-    assert await migration.get_db_version() == "10"
-    assert progress == [("完成 v10 数据库版本收束", 1, 1)]
+    assert result["to_version"] == DBMigration.CURRENT_VERSION
+    assert await migration.get_db_version() == DBMigration.CURRENT_VERSION
+    assert progress == [
+        ("完成 v10 数据库版本收束", 1, 1),
+        ("创建 Timeline 来源快照与导入导出结构", 1, 1),
+    ]
 
 
 @pytest.mark.asyncio
@@ -393,12 +397,12 @@ async def test_migrate_v9_19_to_v9_20_repairs_fragment_and_affect_identity(
         )
         first_fact = {
             "type": "weather",
-            "content": "当天遇到台风天气。",
+            "content": "当天遇到暴雨天气。",
             "source_fact_keys": ["timeline-1:key-fact-1"],
         }
         second_fact = {
             "type": "relationship",
-            "content": "示例甲表达了获得陪伴后的安心。",
+            "content": "示例甲表达了获得协助后的放心。",
             "source_fact_keys": ["timeline-1:key-fact-1"],
             "actor_refs": [
                 {
@@ -418,8 +422,8 @@ async def test_migrate_v9_19_to_v9_20_repairs_fragment_and_affect_identity(
             {
                 **common_columns,
                 "fragment_uid": "fragment-1",
-                "label": "台风天气",
-                "summary": "当天遇到台风天气。",
+                "label": "暴雨天气",
+                "summary": "当天遇到暴雨天气。",
                 "facts": json.dumps([first_fact], ensure_ascii=False),
                 "metadata": "{}",
                 "affect_events": "[]",
@@ -427,8 +431,8 @@ async def test_migrate_v9_19_to_v9_20_repairs_fragment_and_affect_identity(
             {
                 **common_columns,
                 "fragment_uid": "fragment-2",
-                "label": "安心陪伴",
-                "summary": "示例甲表达了获得陪伴后的安心。",
+                "label": "放心协助",
+                "summary": "示例甲表达了获得协助后的放心。",
                 "facts": json.dumps([second_fact], ensure_ascii=False),
                 "metadata": "{}",
                 "affect_events": json.dumps(
@@ -509,7 +513,7 @@ async def test_migrate_v9_19_to_v9_20_repairs_fragment_and_affect_identity(
         "logical_identity_disambiguation" in json.loads(row["metadata"])
         for row in fragments
     )
-    assert fragments[0]["summary"] == "当天遇到台风天气。"
+    assert fragments[0]["summary"] == "当天遇到暴雨天气。"
     repaired_fragment_event = json.loads(fragments[1]["affect_events"])[0]
     repaired_topic_event = json.loads(topic["affect_profile"])[0]
     assert repaired_fragment_event["actor_id"] == target_actor_id
@@ -1472,7 +1476,7 @@ def test_format_injection_private_chat_v1_legacy():
 
     assert result != ""
     assert "后端工程师" in result
-    assert "工作" in result  # topics
+    assert "虚构项目" in result  # topics
     assert "后端工程师，使用 Python 和 Go" in result  # key_facts
 
 

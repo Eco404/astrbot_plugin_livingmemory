@@ -65,9 +65,9 @@ def test_legacy_text_helpers_delegate_to_shared_contracts() -> None:
 
 
 def test_weighted_jaccard_compatibility_wrapper_uses_shared_contract() -> None:
-    left = {"工资", "salary", "2026"}
-    right = {"工资", "salary", "june"}
-    frequency = Counter({"工资": 2, "salary": 3, "2026": 8, "june": 1})
+    left = {"报销", "salary", "2026"}
+    right = {"报销", "salary", "june"}
+    frequency = Counter({"报销": 2, "salary": 3, "2026": 8, "june": 1})
 
     expected = weighted_jaccard_similarity(left, right, frequency, 10)
     actual = TopicBuildManager._weighted_jaccard(left, right, frequency, 10)
@@ -76,7 +76,7 @@ def test_weighted_jaccard_compatibility_wrapper_uses_shared_contract() -> None:
 
 
 def test_recall_feature_wrappers_share_one_contract() -> None:
-    value = "AstrBot memory 工资补发"
+    value = "AstrBot memory 报销补记"
     expected = retrieval_text_features(value)
 
     assert RecallPipeline._text_features(value) == expected

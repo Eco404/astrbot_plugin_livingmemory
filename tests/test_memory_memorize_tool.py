@@ -24,14 +24,14 @@ def memory_processor():
     processor = Mock()
     processor.build_memory_from_structured_data = Mock(
         return_value=(
-            "用户喜欢黑咖啡 | 不加糖",
+            "用户喜欢原味茶 | 不加糖",
             {
                 "topics": ["饮食偏好"],
                 "key_facts": ["不加糖"],
                 "sentiment": "neutral",
                 "interaction_type": "private_chat",
-                "canonical_summary": "用户喜欢黑咖啡 | 不加糖",
-                "persona_summary": "用户喜欢黑咖啡",
+                "canonical_summary": "用户喜欢原味茶 | 不加糖",
+                "persona_summary": "用户喜欢原味茶",
                 "summary_schema_version": "v2",
                 "summary_quality": "normal",
             },
@@ -69,7 +69,7 @@ async def test_memory_memorize_tool_writes_current_session_and_persona(
         get_persona.return_value = "persona_a"
         raw_result = await tool.call(
             _make_run_context(),
-            memory="用户喜欢黑咖啡",
+            memory="用户喜欢原味茶",
             topics=["饮食偏好"],
             key_facts=["不加糖"],
             importance=0.8,
@@ -102,8 +102,8 @@ async def test_memory_memorize_tool_uses_memory_processor_format(
         get_persona.return_value = "persona_a"
         await tool.call(
             _make_run_context(),
-            memory="用户喜欢黑咖啡",
-            topics=["饮食偏好", "", "咖啡"],
+            memory="用户喜欢原味茶",
+            topics=["饮食偏好", "", "茶饮"],
             key_facts=["不加糖"],
             sentiment="neutral",
             importance=2.0,
@@ -112,17 +112,17 @@ async def test_memory_memorize_tool_uses_memory_processor_format(
 
     memory_processor.build_memory_from_structured_data.assert_called_once_with(
         structured_data={
-            "summary": "用户喜欢黑咖啡",
-            "topics": ["饮食偏好", "咖啡"],
+            "summary": "用户喜欢原味茶",
+            "topics": ["饮食偏好", "茶饮"],
             "key_facts": ["不加糖"],
             "sentiment": "neutral",
             "importance": 2.0,
         },
         is_group_chat=False,
-        fallback_excerpt="用户喜欢黑咖啡",
+        fallback_excerpt="用户喜欢原味茶",
     )
     call_kwargs = memory_engine.add_memory.await_args.kwargs
-    assert call_kwargs["content"] == "用户喜欢黑咖啡 | 不加糖"
+    assert call_kwargs["content"] == "用户喜欢原味茶 | 不加糖"
     assert call_kwargs["importance"] == 0.8
     assert call_kwargs["metadata"]["source_window"] == {
         "session_id": "test:private:session-1",

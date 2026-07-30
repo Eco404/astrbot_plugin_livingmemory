@@ -279,7 +279,7 @@ export class IdentityPage {
         ${expanded ? `<div class="identity-fields">
           ${platformField}
           ${field("user_id", "identity.userId", profile.user_id, "identity.userIdPh")}
-          ${field("display_name", "identity.displayName", profile.display_name, "identity.displayNamePh")}
+          ${field("display_name", "identity.displayName", profile.display_name)}
           ${field("aliases", "identity.aliases", profile.aliases.join(", "), "identity.aliasesPh")}
           ${field("gender", "identity.gender", profile.gender, "identity.genderPh")}
           ${field("pronouns", "identity.pronouns", profile.pronouns.join(", "), "identity.pronounsPh")}

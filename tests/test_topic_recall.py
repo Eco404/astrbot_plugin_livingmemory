@@ -29,7 +29,7 @@ class _Embedding:
     async def get_embeddings(self, texts: list[str]):
         self.calls += 1
         vectors = {
-            "上海天气": [1.0, 0.0],
+            "示例市天气": [1.0, 0.0],
             "之前的旅行": [0.8, 0.2],
         }
         return [vectors.get(text, [0.0, 1.0]) for text in texts]
@@ -163,7 +163,7 @@ def _affect_event(category: str = "frustration") -> dict:
 
 @pytest.mark.asyncio
 async def test_topic_retriever_rejects_unsigned_legacy_vectors():
-    payload = _payload("weather", "上海雷雨", [1.0, 0.0])
+    payload = _payload("weather", "示例市雷雨", [1.0, 0.0])
     payload["topic"].embedding_signature = {}
     retriever = TopicRetriever(
         _Store([payload]),
@@ -172,7 +172,7 @@ async def test_topic_retriever_rejects_unsigned_legacy_vectors():
     )
 
     with pytest.raises(TopicEmbeddingCompatibilityError, match="重新向量化"):
-        await retriever.search("上海天气", memory_space_id="space-1", k=1)
+        await retriever.search("示例市天气", memory_space_id="space-1", k=1)
 
 
 @pytest.mark.asyncio
@@ -261,7 +261,7 @@ async def test_topic_retriever_rejects_model_or_dimension_changes(
     signature_update,
     expected_reason,
 ):
-    payload = _payload("weather", "上海雷雨", [1.0, 0.0])
+    payload = _payload("weather", "示例市雷雨", [1.0, 0.0])
     payload["topic"].embedding_signature.update(signature_update)
     retriever = TopicRetriever(
         _Store([payload]),
@@ -270,12 +270,12 @@ async def test_topic_retriever_rejects_model_or_dimension_changes(
     )
 
     with pytest.raises(TopicEmbeddingCompatibilityError, match=expected_reason):
-        await retriever.search("上海天气", memory_space_id="space-1", k=1)
+        await retriever.search("示例市天气", memory_space_id="space-1", k=1)
 
 
 @pytest.mark.asyncio
 async def test_topic_retriever_refreshes_reloaded_embedding_provider():
-    payload = _payload("weather", "上海雷雨", [1.0, 0.0])
+    payload = _payload("weather", "示例市雷雨", [1.0, 0.0])
     initial = _Embedding()
 
     class ReloadedEmbedding(_Embedding):
@@ -290,7 +290,7 @@ async def test_topic_retriever_refreshes_reloaded_embedding_provider():
     )
 
     with pytest.raises(TopicEmbeddingCompatibilityError, match="Provider 已变更"):
-        await retriever.search("上海天气", memory_space_id="space-1", k=1)
+        await retriever.search("示例市天气", memory_space_id="space-1", k=1)
     assert retriever.embedding_provider is reloaded
 
 
@@ -298,7 +298,7 @@ async def test_topic_retriever_refreshes_reloaded_embedding_provider():
 async def test_topic_retriever_uses_stored_vectors_without_llm():
     store = _Store(
         [
-            _payload("weather", "上海雷雨", [1.0, 0.0]),
+            _payload("weather", "示例市雷雨", [1.0, 0.0]),
             _payload("coding", "插件开发", [0.0, 1.0]),
         ]
     )
@@ -309,7 +309,7 @@ async def test_topic_retriever_uses_stored_vectors_without_llm():
     )
 
     results = await retriever.search(
-        "上海天气", memory_space_id="space-1", k=2
+        "示例市天气", memory_space_id="space-1", k=2
     )
 
     assert [item.topic_uid for item in results] == ["weather", "coding"]
@@ -319,7 +319,7 @@ async def test_topic_retriever_uses_stored_vectors_without_llm():
 
 @pytest.mark.asyncio
 async def test_topic_retriever_keeps_relevance_when_rerank_has_one_candidate():
-    store = _Store([_payload("weather", "上海雷雨", [1.0, 0.0])])
+    store = _Store([_payload("weather", "示例市雷雨", [1.0, 0.0])])
     reranker = _CountingReranker([0.0])
     retriever = TopicRetriever(
         store,
@@ -329,7 +329,7 @@ async def test_topic_retriever_keeps_relevance_when_rerank_has_one_candidate():
     )
 
     result = (
-        await retriever.search("上海天气", memory_space_id="space-1", k=1)
+        await retriever.search("示例市天气", memory_space_id="space-1", k=1)
     )[0]
 
     assert reranker.calls == 1
@@ -343,7 +343,7 @@ async def test_topic_retriever_keeps_relevance_when_rerank_has_one_candidate():
 
 @pytest.mark.asyncio
 async def test_topic_retriever_skips_rerank_when_weight_is_zero():
-    store = _Store([_payload("weather", "上海雷雨", [1.0, 0.0])])
+    store = _Store([_payload("weather", "示例市雷雨", [1.0, 0.0])])
     reranker = _CountingReranker([1.0])
     retriever = TopicRetriever(
         store,
@@ -353,7 +353,7 @@ async def test_topic_retriever_skips_rerank_when_weight_is_zero():
     )
 
     result = (
-        await retriever.search("上海天气", memory_space_id="space-1", k=1)
+        await retriever.search("示例市天气", memory_space_id="space-1", k=1)
     )[0]
 
     assert reranker.calls == 0
@@ -388,8 +388,8 @@ async def test_topic_pipeline_suppresses_high_context_coverage_without_tracking_
     ]
     store = _Store(
         [
-            _payload("covered", "上海天气", [1.0, 0.0], sources=covered_sources),
-            _payload("partial", "上海旅行", [0.9, 0.1], sources=partial_sources),
+            _payload("covered", "示例市天气", [1.0, 0.0], sources=covered_sources),
+            _payload("partial", "示例市旅行", [0.9, 0.1], sources=partial_sources),
         ]
     )
     retriever = TopicRetriever(
@@ -407,7 +407,7 @@ async def test_topic_pipeline_suppresses_high_context_coverage_without_tracking_
     )
 
     outcome = await pipeline.search(
-        branches=[RecallQueryBranch("current", "上海天气", 1.0, "user")],
+        branches=[RecallQueryBranch("current", "示例市天气", 1.0, "user")],
         memory_space_id="space-1",
         final_k=2,
         context_session_id="session-1",
@@ -450,12 +450,12 @@ async def test_topic_pipeline_default_floor_accepts_moderate_match_but_rejects_w
 @pytest.mark.asyncio
 async def test_recent_context_cannot_qualify_a_topic_missing_from_current_query():
     store = _Store([_payload("placeholder", "占位", [1.0])])
-    current_topic = _payload("current", "工资核对", [1.0])["topic"]
+    current_topic = _payload("current", "报销核对", [1.0])["topic"]
     context_only_topic = _payload("context-only", "酒店住宿", [1.0])["topic"]
     retriever = _MappedScoreRetriever(
         store,
         {
-            "这次工资对吗": [
+            "这次报销对吗": [
                 TopicRecallResult(current_topic, 0.40, 0.40, 0.40, 0.0)
             ],
             "上次的酒店": [
@@ -476,7 +476,7 @@ async def test_recent_context_cannot_qualify_a_topic_missing_from_current_query(
 
     outcome = await pipeline.search(
         branches=[
-            RecallQueryBranch("current", "这次工资对吗", 1.0, "user"),
+            RecallQueryBranch("current", "这次报销对吗", 1.0, "user"),
             RecallQueryBranch("recent_user", "上次的酒店", 0.45, "user"),
         ],
         memory_space_id="space-1",
@@ -539,17 +539,17 @@ async def test_recent_context_is_a_bounded_ranking_bonus_only():
 @pytest.mark.asyncio
 async def test_topic_pipeline_reranks_candidate_union_once_with_current_query():
     store = _Store([_payload("placeholder", "占位", [1.0])])
-    first = _payload("first", "工资计算", [1.0])["topic"]
-    second = _payload("second", "工资补发", [1.0])["topic"]
+    first = _payload("first", "报销计算", [1.0])["topic"]
+    second = _payload("second", "报销补记", [1.0])["topic"]
     reranker = _CountingReranker([0.1, 0.9])
     retriever = _MappedScoreRetriever(
         store,
         {
-            "工资": [
+            "报销": [
                 TopicRecallResult(first, 0.41, 0.41, 0.41, 0.0),
                 TopicRecallResult(second, 0.40, 0.40, 0.40, 0.0),
             ],
-            "上次补发": [
+            "上次补记": [
                 TopicRecallResult(second, 0.90, 0.90, 0.90, 0.0)
             ],
         },
@@ -567,8 +567,8 @@ async def test_topic_pipeline_reranks_candidate_union_once_with_current_query():
 
     outcome = await pipeline.search(
         branches=[
-            RecallQueryBranch("current", "工资", 1.0, "user"),
-            RecallQueryBranch("recent_user", "上次补发", 0.45, "user"),
+            RecallQueryBranch("current", "报销", 1.0, "user"),
+            RecallQueryBranch("recent_user", "上次补记", 0.45, "user"),
         ],
         memory_space_id="space-1",
         final_k=2,
@@ -582,8 +582,8 @@ async def test_topic_pipeline_reranks_candidate_union_once_with_current_query():
 @pytest.mark.asyncio
 async def test_low_confidence_rerank_cannot_overturn_base_order():
     store = _Store([_payload("placeholder", "占位", [1.0])])
-    first = _payload("first", "工资补发", [1.0])["topic"]
-    second = _payload("second", "持续陪伴", [1.0])["topic"]
+    first = _payload("first", "报销补记", [1.0])["topic"]
+    second = _payload("second", "持续协助", [1.0])["topic"]
     reranker = _CountingReranker([0.005, 0.006])
     retriever = _FixedScoreRetriever(
         store,
@@ -606,7 +606,7 @@ async def test_low_confidence_rerank_cannot_overturn_base_order():
     )
 
     outcome = await pipeline.search(
-        branches=[RecallQueryBranch("current", "之前工资怎么样", 1.0, "user")],
+        branches=[RecallQueryBranch("current", "之前报销怎么样", 1.0, "user")],
         memory_space_id="space-1",
         final_k=2,
     )
@@ -704,13 +704,13 @@ async def test_topic_pipeline_actor_match_only_adds_configured_boost():
 
 @pytest.mark.asyncio
 async def test_topic_fragment_supplements_only_serve_role_anchored_rows():
-    topic = _payload("weather", "上海雷雨", [1.0, 0.0])["topic"]
+    topic = _payload("weather", "示例市雷雨", [1.0, 0.0])["topic"]
     safe = TopicFragmentDraft(
         fragment_uid="safe-fragment",
         run_uid="run-1",
         candidate_group_uid="group-1",
         memory_space_id="space-1",
-        label="上海雷雨出行",
+        label="示例市雷雨出行",
         summary="我提醒示例甲携带雨具",
         timeline_uids=["timeline-1"],
         source_revisions={"timeline-1": 1},
@@ -734,7 +734,7 @@ async def test_topic_fragment_supplements_only_serve_role_anchored_rows():
         metadata={},
     )
     store = _Store(
-        [_payload("weather", "上海雷雨", [1.0, 0.0])],
+        [_payload("weather", "示例市雷雨", [1.0, 0.0])],
         fragments=[
             {"topic_uid": "weather", "fragment": safe, "sources": []},
             {"topic_uid": "weather", "fragment": legacy, "sources": []},
@@ -756,7 +756,7 @@ async def test_topic_fragment_supplements_only_serve_role_anchored_rows():
     parent = TopicRecallResult(topic, 0.9, 0.9, 0.9, 0.0)
 
     outcome = await pipeline.search_fragment_supplements(
-        branches=[RecallQueryBranch("current", "上海天气", 1.0, "user")],
+        branches=[RecallQueryBranch("current", "示例市天气", 1.0, "user")],
         topic_results=[parent],
         limit=2,
     )
@@ -768,7 +768,7 @@ async def test_topic_fragment_supplements_only_serve_role_anchored_rows():
 
 @pytest.mark.asyncio
 async def test_fragment_candidates_rerank_once_without_changing_current_relevance():
-    topic = _payload("weather", "上海雷雨", [1.0, 0.0])["topic"]
+    topic = _payload("weather", "示例市雷雨", [1.0, 0.0])["topic"]
     fragments = []
     for index, embedding in enumerate(([1.0, 0.0], [0.9, 0.1]), 1):
         fragment = TopicFragmentDraft(
@@ -777,7 +777,7 @@ async def test_fragment_candidates_rerank_once_without_changing_current_relevanc
             candidate_group_uid="group-1",
             memory_space_id="space-1",
             label=f"雷雨片段 {index}",
-            summary=f"上海雷雨出行提醒 {index}",
+            summary=f"示例市雷雨出行提醒 {index}",
             timeline_uids=[f"timeline-{index}"],
             source_revisions={f"timeline-{index}": 1},
             facts=[{"content": "携带雨具"}],
@@ -789,7 +789,7 @@ async def test_fragment_candidates_rerank_once_without_changing_current_relevanc
             {"topic_uid": "weather", "fragment": fragment, "sources": []}
         )
     reranker = _CountingReranker([0.0, 1.0])
-    store = _Store([_payload("weather", "上海雷雨", [1.0, 0.0])], fragments)
+    store = _Store([_payload("weather", "示例市雷雨", [1.0, 0.0])], fragments)
     retriever = TopicRetriever(
         store,
         embedding_provider=_Embedding(),
@@ -816,7 +816,7 @@ async def test_fragment_candidates_rerank_once_without_changing_current_relevanc
 
     outcome = await pipeline.search_fragment_supplements(
         branches=[
-            RecallQueryBranch("current", "上海天气", 1.0, "user"),
+            RecallQueryBranch("current", "示例市天气", 1.0, "user"),
             RecallQueryBranch("recent_user", "之前的旅行", 0.45, "user"),
         ],
         topic_results=[parent],
@@ -833,27 +833,27 @@ async def test_fragment_candidates_rerank_once_without_changing_current_relevanc
 
 @pytest.mark.asyncio
 async def test_fragment_reuses_query_vectors_and_keeps_facts_when_body_duplicates_parent():
-    payload = _payload("wage", "工资补发", [1.0, 0.0])
+    payload = _payload("wage", "报销补记", [1.0, 0.0])
     topic = payload["topic"]
-    topic.summary = "工资少发六百元，计划下月补回。"
+    topic.summary = "报销少记六百元，计划下月补回。"
     payload["atoms"] = [
-        {"content": "工资少发六百元", "importance": 0.8},
-        {"content": "计划在八月补发", "importance": 0.8},
+        {"content": "报销少记六百元", "importance": 0.8},
+        {"content": "计划在八月补记", "importance": 0.8},
     ]
     fragment = TopicFragmentDraft(
         fragment_uid="wage-fragment",
         run_uid="run-1",
         candidate_group_uid="group-1",
         memory_space_id="space-1",
-        label="工资补发",
-        summary="工资少发六百元，计划下月补回。",
+        label="报销补记",
+        summary="报销少记六百元，计划下月补回。",
         timeline_uids=["timeline-1"],
         source_revisions={"timeline-1": 1},
         facts=[
-            {"content": "工资少发六百元"},
+            {"content": "报销少记六百元"},
             {"content": "六月实际工作二十天"},
             {"content": "合同日薪为三百元"},
-            {"content": "计划在八月补发"},
+            {"content": "计划在八月补记"},
         ],
         embedding=[1.0, 0.0],
         embedding_signature=_fragment_signature([1.0, 0.0]),
@@ -879,7 +879,7 @@ async def test_fragment_reuses_query_vectors_and_keeps_facts_when_body_duplicate
             "fragment_relative_floor": 0.0,
         },
     )
-    branches = [RecallQueryBranch("current", "上海天气", 1.0, "user")]
+    branches = [RecallQueryBranch("current", "示例市天气", 1.0, "user")]
     topic_outcome = await pipeline.search(
         branches=branches,
         memory_space_id="space-1",
@@ -903,10 +903,10 @@ async def test_fragment_reuses_query_vectors_and_keeps_facts_when_body_duplicate
         "合同日薪为三百元",
     ]
     assert result.content.startswith("Topic 片段补充事实: 六月实际工作二十天")
-    assert "工资少发六百元" not in result.content
+    assert "报销少记六百元" not in result.content
     assert "六月实际工作二十天" in result.content
     assert "合同日薪为三百元" in result.content
-    assert "计划在八月补发" not in result.content
+    assert "计划在八月补记" not in result.content
     assert "计划下月补回" not in result.content
     assert result.filter_reason is None
     assert result.to_dict()["fact_count"] == 2
@@ -915,16 +915,16 @@ async def test_fragment_reuses_query_vectors_and_keeps_facts_when_body_duplicate
 
 @pytest.mark.asyncio
 async def test_fragment_skips_parent_duplicate_body_only_when_it_has_no_facts():
-    payload = _payload("wage", "工资补发", [1.0, 0.0])
+    payload = _payload("wage", "报销补记", [1.0, 0.0])
     topic = payload["topic"]
-    topic.summary = "工资少发六百元，计划下月补回。"
+    topic.summary = "报销少记六百元，计划下月补回。"
     fragment = TopicFragmentDraft(
         fragment_uid="wage-fragment",
         run_uid="run-1",
         candidate_group_uid="group-1",
         memory_space_id="space-1",
-        label="工资补发",
-        summary="工资少发六百元，计划下月补回。",
+        label="报销补记",
+        summary="报销少记六百元，计划下月补回。",
         timeline_uids=["timeline-1"],
         source_revisions={"timeline-1": 1},
         facts=[],
@@ -950,7 +950,7 @@ async def test_fragment_skips_parent_duplicate_body_only_when_it_has_no_facts():
             "fragment_relative_floor": 0.0,
         },
     )
-    branches = [RecallQueryBranch("current", "工资", 1.0, "user")]
+    branches = [RecallQueryBranch("current", "报销", 1.0, "user")]
     topic_outcome = await pipeline.search(
         branches=branches,
         memory_space_id="space-1",
@@ -973,24 +973,24 @@ async def test_fragment_skips_parent_duplicate_body_only_when_it_has_no_facts():
 
 @pytest.mark.asyncio
 async def test_fragment_skips_duplicate_parent_body_and_duplicate_facts():
-    payload = _payload("wage", "工资补发", [1.0, 0.0])
-    payload["topic"].summary = "工资少发六百元，计划在八月补发。"
+    payload = _payload("wage", "报销补记", [1.0, 0.0])
+    payload["topic"].summary = "报销少记六百元，计划在八月补记。"
     payload["atoms"] = [
-        {"content": "工资少发六百元", "importance": 0.8},
-        {"content": "计划在八月补发", "importance": 0.8},
+        {"content": "报销少记六百元", "importance": 0.8},
+        {"content": "计划在八月补记", "importance": 0.8},
     ]
     fragment = TopicFragmentDraft(
         fragment_uid="wage-fragment",
         run_uid="run-1",
         candidate_group_uid="group-1",
         memory_space_id="space-1",
-        label="工资补发",
-        summary="工资少发六百元，计划在八月补发。",
+        label="报销补记",
+        summary="报销少记六百元，计划在八月补记。",
         timeline_uids=["timeline-1"],
         source_revisions={"timeline-1": 1},
         facts=[
-            {"content": "工资少发六百元"},
-            {"content": "计划在八月补发"},
+            {"content": "报销少记六百元"},
+            {"content": "计划在八月补记"},
         ],
         embedding=[1.0, 0.0],
         embedding_signature=_fragment_signature([1.0, 0.0]),
@@ -1014,7 +1014,7 @@ async def test_fragment_skips_duplicate_parent_body_and_duplicate_facts():
             "fragment_relative_floor": 0.0,
         },
     )
-    branches = [RecallQueryBranch("current", "工资", 1.0, "user")]
+    branches = [RecallQueryBranch("current", "报销", 1.0, "user")]
     topic_outcome = await pipeline.search(
         branches=branches,
         memory_space_id="space-1",
@@ -1036,11 +1036,11 @@ async def test_fragment_skips_duplicate_parent_body_and_duplicate_facts():
 
 @pytest.mark.asyncio
 async def test_fragment_fact_provenance_filters_paraphrased_parent_atom():
-    payload = _payload("topic-1", "BW 购票", [1.0, 0.0])
-    payload["topic"].summary = "示例甲曾计划参加 BW，但错过前两轮开票。"
+    payload = _payload("topic-1", "Expo 购票", [1.0, 0.0])
+    payload["topic"].summary = "示例甲曾计划参加 Expo，但错过前两轮开票。"
     payload["atoms"] = [
         {
-            "content": "示例甲曾计划参加 BW，但错过前两轮开票。",
+            "content": "示例甲曾计划参加 Expo，但错过前两轮开票。",
             "importance": 0.8,
             "metadata": {"source_fact_uids": ["fragment-fact-1"]},
         }
@@ -1050,7 +1050,7 @@ async def test_fragment_fact_provenance_filters_paraphrased_parent_atom():
         run_uid="run-1",
         candidate_group_uid="group-1",
         memory_space_id="space-1",
-        label="BW 购票计划",
+        label="Expo 购票计划",
         summary="示例甲错过了前两轮开票。",
         timeline_uids=["timeline-1"],
         source_revisions={"timeline-1": 1},
@@ -1082,7 +1082,7 @@ async def test_fragment_fact_provenance_filters_paraphrased_parent_atom():
             "fragment_relative_floor": 0.0,
         },
     )
-    branches = [RecallQueryBranch("current", "BW", 1.0, "user")]
+    branches = [RecallQueryBranch("current", "Expo", 1.0, "user")]
     topic_outcome = await pipeline.search(
         branches=branches,
         memory_space_id="space-1",

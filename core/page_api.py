@@ -23,8 +23,8 @@ from .page_api_modules import (
     SessionHandler,
     SettingsHandler,
     StatsHandler,
-    TopicHandler,
     TimelineHandler,
+    TopicHandler,
 )
 
 PLUGIN_NAME = "astrbot_plugin_livingmemory"
@@ -170,6 +170,18 @@ class PluginPageApi:
             self.batch_delete_memories,
             ["POST"],
             "LivingMemory Page batch delete memories",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/memories/export",
+            self.export_memories,
+            ["POST"],
+            "LivingMemory Page export memories",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/memories/import",
+            self.import_memories,
+            ["POST"],
+            "LivingMemory Page import memories",
         )
         register(
             f"{PAGE_API_PREFIX}/memories/batch-update",
@@ -653,6 +665,22 @@ class PluginPageApi:
         if error:
             return error
         return await self.memory_handler.batch_delete_memories(ready["memory_engine"])
+
+    async def export_memories(self):
+        """导出全部或已选 Timeline 记忆。"""
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.memory_handler.export_memories(ready["memory_engine"])
+
+    async def import_memories(self):
+        """预览或导入 Timeline 记忆。"""
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        return await self.memory_handler.import_memories(
+            ready["memory_engine"], ready["memory_processor"]
+        )
 
     async def batch_update_memories(self):
         """批量更新记忆字段"""

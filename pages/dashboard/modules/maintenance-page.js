@@ -29,6 +29,7 @@ export class MaintenancePage {
       button.addEventListener("click", () => this.selectTab(button.dataset.maintenanceTab));
     });
     document.getElementById("maintenance-topic-space")?.addEventListener("change", () => this.changeTopicSpace());
+    document.getElementById("timeline-rebuild-space")?.addEventListener("change", () => this.changeTimelineSpace());
     document.getElementById("maintenance-open-topic")?.addEventListener("click", event => this.openTopicMaintenance(event.currentTarget));
     document.getElementById("maintenance-open-archived-topics")?.addEventListener("click", () => this.openArchivedTopics());
     document.getElementById("maintenance-open-reviews")?.addEventListener("click", () => this.openReviews());
@@ -113,6 +114,8 @@ export class MaintenancePage {
       }
     });
     window.addEventListener("livingmemory:timeline-staged-updated", () => this.loadTimelineStagedCount());
+    this.renderTopicMaintenanceState();
+    this.renderTimelineMaintenanceState();
   }
 
   async activate() {
@@ -183,6 +186,11 @@ export class MaintenancePage {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   }
 
+  formatDatabaseVersion(value) {
+    const version = String(value || "").trim().replace(/^v+/i, "");
+    return version ? `v${version}` : "";
+  }
+
   renderDatabaseHealth() {
     const data = this.databaseHealth;
     const summary = document.getElementById("database-health-summary");
@@ -199,8 +207,9 @@ export class MaintenancePage {
 
     databases.innerHTML = (data.databases || []).map(database => {
       const ok = database.integrity === "ok" && !(database.foreign_key_violations || []).length;
+      const version = this.formatDatabaseVersion(database.schema_version);
       return `<div class="database-health-database">
-        <span><strong>${esc(database.label || database.filename)}</strong><small>${esc(database.filename || "--")} · ${esc(this.formatDatabaseBytes(database.size_bytes))}${database.schema_version ? ` · v${esc(database.schema_version)}` : ""}</small></span>
+        <span><strong>${esc(database.label || database.filename)}</strong><small>${esc(database.filename || "--")} · ${esc(this.formatDatabaseBytes(database.size_bytes))}${version ? ` · ${esc(version)}` : ""}</small></span>
         <span class="status-badge ${ok ? "status-completed" : "status-failed"}">${esc(ok ? window.t("maintenance.databaseIntegrityOk") : window.t("maintenance.databaseIntegrityIssue"))}</span>
         <small>${esc(window.t("maintenance.databaseForeignKeys", Number((database.foreign_key_violations || []).length)))}</small>
       </div>`;
@@ -590,12 +599,42 @@ export class MaintenancePage {
         : source.value;
     });
     this.renderTopicMaintenanceState();
+    this.renderTimelineMaintenanceState();
   }
 
   renderTopicMaintenanceState() {
-    const selected = this.reviewSpace();
-    document.getElementById("maintenance-topic-empty")?.classList.toggle("hidden", Boolean(selected));
-    document.getElementById("maintenance-topic-actions")?.classList.toggle("hidden", !selected);
+    this.setSpaceDependentState("maintenance-topic-actions", Boolean(this.reviewSpace()));
+  }
+
+  renderTimelineMaintenanceState() {
+    const selected = Boolean(document.getElementById("timeline-rebuild-space")?.value);
+    this.setSpaceDependentState("maintenance-timeline-actions", selected);
+  }
+
+  setSpaceDependentState(id, enabled) {
+    const container = document.getElementById(id);
+    if (!container) return;
+    container.classList.toggle("is-space-unselected", !enabled);
+    container.setAttribute("aria-disabled", enabled ? "false" : "true");
+    container.querySelectorAll("button, select, input").forEach(control => {
+      if (!enabled) {
+        if (!control.disabled) control.dataset.disabledForMissingSpace = "true";
+        control.disabled = true;
+      } else if (control.dataset.disabledForMissingSpace === "true") {
+        control.disabled = false;
+        delete control.dataset.disabledForMissingSpace;
+      }
+    });
+  }
+
+  changeTimelineSpace() {
+    this.timelineRebuildItems = [];
+    const summary = document.getElementById("timeline-rebuild-summary");
+    if (summary) summary.textContent = "";
+    document.getElementById("timeline-rebuild-options")?.classList.add("hidden");
+    const list = document.getElementById("timeline-rebuild-list");
+    if (list) list.innerHTML = `<div class="identity-state">${esc(window.t("maintenance.rebuildNotChecked"))}</div>`;
+    this.renderTimelineMaintenanceState();
   }
 
   async changeTopicSpace() {

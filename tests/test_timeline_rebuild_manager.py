@@ -9,6 +9,9 @@ from astrbot_plugin_livingmemory.core.managers.timeline_rebuild_manager import (
     TimelineRebuildManager,
 )
 from astrbot_plugin_livingmemory.core.models.conversation_models import Message
+from astrbot_plugin_livingmemory.storage.memory_identity_store import (
+    MemoryIdentityStore,
+)
 
 
 class FakeConversationManager:
@@ -125,6 +128,15 @@ async def create_source_db(path, *, complete=True, linked=True):
             CREATE TABLE topic_timeline_links (
                 topic_uid TEXT, timeline_uid TEXT, status TEXT
             );
+            CREATE TABLE memory_source_snapshots (
+                memory_uid TEXT PRIMARY KEY,
+                source_revision INTEGER NOT NULL DEFAULT 1,
+                source_json TEXT NOT NULL,
+                message_count INTEGER NOT NULL,
+                retention_reason TEXT NOT NULL DEFAULT 'importance_threshold',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
             """
         )
         await db.execute(
@@ -198,6 +210,30 @@ def source_memory():
             "source_window": source,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_preview_uses_retained_snapshot_when_raw_messages_are_missing(tmp_path):
+    db_path = tmp_path / "memory.db"
+    await create_source_db(db_path)
+    engine = FakeMemoryEngine({1: source_memory()})
+    engine.memory_identity_store = MemoryIdentityStore(str(db_path))
+    await engine.memory_identity_store.save_source_snapshot(
+        "memory-1",
+        [item.to_dict() for item in source_messages()],
+        source_revision=1,
+        retention_reason="importance_threshold",
+    )
+    manager = TimelineRebuildManager(
+        str(db_path), FakeConversationManager([]), engine, FakeProcessor()
+    )
+    await manager.initialize()
+
+    preview = await manager.preview([1])
+
+    assert preview["reconstructable_count"] == 1
+    assert preview["items"][0]["source_snapshot"]["source_kind"] == "retained_snapshot"
+    assert preview["items"][0]["source_warning"]
 
 
 def second_source_memory():

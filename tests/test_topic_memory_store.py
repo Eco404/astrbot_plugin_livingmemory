@@ -253,9 +253,9 @@ async def test_affect_profile_and_fragment_events_round_trip(tmp_path: Path):
         "event_uid": "affect-event-1",
         "actor_id": "qq:human:u1",
         "display_name_snapshot": "示例甲",
-        "emotion": "感到安心",
-        "description": "因有人陪伴而感到安心",
-        "trigger": "获得陪伴",
+        "emotion": "感到放心",
+        "description": "因有人协助而感到放心",
+        "trigger": "获得协助",
         "target": "睡眠",
         "evidence_type": "explicit",
         "temporal_status": "historical",
@@ -276,8 +276,8 @@ async def test_affect_profile_and_fragment_events_round_trip(tmp_path: Path):
     topic = TopicMemory(
         topic_uid="topic-1",
         memory_space_id=space_id,
-        title="睡眠陪伴",
-        summary="示例甲因获得陪伴而安心。",
+        title="睡眠协助",
+        summary="示例甲因获得协助而放心。",
         affect_profile=[{**event, "fragment_uid": "fragment-1"}],
         affective_salience=0.736,
         affect_signature=signature,
@@ -288,11 +288,11 @@ async def test_affect_profile_and_fragment_events_round_trip(tmp_path: Path):
         run_uid="run-1",
         candidate_group_uid="group-1",
         memory_space_id=space_id,
-        label="获得陪伴后的安心",
-        summary="示例甲获得陪伴后感到安心。",
+        label="获得协助后的放心",
+        summary="示例甲获得协助后感到放心。",
         timeline_uids=["timeline-1"],
         source_revisions={"timeline-1": 1},
-        facts=[{"content": "示例甲获得陪伴后感到安心。"}],
+        facts=[{"content": "示例甲获得协助后感到放心。"}],
         affect_events=[event],
         affect_signature=signature,
     )
@@ -592,7 +592,7 @@ async def test_review_publication_is_atomic_and_rejects_stale_candidate_revision
     topic = TopicMemory(
         topic_uid="topic-1",
         memory_space_id=space_id,
-        title="工资",
+        title="报销",
         summary="旧摘要",
     )
     link = TopicTimelineLink(
@@ -611,7 +611,7 @@ async def test_review_publication_is_atomic_and_rejects_stale_candidate_revision
         review_type="ambiguous_topic_match",
         timeline_uids=["timeline-1"],
         topic_uids=[topic.topic_uid],
-        details={"proposed_title": "工资补发"},
+        details={"proposed_title": "报销补记"},
     )
     run = await store.create_maintenance_run(
         TopicMaintenanceRun(
@@ -625,7 +625,7 @@ async def test_review_publication_is_atomic_and_rejects_stale_candidate_revision
         mode=TopicMaintenanceMode.REPAIR,
         snapshots=[
             {
-                "topic": replace(saved, title="工资补发", summary="新摘要"),
+                "topic": replace(saved, title="报销补记", summary="新摘要"),
                 "atoms": [],
                 "links": [link],
                 "atom_sources": [],
@@ -707,14 +707,14 @@ async def test_actor_filter_and_fact_groups_expose_concrete_provenance(tmp_path:
     topic = TopicMemory(
         topic_uid="topic-actor",
         memory_space_id=space_id,
-        title="工资补发",
-        summary="示例甲的工资补发记录",
+        title="报销补记",
+        summary="示例甲的报销补记记录",
     )
     atom = TopicMemoryAtom(
         atom_uid="atom-salary",
         topic_uid=topic.topic_uid,
         atom_type="factual",
-        content="示例甲的六月工资少发了 600 元",
+        content="示例甲的项目报销少记了 100 元",
     )
     link = TopicTimelineLink(
         topic_uid=topic.topic_uid,
@@ -747,8 +747,8 @@ async def test_actor_filter_and_fact_groups_expose_concrete_provenance(tmp_path:
         run_uid="run-actor",
         candidate_group_uid="group-actor",
         memory_space_id=space_id,
-        label="工资补发",
-        summary="示例甲的六月工资补发片段",
+        label="报销补记",
+        summary="示例甲的六月报销补记片段",
         timeline_uids=["timeline-1"],
         source_revisions={"timeline-1": 1},
         facts=[{"content": atom.content}],
@@ -815,7 +815,7 @@ async def test_actor_filter_and_fact_groups_expose_concrete_provenance(tmp_path:
     assert group["facts"] == [
         {
             "atom_uid": "atom-salary",
-            "content": "示例甲的六月工资少发了 600 元",
+            "content": "示例甲的项目报销少记了 100 元",
             "atom_type": "factual",
             "fragment_uids": ["fragment-1"],
             "timeline_uids": ["timeline-1"],

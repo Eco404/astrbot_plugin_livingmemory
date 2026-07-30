@@ -425,7 +425,7 @@ async def test_proactive_bot_self_action_is_not_transferred_to_private_peer():
             id=1,
             session_id="s1",
             role="user",
-            content="刚理完头发，准备找点吃的",
+            content="刚完成资料整理，准备再核对一遍",
             sender_id="u1",
             sender_name="示例甲",
             platform="test",
@@ -434,7 +434,7 @@ async def test_proactive_bot_self_action_is_not_transferred_to_private_peer():
             id=2,
             session_id="s1",
             role="assistant",
-            content="脑子总算回来一点了，想开电脑写一小段，把散乱念头理顺。你也别忘了晚饭。",
+            content="我准备整理一份测试说明，把待办事项理顺。你也别忘了提交结果。",
             sender_id="bot",
             sender_name="测试助手",
             platform="test",
@@ -444,7 +444,7 @@ async def test_proactive_bot_self_action_is_not_transferred_to_private_peer():
             id=3,
             session_id="s1",
             role="user",
-            content="嗯，准备附近转一转",
+            content="嗯，我会检查遗漏项",
             sender_id="u1",
             sender_name="示例甲",
             platform="test",
@@ -453,31 +453,31 @@ async def test_proactive_bot_self_action_is_not_transferred_to_private_peer():
     llm = _SequenceLLMProvider(
         """{
             "memory_decision":"store","no_memory_reason":"none",
-            "summary":"示例甲打算开电脑写一小段，我提醒他吃晚饭",
-            "topics":["晚间安排"],
-            "key_facts":["示例甲打算开电脑写一小段"],
+            "summary":"示例甲准备整理测试说明，我提醒他提交结果",
+            "topics":["测试安排"],
+            "key_facts":["示例甲准备整理测试说明"],
             "key_fact_evidence":[{"fact_index":0,"message_refs":["M2"]}],
             "key_fact_attributions":[{"fact_index":0,"subject_refs":[{"actor_ref":"A2","display_name_snapshot":"示例甲"}],"claim_type":"speaker_self","confidence":0.9}],
             "key_fact_profiles":[{"fact_index":0,"fact_type":"plan","durability":"medium","selection_reason":"future_utility"}],
             "message_coverage":[
-                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"晚间背景"},
+                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"测试背景"},
                 {"message_ref":"M2","disposition":"fact","fact_indexes":[0],"reason_code":"durable_fact","reason":"计划来源"},
-                {"message_ref":"M3","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"后续安排"}
+                {"message_ref":"M3","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"后续检查"}
             ],
             "sentiment":"positive","importance":0.5
         }""",
         """{
             "memory_decision":"store","no_memory_reason":"none",
-            "summary":"我打算开电脑写一小段整理念头，也提醒示例甲别忘了吃晚饭",
-            "topics":["晚间安排"],
-            "key_facts":["我打算开电脑写一小段整理念头"],
+            "summary":"我准备整理测试说明，也提醒示例甲别忘了提交结果",
+            "topics":["测试安排"],
+            "key_facts":["我准备整理测试说明"],
             "key_fact_evidence":[{"fact_index":0,"message_refs":["M2"]}],
             "key_fact_attributions":[{"fact_index":0,"subject_refs":[{"actor_ref":"A1","display_name_snapshot":"测试助手"}],"claim_type":"speaker_self","confidence":1.0}],
             "key_fact_profiles":[{"fact_index":0,"fact_type":"plan","durability":"medium","selection_reason":"future_utility"}],
             "message_coverage":[
-                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"晚间背景"},
+                {"message_ref":"M1","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"测试背景"},
                 {"message_ref":"M2","disposition":"fact","fact_indexes":[0],"reason_code":"durable_fact","reason":"Bot自述计划"},
-                {"message_ref":"M3","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"后续安排"}
+                {"message_ref":"M3","disposition":"context","fact_indexes":[],"reason_code":"supporting_context","reason":"后续检查"}
             ],
             "sentiment":"positive","importance":0.5
         }""",
@@ -511,9 +511,9 @@ def test_source_grounding_accepts_durable_bot_relationship_interaction():
         {
             "memory_decision": "store",
             "no_memory_reason": "none",
-            "summary": "我主动提醒示例甲按时吃晚饭，并继续陪他讨论晚间安排",
-            "topics": ["晚间陪伴"],
-            "key_facts": ["我主动提醒示例甲按时吃晚饭"],
+            "summary": "我主动提醒示例甲按时提交结果，并继续协助他讨论测试安排",
+            "topics": ["测试协作"],
+            "key_facts": ["我主动提醒示例甲按时提交结果"],
             "key_fact_evidence": [
                 {"fact_index": 0, "message_refs": ["M2"]}
             ],

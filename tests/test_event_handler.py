@@ -2,14 +2,14 @@
 Tests for EventHandler core behaviors.
 """
 
+import time
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from astrbot.api.platform import MessageType
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.event_handler import EventHandler
 from astrbot_plugin_livingmemory.core.models.conversation_models import Message
-
-from astrbot.api.platform import MessageType
 
 
 @pytest.fixture
@@ -894,7 +894,7 @@ async def test_remove_fake_tool_call_preserves_real_tool_calls(handler):
                     "type": "function",
                     "function": {
                         "name": "get_weather",
-                        "arguments": '{"city": "上海"}',
+                        "arguments": '{"city": "示例市"}',
                     },
                 }
             ],
@@ -986,21 +986,21 @@ async def test_topic_access_is_recorded_only_after_successful_injection(
     handler, memory_engine
 ):
     event = _make_event(group=False)
-    req = _make_req("工资怎么核对")
+    req = _make_req("报销怎么核对")
     topic = Mock(
-        title="工资核对",
-        summary="核对工资天数和补发记录",
+        title="报销核对",
+        summary="核对报销天数和补记记录",
         importance=0.8,
         confidence=0.9,
         status=Mock(value="active"),
-        metadata={"keywords": ["工资"]},
+        metadata={"keywords": ["报销"]},
         started_at=None,
         ended_at=None,
     )
     topic_result = Mock(
         topic_uid="topic-wage",
         topic=topic,
-        content="工资核对\n核对工资天数和补发记录",
+        content="报销核对\n核对报销天数和补记记录",
         final_score=0.8,
         atoms=[],
         sources=[],
@@ -1604,11 +1604,11 @@ async def test_media_only_private_message_is_preserved_as_raw_evidence(
     )
     event = _make_event(group=False)
     event.get_message_str.return_value = ""
-    event.get_messages.return_value = [Image()]
+    event.get_messages.return_value = [Image(file="test-image.png")]
     req = _make_req("")
     # A caption may be added by AstrBot after the raw message was received.
     req.extra_user_content_parts = [
-        Mock(text="<image_caption>一张工资单截图</image_caption>")
+        Mock(text="<image_caption>一张报销单截图</image_caption>")
     ]
 
     await handler.handle_memory_recall(event, req)
@@ -1616,7 +1616,7 @@ async def test_media_only_private_message_is_preserved_as_raw_evidence(
     conversation_manager.add_message_from_event.assert_awaited_once_with(
         event=event,
         role="user",
-        content="[图片: 一张工资单截图]",
+        content="[图片: 一张报销单截图]",
         event_source="incoming_private_message",
     )
 
@@ -1722,11 +1722,16 @@ async def test_context_expansion_enriches_query(
     cm_mock.update_session_metadata = AsyncMock()
     cm_mock.invalidate_cache = AsyncMock()
     # get_context 按时间升序返回；最后一条是刚存入的当前消息。
+    now = time.time()
     cm_mock.get_context = AsyncMock(
         return_value=[
-            {"role": "user", "content": "用户之前说的事情"},
-            {"role": "assistant", "content": "Bot 的上一条回复"},
-            {"role": "user", "content": "当前用户消息"},
+            {"role": "user", "content": "用户之前说的事情", "timestamp": now - 120},
+            {
+                "role": "assistant",
+                "content": "Bot 的上一条回复",
+                "timestamp": now - 60,
+            },
+            {"role": "user", "content": "当前用户消息", "timestamp": now},
         ]
     )
 

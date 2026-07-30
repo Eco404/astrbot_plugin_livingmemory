@@ -13,13 +13,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
 import pytest
+from astrbot_plugin_livingmemory.core.models.identity_profile import (
+    SupplementalIdentityStore,
+)
 from astrbot_plugin_livingmemory.core.page_api import (
     PAGE_API_PREFIX,
     PLUGIN_NAME,
     PluginPageApi,
-)
-from astrbot_plugin_livingmemory.core.models.identity_profile import (
-    SupplementalIdentityStore,
 )
 
 # ---------------------------------------------------------------------------
@@ -72,6 +72,25 @@ class FakeMemoryEngine:
 
     async def batch_delete_memories(self, memory_ids: list[int]):
         return len(memory_ids)
+
+    async def get_memory_transfer_records(self, memory_ids=None):
+        records = [
+            {
+                "original_id": 1,
+                "content": "portable memory",
+                "importance": 0.7,
+                "session_id": "s1",
+                "persona_id": "p1",
+                "metadata": {"topics": ["portable"]},
+                "source_messages": [],
+            }
+        ]
+        if memory_ids is None or 1 in memory_ids:
+            return records
+        return []
+
+    async def get_memory_import_keys(self):
+        return {("existing memory", "s1", "p1")}
 
     async def close(self):
         pass
@@ -1297,14 +1316,14 @@ class TestStructuredUpdateWorkflow:
                 "scope": "session",
                 "value": {
                     "summary": "edited",
-                    "key_facts": ["用户住在上海"],
+                    "key_facts": ["用户住在示例市"],
                 },
                 "field_changes": [
                     {
                         "field": "key_facts",
                         "operation": "replace",
                         "before": "用户住在北京",
-                        "after": "用户住在上海",
+                        "after": "用户住在示例市",
                     }
                 ],
             }
@@ -1324,7 +1343,7 @@ class TestStructuredUpdateWorkflow:
         assert [item["memory_id"] for item in result["data"]["items"]] == [2]
         assert result["data"]["items"][0]["modification_type"] == "exact_replace"
         assert result["data"]["items"][0]["proposed_value"]["key_facts"] == [
-            "用户住在上海"
+            "用户住在示例市"
         ]
         assert result["data"]["plan_id"]
 
@@ -1395,7 +1414,7 @@ class TestStructuredUpdateWorkflow:
                     "field": "key_facts",
                     "operation": "replace",
                     "before": "用户目前居住在北京",
-                    "after": "用户目前居住在上海",
+                    "after": "用户目前居住在示例市",
                 }
             ],
         )
@@ -1403,7 +1422,7 @@ class TestStructuredUpdateWorkflow:
         assert planned is not None
         assert planned["modification_type"] == "near_replace"
         assert planned["default_selected"] is False
-        assert planned["proposed_value"]["key_facts"] == ["用户目前居住在上海"]
+        assert planned["proposed_value"]["key_facts"] == ["用户目前居住在示例市"]
 
     @pytest.mark.asyncio
     async def test_start_job_tracks_current_memory_progress(self, api):
@@ -1562,6 +1581,84 @@ class TestBatchDeleteMemories:
         assert "abc" in result["data"]["failed_ids"]
 
 
+class TestMemoryTransfer:
+    @pytest.mark.asyncio
+    async def test_export_selected_json(self, api):
+        req = _mock_page_request(get_json={"format": "json", "memory_ids": [1]})
+        with _patch_page_request(req):
+            result = await api.export_memories()
+
+        assert result["status"] == "ok"
+        assert result["data"]["memory_count"] == 1
+        payload = json.loads(result["data"]["content"])
+        assert payload["format"] == "livingmemory"
+        assert payload["memories"][0]["content"] == "portable memory"
+
+    @pytest.mark.asyncio
+    async def test_import_preview_counts_duplicate_and_invalid(self, api):
+        content = json.dumps(
+            [
+                {"content": "existing memory", "session_id": "s1", "persona_id": "p1"},
+                {"content": "new memory", "session_id": "s1", "persona_id": "p1"},
+                {"messages": [{"role": "user"}]},
+            ]
+        )
+        req = _mock_page_request(
+            get_json={
+                "format": "json",
+                "content": content,
+                "duplicate_strategy": "skip",
+                "dry_run": True,
+            }
+        )
+        with _patch_page_request(req):
+            result = await api.import_memories()
+
+        assert result["status"] == "ok"
+        assert result["data"]["valid_count"] == 2
+        assert result["data"]["invalid_count"] == 1
+        assert result["data"]["duplicate_count"] == 1
+        assert result["data"]["planned_import_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_import_execute_writes_new_identity_safe_metadata(self, api):
+        content = json.dumps(
+            {
+                "content": "new imported memory",
+                "session_id": "s2",
+                "metadata": {
+                    "memory_uid": "remote-uid",
+                    "memory_space_id": "remote-space",
+                    "memory_layer": "topic",
+                    "importance_revision": 8,
+                    "topics": ["import"],
+                },
+            }
+        )
+        engine = api.plugin.initializer.memory_engine
+        engine.add_memory = AsyncMock(return_value=77)
+        req = _mock_page_request(
+            get_json={
+                "format": "json",
+                "content": content,
+                "duplicate_strategy": "skip",
+                "dry_run": False,
+            }
+        )
+        with _patch_page_request(req):
+            result = await api.import_memories()
+
+        assert result["status"] == "ok"
+        assert result["data"]["imported_ids"] == [77]
+        kwargs = engine.add_memory.await_args.kwargs
+        assert "memory_uid" not in kwargs["metadata"]
+        assert "memory_space_id" not in kwargs["metadata"]
+        assert "memory_layer" not in kwargs["metadata"]
+        assert kwargs["metadata"]["importance_revision"] == 1
+        assert kwargs["metadata"]["importance_reason"] == "memory_import"
+        assert kwargs["source_retention_reason"] == "memory_import"
+
+
 class TestTestRecall:
     @pytest.mark.asyncio
     async def test_empty_query(self, api):
@@ -1664,7 +1761,7 @@ class TestTestRecall:
         engine.topic_memory_enabled = True
         timeline = SimpleNamespace(
             doc_id=7,
-            content="工资核对的 Timeline",
+            content="报销核对的 Timeline",
             final_score=0.8,
             rrf_score=0.8,
             bm25_score=0.2,
@@ -1677,15 +1774,15 @@ class TestTestRecall:
             find_memory_spaces_for_session=AsyncMock(return_value=["space-1"])
         )
         topic = SimpleNamespace(
-            title="工资核对",
-            summary="工资核对详情",
+            title="报销核对",
+            summary="报销核对详情",
             importance=0.8,
             status=SimpleNamespace(value="active"),
         )
         topic_result = SimpleNamespace(
             topic_uid="topic-1",
             topic=topic,
-            content="工资核对\n工资核对详情",
+            content="报销核对\n报销核对详情",
             final_score=0.9,
             relevance_score=0.8,
             embedding_score=0.7,
@@ -1716,7 +1813,7 @@ class TestTestRecall:
         )
         req = _mock_page_request(
             get_json={
-                "query": "工资",
+                "query": "报销",
                 "mode": "current",
                 "session_id": "bot:FriendMessage:user",
                 "k": 5,
@@ -1750,7 +1847,7 @@ class TestTestRecall:
         )
         api.plugin.initializer.recall_trace_store = trace_store
         req = _mock_page_request(
-            get_json={"query": "六月工资", "k": 3, "mode": "timeline"}
+            get_json={"query": "六月报销", "k": 3, "mode": "timeline"}
         )
 
         with _patch_page_request(req):
@@ -1761,7 +1858,7 @@ class TestTestRecall:
         saved = trace_store.record.await_args.kwargs
         assert saved["trace_type"] == "test"
         assert saved["status"] == "completed"
-        assert saved["query_text"] == "六月工资"
+        assert saved["query_text"] == "六月报销"
         assert saved["request_data"]["mode"] == "timeline"
         assert saved["result_data"]["diagnostics"]["mode"] == "timeline"
 
@@ -2222,7 +2319,7 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 74
+        assert len(plugin._api_routes) == 76
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
@@ -2247,6 +2344,8 @@ class TestRouteRegistration:
         assert f"{prefix}/timeline/inactive/restore" in paths
         assert f"{prefix}/memories/update/progress" in paths
         assert f"{prefix}/memories/batch-delete" in paths
+        assert f"{prefix}/memories/export" in paths
+        assert f"{prefix}/memories/import" in paths
         assert f"{prefix}/timeline/settings" in paths
         assert f"{prefix}/timeline/settings/update" in paths
         assert f"{prefix}/timeline/rebuild/preview" in paths

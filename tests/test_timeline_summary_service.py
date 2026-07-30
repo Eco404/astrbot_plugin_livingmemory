@@ -49,8 +49,12 @@ async def test_summary_service_creates_memory_and_advances_checkpoint(tmp_path: 
     )
     processor.classify_atoms_from_metadata = MagicMock(return_value=["atom"])
     engine = AsyncMock()
+    config = ConfigManager({})
+    config.apply_runtime_overrides(
+        {"reflection_engine.source_retention_importance_threshold": 0.7}
+    )
     service = TimelineSummaryService(
-        config_manager=ConfigManager({}),
+        config_manager=config,
         conversation_manager=manager,
         memory_engine=engine,
         memory_processor=processor,
@@ -70,6 +74,10 @@ async def test_summary_service_creates_memory_and_advances_checkpoint(tmp_path: 
     assert kwargs["metadata"]["source_window"]["triggered_by"] == "idle"
     assert kwargs["metadata"]["source_window"]["start_index"] == 0
     assert kwargs["metadata"]["source_window"]["end_index"] == 4
+    assert kwargs["source_messages"] == await manager.get_messages_range(
+        "test:FriendMessage:user", 0, 4
+    )
+    assert kwargs["source_retention_reason"] == "importance_threshold"
     session = await store.get_session("test:FriendMessage:user")
     assert session is not None
     assert session.metadata["last_summarized_index"] == 4
