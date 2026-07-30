@@ -1,105 +1,46 @@
-# 技术架构
+# 整体架构
 
-LivingMemory 的运行时由事件钩子、记忆处理、检索融合、存储和 WebUI API 五个部分组成。它尽量把“自动记忆”和“主动工具”放在同一套数据模型上，避免两套记忆系统互相打架。
+LivingMemory 以 Timeline 为来源层、Topic 为派生层。它们不是两套互不相干的记忆，也不共享同一批事实原子；二者通过稳定 UID、revision、正式片段与来源关系形成可维护链路。
 
-<img class="diagram" src="/images/architecture-flow.svg" alt="LivingMemory runtime architecture">
+![LivingMemory 整体架构](./assets/images/architecture-overview-zh.svg){.diagram}
 
-## 总体流程
+## 数据层级
 
-1. AstrBot 收到消息后，`EventHandler` 捕获会话上下文。
-2. 在 LLM 请求前，召回链路根据当前消息和最近上下文查询长期记忆。
-3. 检索结果按配置注入到请求中，或作为 Agent 工具结果返回。
-4. LLM 回复后，反思链路判断是否需要总结并写入新记忆。
-5. 后台任务执行衰减、过期清理、备份和索引校验。
+| 层级 | 主要内容 | 是否直接编辑 | 主要用途 |
+| --- | --- | --- | --- |
+| 原始会话 | 消息、发送者、角色、时间 | 否 | 总结证据、按需补证、会话审计 |
+| Timeline | 摘要、事实、主题、情绪、时间与人物绑定 | 是 | 保存按时间发生的经历 |
+| 正式片段 | 单一检索意图、事实、人物、情绪与来源 | 否 | Topic 构建与精简补充 |
+| Topic | 主题正文、独立原子、人物索引、相关话题 | 否 | 跨时间归并与主要召回 |
 
-## 主要模块
+## 为什么不让 Timeline 与 Topic 共用原子
 
-| 模块 | 职责 |
-| --- | --- |
-| `main.py` | 注册插件、初始化核心组件、注册 Agent 工具和 Pages API |
-| `core/plugin_initializer.py` | 非阻塞初始化、Provider 等待、数据库迁移、索引加载 |
-| `core/event_handler.py` | 群聊捕获、记忆召回、记忆反思 |
-| `core/managers/memory_engine.py` | 统一记忆写入、搜索、删除和索引维护 |
-| `core/managers/graph_memory_manager.py` | 图谱节点、边、条目和图检索协调 |
-| `core/managers/atom_lifecycle_manager.py` | 原子过期、遗忘、强化和生命周期维护 |
-| `core/retrieval/` | BM25、向量、图谱、原子检索与 RRF 融合 |
-| `storage/` | SQLite 存储、图谱存储、原子存储、数据库迁移 |
-| `pages/dashboard/` | AstrBot Pages 管理界面 |
+Timeline 原子描述某次总结窗口中的事实，Topic 原子则描述跨片段归并后的稳定事实。如果直接共用，Topic 合并、拆分或重新表述时会反向修改来源层，也无法独立记录 Topic 的置信度和来源覆盖。
 
-## 双路四模式检索
+当前设计保留两套原子，并使用以下关系追溯：
 
-普通长期记忆和图谱记忆分别走两条路线：
+```text
+Topic atom
+  -> formal fragment
+  -> Timeline UID + revision
+  -> Timeline atom / source fact key
+  -> source window or source snapshot
+```
 
-| 路线 | 关键词模式 | 向量模式 |
-| --- | --- | --- |
-| 文档路 | `BM25Retriever` | `VectorRetriever` |
-| 图谱路 | `GraphKeywordRetriever` | `GraphVectorRetriever` |
+## 稳定身份与版本
 
-随后 `RRFFusion` 会融合多个排序列表，再叠加重要性、时间衰减、会话隔离和人格隔离等过滤条件。
+- Timeline 使用稳定 `memory_uid`，物理文档 ID 可以改变。
+- 每次正文或来源变化递增 revision。
+- 正式片段拥有稳定逻辑 ID 与独立 revision。
+- Topic 使用稳定 UID；更新时原子发布完整新快照。
+- 构建检查点绑定输入、配置、Prompt 与模型签名，变化后只复用仍然有效的阶段。
 
-## 记忆数据模型
+## 人物与情绪
 
-| 类型 | 说明 |
-| --- | --- |
-| 会话消息 | 原始对话上下文，用于触发总结和补充查询 |
-| 记忆条目 | LLM 总结后的长期记忆，包含摘要、重要性、会话和人格元数据 |
-| 图谱节点与边 | 从记忆中抽取的实体和关系，支持跨记忆合并 |
-| 记忆原子 | 独立事实单元，拥有类型、TTL、衰减和访问强化状态 |
+消息发送者与 Timeline `role_bindings` 提供稳定人物锚点。正式片段只能引用输入中允许的 actor ref，不按昵称跨片段猜测身份。Topic 人物和事实人物关系存入独立关系表，详情页可追溯到片段与 Timeline。
 
-### Timeline 逻辑身份与来源范围
+情绪不是只保留一个正负标签。正式片段与 Topic 保存情绪事件、强度、目标与来源；召回时可作为轻量补充，避免主题摘要把互动中的感情色彩完全抹平。
 
-每条新记忆都会获得稳定的 `memory_uid`、递增的 `revision` 和确定性的
-`memory_space_id`。物理 `documents.id` 可以在“新 ID 重建”时变化，但
-`memory_registry` 始终把同一个 `memory_uid` 指向当前文档，因此后续派生数据
-不需要依赖易变化的物理 ID。
+## 图谱的位置
 
-`memory_source_spans` 独立保存记忆对应的会话、消息 ID、消息索引和时间范围。
-历史记忆无法回填消息 ID 时会标记为部分或不可追溯，不会伪造来源。当前这些
-记忆仍属于 `timeline` 层；注册表和来源范围不会改变现有总结与召回行为。
-
-### Topic 派生记忆存储（v9.1，阶段二基础）
-
-Topic 记忆是从 Timeline 记忆自动整理出的派生层，当前只建立存储和溯源结构，
-尚未启用自动构建与召回。`topic_memories` 保存 Topic 快照和独立的重要性状态，
-`topic_memory_atoms` 保存 Topic 自己的事实原子；它们不会复用或修改
-`memory_atoms` 中的 Timeline 原子。
-
-`topic_timeline_links` 通过稳定 UID 建立双向多对多关联，同时保存 Timeline 修订、
-时间簇、语义相似度、时间亲和度和贡献权重。多个时间相近的 Timeline 可以属于同一
-时间簇，因此维护算法不会把单次长对话产生的多个分片直接当成多次独立佐证。
-
-`topic_atom_sources` 进一步把 Topic 原子映射到 Timeline 原子 ID 或内容指纹。
-Timeline 被编辑后，关联 Topic 会先标记为过期，后续维护任务只需重建受影响的片段。
-`topic_maintenance_runs` 保存全量、增量和修复任务的游标与实时进度，支持中断恢复。
-Topic 更新采用修订号乐观锁和单事务快照替换，暂不提供 WebUI 手工编辑入口。
-
-### Topic 候选发现（v9.2，阶段三预览）
-
-`TopicMaintenanceManager` 可以按 `memory_space_id` 对 Timeline 进行只读扫描。
-扫描器提取规范化主题、事实指纹、独立原子指纹和词法特征，先按照来源时间间隔形成
-时间簇，再综合主题、事实、原子、词法重合度和时间簇关系生成候选组。确定性结果只写入
-`topic_candidate_groups`，状态固定为 `preview`，不会写入正式 Topic 或参与召回。
-同一时间簇会作为一个宽松审核窗口，即使内部存在多个话题也会一起交给后续 LLM 分割；
-它不表示这些 Timeline 已被判定为同一个 Topic。
-
-`topic_maintenance_items` 按 Timeline 稳定 UID 和来源修订保存每个扫描结果；任务每批
-提交游标和进度，取消或重启后可以继续。若暂停期间 Timeline 修订发生变化，旧扫描项
-不会被复用，而会重新读取。候选组 ID 对同一次运行保持确定性，重复读取已完成任务不会
-产生重复结果。该层只负责缩小后续 LLM 审核范围，不把规则聚类视为最终语义判断。
-
-数据库架构在 Topic 开发期间按小版本推进：稳定身份层为 v9，Topic 存储基础为
-v9.1，确定性候选扫描为 v9.2；仅在 Topic 构建、维护和召回形成完整闭环后升级到
-v10。小版本以 `v9.2` 形式作为文本写入，即使旧数据库的版本列声明为 INTEGER，
-也不会被 SQLite 转成浮点数，因此未来 v9.10 仍能正确排在 v9.2 之后。
-
-## 数据安全设计
-
-插件在高风险操作前尽量留下恢复点：
-
-| 场景 | 保护措施 |
-| --- | --- |
-| 插件版本变化 | 启动时自动创建版本标记备份 |
-| 数据库迁移 | 迁移前备份 |
-| 索引重建 | 分批重建，失败后回滚 |
-| 删除记忆 | 使用事务保护相关记录 |
-| 管理页面操作 | 通过 Pages API 复用运行时组件，避免绕过 MemoryEngine |
+图谱仍可从 Timeline 事实生成实体与关系，并参与兼容的 Timeline 双路检索。但在当前 Topic 优先架构中，图谱不是 Topic 构建或 Topic 召回的权威来源。主要链路应以 Timeline、正式片段、Topic 及其来源关系为准。

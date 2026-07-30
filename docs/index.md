@@ -1,43 +1,79 @@
 ---
 layout: home
 title: LivingMemory
-titleTemplate: 智能长期记忆插件
+titleTemplate: 可溯源的长期记忆
 hero:
   name: LivingMemory
-  text: 为 AstrBot 打造的智能长期记忆插件
-  tagline: 让机器人记住长期偏好、关系、约定和项目上下文，并用可控的生命周期保持记忆新鲜。
+  text: 让长期记忆既能记住，也能整理
+  tagline: 将连续对话沉淀为 Timeline，再整理为可溯源的 Topic。召回保持精简，来源仍可检查，维护过程可预览、可恢复。
   image:
-    src: https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory/raw/master/logo.png
-    alt: LivingMemory logo
+    src: /logo.png
+    alt: LivingMemory
   actions:
     - theme: brand
-      text: 快速开始
+      text: 开始使用
       link: /guide/getting-started
     - theme: alt
-      text: 查看架构
+      text: 理解记忆架构
       link: /architecture
 features:
-  - title: 自动长期记忆
-    details: 对话达到触发轮次后自动总结，保存为可检索的长期记忆。
-  - title: 主动回忆与写入
-    details: 为 Agent 注册 recall_long_term_memory 与 memorize_long_term_memory 工具。
-  - title: 双路四模式检索
-    details: 文档路和图谱路同时使用关键词与向量检索，再用 RRF 融合排序。
-  - title: 时间感知生命周期
-    details: 记忆原子拥有 TTL、衰减、访问强化和自动清理机制。
-  - title: 插件页面管理
-    details: 在 AstrBot Pages 中查看、搜索、调试召回和浏览知识图谱。
-  - title: 数据安全
-    details: 支持版本备份、迁移前备份、索引回滚和事务删除。
+  - title: Timeline 保存经历
+    details: 按会话和人格总结连续对话，保留事实、情绪、时间范围、人物绑定与来源快照。
+  - title: Topic 整理主题
+    details: 将 Timeline 切成正式片段并跨时间归并，形成更聚焦、可维护的主题记忆。
+  - title: Topic 优先召回
+    details: 以当前消息决定候选资格，可选 Rerank 精排，再用事实和片段补足细节与情绪。
+  - title: 可检查的维护链路
+    details: 全量构建、增量补建、重构、审查、数据库检查和会话清理都有预览与进度。
 ---
 
-<img class="diagram" src="/images/architecture-flow.svg" alt="LivingMemory runtime architecture">
+<section class="home-band">
+  <span class="home-kicker">Memory architecture</span>
+  <h2>两层记忆，一条可回溯的数据链</h2>
+  <p>LivingMemory 不把聊天记录、长期经历和主题知识混成一个列表。Timeline 负责保存发生过什么，Topic 负责把相关内容重新组织；两者通过正式片段、事实与人物索引保持联系。</p>
 
-## 这份文档适合谁？
+![LivingMemory 记忆架构](./assets/images/architecture-overview-zh.svg){.diagram}
 
-如果你只是想装好插件并让 AstrBot 拥有长期记忆，从 [快速开始](/guide/getting-started) 读起。  
-如果你想理解为什么它能同时处理事实、关系、偏好和旧记忆衰减，直接看 [功能说明](/features) 和 [技术架构](/architecture)。
+  <div class="home-memory-grid">
+    <div>
+      <h3>Timeline 是来源层</h3>
+      <p>固定轮次、空闲窗口或手动命令触发总结。原始消息可清理，但来源快照、时间范围和稳定记忆身份仍可支持审计与重构。</p>
+    </div>
+    <div>
+      <h3>Topic 是派生层</h3>
+      <p>Topic 不允许直接编辑。Timeline 改变后，关联正式片段、事实、人物关系与 Topic 会通过局部维护重新同步。</p>
+    </div>
+  </div>
+</section>
 
-::: tip 文档范围
-这里保留的是面向使用、配置、功能理解和架构说明的内容。旧版本阶段总结、内部开发记录和过期 API 草稿已经不再放进文档站。
-:::
+<section class="home-band">
+  <span class="home-kicker">Recall</span>
+  <h2>相关性优先，同时保留语境</h2>
+  <p>当前用户消息始终决定 Topic 是否合格；最近上下文只提供有限辅助。正式片段与事实补充具体情节和情绪，必要时再回退到 Timeline。</p>
+
+![Topic 优先召回](./assets/images/recall-flow-zh.svg){.diagram}
+</section>
+
+<section class="home-band">
+  <span class="home-kicker">Operations</span>
+  <h2>长期运行需要维护，而不是放任数据库增长</h2>
+  <p>统一维护中心将高风险操作从日常页面中分离。检查、预览、确认、进度和回滚构成一致的操作约束。</p>
+  <div class="home-ops-grid">
+    <div>
+      <h3>构建与修复</h3>
+      <p>全量构建原子发布；增量只处理新增或待同步的 Timeline；低质量 Timeline 可同 ID 重构。</p>
+    </div>
+    <div>
+      <h3>审计与诊断</h3>
+      <p>查看 Topic 待审查、最近真实召回、召回测试、模型连接、会话审计和数据库健康状态。</p>
+    </div>
+    <div>
+      <h3>清理与归档</h3>
+      <p>清理已完成任务中间数据、归档派生 Topic、管理不活跃 Timeline，并按需压缩数据库。</p>
+    </div>
+    <div>
+      <h3>迁移与恢复</h3>
+      <p>数据库 v8 依次迁移到 v9、v10 和当前小版本；迁移与插件版本变化前保留备份。</p>
+    </div>
+  </div>
+</section>

@@ -1,114 +1,26 @@
 # Architecture
 
-LivingMemory is built from event hooks, memory processing, retrieval fusion, storage, and a Pages API. Automatic memory and active agent tools share the same core data model so they do not become two separate memory systems.
+LivingMemory uses Timeline as its editable source layer and Topic as its derived retrieval layer. They do not share fact atoms; stable IDs, revisions, formal fragments, and provenance links connect them.
 
-<img class="diagram" src="/images/architecture-flow.svg" alt="LivingMemory runtime architecture">
+![LivingMemory architecture](../assets/images/architecture-overview-en.svg){.diagram}
 
-## Runtime flow
+## Data layers
 
-1. AstrBot receives a message and `EventHandler` captures session context.
-2. Before the LLM request, the recall pipeline searches long-term memory using the current message and optional recent context.
-3. Retrieved memories are injected into the request or returned as agent tool results.
-4. After the LLM responds, the reflection pipeline decides whether to summarize and store new memory.
-5. Background tasks handle decay, cleanup, backup, and index validation.
+| Layer | Contents | Directly editable | Purpose |
+| --- | --- | --- | --- |
+| Raw conversation | Messages, senders, roles, timestamps | No | Evidence, rebuilding, session audit |
+| Timeline | Summary, facts, topics, affect, actor bindings | Yes | Chronological experience |
+| Formal fragment | One retrieval intent plus fact-level provenance | No | Topic construction and concise supplements |
+| Topic | Derived summary, atoms, actors, relations, affect | No | Cross-time organization and primary recall |
 
-## Main modules
+## Identity and provenance
 
-| Module | Responsibility |
-| --- | --- |
-| `main.py` | Registers the plugin, initializes runtime components, registers agent tools and Pages API |
-| `core/plugin_initializer.py` | Non-blocking initialization, provider waiting, database migration, index loading |
-| `core/event_handler.py` | Group capture, memory recall, memory reflection |
-| `core/managers/memory_engine.py` | Unified write, search, delete, and index maintenance |
-| `core/managers/graph_memory_manager.py` | Coordinates graph nodes, edges, entries, and graph retrieval |
-| `core/managers/atom_lifecycle_manager.py` | Maintains atom expiration, forgetting, reinforcement, and lifecycle state |
-| `core/retrieval/` | BM25, vector, graph, atom retrieval, and RRF fusion |
-| `storage/` | SQLite storage, graph storage, atom storage, database migration |
-| `pages/dashboard/` | AstrBot Pages management UI |
+Timeline has a stable `memory_uid` and revision. Formal fragments have stable logical IDs and revisions. Topic publication replaces the complete derived snapshot atomically. A Topic fact traces through its fragment to a specific Timeline revision and source fact or source window.
 
-## Dual-route retrieval
+## Actors and affect
 
-Document memories and graph memories are searched through two routes:
+Message senders and Timeline role bindings anchor identity. The model may only select actor references supplied by code; unresolved mentions remain local rather than being merged by nickname. Affect events keep intensity, target, and source so retrieval does not reduce every interaction to neutral facts.
 
-| Route | Keyword mode | Vector mode |
-| --- | --- | --- |
-| Document route | `BM25Retriever` | `VectorRetriever` |
-| Graph route | `GraphKeywordRetriever` | `GraphVectorRetriever` |
+## The graph route
 
-`RRFFusion` merges the ranked lists, then the runtime applies importance, time decay, session filtering, and persona filtering.
-
-## Memory data model
-
-| Type | Description |
-| --- | --- |
-| Session messages | Raw conversation context used for summarization triggers and expanded queries |
-| Memory entries | LLM-generated long-term memories with summaries, importance, session, and persona metadata |
-| Graph nodes and edges | Entities and relationships extracted from memories, with cross-memory merging |
-| Memory atoms | Independent fact units with type, TTL, decay, and access reinforcement |
-
-### Timeline identity and source spans
-
-Every new memory receives a stable `memory_uid`, a monotonic `revision`, and a
-deterministic `memory_space_id`. The physical `documents.id` may change during a
-new-ID replacement, while `memory_registry` keeps the same logical UID mapped to
-the current document.
-
-`memory_source_spans` stores the session, message IDs, message indexes, and time
-range separately. Legacy memories without stable message evidence are marked as
-partially or not traceable instead of receiving fabricated provenance. These
-records remain in the `timeline` layer and do not change existing generation or
-retrieval behavior.
-
-### Derived Topic-memory storage (v9.1, phase-two foundation)
-
-Topic memories are automatically derived from Timeline memories. This phase only
-introduces storage and provenance; generation and retrieval remain disabled.
-`topic_memories` stores generated snapshots and independent importance state,
-while `topic_memory_atoms` stores Topic-owned atoms without reusing or mutating
-Timeline atoms in `memory_atoms`.
-
-`topic_timeline_links` forms a bidirectional many-to-many index using stable UIDs
-and records source revisions, time clusters, semantic similarity, temporal
-affinity, and contribution weight. Nearby Timeline fragments can share one time
-cluster, so a long conversation is not treated as several independent votes.
-
-`topic_atom_sources` maps each Topic atom to a Timeline atom ID or content
-fingerprint. Editing a Timeline marks only dependent Topics stale for later
-targeted rebuilding. `topic_maintenance_runs` stores resumable cursors and live
-progress for full, incremental, and repair jobs. Topic snapshots use optimistic
-revisions and transactional replacement and have no manual WebUI editing path.
-
-### Topic candidate discovery (v9.2, phase-three preview)
-
-`TopicMaintenanceManager` performs read-only Timeline scans within one strict
-`memory_space_id`. It extracts normalized topics, fact fingerprints, independent
-atom fingerprints, and lexical features; assigns source-time clusters; and then
-builds broad candidate groups from topic, fact, atom, lexical, and temporal
-overlap. Deterministic output is stored only in `topic_candidate_groups` with
-`preview` status. It neither writes final Topics nor participates in retrieval.
-A time cluster is kept as one broad review window even when it may contain
-several subjects; a later LLM must split it, and the window is never treated as
-a final Topic decision.
-
-`topic_maintenance_items` persists each source UID and revision together with a
-batch cursor and progress. Interrupted runs resume without duplicating work, and
-a Timeline revised during a pause is read again instead of reusing stale input.
-Candidate IDs remain deterministic within one run. This layer narrows the input
-for later LLM review and is not treated as a final semantic decision.
-
-Topic development advances the database schema through minor versions: v9 is
-the stable-identity layer, v9.1 adds Topic storage, and v9.2 adds deterministic
-candidate scanning. The schema reaches v10 only after Topic generation,
-maintenance, and retrieval form a complete feature. Minor versions are stored
-as prefixed text such as `v9.2`, preventing SQLite's legacy INTEGER affinity
-from collapsing a future v9.10 into the floating-point value 9.1.
-
-## Data safety
-
-| Scenario | Protection |
-| --- | --- |
-| Plugin version change | Startup creates a version-tagged backup |
-| Database migration | Backup before migration |
-| Index rebuild | Batched rebuild with rollback on failure |
-| Memory deletion | Transactional deletion of related records |
-| Dashboard operations | Pages API reuses MemoryEngine and GraphStore instead of bypassing backend safety logic |
+The graph remains an optional Timeline-derived retrieval route. It is not the authoritative source for Topic construction or Topic-first recall; provenance follows Timeline, formal fragments, Topic, and their link tables.
