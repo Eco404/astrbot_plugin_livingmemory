@@ -24,7 +24,7 @@ features:
   - title: Topic-first recall
     details: The current message qualifies candidates; optional reranking, facts, and fragments restore useful detail and tone.
   - title: Inspectable maintenance
-    details: Full and incremental builds, rebuilds, reviews, session cleanup, and database checks expose preview and progress.
+    details: Full and incremental builds, rebuilds, reviews, session cleanup, and database checks expose preview and progress across desktop and mobile layouts.
 ---
 
 <section class="home-band">

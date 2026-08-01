@@ -4,6 +4,8 @@ LivingMemory 使用 AstrBot 官方插件 Pages，不需要启动独立管理服�
 
 入口：`插件 → LivingMemory → Pages → dashboard`
 
+Dashboard 同时适配桌面和手机端。窄屏下使用左上角导航按钮打开侧边栏；表格、工具栏、维护功能和详情浮窗会按可用宽度重新排列。横屏窄视口会使用紧凑布局，避免主要操作被遮挡。
+
 ## 日常页面
 
 | 页面 | 用途 |

@@ -1022,16 +1022,20 @@ export class MaintenancePage {
         : `<div class="identity-state">${esc(window.t("maintenance.archivedTopicsEmpty"))}</div>`;
       const selected = this.bindStateMaintenanceSelection(overlay, "maintenance.deleteArchivedTopics");
       overlay.querySelector("[data-state-submit]")?.addEventListener("click", async event => {
+        const submitButton = event.currentTarget;
         const topicUids = selected();
         if (!topicUids.length) return;
+        submitButton.disabled = true;
         const confirmed = await this.confirmDialog.show({
           title: window.t("maintenance.deleteArchivedConfirmTitle"),
           message: window.t("maintenance.deleteArchivedConfirmMessage", topicUids.length),
           confirmLabel: window.t("common.delete"),
           danger: true,
         });
-        if (!confirmed) return;
-        event.currentTarget.disabled = true;
+        if (!confirmed) {
+          submitButton.disabled = false;
+          return;
+        }
         try {
           const result = await this.topicPage.api.post("topics/archived/delete", {
             memory_space_id: space,
@@ -1044,7 +1048,7 @@ export class MaintenancePage {
           await this.loadTopicMaintenanceCounts();
         } catch (error) {
           this.showToast(error.message, true);
-          event.currentTarget.disabled = false;
+          submitButton.disabled = false;
         }
       });
     } catch (error) {
@@ -1074,15 +1078,19 @@ export class MaintenancePage {
       submit?.classList.remove("btn-danger");
       submit?.classList.add("btn-primary");
       submit?.addEventListener("click", async event => {
+        const submitButton = event.currentTarget;
         const memoryIds = selected().map(Number).filter(Number.isFinite);
         if (!memoryIds.length) return;
+        submitButton.disabled = true;
         const confirmed = await this.confirmDialog.show({
           title: window.t("maintenance.restoreInactiveConfirmTitle"),
           message: window.t("maintenance.restoreInactiveConfirmMessage", memoryIds.length),
           confirmLabel: window.t("common.restore"),
         });
-        if (!confirmed) return;
-        event.currentTarget.disabled = true;
+        if (!confirmed) {
+          submitButton.disabled = false;
+          return;
+        }
         try {
           const result = await this.topicPage.api.post("timeline/inactive/restore", {
             memory_space_id: space,
@@ -1092,7 +1100,7 @@ export class MaintenancePage {
           overlay.classList.remove("visible");
         } catch (error) {
           this.showToast(error.message, true);
-          event.currentTarget.disabled = false;
+          submitButton.disabled = false;
         }
       });
     } catch (error) {
