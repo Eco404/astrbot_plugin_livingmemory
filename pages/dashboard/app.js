@@ -169,9 +169,29 @@ import {
   }
 
   function initSidebar() {
+    const sidebar = document.getElementById("dashboard-sidebar");
+    const mobileToggle = document.getElementById("mobile-nav-toggle");
+    const mobileBackdrop = document.getElementById("mobile-nav-backdrop");
+    const mobileNavigationMedia = window.matchMedia("(max-width: 768px), (max-height: 500px) and (max-width: 1000px)");
+
+    const setMobileNavigation = (open) => {
+      if (!sidebar || !mobileToggle || !mobileBackdrop) return;
+      const shouldOpen = Boolean(open) && mobileNavigationMedia.matches;
+      sidebar.classList.toggle("mobile-open", shouldOpen);
+      mobileBackdrop.classList.toggle("visible", shouldOpen);
+      mobileToggle.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+      document.body.classList.toggle("mobile-nav-open", shouldOpen);
+    };
+
+    mobileToggle?.addEventListener("click", () => {
+      setMobileNavigation(!sidebar?.classList.contains("mobile-open"));
+    });
+    mobileBackdrop?.addEventListener("click", () => setMobileNavigation(false));
+
     document.querySelectorAll(".nav-item[data-page]").forEach(item => {
       item.addEventListener("click", () => {
         switchPage(item.dataset.page);
+        setMobileNavigation(false);
       });
     });
 
@@ -210,6 +230,17 @@ import {
         }
       });
     }
+
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && sidebar?.classList.contains("mobile-open")) {
+        setMobileNavigation(false);
+        mobileToggle?.focus();
+      }
+    });
+
+    mobileNavigationMedia.addEventListener?.("change", event => {
+      if (!event.matches) setMobileNavigation(false);
+    });
   }
 
   function updateLanguageMenu() {

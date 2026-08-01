@@ -61,7 +61,7 @@ flowchart LR
 | Embedding | Timeline、正式片段和 Topic 的向量。 |
 | Rerank | 可选候选精排；插件也提供内置 Cloudflare Workers AI 客户端。 |
 
-可视化工作区入口为 `插件 -> LivingMemory -> Pages -> dashboard`。插件 Pages 需要 **AstrBot 4.24.2 或更高版本**。
+可视化工作区入口为 `插件 -> LivingMemory -> Pages -> dashboard`。WebUI 适配桌面与手机端，手机端通过左上角导航按钮切换页面。插件 Pages 需要 **AstrBot 4.24.2 或更高版本**。
 
 ## 深入了解
 

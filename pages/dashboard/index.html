@@ -9,8 +9,21 @@
   </head>
   <body>
     <div id="app">
+      <button
+        class="mobile-nav-toggle"
+        id="mobile-nav-toggle"
+        type="button"
+        aria-controls="dashboard-sidebar"
+        aria-expanded="false"
+        data-i18n-aria="nav.openMenu"
+        aria-label="Open navigation"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <path d="M4 7h16M4 12h16M4 17h16"/>
+        </svg>
+      </button>
       <!-- Sidebar -->
-      <aside class="sidebar">
+      <aside class="sidebar" id="dashboard-sidebar">
         <div class="sidebar-brand">LivingMemory</div>
         <nav class="sidebar-nav">
           <button class="nav-item active" data-page="graph">
@@ -76,6 +89,7 @@
           </details>
         </div>
       </aside>
+      <button class="mobile-nav-backdrop" id="mobile-nav-backdrop" type="button" tabindex="-1" data-i18n-aria="nav.closeMenu" aria-label="Close navigation"></button>
 
       <!-- Main Content -->
       <main class="main-content">

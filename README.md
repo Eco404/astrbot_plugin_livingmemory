@@ -61,7 +61,7 @@ flowchart LR
 | Embedding | Timeline, formal-fragment, and Topic vectors. |
 | Rerank | Optional candidate refinement; the plugin also supports a built-in Cloudflare Workers AI client. |
 
-Open the workspace at `Plugins -> LivingMemory -> Pages -> dashboard`. Plugin Pages requires **AstrBot 4.24.2 or later**.
+Open the workspace at `Plugins -> LivingMemory -> Pages -> dashboard`. The WebUI adapts to desktop and mobile layouts; on mobile, use the top-left navigation button to switch pages. Plugin Pages requires **AstrBot 4.24.2 or later**.
 
 ## Go deeper
 

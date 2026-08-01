@@ -24,7 +24,7 @@ features:
   - title: Topic 优先召回
     details: 以当前消息决定候选资格，可选 Rerank 精排，再用事实和片段补足细节与情绪。
   - title: 可检查的维护链路
-    details: 全量构建、增量补建、重构、审查、数据库检查和会话清理都有预览与进度。
+    details: 全量构建、增量补建、重构、审查、数据库检查和会话清理都有预览与进度，WebUI 同时适配桌面与手机端。
 ---
 
 <section class="home-band">

@@ -76,6 +76,8 @@
     "header.subtitle":    { zh: "长期记忆与会话管理 · 基于混合检索的智能记忆系统", en: "Long-term memory & session management · Hybrid retrieval system", ru: "Долгосрочная память и управление сессиями · Гибридная поисковая система" },
     "header.theme":       { zh: "切换主题", en: "Toggle theme", ru: "Сменить тему" },
     "header.lang":        { zh: "语言", en: "Language", ru: "Язык" },
+    "nav.openMenu":       { zh: "打开导航", en: "Open navigation", ru: "Открыть навигацию" },
+    "nav.closeMenu":      { zh: "关闭导航", en: "Close navigation", ru: "Закрыть навигацию" },
     "language.current.zh": { zh: "中文", en: "Chinese", ru: "Китайский" },
     "language.current.en": { zh: "英文", en: "English", ru: "Английский" },
     "language.current.ru": { zh: "俄文", en: "Russian", ru: "Русский" },

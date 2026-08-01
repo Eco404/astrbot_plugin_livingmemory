@@ -2,6 +2,8 @@
 
 Open `Plugins → LivingMemory → Pages → dashboard` in AstrBot.
 
+The dashboard adapts to desktop and mobile layouts. On narrow screens, use the top-left navigation button to open the sidebar; tables, toolbars, maintenance actions, and detail dialogs reflow to the available width. Compact landscape layouts keep primary actions visible.
+
 ## Daily pages
 
 | Page | Purpose |

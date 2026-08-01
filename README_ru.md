@@ -40,7 +40,7 @@
 2. Перезагрузите AstrBot и выберите LLM и Embedding Provider. Пустой ID использует модель AstrBot по умолчанию.
 3. Проверьте создание Timeline и модели, затем включите Topic и запустите первую полную сборку.
 
-Рабочее пространство открывается через `Plugins -> LivingMemory -> Pages -> dashboard`. Для Plugin Pages требуется **AstrBot 4.24.2 или новее**.
+Рабочее пространство открывается через `Plugins -> LivingMemory -> Pages -> dashboard`. WebUI адаптирован для настольных и мобильных экранов; на телефоне страницы переключаются кнопкой навигации в левом верхнем углу. Для Plugin Pages требуется **AstrBot 4.24.2 или новее**.
 
 Подробная документация доступна на [английском](https://eco404.github.io/astrbot_plugin_livingmemory/en/) и [китайском](https://eco404.github.io/astrbot_plugin_livingmemory/).
 
