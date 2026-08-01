@@ -1,4 +1,5 @@
 import { esc } from "./utils.js";
+import { bindSettingDependencies } from "./setting-dependencies.js";
 
 export class SettingsPage {
   constructor(api, showToast) {
@@ -74,6 +75,14 @@ export class SettingsPage {
     content.querySelectorAll("[data-settings-reset]").forEach(button => {
       button.addEventListener("click", () => this.resetOne(button.dataset.settingsReset));
     });
+    this.refreshVisibility = bindSettingDependencies({
+      root: content,
+      definitions,
+      effectiveValues: effective,
+      inputSelector: ".settings-page-input",
+      rowSelector: ".settings-page-row",
+      sectionSelector: ".settings-page-section",
+    });
     const hasEditable = Boolean(content.querySelector(".settings-page-input:not(:disabled)"));
     document.getElementById("settings-save").disabled = !hasEditable;
     document.getElementById("settings-reset-all").disabled = !hasEditable;
@@ -114,6 +123,7 @@ export class SettingsPage {
     }
     const reset = row?.querySelector("[data-settings-reset]");
     if (reset) reset.disabled = true;
+    this.refreshVisibility?.();
   }
 
   resetAllValues() {

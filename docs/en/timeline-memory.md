@@ -4,7 +4,13 @@ Timeline records what happened during a continuous conversation window. It is th
 
 ## Generation boundaries
 
-Timeline can be produced by round-based summarization, idle summarization after a minimum number of rounds, or explicit manual and Agent writes. On restart, overdue idle windows are checked again instead of being silently skipped.
+Timeline can be produced by base-round summarization with topic continuation, idle summarization after a minimum number of rounds, or explicit manual and Agent writes. On restart, overdue idle windows are checked again instead of being silently skipped.
+
+## Topic continuation
+
+Topic continuation only refines the base-round boundary for an active conversation. It does not block idle, manual, or failed-job retry summaries. Once the base window is reached, the pending window may contain multiple provisional topics. A new dialogue unit may continue when it matches any existing topic. If it matches none, the preceding units are summarized and the new unit becomes the next window's seed. A configurable hard limit always summarizes the window even when a topic keeps continuing.
+
+The current-message embedding already produced by Topic recall is cached in the conversation database and reused when compatible. Only missing vectors are requested. Cached features are removed after their source messages are summarized or deleted. If Embedding is unavailable, the system safely falls back to the round boundary instead of losing the memory.
 
 ## Structured fields
 

@@ -1,11 +1,11 @@
 import pytest
-
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.timeline_settings import (
     TIMELINE_SETTING_DEFINITIONS,
     effective_timeline_settings,
     timeline_setting_defaults,
     validate_timeline_setting,
+    validate_timeline_settings,
 )
 
 
@@ -37,4 +37,29 @@ def test_config_manager_runtime_overrides_apply_to_get_and_sections():
     assert manager.get("recall_engine.top_k") == 3
     assert manager.recall_engine["top_k"] == 3
     assert manager.filtering_settings["use_session_filtering"] is False
+
+
+def test_topic_continuation_force_limit_must_exceed_base_rounds():
+    values = timeline_setting_defaults()
+    values["reflection_engine.summary_trigger_rounds"] = 12
+    values["reflection_engine.topic_continuation_force_summary_rounds"] = 12
+    with pytest.raises(ValueError, match="必须大于"):
+        validate_timeline_settings(values)
+    values["reflection_engine.topic_continuation_enabled"] = False
+    validate_timeline_settings(values)
+
+
+def test_dependent_settings_expose_visibility_contract():
+    assert TIMELINE_SETTING_DEFINITIONS[
+        "reflection_engine.idle_summary_delay_minutes"
+    ]["visible_when"] == {
+        "key": "reflection_engine.idle_summary_enabled",
+        "equals": True,
+    }
+    assert TIMELINE_SETTING_DEFINITIONS[
+        "reflection_engine.topic_continuation_force_summary_rounds"
+    ]["visible_when"] == {
+        "key": "reflection_engine.topic_continuation_enabled",
+        "equals": True,
+    }
 

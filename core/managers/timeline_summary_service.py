@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
 
 from ..utils import OperationContext
+from .timeline_topic_continuation import (
+    TimelineTopicContinuationEvaluator,
+    build_dialogue_units,
+)
 
 if TYPE_CHECKING:
     from ..base.config_manager import ConfigManager
@@ -43,11 +48,16 @@ class TimelineSummaryService:
         conversation_manager: "ConversationManager",
         memory_engine: "MemoryEngine",
         memory_processor: "MemoryProcessor",
+        embedding_provider_resolver: Callable[[], Any] | None = None,
     ) -> None:
         self.config_manager = config_manager
         self.conversation_manager = conversation_manager
         self.memory_engine = memory_engine
         self.memory_processor = memory_processor
+        self._continuation_evaluator = TimelineTopicContinuationEvaluator(
+            conversation_manager.store,
+            embedding_provider_resolver or (lambda: None),
+        )
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._closing = False
@@ -131,15 +141,17 @@ class TimelineSummaryService:
         )
         pending = pending if isinstance(pending, dict) else {}
         start_index = max(0, int(pending.get("start_index", last_summarized)))
-        end_index = total_messages
+        pending_end_value = pending.get("end_index")
+        has_pending_range = pending_end_value is not None and bool(pending)
+        pending_end = int(pending_end_value or total_messages)
+        end_index = (
+            min(total_messages, max(start_index, pending_end))
+            if has_pending_range
+            else total_messages
+        )
         retry_count = max(0, int(pending.get("retry_count", 0)))
-        pending_end = int(pending.get("end_index", end_index) or end_index)
-        if end_index > pending_end:
-            # New messages make this a new larger work unit rather than silently
-            # abandoning the failed source range.
-            retry_count = 0
         next_retry_at = float(pending.get("next_retry_at", 0.0) or 0.0)
-        blocked = bool(pending.get("blocked", False)) and end_index <= pending_end
+        blocked = bool(pending.get("blocked", False))
         if not force and (blocked or next_retry_at > time.time()):
             return TimelineSummaryResult(
                 "deferred",
@@ -151,7 +163,7 @@ class TimelineSummaryService:
             )
 
         unsummarized = max(0, end_index - start_index)
-        if unsummarized < 2 or (not force and unsummarized // 2 < min_rounds):
+        if unsummarized < 2:
             return TimelineSummaryResult(
                 "insufficient",
                 session_id,
@@ -173,6 +185,74 @@ class TimelineSummaryService:
                 end_index=end_index,
                 message_count=len(history),
             )
+
+        units = build_dialogue_units(history)
+        if not force and len(units) < min_rounds:
+            return TimelineSummaryResult(
+                "insufficient",
+                session_id,
+                start_index=start_index,
+                end_index=end_index,
+                message_count=len(history),
+            )
+
+        boundary_diagnostics: dict[str, Any] = {}
+        continuation_enabled = bool(
+            self.config_manager.get(
+                "reflection_engine.topic_continuation_enabled", True
+            )
+        )
+        if (
+            not force
+            and not has_pending_range
+            and trigger_type == "round_limit"
+            and continuation_enabled
+        ):
+            base_rounds = max(1, int(min_rounds))
+            force_rounds = max(
+                base_rounds + 1,
+                int(
+                    self.config_manager.get(
+                        "reflection_engine.topic_continuation_force_summary_rounds",
+                        base_rounds * 2,
+                    )
+                ),
+            )
+            decision = await self._continuation_evaluator.evaluate(
+                history,
+                base_rounds=base_rounds,
+                force_rounds=force_rounds,
+            )
+            boundary_diagnostics = {
+                "boundary_reason": decision.reason,
+                "dialogue_unit_count": decision.unit_count,
+                "base_rounds": base_rounds,
+                "force_summary_rounds": force_rounds,
+                "provisional_topic_count": decision.provisional_topic_count,
+                "max_topic_similarity": decision.max_similarity,
+            }
+            if decision.action == "continue":
+                await self.conversation_manager.update_session_metadata(
+                    session_id,
+                    "topic_continuation_state",
+                    {
+                        "status": "continuing",
+                        **boundary_diagnostics,
+                        "updated_at": time.time(),
+                    },
+                )
+                return TimelineSummaryResult(
+                    "continuing",
+                    session_id,
+                    start_index=start_index,
+                    end_index=end_index,
+                    message_count=len(history),
+                    decision_reason=decision.reason,
+                )
+            if 0 < decision.summary_end_offset < len(history):
+                end_index = start_index + decision.summary_end_offset
+                history = history[: decision.summary_end_offset]
+                units = build_dialogue_units(history)
 
         effective_persona = str(
             persona_id
@@ -210,6 +290,7 @@ class TimelineSummaryService:
                     "started_at": history[0].timestamp,
                     "ended_at": history[-1].timestamp,
                     "triggered_by": trigger_type,
+                    **boundary_diagnostics,
                 }
                 if (
                     metadata.get("memory_decision") == "no_memory"
@@ -235,6 +316,10 @@ class TimelineSummaryService:
                         ],
                         metadata=metadata,
                     )
+                    await self.conversation_manager.update_session_metadata(
+                        session_id, "topic_continuation_state", None
+                    )
+                    await self._clear_pending_features(history)
                     logger.info(
                         "[%s] Timeline 窗口已检查且无需写入记忆: "
                         "trigger=%s range=[%s:%s] reason=%s",
@@ -291,9 +376,11 @@ class TimelineSummaryService:
                         "last_persona_id": effective_persona,
                         "last_summary_decision": "store",
                         "last_no_memory_reason": None,
+                        "topic_continuation_state": None,
                     },
                 )
                 await store.finish_summary_job(session_id)
+                await self._clear_pending_features(history)
                 logger.info(
                     "[%s] Timeline 总结完成: trigger=%s range=[%s:%s]",
                     session_id,
@@ -351,6 +438,14 @@ class TimelineSummaryService:
                 message_count=len(history),
                 error=str(exc),
             )
+
+    async def _clear_pending_features(self, history: list[Any]) -> None:
+        try:
+            await self.conversation_manager.store.delete_pending_message_features(
+                message_ids=[int(item.id or 0) for item in history]
+            )
+        except Exception as exc:
+            logger.warning("清理已总结消息的短期查询特征失败: %s", exc)
 
     def _on_task_done(self, session_id: str, task: asyncio.Task) -> None:
         if self._tasks.get(session_id) is task:

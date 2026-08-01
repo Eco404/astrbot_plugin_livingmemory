@@ -58,6 +58,34 @@ async def test_timeline_v3_import_preserves_newly_moved_legacy_settings(
 
 
 @pytest.mark.asyncio
+async def test_timeline_settings_migrate_continuation_cap_above_legacy_base(
+    mock_context, tmp_path
+):
+    db_path = tmp_path / "livingmemory.db"
+    store = TopicMemoryStore(str(db_path))
+    await store.initialize()
+    await store.update_timeline_setting_overrides(
+        {
+            "__legacy_imported_v4__": True,
+            "reflection_engine.summary_trigger_rounds": 50,
+        },
+        settings_revision=7,
+    )
+    config = ConfigManager({})
+    init = PluginInitializer(mock_context, config, str(tmp_path))
+
+    await init._initialize_timeline_runtime_settings(str(db_path))
+
+    assert config.get("reflection_engine.summary_trigger_rounds") == 50
+    assert (
+        config.get("reflection_engine.topic_continuation_force_summary_rounds")
+        == 100
+    )
+    stored = await store.get_timeline_setting_overrides()
+    assert stored["reflection_engine.topic_continuation_force_summary_rounds"] == 100
+
+
+@pytest.mark.asyncio
 async def test_ensure_initialized_timeout(initializer):
     ok = await initializer.ensure_initialized(timeout=0.1)
     assert ok is False
@@ -330,6 +358,7 @@ async def test_complete_initialization_wires_graph_db_and_engine_config(
     class FakeConversationManager:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            self.store = kwargs["store"]
 
         async def get_session_scope(self, session_id):
             return None
@@ -509,6 +538,7 @@ async def test_complete_initialization_skips_graph_db_when_disabled(
     class FakeConversationManager:
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            self.store = kwargs["store"]
 
         async def get_session_scope(self, session_id):
             return None

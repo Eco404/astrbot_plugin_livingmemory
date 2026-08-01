@@ -1,4 +1,5 @@
 import { esc } from "./utils.js";
+import { bindSettingDependencies } from "./setting-dependencies.js";
 
 export class TimelinePage {
   constructor(api, showToast) {
@@ -90,6 +91,14 @@ export class TimelinePage {
     content.querySelectorAll("[data-reset-timeline-setting]").forEach(button => {
       button.addEventListener("click", () => this.resetOne(button.dataset.resetTimelineSetting));
     });
+    this.refreshVisibility = bindSettingDependencies({
+      root: content,
+      definitions,
+      effectiveValues: this.data?.effective || {},
+      inputSelector: ".timeline-setting-input",
+      rowSelector: ".topic-setting-row",
+      sectionSelector: ".topic-settings-section",
+    });
   }
 
   resetOne(key) {
@@ -103,6 +112,7 @@ export class TimelinePage {
     row?.querySelector("[data-setting-source]")?.classList.remove("is-custom");
     if (row?.querySelector("[data-setting-source]")) row.querySelector("[data-setting-source]").textContent = window.t("topic.defaultValue");
     if (row?.querySelector("[data-reset-timeline-setting]")) row.querySelector("[data-reset-timeline-setting]").disabled = true;
+    this.refreshVisibility?.();
   }
 
   resetAllValues() {

@@ -13,7 +13,11 @@ from astrbot.api.platform import MessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import TextPart
 
+from ..embedding_signature import provider_identity
 from ..fact_temporal import normalize_fact_temporal
+from ..managers.timeline_topic_continuation import (
+    PENDING_MESSAGE_EMBEDDING_FORMAT,
+)
 from ..models.conversation_models import stable_actor_id
 from ..retrieval.unified_recall import (
     UnifiedRecallCoordinator,
@@ -131,11 +135,12 @@ class MemoryRecall:
 
                 # 存储用户消息（仅私聊），无论是否启用召回都需要
                 is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
+                stored_user_message = None
                 if not is_group and actual_query:
                     # 原始事件内容优先于 ProviderRequest.prompt，后者可能已被
                     # 其他插件改写，不适合作为可追溯的原始对话证据。
                     message_to_store = extracted_query or raw_query or request_query
-                    await self.conversation_manager.add_message_from_event(
+                    stored_user_message = await self.conversation_manager.add_message_from_event(
                         event=event,
                         role="user",
                         content=message_to_store,
@@ -259,6 +264,16 @@ class MemoryRecall:
                 recalled_memories = unified_outcome.timeline_results
                 topic_results = unified_outcome.topic_results
                 fragment_results = unified_outcome.fragment_results
+                if stored_user_message is None and is_group:
+                    stored_user_message = await self._find_latest_stored_user_message(
+                        session_id,
+                        actual_query,
+                    )
+                await self._cache_current_query_vector(
+                    stored_user_message,
+                    recall_outcome,
+                    topic_outcome,
+                )
                 branch_summary = ", ".join(
                     f"{item.name}:{item.weight:.2f}"
                     for item in recall_outcome.branches
@@ -694,6 +709,7 @@ class MemoryRecall:
     ) -> int:
         """从请求上下文中移除临时注入的记忆片段"""
         import re
+
         from ..base.constants import MEMORY_INJECTION_FOOTER, MEMORY_INJECTION_HEADER
 
         removed = 0
@@ -743,6 +759,80 @@ class MemoryRecall:
             and MEMORY_INJECTION_HEADER in text
             and MEMORY_INJECTION_FOOTER in text
         )
+
+    async def _cache_current_query_vector(
+        self, message, recall_outcome, topic_outcome
+    ) -> None:
+        """Best-effort reuse of the current query vector for topic continuation."""
+        if (
+            message is None
+            or topic_outcome is None
+            or not bool(
+                self.config_manager.get(
+                    "reflection_engine.topic_continuation_enabled", True
+                )
+            )
+        ):
+            return
+        try:
+            branches = list(getattr(recall_outcome, "branches", []) or [])
+            vectors = list(getattr(topic_outcome, "query_vectors", []) or [])
+            current_index = next(
+                index
+                for index, branch in enumerate(branches)
+                if getattr(branch, "name", "") == "current"
+            )
+            if current_index >= len(vectors):
+                return
+            branch_text = str(getattr(branches[current_index], "text", "") or "")
+            message_text = str(getattr(message, "content", "") or "")
+            normalize = lambda value: " ".join(value.split())
+            if normalize(branch_text) != normalize(message_text):
+                return
+            topic_pipeline = getattr(
+                self.memory_engine, "topic_recall_pipeline", None
+            )
+            retriever = getattr(topic_pipeline, "retriever", None)
+            refresh = getattr(retriever, "refresh_providers", None)
+            if callable(refresh):
+                refresh()
+            provider = getattr(retriever, "embedding_provider", None)
+            provider_id, model_id = provider_identity(provider)
+            vector = [float(value) for value in vectors[current_index]]
+            if not vector:
+                return
+            await self.conversation_manager.store.upsert_pending_message_feature(
+                message_id=int(message.id),
+                session_id=message.session_id,
+                text=message_text,
+                embedding=vector,
+                provider_id=provider_id,
+                model_id=model_id,
+                input_format_version=PENDING_MESSAGE_EMBEDDING_FORMAT,
+            )
+        except (StopIteration, TypeError, ValueError, AttributeError) as exc:
+            logger.debug("短期查询向量未缓存: %s", exc)
+        except Exception as exc:
+            logger.warning("缓存短期查询向量失败，不影响本轮召回: %s", exc)
+
+    async def _find_latest_stored_user_message(self, session_id: str, text: str):
+        """Locate the group message persisted by the independent capture hook."""
+        try:
+            total = await self.conversation_manager.store.get_message_count(session_id)
+            if total <= 0:
+                return None
+            messages = await self.conversation_manager.get_messages_range(
+                session_id=session_id,
+                start_index=total - 1,
+                end_index=total,
+            )
+            if not messages or messages[0].role != "user":
+                return None
+            normalize = lambda value: " ".join(str(value or "").split())
+            return messages[0] if normalize(messages[0].content) == normalize(text) else None
+        except Exception as exc:
+            logger.debug("无法定位群聊当前消息的短期查询特征载体: %s", exc)
+            return None
 
     def _normalize_text_only_context_parts(
         self, req: ProviderRequest, session_id: str
