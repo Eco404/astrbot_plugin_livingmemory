@@ -18,6 +18,15 @@ Sharing one Timeline is only a weak continuity signal; it cannot force unrelated
 
 Formal fragments persist text, facts, source keys, actor references, affect, time, Timeline revision, embedding signature, and vector. They support both Topic reconstruction and concise recall supplements.
 
+## Browsing and search
+
+The Topic page supports status and actor filters alongside two explicit search modes:
+
+- **Keyword search** matches Topic titles, summaries, and fact atoms.
+- **Semantic search** embeds the query with the active Embedding provider and searches the stored Topic vectors.
+
+Semantic search does not regenerate Topics or call the LLM. An incompatible embedding signature produces an explicit revectorization error instead of silently returning misleading results. Existing status and actor filters still apply.
+
 ## Related Topics
 
 Related Topics are sparse, undirected, non-hierarchical edges. They can be recalculated from stored vectors without calling the LLM or rewriting Topic text.

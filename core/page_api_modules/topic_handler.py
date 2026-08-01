@@ -12,6 +12,7 @@ from quart import request
 
 from astrbot.api import logger
 
+from ..embedding_signature import SUPPORTED_TOPIC_EMBEDDING_FORMATS
 from ..models.memory_identity import resolve_memory_space
 from ..models.topic_memory import TopicMaintenanceMode
 from ..timeline_settings import (
@@ -20,6 +21,7 @@ from ..timeline_settings import (
     validate_timeline_setting,
 )
 from ..topic_settings import TOPIC_SETTING_DEFINITIONS, validate_topic_setting
+from ..topic_vector_index import TopicVectorIndexCompatibilityError
 
 if TYPE_CHECKING:
     from .utils import PageApiUtils
@@ -147,28 +149,72 @@ class TopicHandler:
             return self.utils.ok({"items": [], "memory_space_id": None})
         status = self.utils.optional_text(request.args.get("status")) or "active"
         actor_id = self.utils.optional_text(request.args.get("actor_id"))
+        search_query = self.utils.optional_text(request.args.get("search_query"))
+        search_mode = self.utils.optional_text(request.args.get("search_mode")) or "keyword"
+        if search_mode not in {"keyword", "semantic"}:
+            return self.utils.error("不支持的 Topic 搜索方式")
         try:
             limit = max(1, min(int(request.args.get("limit", 100)), 500))
             offset = max(0, int(request.args.get("offset", 0)))
             normalized_status = None if status == "all" else status
-            topics = await memory_engine.topic_memory_store.list_topics(
-                memory_space_id,
-                status=normalized_status,
-                limit=limit,
-                offset=offset,
-                actor_id=actor_id,
-            )
+            relevance_scores: dict[str, float] = {}
+            if search_query and search_mode == "semantic":
+                retriever = memory_engine.topic_retriever
+                retriever.refresh_providers()
+                if retriever.embedding_provider is None:
+                    return self.utils.error("相关性搜索需要可用的 Embedding 模型")
+                query_vector = (await retriever._get_embeddings([search_query]))[0]
+                hits = await memory_engine.topic_vector_index.search(
+                    memory_space_id=memory_space_id,
+                    artifact_type="topic",
+                    query_vector=query_vector,
+                    limit=500,
+                    provider=retriever.embedding_provider,
+                    input_format_versions=SUPPORTED_TOPIC_EMBEDDING_FORMATS,
+                    artifact_status=normalized_status,
+                )
+                relevance_scores = {
+                    hit.artifact_uid: max(0.0, min(1.0, float(hit.score)))
+                    for hit in hits
+                }
+                matched = await memory_engine.topic_memory_store.get_topics_by_uids(
+                    memory_space_id,
+                    [hit.artifact_uid for hit in hits],
+                    status=normalized_status,
+                    actor_id=actor_id,
+                )
+                matched_by_uid = {topic.topic_uid: topic for topic in matched}
+                ordered = [
+                    matched_by_uid[hit.artifact_uid]
+                    for hit in hits
+                    if hit.artifact_uid in matched_by_uid
+                ]
+                filtered_total = len(ordered)
+                topics = ordered[offset : offset + limit]
+            else:
+                topics = await memory_engine.topic_memory_store.list_topics(
+                    memory_space_id,
+                    status=normalized_status,
+                    limit=limit,
+                    offset=offset,
+                    actor_id=actor_id,
+                    search_text=search_query,
+                )
+                filtered_total = await memory_engine.topic_memory_store.count_topics(
+                    memory_space_id,
+                    status=normalized_status,
+                    actor_id=actor_id,
+                    search_text=search_query,
+                )
             items = [self._topic_payload(item) for item in topics]
             for item in items:
                 item["support"] = await memory_engine.topic_memory_store.get_topic_support_metrics(
                     item["topic_uid"]
                 )
-            filtered_total, space_total = await asyncio.gather(
-                memory_engine.topic_memory_store.count_topics(
-                    memory_space_id,
-                    status=normalized_status,
-                ),
-                memory_engine.topic_memory_store.count_topics(memory_space_id),
+                if item["topic_uid"] in relevance_scores:
+                    item["search_score"] = relevance_scores[item["topic_uid"]]
+            space_total = await memory_engine.topic_memory_store.count_topics(
+                memory_space_id
             )
             return self.utils.ok(
                 {
@@ -181,12 +227,19 @@ class TopicHandler:
                         status=normalized_status,
                     ),
                     "actor_id": actor_id,
+                    "search_query": search_query,
+                    "search_mode": search_mode,
                     # `status` is reserved by the Page API response envelope. The
                     # AstrBot bridge unwraps successful responses before the
                     # dashboard sees them, so an inner value of "error" would be
                     # mistaken for a failed request by ApiClient.
                     "status_filter": status,
                 }
+            )
+        except TopicVectorIndexCompatibilityError as exc:
+            return self.utils.error(
+                "Topic 向量与当前 Embedding 模型不兼容，请先重新向量化并重算关系："
+                f"{exc.reason}"
             )
         except Exception as exc:
             logger.error("[PageAPI] 获取 Topic 列表失败", exc_info=True)

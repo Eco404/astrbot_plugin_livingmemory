@@ -809,6 +809,16 @@ async def test_actor_filter_and_fact_groups_expose_concrete_provenance(tmp_path:
     matched = await store.list_topics(space_id, actor_id=actor.actor_id)
     assert [item.topic_uid for item in matched] == [topic.topic_uid]
     assert await store.list_topics(space_id, actor_id="qq:human:other") == []
+    assert [
+        item.topic_uid
+        for item in await store.list_topics(space_id, search_text="报销补记")
+    ] == [topic.topic_uid]
+    assert [
+        item.topic_uid
+        for item in await store.list_topics(space_id, search_text="少记了 100")
+    ] == [topic.topic_uid]
+    assert await store.count_topics(space_id, search_text="少记了 100") == 1
+    assert await store.list_topics(space_id, search_text="不存在的事实") == []
     catalog = await store.list_topic_actors(space_id)
     assert catalog[0]["display_name"] == "示例甲"
     assert catalog[0]["topic_count"] == 1

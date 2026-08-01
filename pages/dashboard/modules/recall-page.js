@@ -15,6 +15,7 @@ export class RecallPage {
     this.sessionsLoaded = false;
     this.sessionsLoading = null;
     this.currentExport = null;
+    this.recallRunning = false;
   }
 
   async fetchSessions(force = false) {
@@ -141,6 +142,7 @@ export class RecallPage {
    * 执行召回测试
    */
   async runRecall() {
+    if (this.recallRunning) return;
     const query = document.getElementById("recall-query").value.trim();
     const k = parseInt(document.getElementById("recall-k").value) || 5;
     const sessionId = document.getElementById("recall-session").value.trim();
@@ -159,6 +161,7 @@ export class RecallPage {
       return;
     }
 
+    this.recallRunning = true;
     const searchBtn = document.getElementById("recall-search-btn");
     if (searchBtn) searchBtn.disabled = true;
 
@@ -186,6 +189,7 @@ export class RecallPage {
       this.currentExport = null;
       document.getElementById("recall-export-current")?.classList.add("hidden");
     } finally {
+      this.recallRunning = false;
       if (searchBtn) searchBtn.disabled = false;
     }
   }

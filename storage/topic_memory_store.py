@@ -1391,6 +1391,7 @@ class TopicMemoryStore:
         limit: int = 100,
         offset: int = 0,
         actor_id: str | None = None,
+        search_text: str | None = None,
     ) -> list[TopicMemory]:
         where = "memory_space_id = ?"
         params: list[Any] = [memory_space_id]
@@ -1412,6 +1413,17 @@ class TopicMemoryStore:
                 f"AND actor.actor_id IN ({actor_placeholders}))"
             )
             params.extend(normalized_actor_ids)
+        normalized_search = str(search_text or "").strip()
+        if normalized_search:
+            pattern = f"%{self._escape_like(normalized_search)}%"
+            where += (
+                " AND (title LIKE ? ESCAPE '\\' COLLATE NOCASE "
+                "OR summary LIKE ? ESCAPE '\\' COLLATE NOCASE "
+                "OR EXISTS (SELECT 1 FROM topic_memory_atoms atom "
+                "WHERE atom.topic_uid = topic_memories.topic_uid "
+                "AND atom.content LIKE ? ESCAPE '\\' COLLATE NOCASE))"
+            )
+            params.extend([pattern, pattern, pattern])
         params.extend([max(1, min(int(limit), 1000)), max(0, int(offset))])
         async with self._connect() as db:
             cursor = await db.execute(
@@ -1565,12 +1577,40 @@ class TopicMemoryStore:
         memory_space_id: str,
         *,
         status: TopicMemoryStatus | str | None = None,
+        actor_id: str | None = None,
+        search_text: str | None = None,
     ) -> int:
         where = "memory_space_id = ?"
         params: list[Any] = [memory_space_id]
         if status is not None:
             where += " AND status = ?"
             params.append(self._enum_value(status))
+        normalized_actor_ids = sorted(
+            {
+                value.strip()
+                for value in str(actor_id or "").split(",")
+                if value.strip()
+            }
+        )
+        if normalized_actor_ids:
+            actor_placeholders = ",".join("?" * len(normalized_actor_ids))
+            where += (
+                " AND EXISTS (SELECT 1 FROM topic_actor_links actor "
+                "WHERE actor.topic_uid = topic_memories.topic_uid "
+                f"AND actor.actor_id IN ({actor_placeholders}))"
+            )
+            params.extend(normalized_actor_ids)
+        normalized_search = str(search_text or "").strip()
+        if normalized_search:
+            pattern = f"%{self._escape_like(normalized_search)}%"
+            where += (
+                " AND (title LIKE ? ESCAPE '\\' COLLATE NOCASE "
+                "OR summary LIKE ? ESCAPE '\\' COLLATE NOCASE "
+                "OR EXISTS (SELECT 1 FROM topic_memory_atoms atom "
+                "WHERE atom.topic_uid = topic_memories.topic_uid "
+                "AND atom.content LIKE ? ESCAPE '\\' COLLATE NOCASE))"
+            )
+            params.extend([pattern, pattern, pattern])
         async with self._connect() as db:
             row = await (
                 await db.execute(
@@ -1579,6 +1619,10 @@ class TopicMemoryStore:
                 )
             ).fetchone()
         return int(row[0] if row else 0)
+
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     async def delete_archived_topics(
         self,
@@ -1639,6 +1683,7 @@ class TopicMemoryStore:
         topic_uids: list[str],
         *,
         status: TopicMemoryStatus | str | None = TopicMemoryStatus.ACTIVE,
+        actor_id: str | None = None,
     ) -> list[TopicMemory]:
         normalized = sorted(
             {str(uid).strip() for uid in topic_uids if str(uid).strip()}
@@ -1651,13 +1696,29 @@ class TopicMemoryStore:
         if status is not None:
             status_clause = " AND status = ?"
             params.append(self._enum_value(status))
+        actor_clause = ""
+        normalized_actor_ids = sorted(
+            {
+                value.strip()
+                for value in str(actor_id or "").split(",")
+                if value.strip()
+            }
+        )
+        if normalized_actor_ids:
+            actor_placeholders = ",".join("?" * len(normalized_actor_ids))
+            actor_clause = (
+                " AND EXISTS (SELECT 1 FROM topic_actor_links actor "
+                "WHERE actor.topic_uid = topic_memories.topic_uid "
+                f"AND actor.actor_id IN ({actor_placeholders}))"
+            )
+            params.extend(normalized_actor_ids)
         async with self._connect() as db:
             rows = await (
                 await db.execute(
                     f"""
                     SELECT * FROM topic_memories
                     WHERE memory_space_id = ?
-                      AND topic_uid IN ({placeholders}){status_clause}
+                      AND topic_uid IN ({placeholders}){status_clause}{actor_clause}
                     ORDER BY importance DESC, updated_at DESC
                     """,
                     params,
@@ -2501,6 +2562,7 @@ class TopicMemoryStore:
         memory_space_id: str,
         *,
         artifact_type: str,
+        status: TopicMemoryStatus | str | None = TopicMemoryStatus.ACTIVE,
         limit: int = 512,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -2509,17 +2571,23 @@ class TopicMemoryStore:
         safe_offset = max(0, int(offset))
         async with self._connect() as db:
             if artifact_type == "topic":
+                status_clause = ""
+                params: list[Any] = [memory_space_id]
+                if status is not None:
+                    status_clause = " AND status = ?"
+                    params.append(self._enum_value(status))
+                params.extend([safe_limit, safe_offset])
                 rows = await (
                     await db.execute(
-                        """
+                        f"""
                         SELECT topic_uid AS artifact_uid, metadata,
                                embedding_signature
                         FROM topic_memories
-                        WHERE memory_space_id = ? AND status = 'active'
+                        WHERE memory_space_id = ?{status_clause}
                         ORDER BY topic_uid
                         LIMIT ? OFFSET ?
                         """,
-                        (memory_space_id, safe_limit, safe_offset),
+                        params,
                     )
                 ).fetchall()
                 return [

@@ -620,6 +620,7 @@ export class PeekPanel {
   }
 
   async startSaveJob(overlay, updatePayload) {
+    if (this._saveJobRunning) return;
     const scope = overlay.querySelector("#memory-related-scope").value;
     if (scope !== "current" && !overlay._relatedDetected) return;
     const modeInput = overlay.querySelector('input[name="memory-save-mode"]:checked');

@@ -35,7 +35,8 @@
 | :--- | :--- | :--- |
 | **Two-layer architecture**<br>Timeline is the editable source; Topic is derived and read-only. | **Current-query control**<br>The current message qualifies candidates; recent context only adds bounded support. | **Atomic publication**<br>Failed or cancelled Topic builds leave the active generation intact. |
 | **Traceable structure**<br>Facts, actors, emotion, formal fragments, and revisions retain source links. | **Optional Rerank**<br>A configured provider or built-in Cloudflare client can refine qualified candidates. | **Unified maintenance**<br>Review, rebuild, session audit, database health, recall traces, and model tests share one workspace. |
-| **Bounded incremental updates**<br>New Timeline revisions match a limited neighborhood of existing Topics. | **Agent-native tools**<br>`recall_long_term_memory` and `memorize_long_term_memory` support active memory use. | **Data lifecycle**<br>Backups, staged edits, import/export, cleanup, archive, and in-place reconstruction are explicit operations. |
+| **Bounded incremental updates**<br>New Timeline revisions match a limited neighborhood of existing Topics. | **Two Topic search modes**<br>Search titles, summaries, and facts by keyword, or use Embedding similarity to find related themes. | **Data lifecycle**<br>Backups, staged edits, import/export, cleanup, archive, and in-place reconstruction are explicit operations. |
+| **Topic continuation**<br>After the base round count, pending themes may extend the summary boundary until the configured hard limit. | **Agent-native tools**<br>`recall_long_term_memory` and `memorize_long_term_memory` support active memory use. | **Duplicate-submit guards**<br>Long-running actions lock immediately and restore persisted task state after refresh. |
 
 ```mermaid
 flowchart LR
