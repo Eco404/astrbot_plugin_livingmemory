@@ -2902,6 +2902,10 @@ body {
   pointer-events: auto;
 }
 
+#action-confirm-overlay {
+  z-index: 130;
+}
+
 .modal {
   background: var(--bg-card);
   border: 1px solid var(--border-light);
@@ -3064,8 +3068,10 @@ body {
 .topic-table-container { display: flex; flex: 1 1 auto; min-height: 180px; }
 .topic-list-toolbar {
   display: flex;
+  flex: 0 0 auto;
   justify-content: space-between;
   align-items: end;
+  align-content: flex-start;
   gap: var(--space-3);
   flex-wrap: wrap;
   min-height: 36px;
