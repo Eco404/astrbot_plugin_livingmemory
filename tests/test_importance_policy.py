@@ -224,6 +224,7 @@ async def test_deleted_source_review_can_be_repaired_manually():
         affected_topic_uids=["topic-1"],
         deleted_timeline_uids=["timeline-1"],
         review_uid="review-1",
+        progress_callback=None,
     )
 
 

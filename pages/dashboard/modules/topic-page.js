@@ -28,6 +28,9 @@ export class TopicPage {
     this.actorFilter = "";
     this.actorCatalog = [];
     this.statusFilter = "active";
+    this.searchMode = "keyword";
+    this.searchQuery = "";
+    this.topicsRequestId = 0;
   }
 
   initEventListeners() {
@@ -35,13 +38,27 @@ export class TopicPage {
     document.getElementById("topic-space")?.addEventListener("change", () => {
       this.actorFilter = "";
       this.statusFilter = "active";
+      this.searchMode = "keyword";
+      this.searchQuery = "";
       this.syncStatusFilterControls();
+      this.syncSearchControls();
       this.fetch();
     });
     document.getElementById("topic-status-filter")?.addEventListener("change", event => {
       this.statusFilter = event.currentTarget.value || "active";
       this.fetchTopics();
     });
+    document.getElementById("topic-search-mode")?.addEventListener("change", event => {
+      this.searchMode = event.currentTarget.value === "semantic" ? "semantic" : "keyword";
+      if (this.searchQuery) this.fetchTopics();
+    });
+    document.getElementById("topic-search-input")?.addEventListener("keydown", event => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      this.applySearch();
+    });
+    document.getElementById("topic-search-submit")?.addEventListener("click", () => this.applySearch());
+    document.getElementById("topic-search-clear")?.addEventListener("click", () => this.clearSearch());
     document.getElementById("topic-actor-filter")?.addEventListener("click", event => {
       event.stopPropagation();
       this.toggleActorFilter();
@@ -135,6 +152,46 @@ export class TopicPage {
   syncStatusFilterControls() {
     const select = document.getElementById("topic-status-filter");
     if (select) select.value = this.statusFilter;
+  }
+
+  syncSearchControls() {
+    const mode = document.getElementById("topic-search-mode");
+    const input = document.getElementById("topic-search-input");
+    if (mode) mode.value = this.searchMode;
+    if (input) input.value = this.searchQuery;
+    this.updateSearchControls();
+  }
+
+  updateSearchControls(busy = false) {
+    const input = document.getElementById("topic-search-input");
+    const mode = document.getElementById("topic-search-mode");
+    const submit = document.getElementById("topic-search-submit");
+    const clear = document.getElementById("topic-search-clear");
+    if (input) input.disabled = busy;
+    if (mode) mode.disabled = busy;
+    if (submit) submit.disabled = busy;
+    if (clear) clear.disabled = busy || !this.searchQuery;
+  }
+
+  applySearch() {
+    const input = document.getElementById("topic-search-input");
+    const query = String(input?.value || "").trim();
+    if (query === this.searchQuery) {
+      if (query) this.fetchTopics();
+      return;
+    }
+    this.searchQuery = query;
+    this.updateSearchControls();
+    this.fetchTopics();
+  }
+
+  clearSearch() {
+    if (!this.searchQuery && !document.getElementById("topic-search-input")?.value) return;
+    this.searchQuery = "";
+    const input = document.getElementById("topic-search-input");
+    if (input) input.value = "";
+    this.updateSearchControls();
+    this.fetchTopics();
   }
 
   actorFilterIsOpen() {
@@ -273,6 +330,7 @@ export class TopicPage {
   }
 
   async fetchTopics() {
+    const requestId = ++this.topicsRequestId;
     const space = this.currentSpace();
     const body = document.getElementById("topics-body");
     this.closeDetail({ restoreFocus: false });
@@ -280,13 +338,17 @@ export class TopicPage {
       body.innerHTML = `<tr><td colspan="6" class="table-empty">${esc(window.t("topic.chooseSpace"))}</td></tr>`;
       return;
     }
+    this.updateSearchControls(true);
     try {
       const data = await this.api.get("topics", {
         memory_space_id: space,
         actor_id: this.actorFilter,
         status: this.statusFilter,
+        search_query: this.searchQuery,
+        search_mode: this.searchMode,
         limit: 200,
       });
+      if (requestId !== this.topicsRequestId) return;
       const items = data.items || [];
       const spaceTotal = Math.max(0, Number(data.space_total ?? this.topicCount));
       this.actorCatalog = data.actors || [];
@@ -296,7 +358,7 @@ export class TopicPage {
       body.innerHTML = items.length ? items.map(item => `
         <tr class="topic-row" data-topic-uid="${esc(item.topic_uid)}" tabindex="0" role="button" aria-label="${esc(`${window.t("topic.viewDetails")}: ${item.title}`)}">
           <td class="text-mono">${esc(item.topic_uid.slice(0, 12))}</td>
-          <td class="topic-title-cell" title="${esc(item.title)}"><span>${esc(item.title)}</span></td>
+          <td class="topic-title-cell" title="${esc(item.title)}"><span>${esc(item.title)}</span>${item.search_score == null ? "" : `<small>${esc(window.t("topic.searchScore", Number(item.search_score).toFixed(3)))}</small>`}</td>
           <td>${esc(item.status)}</td>
           <td>${Number(item.importance || 0).toFixed(2)}</td>
           <td>${item.support?.time_cluster_count || 0} / ${item.support?.timeline_count || 0}</td>
@@ -311,8 +373,11 @@ export class TopicPage {
         });
       });
     } catch (e) {
+      if (requestId !== this.topicsRequestId) return;
       body.innerHTML = `<tr><td colspan="6" class="table-empty table-empty-error">${esc(window.t("topic.loadFailed"))}</td></tr>`;
       this.showToast(e.message || window.t("topic.loadFailed"), true);
+    } finally {
+      if (requestId === this.topicsRequestId) this.updateSearchControls(false);
     }
   }
 
@@ -1241,7 +1306,7 @@ export class TopicPage {
         </div>` : ""}
         <div class="text-tertiary">${esc(window.t("topic.progress.elapsed"))} ${esc(elapsed)} · ${esc(window.t("topic.progress.updated"))} ${esc(updatedAgo)}</div>
         <div class="text-tertiary">${esc(job.status)} · ${esc(job.memory_space_id || "")}</div>
-        ${job.run_uid && ["failed", "cancelled", "pending"].includes(job.status)
+        ${job.operation !== "resolve_review" && job.run_uid && ["failed", "cancelled", "pending"].includes(job.status)
           ? `<div class="topic-progress-actions">
               <button id="${resumeId}" class="btn btn-primary">${esc(window.t("topic.resumeBuild"))}</button>
               <button id="${discardId}" class="btn btn-danger">${esc(window.t("topic.discardBuild"))}</button>

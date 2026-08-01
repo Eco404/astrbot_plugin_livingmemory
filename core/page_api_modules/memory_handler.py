@@ -352,6 +352,7 @@ class MemoryHandler:
         if topic_store is not None and memory_uid:
             try:
                 topic_rows = await topic_store.get_topics_for_timeline(memory_uid)
+                timeline_revision = int(metadata.get("revision") or 1)
                 detail["related_topics"] = [
                     {
                         "topic_uid": str(row.get("topic_uid") or ""),
@@ -360,6 +361,14 @@ class MemoryHandler:
                         "status": str(row.get("status") or "active"),
                         "importance": float(row.get("importance") or 0.0),
                         "revision": int(row.get("revision") or 1),
+                        "source_timeline_revision": int(
+                            row.get("source_timeline_revision") or 0
+                        ),
+                        "waiting_rebuild": bool(
+                            row.get("source_timeline_revision")
+                            and int(row.get("source_timeline_revision") or 0)
+                            != timeline_revision
+                        ),
                         "time_cluster_key": str(row.get("time_cluster_key") or ""),
                         "contribution_weight": float(
                             row.get("contribution_weight") or 0.0

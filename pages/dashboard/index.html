@@ -265,6 +265,15 @@
                   </select>
                 </label>
               </div>
+              <div class="topic-search-control" id="topic-search-form" role="search">
+                <select id="topic-search-mode" class="select input input-sm" aria-label="搜索方式" data-i18n-aria="topic.searchMode">
+                  <option value="keyword" data-i18n="topic.searchKeyword">关键字</option>
+                  <option value="semantic" data-i18n="topic.searchSemantic">相关性</option>
+                </select>
+                <input id="topic-search-input" class="input input-sm" type="search" autocomplete="off" data-i18n-placeholder="topic.searchPlaceholder" placeholder="搜索标题、摘要和事实">
+                <button id="topic-search-submit" class="btn btn-secondary btn-sm" type="button" data-i18n="topic.searchSubmit">搜索</button>
+                <button id="topic-search-clear" class="btn btn-ghost btn-sm" type="button" data-i18n="topic.searchClear" disabled>清除</button>
+              </div>
               <div class="topic-list-filter">
                 <span data-i18n="topic.actorFilter">按人物筛选</span>
                 <div class="topic-actor-filter-control">
@@ -364,7 +373,7 @@
                   <button class="btn btn-secondary maintenance-count-button" id="maintenance-open-topic" type="button"><span data-i18n="maintenance.openIncremental">查看</span><span class="maintenance-action-count" id="maintenance-topic-unindexed-count">0</span></button>
                 </div>
                 <div class="maintenance-topic-action-row">
-                  <div><strong data-i18n="maintenance.reviewTitle">Topic 待审查</strong><p data-i18n="maintenance.reviewIntro">核对歧义片段与候选 Topic，再决定合并、新建、暂缓或忽略。</p></div>
+                  <div><strong data-i18n="maintenance.reviewTitle">Topic 待审查</strong><p data-i18n="maintenance.reviewIntro">核对歧义片段与候选 Topic，再决定合并、新建或忽略。</p></div>
                   <button class="btn btn-secondary maintenance-count-button" id="maintenance-open-reviews" type="button"><span data-i18n="maintenance.openReviews">查看</span><span class="maintenance-action-count" id="maintenance-topic-review-count">0</span></button>
                 </div>
                 <div class="maintenance-topic-action-row">
@@ -805,7 +814,7 @@
         <div class="modal-header">
           <div>
             <div class="modal-title" id="topic-review-title" data-i18n="maintenance.reviewTitle">Topic 待审查</div>
-            <p class="modal-subtitle" data-i18n="maintenance.reviewIntro">核对歧义片段与候选 Topic，再决定合并、新建、暂缓或忽略。</p>
+            <p class="modal-subtitle" data-i18n="maintenance.reviewIntro">核对歧义片段与候选 Topic，再决定合并、新建或忽略。</p>
           </div>
           <button class="modal-close" id="topic-review-close" type="button" data-i18n-aria="common.close" aria-label="Close">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>

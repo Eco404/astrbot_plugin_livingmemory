@@ -38,14 +38,15 @@ from .processors.memory_processor import MemoryProcessor
 from .providers.cloudflare_rerank import CloudflareRerankClient
 from .schedulers.decay_scheduler import DecayScheduler
 from .schedulers.idle_summary_scheduler import IdleSummaryScheduler
-from .topic_settings import topic_setting_defaults
 from .timeline_settings import (
     TIMELINE_SETTING_DEFINITIONS,
     TIMELINE_SETTINGS_REVISION,
     effective_timeline_settings,
     timeline_setting_defaults,
     validate_timeline_setting,
+    validate_timeline_settings,
 )
+from .topic_settings import topic_setting_defaults
 from .validators.index_validator import IndexValidator
 
 FaissVecDB: Any = None
@@ -870,6 +871,7 @@ class PluginInitializer:
                 conversation_manager=self.conversation_manager,
                 memory_engine=self.memory_engine,
                 memory_processor=self.memory_processor,
+                embedding_provider_resolver=lambda: self.embedding_provider,
             )
             self.timeline_rebuild_manager = TimelineRebuildManager(
                 str(db_path),
@@ -971,6 +973,23 @@ class PluginInitializer:
             if key in TIMELINE_SETTING_DEFINITIONS
         }
         effective = effective_timeline_settings(public)
+        try:
+            validate_timeline_settings(effective)
+        except ValueError:
+            # Older installations may have a base summary window above the new
+            # continuation cap. Preserve the old window and migrate only the cap.
+            base_rounds = int(effective["reflection_engine.summary_trigger_rounds"])
+            adjusted_cap = min(200, max(base_rounds + 1, base_rounds * 2))
+            public["reflection_engine.topic_continuation_force_summary_rounds"] = (
+                adjusted_cap
+            )
+            await store.update_timeline_setting_overrides(
+                {
+                    "reflection_engine.topic_continuation_force_summary_rounds": adjusted_cap
+                },
+                settings_revision=TIMELINE_SETTINGS_REVISION,
+            )
+            effective = effective_timeline_settings(public)
         self.config_manager.apply_runtime_overrides(effective)
         await self._apply_cloudflare_runtime_settings(effective)
 
@@ -1006,6 +1025,13 @@ class PluginInitializer:
             key: validate_timeline_setting(key, value)
             for key, value in changes.items()
         }
+        current = await self.get_timeline_runtime_settings()
+        proposed = timeline_setting_defaults() if reset_all else dict(current["effective"])
+        for key in reset_keys or []:
+            if key in TIMELINE_SETTING_DEFINITIONS:
+                proposed[key] = TIMELINE_SETTING_DEFINITIONS[key]["default"]
+        proposed.update(normalized)
+        validate_timeline_settings(proposed)
         stored = await self.memory_engine.topic_memory_store.update_timeline_setting_overrides(
             normalized,
             reset_keys=reset_keys,

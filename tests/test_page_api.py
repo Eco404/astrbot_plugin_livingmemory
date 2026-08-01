@@ -16,6 +16,7 @@ import pytest
 from astrbot_plugin_livingmemory.core.models.identity_profile import (
     SupplementalIdentityStore,
 )
+from astrbot_plugin_livingmemory.core.models.topic_memory import TopicMemory
 from astrbot_plugin_livingmemory.core.page_api import (
     PAGE_API_PREFIX,
     PLUGIN_NAME,
@@ -542,7 +543,15 @@ class TestTopicList:
     async def test_defaults_to_active_and_reports_unfiltered_space_total(self, api):
         engine = api.plugin.initializer.memory_engine
 
-        async def count_topics(_space_id, *, status=None):
+        async def count_topics(
+            _space_id,
+            *,
+            status=None,
+            actor_id=None,
+            search_text=None,
+        ):
+            assert actor_id is None
+            assert search_text is None
             return 0 if status == "active" else 4
 
         engine.topic_memory_store = SimpleNamespace(
@@ -556,7 +565,7 @@ class TestTopicList:
             result = await api.list_topics()
 
         assert result["status"] == "ok"
-        assert result["data"]["status"] == "active"
+        assert result["data"]["status_filter"] == "active"
         assert result["data"]["total"] == 0
         assert result["data"]["space_total"] == 4
         engine.topic_memory_store.list_topics.assert_awaited_once_with(
@@ -565,7 +574,133 @@ class TestTopicList:
             limit=100,
             offset=0,
             actor_id=None,
+            search_text=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_error_status_filter_does_not_collide_with_response_status(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.topic_memory_store = SimpleNamespace(
+            list_topics=AsyncMock(return_value=[]),
+            count_topics=AsyncMock(return_value=0),
+            list_topic_actors=AsyncMock(return_value=[]),
+        )
+        req = _mock_page_request(
+            args={"memory_space_id": "space-1", "status": "error"}
+        )
+
+        with _patch_page_request(req):
+            result = await api.list_topics()
+
+        assert result["status"] == "ok"
+        assert result["data"]["status_filter"] == "error"
+        assert "status" not in result["data"]
+        engine.topic_memory_store.list_topics.assert_awaited_once_with(
+            "space-1",
+            status="error",
+            limit=100,
+            offset=0,
+            actor_id=None,
+            search_text=None,
+        )
+
+
+    @pytest.mark.asyncio
+    async def test_keyword_search_is_forwarded_to_store(self, api):
+        engine = api.plugin.initializer.memory_engine
+        engine.topic_memory_store = SimpleNamespace(
+            list_topics=AsyncMock(return_value=[]),
+            count_topics=AsyncMock(side_effect=[2, 7]),
+            list_topic_actors=AsyncMock(return_value=[]),
+        )
+        req = _mock_page_request(
+            args={
+                "memory_space_id": "space-1",
+                "search_query": "项目报销",
+                "search_mode": "keyword",
+            }
+        )
+
+        with _patch_page_request(req):
+            result = await api.list_topics()
+
+        assert result["status"] == "ok"
+        assert result["data"]["total"] == 2
+        assert result["data"]["space_total"] == 7
+        engine.topic_memory_store.list_topics.assert_awaited_once_with(
+            "space-1",
+            status="active",
+            limit=100,
+            offset=0,
+            actor_id=None,
+            search_text="项目报销",
+        )
+
+    @pytest.mark.asyncio
+    async def test_semantic_search_uses_vector_order_and_actor_filter(self, api):
+        engine = api.plugin.initializer.memory_engine
+        topics = [
+            TopicMemory(
+                topic_uid="topic-b",
+                memory_space_id="space-1",
+                title="第二候选",
+                summary="摘要 B",
+            ),
+            TopicMemory(
+                topic_uid="topic-a",
+                memory_space_id="space-1",
+                title="第一候选",
+                summary="摘要 A",
+            ),
+        ]
+        store = SimpleNamespace(
+            get_topics_by_uids=AsyncMock(return_value=topics),
+            get_topic_support_metrics=AsyncMock(return_value={}),
+            count_topics=AsyncMock(return_value=9),
+            list_topic_actors=AsyncMock(return_value=[]),
+        )
+        provider = object()
+        retriever = SimpleNamespace(
+            embedding_provider=provider,
+            refresh_providers=MagicMock(),
+            _get_embeddings=AsyncMock(return_value=[[1.0, 0.0]]),
+        )
+        vector_index = SimpleNamespace(
+            search=AsyncMock(
+                return_value=[
+                    SimpleNamespace(artifact_uid="topic-a", score=0.91),
+                    SimpleNamespace(artifact_uid="topic-b", score=0.72),
+                ]
+            )
+        )
+        engine.topic_memory_store = store
+        engine.topic_retriever = retriever
+        engine.topic_vector_index = vector_index
+        req = _mock_page_request(
+            args={
+                "memory_space_id": "space-1",
+                "actor_id": "qq:human:10000001",
+                "search_query": "报销差额",
+                "search_mode": "semantic",
+            }
+        )
+
+        with _patch_page_request(req):
+            result = await api.list_topics()
+
+        assert result["status"] == "ok"
+        assert [item["topic_uid"] for item in result["data"]["items"]] == [
+            "topic-a",
+            "topic-b",
+        ]
+        assert result["data"]["items"][0]["search_score"] == pytest.approx(0.91)
+        store.get_topics_by_uids.assert_awaited_once_with(
+            "space-1",
+            ["topic-a", "topic-b"],
+            status="active",
+            actor_id="qq:human:10000001",
+        )
+        vector_index.search.assert_awaited_once()
 
 
 class TestSessionCatalog:
@@ -873,7 +1008,7 @@ class TestListMemories:
                     7,
                     "7",
                     "Timeline detail",
-                    json.dumps({"memory_uid": "timeline-7"}),
+                    json.dumps({"memory_uid": "timeline-7", "revision": 3}),
                     "created",
                     "updated",
                 ),
@@ -891,6 +1026,7 @@ class TestListMemories:
                         "link_status": "active",
                         "importance": 0.8,
                         "revision": 2,
+                        "source_timeline_revision": 2,
                     },
                     {
                         "topic_uid": "topic-archived",
@@ -920,6 +1056,10 @@ class TestListMemories:
         assert [item["topic_uid"] for item in result["data"]["related_topics"]] == [
             "topic-active"
         ]
+        assert result["data"]["related_topics"][0]["waiting_rebuild"] is True
+        assert (
+            result["data"]["related_topics"][0]["source_timeline_revision"] == 2
+        )
         topic_store.get_topics_for_timeline.assert_awaited_once_with("timeline-7")
 
     @pytest.mark.asyncio

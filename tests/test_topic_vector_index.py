@@ -34,8 +34,9 @@ class _VectorStore:
         artifact_type,
         limit,
         offset,
+        status="active",
     ):
-        self.calls.append((memory_space_id, artifact_type, limit, offset))
+        self.calls.append((memory_space_id, artifact_type, limit, offset, status))
         return self.rows[offset : offset + limit]
 
 
@@ -90,6 +91,59 @@ async def test_vector_index_pages_and_reuses_a_derived_namespace():
     assert [item.artifact_uid for item in first] == ["left", "near-left"]
     assert [item.artifact_uid for item in second] == ["right"]
     assert [call[3] for call in store.calls] == [0, 2]
+
+
+@pytest.mark.asyncio
+async def test_vector_index_uses_separate_topic_status_namespaces():
+    provider = _Provider()
+    signature = make_embedding_signature(
+        provider,
+        dimension=2,
+        input_format_version=TOPIC_CENTROID_EMBEDDING_FORMAT,
+        generated_at=1.0,
+    )
+
+    class _StatusStore(_VectorStore):
+        async def list_vector_artifacts(
+            self,
+            memory_space_id,
+            *,
+            artifact_type,
+            limit,
+            offset,
+            status="active",
+        ):
+            self.calls.append((memory_space_id, artifact_type, limit, offset, status))
+            uid = "archived" if status == "archived" else "active"
+            return [] if offset else [{
+                "artifact_uid": uid,
+                "embedding": [1.0, 0.0],
+                "embedding_signature": signature,
+            }]
+
+    store = _StatusStore([])
+    index = TopicVectorIndex(store)
+    active = await index.search(
+        memory_space_id="space-1",
+        artifact_type="topic",
+        query_vector=[1.0, 0.0],
+        limit=1,
+        provider=provider,
+        input_format_versions={TOPIC_CENTROID_EMBEDDING_FORMAT},
+    )
+    archived = await index.search(
+        memory_space_id="space-1",
+        artifact_type="topic",
+        query_vector=[1.0, 0.0],
+        limit=1,
+        provider=provider,
+        input_format_versions={TOPIC_CENTROID_EMBEDDING_FORMAT},
+        artifact_status="archived",
+    )
+
+    assert [item.artifact_uid for item in active] == ["active"]
+    assert [item.artifact_uid for item in archived] == ["archived"]
+    assert [call[4] for call in store.calls] == ["active", "archived"]
 
 
 @pytest.mark.asyncio

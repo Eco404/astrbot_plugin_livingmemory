@@ -9,7 +9,10 @@ export class MaintenancePage {
     this.confirmDialog = confirmDialog;
     this.tab = "topic";
     this.reviewUid = null;
+    this.reviewPreviewToken = "";
+    this.reviewResolving = false;
     this.governance = null;
+    this.sessionMaintenanceSubmitting = false;
     this.sessionAudit = [];
     this.sessionPreview = null;
     this.timelineRebuildItems = [];
@@ -1324,7 +1327,8 @@ export class MaintenancePage {
     if (submit) submit.textContent = window.t("maintenance.previewChanges");
   }
 
-  closeSessionMaintenance() {
+  closeSessionMaintenance(force = false) {
+    if (this.sessionMaintenanceSubmitting && !force) return;
     const overlay = document.getElementById("session-maintenance-overlay");
     overlay?.classList.remove("visible");
     overlay?.setAttribute("aria-hidden", "true");
@@ -1341,7 +1345,10 @@ export class MaintenancePage {
   }
 
   async submitSessionMaintenance() {
+    if (this.sessionMaintenanceSubmitting) return;
     const submit = document.getElementById("session-maintenance-submit");
+    this.sessionMaintenanceSubmitting = true;
+    submit.disabled = true;
     try {
       if (!this.sessionPreview) {
         const payload = this.sessionMaintenancePayload();
@@ -1361,15 +1368,15 @@ export class MaintenancePage {
       }
       const force = document.getElementById("session-maintenance-force").checked;
       if (this.sessionPreview.requires_force && !force) throw new Error(window.t("maintenance.forceRequired"));
-      submit.disabled = true;
       const task = await this.topicPage.api.post("sessions/maintenance/start", { ...this.sessionMaintenancePayload(), confirmed: true, force });
       this.showToast(window.t("maintenance.taskStarted"));
       await this.pollSessionTask(task.task_uid);
-      this.closeSessionMaintenance();
+      this.closeSessionMaintenance(true);
       await this.loadSessionAudit();
     } catch (error) {
       this.showToast(error.message, true);
     } finally {
+      this.sessionMaintenanceSubmitting = false;
       submit.disabled = false;
     }
   }
@@ -1405,6 +1412,7 @@ export class MaintenancePage {
     const overlay = document.getElementById("topic-review-overlay");
     overlay?.classList.remove("visible");
     overlay?.setAttribute("aria-hidden", "true");
+    this.reviewPreviewToken = "";
   }
 
   async loadReviews() {
@@ -1449,6 +1457,7 @@ export class MaintenancePage {
     try {
       const data = await this.topicPage.api.get("topics/reviews/detail", { review_uid: reviewUid });
       const review = data.review || {};
+      this.reviewPreviewToken = String(review.preview_token || "");
       const fragments = review.fragments || [];
       const candidates = review.candidate_topics || [];
       const timelines = review.timelines || [];
@@ -1470,7 +1479,6 @@ export class MaintenancePage {
         <div class="maintenance-review-actions">
           ${canMaterialize ? `<button class="btn btn-primary" type="button" data-review-action="merge" ${candidates.length ? "" : "disabled"}>${esc(window.t("maintenance.mergeCandidate"))}</button><button class="btn btn-secondary" type="button" data-review-action="new">${esc(window.t("maintenance.createTopic"))}</button>` : ""}
           ${canSyncSources ? `<button class="btn btn-primary" type="button" data-review-action="sync_sources">${esc(window.t("maintenance.syncSourceRepair"))}</button>` : ""}
-          <button class="btn btn-secondary" type="button" data-review-action="defer">${esc(window.t("maintenance.defer"))}</button>
           <button class="btn btn-ghost" type="button" data-review-action="ignore">${esc(window.t("maintenance.ignore"))}</button>
         </div>`;
       document.querySelectorAll("#maintenance-review-list [data-review-uid]").forEach(item => item.classList.toggle("active", item.dataset.reviewUid === reviewUid));
@@ -1480,21 +1488,47 @@ export class MaintenancePage {
   }
 
   async resolveReview(action) {
-    if (!this.reviewUid) return;
+    if (!this.reviewUid || this.reviewResolving) return;
+    if (action === "ignore") {
+      const confirmed = await this.confirmDialog.show({
+        title: window.t("maintenance.ignoreConfirmTitle"),
+        message: window.t("maintenance.ignoreConfirmMessage"),
+        confirmLabel: window.t("maintenance.ignore"),
+        danger: true,
+      });
+      if (!confirmed) return;
+    }
     const target = document.querySelector('input[name="review-target-topic"]:checked')?.value || "";
+    this.reviewResolving = true;
+    document.querySelectorAll("#maintenance-review-detail [data-review-action], #maintenance-review-detail input").forEach(element => {
+      element.disabled = true;
+    });
     try {
-      await this.topicPage.api.post("topics/reviews/resolve", {
+      const job = await this.topicPage.api.post("topics/reviews/resolve", {
         review_uid: this.reviewUid,
         action,
         target_topic_uid: target,
+        preview_token: this.reviewPreviewToken,
       });
+      if (job.job_uid) {
+        this.closeReviews();
+        this.topicPage.renderProgress(job);
+        this.topicPage.setBuildButtonsDisabled(true);
+        this.topicPage.resumePolling(job.job_uid);
+        this.showToast(window.t("maintenance.reviewTaskStarted"));
+        return;
+      }
       this.showToast(window.t("maintenance.reviewApplied"));
       this.reviewUid = null;
+      this.reviewPreviewToken = "";
       await this.topicPage.fetch();
       this.syncTopicSpaces();
       await this.loadReviews();
     } catch (error) {
       this.showToast(error.message || window.t("maintenance.reviewFailed"), true);
+      if (this.reviewUid) await this.loadReviewDetail(this.reviewUid);
+    } finally {
+      this.reviewResolving = false;
     }
   }
 
@@ -1508,7 +1542,19 @@ export class MaintenancePage {
     overlay.setAttribute("aria-hidden", "false");
     try {
       const data = await this.topicPage.api.get("topics", { memory_space_id: space, limit: 500 });
-      this.governance = { space, mode: "merge", topics: data.items || [], preview: null, groupCount: 2, confirmed: false };
+      this.governance = {
+        space,
+        mode: "merge",
+        topics: data.items || [],
+        preview: null,
+        groupCount: 2,
+        confirmed: false,
+        busy: false,
+        mergeTopicUids: [],
+        mainTopicUid: "",
+        selectedTopic: "",
+        fragmentAssignments: {},
+      };
       this.renderGovernance();
     } catch (error) {
       body.innerHTML = `<div class="identity-state identity-state-error">${esc(error.message)}</div>`;
@@ -1519,20 +1565,22 @@ export class MaintenancePage {
     const state = this.governance;
     if (!state) return;
     const body = document.getElementById("topic-governance-body");
-    const topicOptions = state.topics.map(topic => `<option value="${esc(topic.topic_uid)}">${esc(topic.title)} · r${topic.revision}</option>`).join("");
-    const mode = `<div class="governance-mode"><label><input type="radio" name="governance-mode" value="merge" ${state.mode === "merge" ? "checked" : ""}>${esc(window.t("maintenance.mergeTopics"))}</label><label><input type="radio" name="governance-mode" value="split" ${state.mode === "split" ? "checked" : ""}>${esc(window.t("maintenance.splitTopic"))}</label></div>`;
+    const disabled = state.busy ? "disabled" : "";
+    const topicOptions = state.topics.map(topic => `<option value="${esc(topic.topic_uid)}" ${state.selectedTopic === topic.topic_uid ? "selected" : ""}>${esc(topic.title)} · r${topic.revision}</option>`).join("");
+    const mode = `<div class="governance-mode"><label><input type="radio" name="governance-mode" value="merge" ${state.mode === "merge" ? "checked" : ""} ${disabled}>${esc(window.t("maintenance.mergeTopics"))}</label><label><input type="radio" name="governance-mode" value="split" ${state.mode === "split" ? "checked" : ""} ${disabled}>${esc(window.t("maintenance.splitTopic"))}</label></div>`;
     if (state.mode === "merge") {
-      body.innerHTML = `${mode}<p class="text-secondary">${esc(window.t("maintenance.mergeHelp"))}</p><div class="governance-topic-list">${state.topics.map(topic => `<label><input type="checkbox" data-governance-merge-topic value="${esc(topic.topic_uid)}"><span><strong>${esc(topic.title)}</strong><small>${esc(topic.topic_uid)} · r${topic.revision}</small></span><input type="radio" name="governance-main-topic" value="${esc(topic.topic_uid)}" title="${esc(window.t("maintenance.retainUid"))}"></label>`).join("")}</div>${this.renderGovernanceConfirmation()}`;
+      body.innerHTML = `${mode}<p class="text-secondary">${esc(window.t("maintenance.mergeHelp"))}</p><div class="governance-topic-list">${state.topics.map(topic => `<label><input type="checkbox" data-governance-merge-topic value="${esc(topic.topic_uid)}" ${state.mergeTopicUids.includes(topic.topic_uid) ? "checked" : ""} ${disabled}><span><strong>${esc(topic.title)}</strong><small>${esc(topic.topic_uid)} · r${topic.revision}</small></span><input type="radio" name="governance-main-topic" value="${esc(topic.topic_uid)}" title="${esc(window.t("maintenance.retainUid"))}" ${state.mainTopicUid === topic.topic_uid ? "checked" : ""} ${disabled}></label>`).join("")}</div>${this.renderGovernanceConfirmation()}`;
     } else {
-      body.innerHTML = `${mode}<label class="identity-field"><span>${esc(window.t("maintenance.splitSource"))}</span><select class="input" id="governance-split-topic"><option value="">${esc(window.t("topic.chooseSpace"))}</option>${topicOptions}</select></label><div id="governance-split-fragments">${state.preview ? this.renderSplitFragments() : ""}</div>${this.renderGovernanceConfirmation()}`;
-      if (state.selectedTopic) document.getElementById("governance-split-topic").value = state.selectedTopic;
+      body.innerHTML = `${mode}<label class="identity-field"><span>${esc(window.t("maintenance.splitSource"))}</span><select class="input" id="governance-split-topic" ${disabled}><option value="">${esc(window.t("topic.chooseSpace"))}</option>${topicOptions}</select></label><div id="governance-split-fragments">${state.preview ? this.renderSplitFragments() : ""}</div>${this.renderGovernanceConfirmation()}`;
     }
-    document.getElementById("topic-governance-submit").textContent = state.confirmed ? window.t("maintenance.confirmExecute") : window.t("maintenance.previewChanges");
+    const submit = document.getElementById("topic-governance-submit");
+    submit.textContent = state.confirmed ? window.t("maintenance.confirmExecute") : window.t("maintenance.previewChanges");
+    this.setGovernanceBusy(state.busy);
   }
 
   renderSplitFragments() {
     const state = this.governance;
-    return `<div class="governance-fragment-head"><strong>${esc(window.t("maintenance.assignFragments"))}</strong><button class="btn btn-ghost btn-sm" type="button" data-governance-add-group>${esc(window.t("maintenance.addGroup"))}</button></div><div class="governance-fragment-list">${(state.preview?.fragments || []).map(fragment => `<label><span><strong>${esc(fragment.label)}</strong><small>${esc(fragment.summary)}</small></span><select class="input input-sm" data-governance-fragment="${esc(fragment.fragment_uid)}">${Array.from({ length: state.groupCount }, (_, index) => `<option value="${index}">${index === 0 ? esc(window.t("maintenance.mainGroup")) : `${esc(window.t("maintenance.newGroup"))} ${index}`}</option>`).join("")}</select></label>`).join("")}</div>`;
+    return `<div class="governance-fragment-head"><strong>${esc(window.t("maintenance.assignFragments"))}</strong><button class="btn btn-ghost btn-sm" type="button" data-governance-add-group ${state.busy ? "disabled" : ""}>${esc(window.t("maintenance.addGroup"))}</button></div><div class="governance-fragment-list">${(state.preview?.fragments || []).map(fragment => `<label><span><strong>${esc(fragment.label)}</strong><small>${esc(fragment.summary)}</small></span><select class="input input-sm" data-governance-fragment="${esc(fragment.fragment_uid)}" ${state.busy ? "disabled" : ""}>${Array.from({ length: state.groupCount }, (_, index) => `<option value="${index}" ${Number(state.fragmentAssignments[fragment.fragment_uid] || 0) === index ? "selected" : ""}>${index === 0 ? esc(window.t("maintenance.mainGroup")) : `${esc(window.t("maintenance.newGroup"))} ${index}`}</option>`).join("")}</select></label>`).join("")}</div>`;
   }
 
   renderGovernanceConfirmation() {
@@ -1588,8 +1636,9 @@ export class MaintenancePage {
 
   async handleGovernanceChange(event) {
     const state = this.governance;
-    if (!state) return;
+    if (!state || state.busy) return;
     if (event.target.name === "governance-mode") {
+      this.captureGovernanceSelection();
       state.mode = event.target.value;
       state.preview = null;
       state.confirmed = false;
@@ -1599,45 +1648,80 @@ export class MaintenancePage {
     }
     if (event.target.id === "governance-split-topic") {
       state.selectedTopic = event.target.value;
+      state.preview = null;
+      state.fragmentAssignments = {};
       state.confirmed = false;
       state.pendingPayload = null;
       if (!state.selectedTopic) return;
+      state.busy = true;
+      this.renderGovernance();
       try {
         state.preview = await this.topicPage.api.post("topics/governance/preview", { memory_space_id: state.space, operation: "split", topic_uid: state.selectedTopic });
+        state.fragmentAssignments = Object.fromEntries(
+          (state.preview?.fragments || []).map(fragment => [fragment.fragment_uid, 0])
+        );
         this.renderGovernance();
       } catch (error) {
         this.showToast(error.message, true);
+      } finally {
+        if (this.governance === state) {
+          state.busy = false;
+          this.setGovernanceBusy(false);
+        }
       }
       return;
     }
+    this.captureGovernanceSelection();
     state.confirmed = false;
     state.pendingPayload = null;
   }
 
   addGovernanceGroup() {
-    if (!this.governance || this.governance.groupCount >= 8) return;
-    const assignments = this.splitAssignments();
+    if (!this.governance || this.governance.busy || this.governance.groupCount >= 8) return;
+    this.captureGovernanceSelection();
     this.governance.groupCount += 1;
     document.getElementById("governance-split-fragments").innerHTML = this.renderSplitFragments();
-    Object.entries(assignments).forEach(([uid, group]) => {
-      const select = document.querySelector(`[data-governance-fragment="${CSS.escape(uid)}"]`);
-      if (select) select.value = group;
-    });
   }
 
   splitAssignments() {
     return Object.fromEntries(Array.from(document.querySelectorAll("[data-governance-fragment]")).map(select => [select.dataset.governanceFragment, Number(select.value)]));
   }
 
+  captureGovernanceSelection() {
+    const state = this.governance;
+    if (!state) return;
+    if (state.mode === "merge") {
+      state.mergeTopicUids = Array.from(
+        document.querySelectorAll("[data-governance-merge-topic]:checked")
+      ).map(input => input.value);
+      state.mainTopicUid = document.querySelector('input[name="governance-main-topic"]:checked')?.value || "";
+      return;
+    }
+    state.fragmentAssignments = this.splitAssignments();
+  }
+
+  setGovernanceBusy(busy) {
+    const submit = document.getElementById("topic-governance-submit");
+    const cancel = document.getElementById("topic-governance-cancel");
+    const close = document.getElementById("topic-governance-close");
+    if (submit) submit.disabled = Boolean(busy);
+    if (cancel) cancel.disabled = Boolean(busy);
+    if (close) close.disabled = Boolean(busy);
+    document.querySelectorAll("#topic-governance-body input, #topic-governance-body select, #topic-governance-body button").forEach(control => {
+      control.disabled = Boolean(busy);
+    });
+  }
+
   governancePayload() {
     const state = this.governance;
+    this.captureGovernanceSelection();
     if (state.mode === "merge") {
-      const topicUids = Array.from(document.querySelectorAll("[data-governance-merge-topic]:checked")).map(input => input.value);
-      const mainTopicUid = document.querySelector('input[name="governance-main-topic"]:checked')?.value || topicUids[0] || "";
+      const topicUids = [...state.mergeTopicUids];
+      const mainTopicUid = state.mainTopicUid || topicUids[0] || "";
       if (mainTopicUid && !topicUids.includes(mainTopicUid)) throw new Error(window.t("maintenance.mainMustSelected"));
       return { memory_space_id: state.space, operation: "merge", topic_uids: topicUids, main_topic_uid: mainTopicUid };
     }
-    const assignments = this.splitAssignments();
+    const assignments = { ...state.fragmentAssignments };
     const groups = Array.from({ length: state.groupCount }, () => []);
     Object.entries(assignments).forEach(([uid, group]) => groups[group]?.push(uid));
     return { memory_space_id: state.space, operation: "split", topic_uid: state.selectedTopic, fragment_groups: groups.filter(group => group.length) };
@@ -1645,7 +1729,9 @@ export class MaintenancePage {
 
   async submitGovernance() {
     const state = this.governance;
-    if (!state) return;
+    if (!state || state.busy) return;
+    state.busy = true;
+    this.setGovernanceBusy(true);
     try {
       const payload = state.confirmed && state.pendingPayload
         ? state.pendingPayload
@@ -1661,16 +1747,22 @@ export class MaintenancePage {
       }
       await this.topicPage.api.post("topics/governance/execute", { ...payload, confirmed: true });
       this.showToast(window.t("maintenance.governanceCompleted"));
-      this.closeGovernance();
+      this.closeGovernance(true);
       await this.topicPage.fetch();
       this.syncTopicSpaces();
       await this.loadReviews();
     } catch (error) {
       this.showToast(error.message || window.t("maintenance.governanceFailed"), true);
+    } finally {
+      if (this.governance === state) {
+        state.busy = false;
+        this.setGovernanceBusy(false);
+      }
     }
   }
 
-  closeGovernance() {
+  closeGovernance(force = false) {
+    if (this.governance?.busy && !force) return;
     document.getElementById("topic-governance-overlay")?.classList.remove("visible");
     document.getElementById("topic-governance-overlay")?.setAttribute("aria-hidden", "true");
     this.governance = null;

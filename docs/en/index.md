@@ -20,7 +20,7 @@ features:
   - title: Timeline preserves experience
     details: Summarizes continuous conversations with facts, affect, time ranges, actor bindings, and source snapshots.
   - title: Topic reorganizes themes
-    details: Converts Timeline into formal fragments and merges related material across time without losing provenance.
+    details: Converts Timeline into formal fragments, merges related material across time, and supports keyword or Embedding similarity search.
   - title: Topic-first recall
     details: The current message qualifies candidates; optional reranking, facts, and fragments restore useful detail and tone.
   - title: Inspectable maintenance
@@ -36,7 +36,7 @@ features:
 
   <div class="home-memory-grid">
     <div><h3>Timeline is the source layer</h3><p>Round, idle, or manual summarization produces editable memories with source ranges and stable identity.</p></div>
-    <div><h3>Topic is the derived layer</h3><p>Topics are read-only. Changes flow from Timeline through formal fragments into atomically published Topic snapshots.</p></div>
+    <div><h3>Topic is the derived layer</h3><p>Topics are read-only. Changes flow from Timeline through formal fragments into atomically published snapshots, while browsing supports keyword and semantic search.</p></div>
   </div>
 </section>
 

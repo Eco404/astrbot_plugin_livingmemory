@@ -42,8 +42,8 @@ class TopicVectorIndex:
 
     def __init__(self, store: Any):
         self.store = store
-        self._namespaces: dict[tuple[str, str, str], _VectorNamespace] = {}
-        self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        self._namespaces: dict[tuple[str, str, str, str], _VectorNamespace] = {}
+        self._locks: dict[tuple[str, str, str, str], asyncio.Lock] = {}
 
     def invalidate(self, memory_space_id: str | None = None, artifact_type: str | None = None) -> None:
         for key in list(self._namespaces):
@@ -62,12 +62,14 @@ class TopicVectorIndex:
         limit: int,
         provider: Any,
         input_format_versions: Iterable[str],
+        artifact_status: str | None = "active",
     ) -> list[TopicVectorHit]:
         if not query_vector or limit <= 0:
             return []
         expected_formats = {str(value) for value in input_format_versions}
         provider_key = self._provider_key(provider, expected_formats)
-        key = (str(memory_space_id), str(artifact_type), provider_key)
+        status_key = "*" if artifact_status is None else str(artifact_status)
+        key = (str(memory_space_id), str(artifact_type), status_key, provider_key)
         namespace = self._namespaces.get(key)
         if namespace is None:
             lock = self._locks.setdefault(key, asyncio.Lock())
@@ -79,6 +81,7 @@ class TopicVectorIndex:
                         artifact_type=str(artifact_type),
                         provider=provider,
                         input_format_versions=expected_formats,
+                        artifact_status=artifact_status,
                     )
                     self._namespaces[key] = namespace
         if namespace.dimension <= 0:
@@ -105,15 +108,21 @@ class TopicVectorIndex:
         artifact_type: str,
         provider: Any,
         input_format_versions: set[str],
+        artifact_status: str | None,
     ) -> _VectorNamespace:
         rows: list[dict[str, Any]] = []
         offset = 0
         while True:
+            page_kwargs: dict[str, Any] = {
+                "artifact_type": artifact_type,
+                "limit": self.PAGE_SIZE,
+                "offset": offset,
+            }
+            if artifact_type == "topic" and artifact_status != "active":
+                page_kwargs["status"] = artifact_status
             page = await self.store.list_vector_artifacts(
                 memory_space_id,
-                artifact_type=artifact_type,
-                limit=self.PAGE_SIZE,
-                offset=offset,
+                **page_kwargs,
             )
             rows.extend(page)
             if len(page) < self.PAGE_SIZE:

@@ -1519,7 +1519,8 @@ body {
 .memory-related-topic small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .memory-related-topic strong { font-size: 13px; font-weight: 500; }
 .memory-related-topic small { margin-top: 3px; color: var(--text-tertiary); font-size: 11px; }
-.memory-related-topic-meta { color: var(--text-tertiary); font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 11px; }
+.memory-related-topic-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; color: var(--text-tertiary); font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 11px; }
+.memory-related-topic-pending { padding: 2px 6px; border-radius: 999px; background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); font-family: inherit; white-space: nowrap; }
 
 .memory-detail-edit-area {
   width: 100%;
@@ -3084,6 +3085,17 @@ body {
   white-space: nowrap;
 }
 .topic-status-filter .input { min-width: 112px; }
+.topic-search-control {
+  display: flex;
+  flex: 1 1 420px;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-width: 320px;
+}
+.topic-search-control select { flex: 0 0 104px; }
+.topic-search-control input { flex: 1 1 240px; min-width: 140px; max-width: 420px; }
+.topic-search-control .btn { flex: 0 0 auto; }
 .topic-list-filter {
   display: flex;
   align-items: center;
@@ -3182,6 +3194,14 @@ body {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
+}
+.topic-title-cell small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 .topic-detail-overlay { z-index: 110; padding: var(--space-6); }
 .modal.topic-detail-modal {
@@ -4501,6 +4521,20 @@ select.timeline-setting-input { width: min(220px, 100%); }
 
   .topic-page-body { overflow-y: auto; }
   .topic-list-toolbar { justify-content: stretch; }
+  .topic-search-control {
+    display: grid;
+    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.4fr);
+    flex: 1 1 100%;
+    justify-content: stretch;
+    min-width: 0;
+  }
+  .topic-search-control select,
+  .topic-search-control input,
+  .topic-search-control .btn {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
   .topic-list-filter { width: 100%; }
   .topic-actor-filter-control { width: min(260px, 100%); }
   .topic-table-container { flex: 0 0 auto; }

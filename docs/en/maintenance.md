@@ -6,7 +6,7 @@ The maintenance center uses one interaction contract: inspect, preview, confirm,
 
 ## Topic maintenance
 
-It provides revectorization, related-Topic recalculation, incremental completion, ambiguity review, split and merge, archived Topic management, and complete derived-data cleanup for a selected memory space.
+It provides revectorization, related-Topic recalculation, incremental completion, ambiguity review, split and merge, archived Topic management, and complete derived-data cleanup for a selected memory space. Split/merge previews preserve the selected primary Topic and fragment groups across redraws.
 
 ## Timeline maintenance
 
@@ -25,3 +25,5 @@ Production recall tracing is off by default. When enabled, records show original
 ## Atomic publication
 
 Long Topic jobs stage all derived output and switch the formal snapshot only after validation. Existing Topics remain available during construction, and failed or cancelled jobs never expose partial atoms or actor links.
+
+Confirmation controls lock immediately after submission to prevent duplicate operations. Persisted tasks restore their progress after a page refresh.

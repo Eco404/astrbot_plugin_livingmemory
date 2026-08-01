@@ -340,6 +340,103 @@ async def test_duplicate_manual_build_returns_existing_job(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_review_resolution_is_visible_job_and_rejects_duplicate(monkeypatch):
+    release = asyncio.Event()
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={
+            "review_uid": "review-1",
+            "action": "merge",
+            "target_topic_uid": "topic-1",
+            "preview_token": "preview-1",
+        }
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+
+    async def resolve(review_uid, **kwargs):
+        await kwargs["progress_callback"](
+            {
+                "run_uid": "review-run-1",
+                "stage": "topic_synthesis",
+                "current": 1,
+                "total": 2,
+            }
+        )
+        await release.wait()
+        return {"review_uid": review_uid, "run_uid": "review-run-1"}
+
+    manager = SimpleNamespace(
+        has_active_builds=lambda: False,
+        resolve_maintenance_review=AsyncMock(side_effect=resolve),
+    )
+    store = SimpleNamespace(
+        get_maintenance_review=AsyncMock(
+            return_value={
+                "review_uid": "review-1",
+                "memory_space_id": "space-1",
+                "status": "pending",
+            }
+        )
+    )
+    engine = SimpleNamespace(
+        topic_build_manager=manager,
+        topic_memory_store=store,
+    )
+    handler = TopicHandler(PageApiUtils())
+
+    first = await handler.resolve_review(engine)
+    await asyncio.sleep(0)
+    second = await handler.resolve_review(engine)
+
+    assert first["status"] == "ok"
+    assert second["status"] == "ok"
+    assert second["data"]["job_uid"] == first["data"]["job_uid"]
+    assert second["data"]["already_running"] is True
+    job = handler._active_jobs()[0]
+    assert job["operation"] == "resolve_review"
+    assert job["review_uid"] == "review-1"
+    assert job["stage"] == "topic_synthesis"
+    assert job["run_uid"] == "review-run-1"
+    manager.resolve_maintenance_review.assert_awaited_once()
+
+    release.set()
+    await next(iter(handler._tasks))
+    assert handler._jobs[first["data"]["job_uid"]]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_review_resolution_rejects_removed_defer_action(monkeypatch):
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={"review_uid": "review-1", "action": "defer"}
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_livingmemory.core.page_api_modules.topic_handler.request",
+        request,
+    )
+    manager = SimpleNamespace(
+        resolve_maintenance_review=AsyncMock(),
+    )
+    store = SimpleNamespace(
+        get_maintenance_review=AsyncMock(),
+    )
+    engine = SimpleNamespace(
+        topic_build_manager=manager,
+        topic_memory_store=store,
+    )
+
+    response = await TopicHandler(PageApiUtils()).resolve_review(engine)
+
+    assert response["status"] == "error"
+    assert response["message"] == "Topic 审查操作无效"
+    store.get_maintenance_review.assert_not_awaited()
+    manager.resolve_maintenance_review.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reset_full_build_is_forwarded_to_build_manager(monkeypatch):
     class ResetBuildManager:
         def __init__(self):

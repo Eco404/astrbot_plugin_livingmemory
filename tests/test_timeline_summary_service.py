@@ -2,7 +2,6 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.managers.conversation_manager import (
     ConversationManager,
@@ -15,6 +14,42 @@ from astrbot_plugin_livingmemory.core.schedulers.idle_summary_scheduler import (
     IdleSummaryScheduler,
 )
 from astrbot_plugin_livingmemory.storage.conversation_store import ConversationStore
+
+
+class _EmbeddingProvider:
+    provider_config = {"id": "test-embedding", "model": "semantic-v1"}
+
+    def __init__(self, vectors: dict[str, list[float]]):
+        self.vectors = vectors
+        self.calls: list[list[str]] = []
+
+    def get_dim(self) -> int:
+        return 2
+
+    async def get_embeddings(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return [self.vectors[text] for text in texts]
+
+
+async def _add_round(
+    store: ConversationStore,
+    user_text: str,
+    assistant_text: str,
+    *,
+    session_id: str = "test:FriendMessage:user",
+) -> None:
+    for role, content in (("user", user_text), ("assistant", assistant_text)):
+        await store.add_message(
+            Message(
+                id=0,
+                session_id=session_id,
+                role=role,
+                content=content,
+                sender_id="user" if role == "user" else "bot",
+                sender_name="User" if role == "user" else "Bot",
+                platform="test",
+            )
+        )
 
 
 async def _conversation(
@@ -221,4 +256,210 @@ async def test_idle_scheduler_only_schedules_resolved_persona(tmp_path: Path):
         trigger_type="idle",
         min_rounds=2,
     )
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_topic_continuation_reuses_multiple_base_centers_and_splits_new_topic(
+    tmp_path: Path,
+):
+    session_id = "test:FriendMessage:user"
+    store = ConversationStore(str(tmp_path / "conversations.db"))
+    await store.initialize()
+    manager = ConversationManager(store)
+    await _add_round(store, "alpha", "answer alpha")
+    await _add_round(store, "beta", "answer beta")
+    provider = _EmbeddingProvider(
+        {
+            "alpha": [1.0, 0.0],
+            "beta": [0.0, 1.0],
+            "alpha followup": [0.99, 0.01],
+            "new gamma": [-1.0, 0.0],
+        }
+    )
+    processor = AsyncMock()
+    processor.process_conversation.return_value = (
+        "summary",
+        {"topics": ["topic"], "facts": ["fact"]},
+        7.0,
+    )
+    processor.classify_atoms_from_metadata = MagicMock(return_value=[])
+    engine = AsyncMock()
+    config = ConfigManager({})
+    config.apply_runtime_overrides(
+        {
+            "reflection_engine.topic_continuation_enabled": True,
+            "reflection_engine.topic_continuation_force_summary_rounds": 6,
+        }
+    )
+    service = TimelineSummaryService(
+        config_manager=config,
+        conversation_manager=manager,
+        memory_engine=engine,
+        memory_processor=processor,
+        embedding_provider_resolver=lambda: provider,
+    )
+
+    first = await service.summarize_if_needed(
+        session_id,
+        persona_id="persona",
+        trigger_type="round_limit",
+        min_rounds=2,
+    )
+    assert first.status == "continuing"
+    assert provider.calls == [["alpha", "beta"]]
+    assert len(await store.get_pending_message_features([1, 3])) == 2
+
+    await _add_round(store, "alpha followup", "continued answer")
+    second = await service.summarize_if_needed(
+        session_id,
+        persona_id="persona",
+        trigger_type="round_limit",
+        min_rounds=2,
+    )
+    assert second.status == "continuing"
+    assert provider.calls[-1] == ["alpha followup"]
+    assert sum(len(call) for call in provider.calls) == 3
+
+    await _add_round(store, "new gamma", "gamma answer")
+    third = await service.summarize_if_needed(
+        session_id,
+        persona_id="persona",
+        trigger_type="round_limit",
+        min_rounds=2,
+    )
+    assert third.status == "created"
+    assert third.end_index == 6
+    assert third.message_count == 6
+    summarized = processor.process_conversation.await_args.kwargs["messages"]
+    assert [item.content for item in summarized][-2:] == [
+        "alpha followup",
+        "continued answer",
+    ]
+    session = await store.get_session(session_id)
+    assert session is not None
+    assert session.metadata["last_summarized_index"] == 6
+    remaining_features = await store.get_pending_message_features([1, 3, 5, 7])
+    assert set(remaining_features) == {7}
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_topic_continuation_force_limit_summarizes_all(tmp_path: Path):
+    session_id = "test:FriendMessage:user"
+    store = ConversationStore(str(tmp_path / "conversations.db"))
+    await store.initialize()
+    manager = ConversationManager(store)
+    provider = _EmbeddingProvider({f"alpha {index}": [1.0, 0.0] for index in range(4)})
+    for index in range(4):
+        await _add_round(store, f"alpha {index}", f"answer {index}")
+    processor = AsyncMock()
+    processor.process_conversation.return_value = (
+        "summary",
+        {"topics": ["topic"], "facts": ["fact"]},
+        7.0,
+    )
+    processor.classify_atoms_from_metadata = MagicMock(return_value=[])
+    engine = AsyncMock()
+    config = ConfigManager({})
+    config.apply_runtime_overrides(
+        {
+            "reflection_engine.topic_continuation_enabled": True,
+            "reflection_engine.topic_continuation_force_summary_rounds": 4,
+        }
+    )
+    service = TimelineSummaryService(
+        config_manager=config,
+        conversation_manager=manager,
+        memory_engine=engine,
+        memory_processor=processor,
+        embedding_provider_resolver=lambda: provider,
+    )
+    result = await service.summarize_if_needed(
+        session_id,
+        persona_id="persona",
+        trigger_type="round_limit",
+        min_rounds=2,
+    )
+    assert result.status == "created"
+    assert result.end_index == 8
+    assert engine.add_memory.await_args.kwargs["metadata"]["source_window"][
+        "boundary_reason"
+    ] == "force_summary_limit"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_idle_summary_bypasses_topic_continuation(tmp_path: Path):
+    session_id = "test:FriendMessage:user"
+    store = ConversationStore(str(tmp_path / "conversations.db"))
+    await store.initialize()
+    manager = ConversationManager(store)
+    await _add_round(store, "alpha", "answer alpha")
+    await _add_round(store, "alpha followup", "continued answer")
+    provider = _EmbeddingProvider(
+        {"alpha": [1.0, 0.0], "alpha followup": [0.99, 0.01]}
+    )
+    processor = AsyncMock()
+    processor.process_conversation.return_value = (
+        "summary",
+        {"topics": ["topic"], "facts": ["fact"]},
+        7.0,
+    )
+    processor.classify_atoms_from_metadata = MagicMock(return_value=[])
+    service = TimelineSummaryService(
+        config_manager=ConfigManager({}),
+        conversation_manager=manager,
+        memory_engine=AsyncMock(),
+        memory_processor=processor,
+        embedding_provider_resolver=lambda: provider,
+    )
+
+    result = await service.summarize_if_needed(
+        session_id,
+        persona_id="persona",
+        trigger_type="idle",
+        min_rounds=2,
+    )
+
+    assert result.status == "created"
+    assert provider.calls == []
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_summary_retry_keeps_original_end_index(tmp_path: Path):
+    store, manager = await _conversation(tmp_path)
+    processor = AsyncMock()
+    processor.process_conversation.side_effect = [
+        RuntimeError("provider unavailable"),
+        ("summary", {"topics": ["topic"], "facts": ["fact"]}, 7.0),
+    ]
+    processor.classify_atoms_from_metadata = MagicMock(return_value=[])
+    engine = AsyncMock()
+    service = TimelineSummaryService(
+        config_manager=ConfigManager({}),
+        conversation_manager=manager,
+        memory_engine=engine,
+        memory_processor=processor,
+    )
+    first = await service.summarize_if_needed(
+        "test:FriendMessage:user",
+        persona_id="persona",
+        trigger_type="round_limit",
+        min_rounds=2,
+    )
+    assert first.status == "failed"
+    await _add_round(store, "later", "later answer")
+    retried = await service.summarize_if_needed(
+        "test:FriendMessage:user",
+        persona_id="persona",
+        trigger_type="manual",
+        min_rounds=1,
+        force=True,
+    )
+    assert retried.status == "created"
+    assert retried.end_index == 4
+    assert len(processor.process_conversation.await_args.kwargs["messages"]) == 4
+    assert await store.get_message_count("test:FriendMessage:user") == 6
     await store.close()

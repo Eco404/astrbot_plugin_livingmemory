@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
@@ -11,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
-
 from astrbot.api import logger
 
 from ..core.models.conversation_models import Message, Session, serialize_to_json
@@ -152,6 +152,25 @@ class ConversationStore:
             )
         """)
 
+            await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS pending_message_features (
+                message_id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                input_format_version TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                dimension INTEGER NOT NULL,
+                embedding_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                FOREIGN KEY (message_id) REFERENCES messages(id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                    ON DELETE CASCADE
+            )
+        """)
+
             await self.connection.commit()
 
     async def _create_indexes(self) -> None:
@@ -194,8 +213,126 @@ class ConversationStore:
                 "CREATE INDEX IF NOT EXISTS idx_session_aliases_canonical "
                 "ON session_aliases(canonical_session_id, status)"
             )
+            await self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pending_features_session "
+                "ON pending_message_features(session_id, message_id)"
+            )
 
             await self.connection.commit()
+
+    # ==================== 尚未总结消息特征 ====================
+
+    @staticmethod
+    def pending_feature_text_hash(text: str) -> str:
+        normalized = " ".join(str(text or "").split())
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    async def upsert_pending_message_feature(
+        self,
+        *,
+        message_id: int,
+        session_id: str,
+        text: str,
+        embedding: list[float],
+        provider_id: str,
+        model_id: str,
+        input_format_version: str,
+    ) -> None:
+        if self.connection is None or int(message_id or 0) <= 0 or not embedding:
+            return
+        vector = [float(value) for value in embedding]
+        now = time.time()
+        async with self._write_lock:
+            await self.connection.execute(
+                """
+                INSERT INTO pending_message_features (
+                    message_id, session_id, text_hash, input_format_version,
+                    provider_id, model_id, dimension, embedding_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    text_hash = excluded.text_hash,
+                    input_format_version = excluded.input_format_version,
+                    provider_id = excluded.provider_id,
+                    model_id = excluded.model_id,
+                    dimension = excluded.dimension,
+                    embedding_json = excluded.embedding_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    int(message_id),
+                    str(session_id),
+                    self.pending_feature_text_hash(text),
+                    str(input_format_version),
+                    str(provider_id),
+                    str(model_id),
+                    len(vector),
+                    json.dumps(vector, separators=(",", ":")),
+                    now,
+                    now,
+                ),
+            )
+            await self.connection.commit()
+
+    async def get_pending_message_features(
+        self, message_ids: list[int]
+    ) -> dict[int, dict[str, Any]]:
+        if self.connection is None:
+            return {}
+        normalized = sorted({int(value) for value in message_ids if int(value or 0) > 0})
+        if not normalized:
+            return {}
+        placeholders = ",".join("?" for _ in normalized)
+        rows = await (
+            await self.connection.execute(
+                f"""
+                SELECT message_id, session_id, text_hash, input_format_version,
+                       provider_id, model_id, dimension, embedding_json,
+                       created_at, updated_at
+                FROM pending_message_features
+                WHERE message_id IN ({placeholders})
+                """,
+                tuple(normalized),
+            )
+        ).fetchall()
+        result: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            item = dict(row)
+            try:
+                item["embedding"] = [
+                    float(value) for value in json.loads(item.pop("embedding_json"))
+                ]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            result[int(item["message_id"])] = item
+        return result
+
+    async def delete_pending_message_features(
+        self, *, message_ids: list[int] | None = None, session_id: str | None = None
+    ) -> int:
+        if self.connection is None:
+            return 0
+        normalized = sorted(
+            {int(value) for value in (message_ids or []) if int(value or 0) > 0}
+        )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if normalized:
+            clauses.append(f"message_id IN ({','.join('?' for _ in normalized)})")
+            params.extend(normalized)
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(str(session_id))
+        if not clauses:
+            return 0
+        async with self._write_lock:
+            cursor = await self.connection.execute(
+                f"DELETE FROM pending_message_features WHERE {' AND '.join(clauses)}",
+                tuple(params),
+            )
+            await self.connection.commit()
+        return max(0, int(cursor.rowcount or 0))
 
     # ==================== 会话管理 ====================
 

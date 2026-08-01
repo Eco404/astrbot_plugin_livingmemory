@@ -587,6 +587,21 @@ async def test_review_publication_is_atomic_and_rejects_stale_candidate_revision
         memory_uid="timeline-1",
         document_id=1,
     )
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE documents (
+                id INTEGER PRIMARY KEY,
+                text TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        await db.execute(
+            "INSERT INTO documents (id, text) VALUES (?, ?)",
+            (1, "Timeline source"),
+        )
+        await db.commit()
     store = TopicMemoryStore(db_path)
     await store.initialize()
     topic = TopicMemory(
@@ -693,6 +708,34 @@ async def test_review_publication_is_atomic_and_rejects_stale_candidate_revision
     stale_review = await store.get_maintenance_review(stale_review_uid)
     assert stale_review["status"] == "pending"
 
+    context = await store.get_maintenance_review_context(stale_review_uid)
+    assert context["preview_stale"] is True
+    assert context["preview_topic_revisions"] == {
+        topic.topic_uid: advanced.revision
+    }
+    rebound = await store.rebase_maintenance_review(
+        stale_review_uid,
+        preview_token=context["preview_token"],
+    )
+    assert rebound == {topic.topic_uid: advanced.revision}
+    refreshed_review = await store.get_maintenance_review(stale_review_uid)
+    assert refreshed_review["expected_topic_revisions"] == rebound
+
+    refreshed_context = await store.get_maintenance_review_context(stale_review_uid)
+    changed_again = await store.save_topic_snapshot(
+        replace(advanced, summary="第二次外部更新"),
+        atoms=[],
+        links=[link],
+        atom_sources=[],
+        expected_revision=advanced.revision,
+    )
+    with pytest.raises(TopicRevisionConflict, match="preview changed"):
+        await store.rebase_maintenance_review(
+            stale_review_uid,
+            preview_token=refreshed_context["preview_token"],
+        )
+    assert (await store.get_topic(topic.topic_uid)).revision == changed_again.revision
+
 
 @pytest.mark.asyncio
 async def test_actor_filter_and_fact_groups_expose_concrete_provenance(tmp_path: Path):
@@ -766,6 +809,16 @@ async def test_actor_filter_and_fact_groups_expose_concrete_provenance(tmp_path:
     matched = await store.list_topics(space_id, actor_id=actor.actor_id)
     assert [item.topic_uid for item in matched] == [topic.topic_uid]
     assert await store.list_topics(space_id, actor_id="qq:human:other") == []
+    assert [
+        item.topic_uid
+        for item in await store.list_topics(space_id, search_text="报销补记")
+    ] == [topic.topic_uid]
+    assert [
+        item.topic_uid
+        for item in await store.list_topics(space_id, search_text="少记了 100")
+    ] == [topic.topic_uid]
+    assert await store.count_topics(space_id, search_text="少记了 100") == 1
+    assert await store.list_topics(space_id, search_text="不存在的事实") == []
     catalog = await store.list_topic_actors(space_id)
     assert catalog[0]["display_name"] == "示例甲"
     assert catalog[0]["topic_count"] == 1

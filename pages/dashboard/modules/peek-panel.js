@@ -161,7 +161,9 @@ export class PeekPanel {
       relatedTopics.forEach(topic => {
         html += '<button class="memory-related-topic" type="button" data-memory-topic-uid="' + esc(topic.topic_uid) + '" title="' + esc(window.t("detail.openTopic")) + '">';
         html += '<span><strong>' + esc(topic.title || topic.topic_uid) + '</strong><small>' + esc(topic.summary || "") + '</small></span>';
-        html += '<span class="memory-related-topic-meta">r' + Number(topic.revision || 1) + '</span></button>';
+        html += '<span class="memory-related-topic-meta"><span>r' + Number(topic.revision || 1) + '</span>';
+        if (topic.waiting_rebuild) html += '<span class="memory-related-topic-pending">' + esc(window.t("detail.waitingRebuild")) + '</span>';
+        html += '</span></button>';
       });
       html += '</div>';
     } else {
@@ -618,6 +620,7 @@ export class PeekPanel {
   }
 
   async startSaveJob(overlay, updatePayload) {
+    if (this._saveJobRunning) return;
     const scope = overlay.querySelector("#memory-related-scope").value;
     if (scope !== "current" && !overlay._relatedDetected) return;
     const modeInput = overlay.querySelector('input[name="memory-save-mode"]:checked');

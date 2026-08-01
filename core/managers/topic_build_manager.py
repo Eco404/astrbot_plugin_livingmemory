@@ -442,19 +442,11 @@ class TopicBuildManager(
         *,
         action: str,
         target_topic_uid: str | None = None,
+        preview_token: str | None = None,
+        progress_callback=None,
     ) -> dict[str, Any]:
         """Apply one user decision without rerunning fragment extraction."""
         action = str(action or "").strip().lower()
-        if action == "defer":
-            changed = await self.store.set_maintenance_review_status(
-                review_uid,
-                status="pending",
-                action="defer",
-                payload={},
-            )
-            if not changed:
-                raise ValueError("Topic review is no longer pending")
-            return {"review_uid": review_uid, "status": "pending", "action": action}
         if action == "ignore":
             changed = await self.store.set_maintenance_review_status(
                 review_uid,
@@ -480,6 +472,7 @@ class TopicBuildManager(
                     str(uid) for uid in review.get("timeline_uids", []) if str(uid)
                 ],
                 review_uid=review_uid,
+                progress_callback=progress_callback,
             )
         if action not in {"merge", "new"}:
             raise ValueError("Unsupported Topic review action")
@@ -495,6 +488,10 @@ class TopicBuildManager(
         if lock.locked():
             raise RuntimeError("Topic build is already running for this memory space")
         async with lock:
+            await self.store.rebase_maintenance_review(
+                review_uid,
+                preview_token=str(preview_token or ""),
+            )
             context = await self.store.get_maintenance_review_context(review_uid)
             if context is None or str(context.get("status")) != "pending":
                 raise ValueError("Topic review changed; refresh before applying")
@@ -557,6 +554,7 @@ class TopicBuildManager(
                         "target_topic_uid": existing.topic_uid if existing else None
                     },
                 },
+                progress_callback=progress_callback,
             )
 
     async def merge_topics(
@@ -666,6 +664,7 @@ class TopicBuildManager(
         operation: str,
         operation_payload: dict[str, Any] | None = None,
         review_resolution: dict[str, Any] | None = None,
+        progress_callback=None,
     ) -> dict[str, Any]:
         """Synthesize selected fragments and publish every governance result atomically."""
         supplemental_profiles = self._supplemental_profile_payload()
@@ -684,6 +683,14 @@ class TopicBuildManager(
             },
         )
         await self.store.create_maintenance_run(run)
+        await self._emit(
+            progress_callback,
+            run.run_uid,
+            "component_review",
+            1,
+            1,
+            activity=operation,
+        )
         context = self._make_run_context(
             memory_space_id=memory_space_id,
             run_uid=run.run_uid,
@@ -715,8 +722,32 @@ class TopicBuildManager(
                 existing = (
                     retained_topics[index] if index < len(retained_topics) else None
                 )
+                await self._emit(
+                    progress_callback,
+                    run.run_uid,
+                    "topic_synthesis",
+                    index,
+                    len(fragment_groups),
+                    activity=operation,
+                )
                 synthesis = await self._synthesize_component_checkpointed(
                     run.run_uid, fragments
+                )
+                await self._emit(
+                    progress_callback,
+                    run.run_uid,
+                    "topic_synthesis",
+                    index + 1,
+                    len(fragment_groups),
+                    activity=operation,
+                )
+                await self._emit(
+                    progress_callback,
+                    run.run_uid,
+                    "materialization",
+                    index,
+                    len(fragment_groups),
+                    activity=operation,
                 )
                 topic, atoms, links, sources, actor_links, atom_actor_links = (
                     self._materialize_snapshot(
@@ -753,6 +784,14 @@ class TopicBuildManager(
                         },
                     }
                 )
+                await self._emit(
+                    progress_callback,
+                    run.run_uid,
+                    "materialization",
+                    index + 1,
+                    len(fragment_groups),
+                    activity=operation,
+                )
             active_topics = await self.store.list_all_topics(
                 memory_space_id, status=TopicMemoryStatus.ACTIVE
             )
@@ -762,6 +801,14 @@ class TopicBuildManager(
                 if topic.topic_uid not in affected_topic_uids
             ] + materialized_topics
             relations = self._derive_topic_relations(run.run_uid, relation_topics)
+            await self._emit(
+                progress_callback,
+                run.run_uid,
+                "publication",
+                0,
+                1,
+                activity=operation,
+            )
             publication = await self.store.publish_topic_build(
                 run_uid=run.run_uid,
                 memory_space_id=memory_space_id,
@@ -771,6 +818,14 @@ class TopicBuildManager(
                 affected_topic_uids=affected_topic_uids,
                 relation_scope_topic_uids=None,
                 review_resolution=review_resolution,
+            )
+            await self._emit(
+                progress_callback,
+                run.run_uid,
+                "publication",
+                1,
+                1,
+                activity=operation,
             )
             if self.vector_index is not None:
                 self.vector_index.invalidate(memory_space_id)
@@ -1042,6 +1097,7 @@ class TopicBuildManager(
         affected_topic_uids: list[str],
         deleted_timeline_uids: list[str],
         review_uid: str | None = None,
+        progress_callback=None,
     ) -> dict[str, Any]:
         """Rebuild affected Topics only from their remaining authoritative sources."""
         normalized_topics = sorted(
@@ -1082,6 +1138,7 @@ class TopicBuildManager(
                     "deleted_timeline_uids": sorted(deleted),
                     "review_uid": review_uid,
                 },
+                progress_callback=progress_callback,
             )
             if review_uid:
                 await self.store.set_maintenance_review_status(
