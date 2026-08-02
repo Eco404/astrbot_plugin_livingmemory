@@ -2,6 +2,7 @@
 IndexValidator 测试。
 """
 
+import asyncio
 import importlib.util
 import json
 import sqlite3
@@ -176,6 +177,14 @@ def _document_doc_ids(db_path: Path) -> list[str]:
         return [str(row[0]) for row in rows]
 
 
+def _fts_contents(db_path: Path, table_name: str) -> list[str]:
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT content FROM {table_name} ORDER BY doc_id"
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+
 def _write_vectors(storage: _DummyEmbeddingStorage, ids: list[int]) -> None:
     vectors = np.asarray([[float(doc_id), 1.0] for doc_id in ids], dtype=np.float32)
     storage.index.add_with_ids(vectors, np.asarray(ids, dtype=np.int64))
@@ -338,3 +347,139 @@ async def test_rebuild_indexes_repairs_only_missing_vectors_when_index_is_readab
     assert provider.calls == [["doc-4"]]
     assert memory_engine.faiss_db.embedding_storage.index.ntotal == 5
     assert _count_rows(db_path, "documents") == 5
+
+
+@pytest.mark.asyncio
+async def test_bm25_rebuild_failure_keeps_live_generation(tmp_path: Path):
+    db_path = tmp_path / "memory.db"
+    index_path = tmp_path / "memory.index"
+    _prepare_db(db_path, count=3)
+
+    class _FailingTextProcessor:
+        def preprocess_for_bm25(self, text: str) -> str:
+            raise RuntimeError(f"cannot tokenize {text}")
+
+    provider = _DummyEmbeddingProvider()
+    memory_engine = _DummyMemoryEngine(
+        db_path, index_path, provider, batch_size=1, failure_ratio=0.0
+    )
+    memory_engine.bm25_retriever.text_processor = _FailingTextProcessor()
+    validator = IndexValidator(str(db_path), faiss_db=memory_engine.faiss_db)
+
+    result = await validator.rebuild_indexes(memory_engine=memory_engine)
+
+    assert result["success"] is False
+    assert _fts_contents(db_path, "livingmemory_memories_fts") == [
+        "old-doc-0",
+        "old-doc-1",
+        "old-doc-2",
+    ]
+    with sqlite3.connect(db_path) as conn:
+        shadow = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name = ?",
+            ("livingmemory_memories_fts_rebuild",),
+        ).fetchone()
+    assert shadow is None
+
+
+@pytest.mark.asyncio
+async def test_provider_signature_detects_same_dimension_model_change(tmp_path: Path):
+    db_path = tmp_path / "memory.db"
+    index_path = tmp_path / "memory.index"
+    _prepare_db(db_path, count=1)
+    provider = _DummyEmbeddingProvider()
+    provider.provider_config = {
+        "id": "embedding-main",
+        "type": "openai_embedding",
+        "embedding_model": "model-a",
+        "embedding_api_key": "must-not-be-persisted",
+    }
+    provider.model = "model-a"
+    memory_engine = _DummyMemoryEngine(db_path, index_path, provider)
+    validator = IndexValidator(str(db_path), faiss_db=memory_engine.faiss_db)
+
+    assert await validator.provider_signature_changed() is False
+    provider.model = "model-b"
+    provider.provider_config["embedding_model"] = "model-b"
+    assert await validator.provider_signature_changed() is True
+
+    state = await validator._read_index_state("vector")
+    assert state is not None
+    assert len(state["provider_signature"]) == 64
+    assert "must-not-be-persisted" not in json.dumps(state)
+
+
+@pytest.mark.asyncio
+async def test_provider_change_forces_full_vector_generation(tmp_path: Path):
+    db_path = tmp_path / "memory.db"
+    index_path = tmp_path / "memory.index"
+    _prepare_db(db_path, count=2)
+    provider = _DummyEmbeddingProvider()
+    memory_engine = _DummyMemoryEngine(db_path, index_path, provider, batch_size=2)
+    _write_vectors(memory_engine.faiss_db.embedding_storage, [1, 2])
+    validator = IndexValidator(str(db_path), faiss_db=memory_engine.faiss_db)
+
+    result = await validator.rebuild_indexes(
+        memory_engine=memory_engine, force_full_vector=True
+    )
+
+    assert result["success"] is True
+    assert result["vector_mode"] == "full"
+    assert result["switched"] is True
+    assert provider.calls == [["doc-0", "doc-1"]]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_full_rebuild_resumes_from_checkpoint(tmp_path: Path):
+    db_path = tmp_path / "memory.db"
+    index_path = tmp_path / "memory.index"
+    _prepare_db(db_path, count=5)
+
+    class _BlockingProvider(_DummyEmbeddingProvider):
+        def __init__(self, block_second_call: bool):
+            super().__init__()
+            self.block_second_call = block_second_call
+            self.second_call_started = asyncio.Event()
+            self.release_second_call = asyncio.Event()
+
+        async def get_embeddings_batch(self, contents, **kwargs):
+            del kwargs
+            self.calls.append(list(contents))
+            if self.block_second_call and len(self.calls) == 2:
+                self.second_call_started.set()
+                await self.release_second_call.wait()
+            return [
+                [float(len(content)), float(index + 1)]
+                for index, content in enumerate(contents)
+            ]
+
+    first_provider = _BlockingProvider(block_second_call=True)
+    first_engine = _DummyMemoryEngine(db_path, index_path, first_provider, batch_size=2)
+    first_validator = IndexValidator(str(db_path), faiss_db=first_engine.faiss_db)
+    rebuild_task = asyncio.create_task(
+        first_validator.rebuild_indexes(
+            memory_engine=first_engine, force_full_vector=True
+        )
+    )
+    await asyncio.wait_for(first_provider.second_call_started.wait(), timeout=1)
+    rebuild_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await rebuild_task
+
+    checkpoint_path = Path(f"{index_path}.rebuild.tmp")
+    assert checkpoint_path.exists()
+    assert faiss.read_index(str(checkpoint_path)).ntotal == 2
+
+    resumed_provider = _BlockingProvider(block_second_call=False)
+    resumed_engine = _DummyMemoryEngine(
+        db_path, index_path, resumed_provider, batch_size=2
+    )
+    resumed_validator = IndexValidator(str(db_path), faiss_db=resumed_engine.faiss_db)
+    result = await resumed_validator.rebuild_indexes(
+        memory_engine=resumed_engine, force_full_vector=True
+    )
+
+    assert result["success"] is True
+    assert resumed_provider.calls == [["doc-2", "doc-3"], ["doc-4"]]
+    assert resumed_engine.faiss_db.embedding_storage.index.ntotal == 5
+    assert not checkpoint_path.exists()

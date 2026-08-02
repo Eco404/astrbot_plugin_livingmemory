@@ -4,15 +4,26 @@
 
 ## 📋 工作流列表
 
-### 1. 自动发布 (`auto-release.yml`)
+### 1. 测试 (`test.yml`)
+
+**触发条件**: 向 `master` 或 `dev` 推送、提交目标为这两个分支的 Pull Request，或手动触发
+
+**功能**:
+- 在官方 AstrBot 目录结构中运行完整 Python 测试
+- 运行 Dashboard 前端回归测试
+- 构建 VitePress 文档，提前发现文档和依赖错误
+- 同一分支有新提交时取消旧的测试任务
+
+### 2. 自动发布 (`auto-release.yml`)
 
 **触发条件**: 当 `metadata.yaml` 文件中的版本号发生变化并推送到 `main` 或 `master` 分支时
 
 **功能**:
 - 自动检测版本号变化
-- 从 `CHANGELOG.md` 或 Git 提交历史提取更新描述
-- 创建 GitHub Release
-- 生成带有详细信息的发布说明
+- 校验 `metadata.yaml`、`package.json`、`main.py` 和备份管理器版本一致
+- 从 `CHANGELOG.md` 精确提取当前版本的更新描述
+- 创建带 `v` 前缀标签的 GitHub Release
+- 补充与上一版本的完整变更对比链接
 
 **使用方法**:
 1. 更新 `metadata.yaml` 中的版本号
@@ -32,7 +43,7 @@
 - 修复了 Bug C
 ```
 
-### 2. Issue 自动分类 (`auto-label-issues.yml`)
+### 3. Issue 自动分类 (`auto-label-issues.yml`)
 
 **触发条件**: 当有新 Issue 被创建或编辑时
 
@@ -59,7 +70,7 @@
 - `needs more info` - 需要更多信息
 - `good first issue` - 适合新手
 
-### 3. 自动添加到项目看板 (`auto-add-to-project.yml`)
+### 4. 自动添加到项目看板 (`auto-add-to-project.yml`)
 
 **触发条件**: 当带有 `enhancement` 或 `feature` 标签的 Issue 或 PR 被创建时
 

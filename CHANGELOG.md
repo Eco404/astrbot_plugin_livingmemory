@@ -5,7 +5,13 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 并且遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-开发阶段的详细变更记录见 [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md)。正式发布时，仅在本文件新增对应版本的简要说明。
+每个版本的详细技术变更见 [docs/DEVELOPMENT_LOG.md](docs/DEVELOPMENT_LOG.md)。本文件仅保留面向发布的简要说明，两者在发版时同步更新。
+
+## [3.5.0] - 2026-08-02
+
+- 强化 BM25 与 FAISS 索引重建、模型签名识别、断点恢复和启动期后台维护，数据库升级至 v10.2。
+- 修复 Timeline 列表并发刷新、虚拟滚动与侧边详情面板的状态和可访问性问题。
+- 新增 Python、前端及文档 CI，并让 GitHub Release 严格使用对应版本的 CHANGELOG 内容。
 
 ## [3.4.1] - 2026-08-02
 
@@ -484,4 +490,4 @@
 
 ---
 
-注意：每次发版前，从 [DEVELOPMENT_LOG.md](DEVELOPMENT_LOG.md) 整理本次发布内容到具体版本条目，并移除已经发布的开发日志内容。
+注意：每次发版时同步更新 [CHANGELOG.md](CHANGELOG.md) 与 [docs/DEVELOPMENT_LOG.md](docs/DEVELOPMENT_LOG.md)；前者保留简要说明，后者保留同版本的详细技术记录。

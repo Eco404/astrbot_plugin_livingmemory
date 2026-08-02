@@ -75,6 +75,6 @@ flowchart LR
 
 ## 项目
 
-[完整文档](https://eco404.github.io/astrbot_plugin_livingmemory/) · [版本发布](https://github.com/Eco404/astrbot_plugin_livingmemory/releases) · [更新记录](CHANGELOG.md) · [问题反馈](https://github.com/Eco404/astrbot_plugin_livingmemory/issues)
+[完整文档](https://eco404.github.io/astrbot_plugin_livingmemory/) · [版本发布](https://github.com/Eco404/astrbot_plugin_livingmemory/releases) · [更新记录](CHANGELOG.md) · [详细开发日志](docs/DEVELOPMENT_LOG.md) · [问题反馈](https://github.com/Eco404/astrbot_plugin_livingmemory/issues)
 
 LivingMemory 使用 [AGPL-3.0 许可证](LICENSE)发布。

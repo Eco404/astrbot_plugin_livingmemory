@@ -253,6 +253,33 @@ def test_check_faiss_runtime_falls_back_to_generic(monkeypatch, initializer):
     assert run.call_args_list[1].kwargs["env"]["FAISS_OPT_LEVEL"] == "generic"
 
 
+def test_check_faiss_runtime_reports_python_binding_mismatch(
+    monkeypatch, initializer
+):
+    result = subprocess.CompletedProcess(
+        args=[],
+        returncode=1,
+        stdout="",
+        stderr="NameError: name 'SuperKMeans' is not defined",
+    )
+    run = Mock(return_value=result)
+    monkeypatch.setattr(plugin_initializer_mod.subprocess, "run", run)
+    monkeypatch.setattr(
+        plugin_initializer_mod.metadata,
+        "version",
+        Mock(return_value="1.14.2"),
+    )
+
+    with pytest.raises(InitializationError) as exc_info:
+        initializer._check_faiss_runtime()
+
+    message = str(exc_info.value)
+    assert "Python 封装与本地二进制扩展不匹配" in message
+    assert "1.14.2" in message
+    assert "重新安装兼容版本" in message
+    assert run.call_count == 1
+
+
 def test_load_faiss_vec_db_class_uses_patched_class(monkeypatch, initializer):
     class FakeFaissVecDB:
         pass

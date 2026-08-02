@@ -125,6 +125,7 @@ function sidebarZh() {
       items: [
         { text: '维护中心', link: '/maintenance' },
         { text: '数据安全与迁移', link: '/data-safety' },
+        { text: '详细开发日志', link: '/DEVELOPMENT_LOG' },
         { text: '命令速查', link: '/commands' },
       ],
     },

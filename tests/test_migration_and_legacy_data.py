@@ -275,7 +275,53 @@ async def test_migrate_v9_22_to_v10_records_release_boundary(tmp_path):
     assert progress == [
         ("完成 v10 数据库版本收束", 1, 1),
         ("创建 Timeline 来源快照与导入导出结构", 1, 1),
+        ("建立文档索引维护状态", 1, 1),
     ]
+
+
+@pytest.mark.asyncio
+async def test_migrate_v10_1_to_v10_2_adds_document_index_state(tmp_path):
+    db_path = str(tmp_path / "v10_1.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            """
+            CREATE TABLE db_version (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL,
+                description TEXT,
+                migrated_at TEXT NOT NULL,
+                migration_duration_seconds REAL
+            )
+            """
+        )
+        await db.execute(
+            """
+            INSERT INTO db_version(version, description, migrated_at)
+            VALUES ('v10.1', 'test fixture', '2026-08-02T00:00:00+00:00')
+            """
+        )
+        await db.execute(
+            "CREATE TABLE documents (id INTEGER PRIMARY KEY, text TEXT NOT NULL)"
+        )
+        await db.execute("INSERT INTO documents VALUES (1, 'keep me')")
+        await db.commit()
+
+    result = await DBMigration(db_path).migrate()
+
+    assert result["success"] is True
+    assert result["from_version"] == "10.1"
+    assert result["to_version"] == "10.2"
+    async with aiosqlite.connect(db_path) as db:
+        table = await (
+            await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='document_index_state'"
+            )
+        ).fetchone()
+        document = await (
+            await db.execute("SELECT text FROM documents WHERE id = 1")
+        ).fetchone()
+    assert table == ("document_index_state",)
+    assert document == ("keep me",)
 
 
 @pytest.mark.asyncio
