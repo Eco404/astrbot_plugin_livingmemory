@@ -48,6 +48,8 @@ jobs:
 
       - name: Run Python tests
         working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
+        env:
+          PYTHONPATH: ${{ github.workspace }}/AstrBot
         run: python -m pytest -q
 
   frontend:
