@@ -75,6 +75,6 @@ Database upgrades follow the public `v8 -> v9 -> v10` path and then the current 
 
 ## Project
 
-[Documentation](https://eco404.github.io/astrbot_plugin_livingmemory/en/) · [Releases](https://github.com/Eco404/astrbot_plugin_livingmemory/releases) · [Changelog](CHANGELOG.md) · [Issues](https://github.com/Eco404/astrbot_plugin_livingmemory/issues)
+[Documentation](https://eco404.github.io/astrbot_plugin_livingmemory/en/) · [Releases](https://github.com/Eco404/astrbot_plugin_livingmemory/releases) · [Changelog](CHANGELOG.md) · [Development log](docs/DEVELOPMENT_LOG.md) · [Issues](https://github.com/Eco404/astrbot_plugin_livingmemory/issues)
 
 LivingMemory is released under the [AGPL-3.0 license](LICENSE).
