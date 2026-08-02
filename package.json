@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test:frontend": "node --test tests/frontend/*.test.js",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"
@@ -13,6 +14,7 @@
     "vite": "^6.4.2"
   },
   "devDependencies": {
+    "postcss": "^8.5.25",
     "vitepress": "^1.6.4"
   }
 }

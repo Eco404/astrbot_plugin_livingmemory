@@ -29,7 +29,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "10.1"
+    CURRENT_VERSION = "10.2"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -44,6 +44,7 @@ class DBMigration:
         9: "Stable timeline identity registry and source-span provenance",
         "10": "Stable Timeline and Topic memory architecture release",
         "10.1": "Durable Timeline source snapshots",
+        "10.2": "Durable document index maintenance state",
     }
 
     def __init__(self, db_path: str):
@@ -308,6 +309,8 @@ class DBMigration:
                     )
                 if current_key < self.version_key("10.1"):
                     migration_steps.append(self._migrate_v10_to_v10_1)
+                if current_key < self.version_key("10.2"):
+                    migration_steps.append(self._migrate_v10_1_to_v10_2)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -2031,6 +2034,39 @@ class DBMigration:
         if progress_callback:
             progress_callback("创建 Timeline 来源快照与导入导出结构", 1, 1)
         logger.info("v10 -> v10.1 迁移完成")
+
+    async def _migrate_v10_1_to_v10_2(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Persist document-index generations, signatures and recovery state."""
+        logger.info("执行迁移步骤: v10.1 -> v10.2 (document index state)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS document_index_state (
+                    index_kind TEXT PRIMARY KEY,
+                    generation_uid TEXT,
+                    provider_signature TEXT NOT NULL DEFAULT '',
+                    schema_version TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'idle',
+                    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+                    last_error TEXT,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_document_index_state_status
+                ON document_index_state(status, updated_at)
+                """
+            )
+            await db.commit()
+        if progress_callback:
+            progress_callback("建立文档索引维护状态", 1, 1)
+        logger.info("v10.1 -> v10.2 迁移完成")
 
     @staticmethod
     def _migration_json_object(value: Any) -> dict[str, Any]:

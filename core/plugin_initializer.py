@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,19 @@ from .topic_settings import topic_setting_defaults
 from .validators.index_validator import IndexValidator
 
 FaissVecDB: Any = None
+
+_FAISS_GENERIC_FALLBACK_MARKERS = (
+    "illegal instruction",
+    "optimized",
+    "avx",
+    "simd",
+    "dll load failed",
+    "cannot open shared object file",
+    "could not load library",
+    "image not found",
+    "symbol not found",
+    "undefined symbol",
+)
 
 # ── Faiss C++ fopen() 在 Windows 上使用 ANSI codepage ──
 # Python 传给 Faiss 的路径是 UTF-8 字节，Windows fopen 期望 ANSI 编码，
@@ -100,6 +114,34 @@ def _sanitize_path(path: str) -> str:
     return "".join(parts)
 
 
+def _faiss_error_details(result: subprocess.CompletedProcess[str]) -> str:
+    details = (result.stderr or result.stdout or "").strip()
+    if result.returncode < 0:
+        details = f"进程被信号 {-result.returncode} 终止。{details}".strip()
+    return details
+
+
+def _is_faiss_binding_mismatch(details: str) -> bool:
+    lowered = details.lower()
+    return "superkmeans" in lowered or (
+        "python binding" in lowered and "mismatch" in lowered
+    )
+
+
+def _should_try_faiss_generic(result: subprocess.CompletedProcess[str]) -> bool:
+    if result.returncode < 0:
+        return True
+    details = _faiss_error_details(result).lower()
+    return any(marker in details for marker in _FAISS_GENERIC_FALLBACK_MARKERS)
+
+
+def _installed_faiss_version() -> str:
+    try:
+        return metadata.version("faiss-cpu")
+    except metadata.PackageNotFoundError:
+        return "未知"
+
+
 class PluginInitializer:
     """插件初始化器"""
 
@@ -145,6 +187,17 @@ class PluginInitializer:
         self._provider_check_attempts = 0
         self._max_provider_attempts = 60
         self._retry_task: asyncio.Task | None = None
+        self._index_maintenance_task: asyncio.Task | None = None
+        self._index_maintenance_status: dict[str, Any] = {
+            "state": "idle",
+            "reason": "",
+            "current": 0,
+            "total": 0,
+            "message": "",
+            "started_at": None,
+            "finished_at": None,
+            "result": None,
+        }
 
     async def initialize(self) -> bool:
         """
@@ -491,19 +544,21 @@ class PluginInitializer:
         if result.returncode == 0:
             return
 
-        generic_env = os.environ.copy()
-        generic_env["FAISS_OPT_LEVEL"] = "generic"
-        try:
-            generic_result = subprocess.run(
-                [sys.executable, "-c", "import faiss"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-                env=generic_env,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            generic_result = None
+        generic_result = None
+        if _should_try_faiss_generic(result):
+            generic_env = os.environ.copy()
+            generic_env["FAISS_OPT_LEVEL"] = "generic"
+            try:
+                generic_result = subprocess.run(
+                    [sys.executable, "-c", "import faiss"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                    env=generic_env,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                generic_result = None
 
         if generic_result is not None and generic_result.returncode == 0:
             os.environ["FAISS_OPT_LEVEL"] = "generic"
@@ -512,15 +567,20 @@ class PluginInitializer:
             )
             return
 
-        details = (result.stderr or result.stdout or "").strip()
-        if result.returncode < 0:
-            details = f"进程被信号 {-result.returncode} 终止。{details}".strip()
+        details = _faiss_error_details(result)
         if generic_result is not None:
-            generic_details = (
-                generic_result.stderr or generic_result.stdout or ""
-            ).strip()
+            generic_details = _faiss_error_details(generic_result)
             if generic_details and generic_details != details:
                 details = f"{details}；generic 模式: {generic_details}".strip("；")
+        if _is_faiss_binding_mismatch(details):
+            version = _installed_faiss_version()
+            raise InitializationError(
+                "FAISS Python 封装与本地二进制扩展不匹配。"
+                f"当前 faiss-cpu 版本: {version}。"
+                "请卸载后重新安装兼容版本（已知 1.14.2 存在此问题），"
+                "并确保环境中没有残留的 faiss 文件。"
+                f"{' 原始错误: ' + details if details else ''}"
+            )
         raise InitializationError(
             "FAISS 初始化失败，当前 CPU 或运行环境可能不兼容 faiss-cpu。"
             "已尝试 generic 指令集兼容模式；请重新安装兼容版本的 FAISS，"
@@ -887,9 +947,8 @@ class PluginInitializer:
             )
             await self.idle_summary_scheduler.start()
 
-            # 初始化索引验证器并自动重建索引
+            # 初始化索引验证器。检查在 TextProcessor 就绪后放到后台执行。
             self.index_validator = IndexValidator(str(db_path), self.db)
-            await self._auto_rebuild_index_if_needed()
 
             # 异步初始化 TextProcessor
             if self.memory_engine and hasattr(self.memory_engine, "text_processor"):
@@ -898,6 +957,8 @@ class PluginInitializer:
                 ):
                     await self.memory_engine.text_processor.async_init()
                     logger.info("TextProcessor 停用词已加载")
+
+            await self._auto_rebuild_index_if_needed()
 
             # 启动重要性衰减调度器
             decay_rate = self.config_manager.get("importance_decay.decay_rate", 0.01)
@@ -1153,54 +1214,165 @@ class PluginInitializer:
             logger.error(f"数据库迁移检查失败: {e}", exc_info=True)
 
     async def _auto_rebuild_index_if_needed(self):
-        """自动检查并重建索引"""
+        """Schedule index checking without blocking core plugin readiness."""
+        if self._index_maintenance_task and not self._index_maintenance_task.done():
+            return
+        if not self.index_validator or not self.memory_engine:
+            return
+        self._set_index_maintenance_status(
+            state="checking",
+            reason="startup consistency check",
+            current=0,
+            total=0,
+            message="正在检查索引一致性",
+            started_at=time.time(),
+            finished_at=None,
+            result=None,
+        )
+        self._index_maintenance_task = asyncio.create_task(
+            self._run_index_maintenance()
+        )
+        self._index_maintenance_task.add_done_callback(self._on_index_maintenance_done)
+
+    def _set_index_maintenance_status(self, **updates: Any) -> None:
+        self._index_maintenance_status.update(updates)
+        if self.memory_engine is not None:
+            self.memory_engine.index_maintenance_status = dict(
+                self._index_maintenance_status
+            )
+
+    @property
+    def index_maintenance_status(self) -> dict[str, Any]:
+        return dict(self._index_maintenance_status)
+
+    def _on_index_maintenance_done(self, task: asyncio.Task) -> None:
+        if self._index_maintenance_task is task:
+            self._index_maintenance_task = None
+        if task.cancelled():
+            return
+        try:
+            exception = task.exception()
+        except Exception:
+            return
+        if exception:
+            logger.error(
+                f"索引维护任务异常退出: {exception}",
+                exc_info=(type(exception), exception, exception.__traceback__),
+            )
+
+    async def _run_index_maintenance(self) -> None:
         try:
             if not self.index_validator or not self.memory_engine:
                 return
 
-            # 检查v1迁移状态
+            if await self.index_validator.provider_signature_changed():
+                status = await self.index_validator.check_consistency()
+                await self._run_scheduled_index_rebuild(
+                    "Embedding Provider 签名已变化",
+                    status.documents_count,
+                    force_full_vector=True,
+                )
+                return
+
             (
                 needs_migration_rebuild,
                 pending_count,
             ) = await self.index_validator.get_migration_status()
 
             if needs_migration_rebuild:
-                logger.info(f"检测到 v1 迁移数据需要重建索引（{pending_count} 条文档）")
-                logger.info("开始自动重建索引。")
-
-                result = await self.index_validator.rebuild_indexes(self.memory_engine)
-
-                if result["success"]:
-                    logger.info(
-                        f"索引自动重建完成: 成功 {result['processed']} 条, 失败 {result['errors']} 条"
-                    )
-                else:
-                    logger.error(f"索引自动重建失败: {result.get('message')}")
+                await self._run_scheduled_index_rebuild(
+                    f"v1 迁移数据需要重建索引（{pending_count} 条文档）",
+                    pending_count,
+                )
                 return
 
-            # 检查索引一致性
             status = await self.index_validator.check_consistency()
-
             if not status.is_consistent and status.needs_rebuild:
                 logger.warning(f"检测到索引不一致: {status.reason}")
-                logger.info(
-                    f"当前索引计数 - Documents: {status.documents_count}, BM25: {status.bm25_count}, Vector: {status.vector_count}"
+                await self._run_scheduled_index_rebuild(
+                    status.reason, status.documents_count
                 )
-                logger.info("开始自动重建索引。")
-
-                result = await self.index_validator.rebuild_indexes(self.memory_engine)
-
-                if result["success"]:
-                    logger.info(
-                        f"索引自动重建完成: 成功 {result['processed']} 条, 失败 {result['errors']} 条"
-                    )
-                else:
-                    logger.error(f"索引自动重建失败: {result.get('message')}")
             else:
                 logger.info(f"索引一致性检查通过: {status.reason}")
-
+                self._set_index_maintenance_status(
+                    state="ready",
+                    reason=status.reason,
+                    current=status.documents_count,
+                    total=status.documents_count,
+                    message="索引一致性检查通过",
+                    finished_at=time.time(),
+                )
+        except asyncio.CancelledError:
+            self._set_index_maintenance_status(
+                state="cancelled", message="索引维护已取消", finished_at=time.time()
+            )
+            raise
         except Exception as e:
             logger.error(f"自动重建索引失败: {e}", exc_info=True)
+            self._set_index_maintenance_status(
+                state="failed",
+                message=str(e),
+                finished_at=time.time(),
+                result={"success": False, "error": str(e)},
+            )
+
+    async def _run_scheduled_index_rebuild(
+        self,
+        reason: str,
+        expected_total: int,
+        *,
+        force_full_vector: bool = False,
+    ) -> None:
+        if not self.index_validator or not self.memory_engine:
+            return
+        self._set_index_maintenance_status(
+            state="rebuilding",
+            reason=reason,
+            current=0,
+            total=max(0, int(expected_total)),
+            message="开始后台重建索引",
+        )
+        logger.info(f"开始后台索引维护: {reason}")
+
+        async def update_progress(current: int, total: int, message: str) -> None:
+            self._set_index_maintenance_status(
+                current=max(0, int(current)),
+                total=max(0, int(total)),
+                message=message,
+            )
+
+        result = await self.index_validator.rebuild_indexes(
+            self.memory_engine,
+            progress_callback=update_progress,
+            force_full_vector=force_full_vector,
+        )
+        success = bool(result.get("success"))
+        partial = bool(result.get("partial"))
+
+        if success:
+            final_status = await self.index_validator.check_consistency()
+            if not final_status.is_consistent and final_status.needs_rebuild:
+                logger.info(
+                    f"索引维护期间发生并发写入，执行收尾补偿: {final_status.reason}"
+                )
+                reconciliation = await self.index_validator.rebuild_indexes(
+                    self.memory_engine, progress_callback=update_progress
+                )
+                result["reconciliation"] = dict(reconciliation)
+                success = bool(reconciliation.get("success"))
+                partial = partial or bool(reconciliation.get("partial"))
+
+        result["success"] = success
+        result["partial"] = partial
+        state = "partial" if success and partial else "ready" if success else "failed"
+        self._set_index_maintenance_status(
+            state=state,
+            current=int(result.get("processed", 0) or 0),
+            total=int(result.get("total", expected_total) or 0),
+            message=str(result.get("message") or "索引维护完成"),
+            finished_at=time.time(),
+            result=dict(result),
+        )
 
     async def _repair_message_counts(self, conversation_store: ConversationStore):
         """修复会话表中 message_count 与实际消息数量不一致的问题"""
@@ -1368,6 +1540,13 @@ class PluginInitializer:
 
     async def stop_background_tasks(self) -> None:
         """停止初始化阶段的后台任务（如Provider重试）"""
+        if self._index_maintenance_task and not self._index_maintenance_task.done():
+            self._index_maintenance_task.cancel()
+            try:
+                await self._index_maintenance_task
+            except asyncio.CancelledError:
+                pass
+        self._index_maintenance_task = None
         if self._retry_task and not self._retry_task.done():
             self._retry_task.cancel()
             try:

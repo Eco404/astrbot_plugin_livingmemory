@@ -6,7 +6,17 @@ on:
       - main
       - master
     paths:
-      - 'metadata.yaml'
+      - metadata.yaml
+      - package.json
+      - main.py
+      - core/managers/backup_manager.py
+      - CHANGELOG.md
+      - scripts/prepare_release_notes.py
+      - .github/workflows/auto-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   check-version:
@@ -19,35 +29,41 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          # workflow_dispatch must see every existing release tag before it
+          # decides whether the current version still needs publishing.
+          fetch-depth: 0
+
+      - name: Validate release metadata
+        run: |
+          python scripts/prepare_release_notes.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --previous-version none \
+            --output /tmp/release-notes-preview.md
 
       - name: Check version change
         id: check
+        shell: bash
         run: |
-          # 获取当前版本
-          CURRENT_VERSION=$(grep '^version:' metadata.yaml | awk '{print $2}')
-          echo "Current version: $CURRENT_VERSION"
-
-          # 获取上一次提交的版本
-          git checkout HEAD~1 -- metadata.yaml 2>/dev/null || echo "First commit"
-          if [ -f metadata.yaml ]; then
-            PREVIOUS_VERSION=$(grep '^version:' metadata.yaml | awk '{print $2}')
-            git checkout HEAD -- metadata.yaml
-          else
-            PREVIOUS_VERSION="none"
+          set -euo pipefail
+          current_version=$(awk '/^version:/ {print $2; exit}' metadata.yaml)
+          previous_version=none
+          if git cat-file -e HEAD^:metadata.yaml 2>/dev/null; then
+            previous_version=$(git show HEAD^:metadata.yaml | awk '/^version:/ {print $2; exit}')
           fi
-          echo "Previous version: $PREVIOUS_VERSION"
 
-          # 比较版本
-          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-            echo "old_version=$PREVIOUS_VERSION" >> $GITHUB_OUTPUT
-            echo "Version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
-          else
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No version change detected"
+          changed=false
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if ! git rev-parse -q --verify "refs/tags/v${current_version}" >/dev/null; then
+              changed=true
+            fi
+          elif [[ "${current_version}" != "${previous_version}" ]]; then
+            changed=true
           fi
+
+          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
+          echo "version=${current_version}" >> "${GITHUB_OUTPUT}"
+          echo "old_version=${previous_version}" >> "${GITHUB_OUTPUT}"
+          echo "Version: ${previous_version} -> ${current_version}; release=${changed}"
 
   create-release:
     needs: check-version
@@ -61,62 +77,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate changelog
-        id: changelog
+      - name: Verify release tag is new
+        shell: bash
         run: |
-          NEW_VERSION="${{ needs.check-version.outputs.new_version }}"
-          OLD_VERSION="${{ needs.check-version.outputs.old_version }}"
-
-          echo "## 🎉 Release $NEW_VERSION" > changelog.md
-          echo "" >> changelog.md
-
-          # 如果有上一个版本标签，生成两个版本之间的提交日志
-          if git rev-parse "$OLD_VERSION" >/dev/null 2>&1; then
-            echo "### 📝 Changes since $OLD_VERSION" >> changelog.md
-            echo "" >> changelog.md
-
-            # 获取提交信息并分类
-            git log "$OLD_VERSION..HEAD" --pretty=format:"%s|||%h|||%an" --no-merges | while IFS='|||' read -r subject hash author; do
-              # 根据提交信息的前缀进行分类
-              if echo "$subject" | grep -qiE "^(feat|feature):"; then
-                echo "- ✨ **Feature**: ${subject#*: } (${hash})" >> changelog.md
-              elif echo "$subject" | grep -qiE "^fix:"; then
-                echo "- 🐛 **Fix**: ${subject#*: } (${hash})" >> changelog.md
-              elif echo "$subject" | grep -qiE "^docs:"; then
-                echo "- 📚 **Docs**: ${subject#*: } (${hash})" >> changelog.md
-              elif echo "$subject" | grep -qiE "^(refactor|style|perf|test|chore):"; then
-                prefix=$(echo "$subject" | cut -d: -f1)
-                echo "- 🔧 **${prefix^}**: ${subject#*: } (${hash})" >> changelog.md
-              else
-                echo "- 📌 $subject (${hash})" >> changelog.md
-              fi
-            done
-          else
-            echo "### 📝 Changes" >> changelog.md
-            echo "" >> changelog.md
-            echo "Initial release or no previous version tag found." >> changelog.md
-            echo "" >> changelog.md
-            echo "#### Recent commits:" >> changelog.md
-            git log -10 --pretty=format:"- %s (%h)" --no-merges >> changelog.md
+          set -euo pipefail
+          tag="v${{ needs.check-version.outputs.new_version }}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists; refusing to overwrite a release." >&2
+            exit 1
           fi
 
-          echo "" >> changelog.md
-          echo "---" >> changelog.md
-          echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$OLD_VERSION...$NEW_VERSION" >> changelog.md
+      - name: Generate release notes from CHANGELOG
+        run: |
+          python scripts/prepare_release_notes.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --previous-version "${{ needs.check-version.outputs.old_version }}" \
+            --output release-notes.md
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.check-version.outputs.new_version }}
-          name: Release ${{ needs.check-version.outputs.new_version }}
-          body_path: changelog.md
+          tag_name: v${{ needs.check-version.outputs.new_version }}
+          name: LivingMemory v${{ needs.check-version.outputs.new_version }}
+          body_path: release-notes.md
           draft: false
           prerelease: false
           generate_release_notes: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Notify release created
-        run: |
-          echo "✅ Release ${{ needs.check-version.outputs.new_version }} has been created successfully!"
-          echo "🔗 View release at: https://github.com/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.new_version }}"

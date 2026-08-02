@@ -1,0 +1,73 @@
+name: Tests
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+    branches: [master, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout AstrBot
+        uses: actions/checkout@v4
+        with:
+          repository: AstrBotDevs/AstrBot
+          path: AstrBot
+
+      - name: Checkout LivingMemory
+        uses: actions/checkout@v4
+        with:
+          path: AstrBot/data/plugins/astrbot_plugin_livingmemory
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            AstrBot/requirements.txt
+            AstrBot/data/plugins/astrbot_plugin_livingmemory/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r AstrBot/requirements.txt
+          python -m pip install -r AstrBot/data/plugins/astrbot_plugin_livingmemory/requirements.txt
+          python -m pip install pytest pytest-asyncio
+
+      - name: Run Python tests
+        working-directory: AstrBot/data/plugins/astrbot_plugin_livingmemory
+        run: python -m pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout LivingMemory
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run dashboard tests
+        run: npm run test:frontend
+
+      - name: Build documentation
+        run: npm run docs:build
