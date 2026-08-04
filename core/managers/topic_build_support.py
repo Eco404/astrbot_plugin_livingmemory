@@ -169,6 +169,67 @@ class TopicBuildSupportMixin:
         ]
         return round(sum(values) / len(values), 6) if values else 0.5
 
+    @classmethod
+    def _timeline_importance_contribution_weights(
+        cls,
+        timeline_uids: list[str],
+        fragments: list[TopicFragmentDraft],
+    ) -> dict[str, float]:
+        """Allocate this Topic's fact mass across its source Timelines."""
+        normalized_uids = list(dict.fromkeys(str(uid) for uid in timeline_uids if uid))
+        if not normalized_uids:
+            return {}
+        allowed = set(normalized_uids)
+        masses = {uid: 0.0 for uid in normalized_uids}
+        seen_facts: set[tuple[str, str]] = set()
+        for fragment in fragments:
+            fragment_key = str(
+                fragment.logical_fragment_uid or fragment.fragment_uid or "fragment"
+            )
+            for fact in fragment.facts:
+                fact_key = str(fact.get("fact_uid") or cls._norm(fact.get("content")))
+                dedupe_key = (fragment_key, fact_key)
+                if not fact_key or dedupe_key in seen_facts:
+                    continue
+                seen_facts.add(dedupe_key)
+                sources = list(
+                    dict.fromkeys(
+                        str(uid)
+                        for uid in fact.get("source_timeline_uids", [])
+                        if str(uid) in allowed
+                    )
+                )
+                if not sources:
+                    sources = [uid for uid in fragment.timeline_uids if uid in allowed]
+                if not sources:
+                    continue
+                fact_mass = cls._score(fact.get("importance"), 0.5) * max(
+                    0.05,
+                    cls._score(fact.get("confidence"), 0.7),
+                )
+                share = fact_mass / len(sources)
+                for uid in sources:
+                    masses[uid] += share
+
+        total = sum(masses.values())
+        if total <= 0.0:
+            for fragment in fragments:
+                sources = [uid for uid in fragment.timeline_uids if uid in allowed]
+                if not sources:
+                    continue
+                fragment_mass = cls._score(fragment.importance, 0.5) * max(
+                    0.05,
+                    cls._score(fragment.confidence, 0.7),
+                )
+                share = fragment_mass / len(sources)
+                for uid in sources:
+                    masses[uid] += share
+            total = sum(masses.values())
+        if total <= 0.0:
+            equal = 1.0 / len(normalized_uids)
+            return {uid: equal for uid in normalized_uids}
+        return {uid: masses[uid] / total for uid in normalized_uids}
+
     @staticmethod
     async def _gather_cancel_on_error(awaitables: list[Any]) -> list[Any]:
         """Gather in input order and cancel sibling provider calls on failure."""

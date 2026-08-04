@@ -476,6 +476,12 @@ class TopicRecallPipeline:
             ordered = sorted(
                 result.sources,
                 key=lambda item: (
+                    float(
+                        item.get("importance_contribution_weight")
+                        if item.get("importance_contribution_weight") is not None
+                        else item.get("contribution_weight")
+                        or 0.0
+                    ),
                     float(item.get("contribution_weight") or 0.0),
                     float(item.get("semantic_similarity") or 0.0),
                 ),

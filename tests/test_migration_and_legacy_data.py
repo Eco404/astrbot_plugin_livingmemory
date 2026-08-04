@@ -276,6 +276,7 @@ async def test_migrate_v9_22_to_v10_records_release_boundary(tmp_path):
         ("完成 v10 数据库版本收束", 1, 1),
         ("创建 Timeline 来源快照与导入导出结构", 1, 1),
         ("建立文档索引维护状态", 1, 1),
+        ("重算 Topic 来源重要性贡献", 1, 1),
     ]
 
 
@@ -310,7 +311,7 @@ async def test_migrate_v10_1_to_v10_2_adds_document_index_state(tmp_path):
 
     assert result["success"] is True
     assert result["from_version"] == "10.1"
-    assert result["to_version"] == "10.2"
+    assert result["to_version"] == DBMigration.CURRENT_VERSION
     async with aiosqlite.connect(db_path) as db:
         table = await (
             await db.execute(
@@ -322,6 +323,98 @@ async def test_migrate_v10_1_to_v10_2_adds_document_index_state(tmp_path):
         ).fetchone()
     assert table == ("document_index_state",)
     assert document == ("keep me",)
+
+
+@pytest.mark.asyncio
+async def test_migrate_v10_2_to_v10_3_backfills_topic_importance_weights(tmp_path):
+    db_path = str(tmp_path / "v10_2.db")
+    async with aiosqlite.connect(db_path) as db:
+        await db.executescript(
+            """
+            CREATE TABLE db_version (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL,
+                description TEXT,
+                migrated_at TEXT NOT NULL,
+                migration_duration_seconds REAL
+            );
+            INSERT INTO db_version(version, description, migrated_at)
+            VALUES ('v10.2', 'test fixture', '2026-08-04T00:00:00+00:00');
+
+            CREATE TABLE topic_memories (
+                topic_uid TEXT PRIMARY KEY,
+                semantic_importance REAL NOT NULL,
+                base_importance REAL NOT NULL,
+                importance REAL NOT NULL,
+                importance_policy_version INTEGER NOT NULL,
+                source_importance_hash TEXT NOT NULL,
+                metadata TEXT NOT NULL
+            );
+            INSERT INTO topic_memories VALUES (
+                'topic-1', 0.3, 0.7, 0.7, 2, 'old-hash', '{}'
+            );
+
+            CREATE TABLE topic_timeline_links (
+                topic_uid TEXT NOT NULL,
+                timeline_uid TEXT NOT NULL,
+                contribution_weight REAL NOT NULL,
+                PRIMARY KEY(topic_uid, timeline_uid)
+            );
+            INSERT INTO topic_timeline_links VALUES ('topic-1', 'timeline-a', 0.5);
+            INSERT INTO topic_timeline_links VALUES ('topic-1', 'timeline-b', 0.5);
+
+            CREATE TABLE topic_memory_atoms (
+                atom_uid TEXT PRIMARY KEY,
+                topic_uid TEXT NOT NULL,
+                importance REAL NOT NULL,
+                confidence REAL NOT NULL,
+                status TEXT NOT NULL
+            );
+            INSERT INTO topic_memory_atoms VALUES ('atom-a', 'topic-1', 0.9, 0.9, 'active');
+            INSERT INTO topic_memory_atoms VALUES ('atom-b', 'topic-1', 0.3, 0.5, 'active');
+
+            CREATE TABLE topic_atom_sources (
+                topic_atom_uid TEXT NOT NULL,
+                timeline_uid TEXT NOT NULL,
+                contribution_weight REAL NOT NULL
+            );
+            INSERT INTO topic_atom_sources VALUES ('atom-a', 'timeline-a', 1.0);
+            INSERT INTO topic_atom_sources VALUES ('atom-b', 'timeline-b', 1.0);
+            """
+        )
+        await db.commit()
+
+    result = await DBMigration(db_path).migrate()
+
+    assert result["success"] is True
+    assert result["to_version"] == "10.3"
+    async with aiosqlite.connect(db_path) as db:
+        topic = await (
+            await db.execute(
+                """
+                SELECT base_importance, importance, importance_policy_version,
+                       source_importance_hash, metadata
+                FROM topic_memories WHERE topic_uid = 'topic-1'
+                """
+            )
+        ).fetchone()
+        weights = await (
+            await db.execute(
+                """
+                SELECT timeline_uid, importance_contribution_weight
+                FROM topic_timeline_links
+                ORDER BY timeline_uid
+                """
+            )
+        ).fetchall()
+
+    assert topic[0:3] == pytest.approx((0.3, 0.3, 3), abs=0.0)
+    assert topic[3] == ""
+    metadata = json.loads(topic[4])
+    assert metadata["importance_projection"]["source_base_applied"] is False
+    assert metadata["importance_projection"]["source_state_influence"] == 0.15
+    assert weights[0][1] == pytest.approx(0.81 / 0.96)
+    assert weights[1][1] == pytest.approx(0.15 / 0.96)
 
 
 @pytest.mark.asyncio

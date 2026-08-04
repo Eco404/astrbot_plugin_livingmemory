@@ -1,6 +1,6 @@
 # Timeline memory
 
-Timeline records what happened during a continuous conversation window. It is the editable source for Topic reconstruction, actor provenance, and dynamic importance.
+Timeline records what happened during a continuous conversation window. It is the editable source for Topic reconstruction, actor provenance, and source lifecycle state.
 
 ## Generation boundaries
 
@@ -24,4 +24,6 @@ Batch reconstruction finishes all selected Timeline items before synchronizing a
 
 ## Dynamic importance
 
-Timeline separates source importance from decay and access effects. Topic effective importance is projected from current Timeline state and evidence strength, rather than incrementally written back into a second decay system.
+Timeline separates window-level importance from decay and access effects. Because one Timeline can contain several subjects with different value, its overall importance is not added directly to every derived Topic.
+
+A Topic derives its base importance from its own formal fragments and facts. Timeline lifecycle state is only a bounded modifier: it cannot raise a Topic above its semantic base and may only attenuate it slightly when sources become cold. Topic access and decay remain independent, and the current score is recomputed from state rather than accumulated as deltas.

@@ -16,6 +16,10 @@ import aiosqlite
 
 from astrbot.api import logger
 
+from ..core.importance_policy import (
+    IMPORTANCE_POLICY_VERSION,
+    SOURCE_STATE_INFLUENCE,
+)
 from ..core.models.memory_identity import resolve_memory_space
 from ..core.topic_fragment_identity import (
     fragment_semantic_discriminator,
@@ -29,7 +33,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "10.2"
+    CURRENT_VERSION = "10.3"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -45,6 +49,7 @@ class DBMigration:
         "10": "Stable Timeline and Topic memory architecture release",
         "10.1": "Durable Timeline source snapshots",
         "10.2": "Durable document index maintenance state",
+        "10.3": "Topic-local importance projection",
     }
 
     def __init__(self, db_path: str):
@@ -311,6 +316,8 @@ class DBMigration:
                     migration_steps.append(self._migrate_v10_to_v10_1)
                 if current_key < self.version_key("10.2"):
                     migration_steps.append(self._migrate_v10_1_to_v10_2)
+                if current_key < self.version_key("10.3"):
+                    migration_steps.append(self._migrate_v10_2_to_v10_3)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -2067,6 +2074,181 @@ class DBMigration:
         if progress_callback:
             progress_callback("建立文档索引维护状态", 1, 1)
         logger.info("v10.1 -> v10.2 迁移完成")
+
+    async def _migrate_v10_2_to_v10_3(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Separate Topic semantics from window-wide Timeline importance."""
+        logger.info("执行迁移步骤: v10.2 -> v10.3 (Topic-local importance)")
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("PRAGMA busy_timeout = 10000")
+
+            tables = {
+                str(row[0])
+                for row in await (
+                    await db.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                ).fetchall()
+            }
+            if "topic_timeline_links" in tables:
+                columns = {
+                    str(row[1])
+                    for row in await (
+                        await db.execute("PRAGMA table_info(topic_timeline_links)")
+                    ).fetchall()
+                }
+                if "importance_contribution_weight" not in columns:
+                    await db.execute(
+                        """
+                        ALTER TABLE topic_timeline_links
+                        ADD COLUMN importance_contribution_weight REAL NOT NULL DEFAULT 1.0
+                        """
+                    )
+
+                link_rows = await (
+                    await db.execute(
+                        """
+                        SELECT topic_uid, timeline_uid, contribution_weight
+                        FROM topic_timeline_links
+                        """
+                    )
+                ).fetchall()
+                links_by_topic: dict[str, list[aiosqlite.Row]] = {}
+                for row in link_rows:
+                    links_by_topic.setdefault(str(row["topic_uid"]), []).append(row)
+
+                fact_masses: dict[tuple[str, str], float] = {}
+                if {
+                    "topic_memory_atoms",
+                    "topic_atom_sources",
+                }.issubset(tables):
+                    mass_rows = await (
+                        await db.execute(
+                            """
+                            SELECT a.topic_uid, s.timeline_uid,
+                                   SUM(
+                                       MAX(0.0, MIN(1.0, a.importance))
+                                       * MAX(0.05, MIN(1.0, a.confidence))
+                                       * MAX(0.0, s.contribution_weight)
+                                   ) AS fact_mass
+                            FROM topic_memory_atoms a
+                            JOIN topic_atom_sources s
+                              ON s.topic_atom_uid = a.atom_uid
+                            WHERE a.status = 'active'
+                            GROUP BY a.topic_uid, s.timeline_uid
+                            """
+                        )
+                    ).fetchall()
+                    fact_masses = {
+                        (str(row["topic_uid"]), str(row["timeline_uid"])): max(
+                            0.0, float(row["fact_mass"] or 0.0)
+                        )
+                        for row in mass_rows
+                    }
+
+                for topic_uid, topic_links in links_by_topic.items():
+                    raw_weights = {
+                        str(row["timeline_uid"]): fact_masses.get(
+                            (topic_uid, str(row["timeline_uid"])),
+                            0.0,
+                        )
+                        for row in topic_links
+                    }
+                    total = sum(raw_weights.values())
+                    if total <= 0.0:
+                        raw_weights = {
+                            str(row["timeline_uid"]): max(
+                                0.0, float(row["contribution_weight"] or 0.0)
+                            )
+                            for row in topic_links
+                        }
+                        total = sum(raw_weights.values())
+                    if total <= 0.0:
+                        raw_weights = {
+                            str(row["timeline_uid"]): 1.0 for row in topic_links
+                        }
+                        total = float(len(raw_weights))
+                    await db.executemany(
+                        """
+                        UPDATE topic_timeline_links
+                        SET importance_contribution_weight = ?
+                        WHERE topic_uid = ? AND timeline_uid = ?
+                        """,
+                        [
+                            (raw / total, topic_uid, timeline_uid)
+                            for timeline_uid, raw in raw_weights.items()
+                        ],
+                    )
+
+            if "topic_memories" in tables:
+                topic_columns = {
+                    str(row[1])
+                    for row in await (
+                        await db.execute("PRAGMA table_info(topic_memories)")
+                    ).fetchall()
+                }
+                required = {
+                    "topic_uid",
+                    "semantic_importance",
+                    "base_importance",
+                    "importance",
+                    "importance_policy_version",
+                    "source_importance_hash",
+                    "metadata",
+                }
+                if required.issubset(topic_columns):
+                    topic_rows = await (
+                        await db.execute(
+                            "SELECT topic_uid, semantic_importance, metadata FROM topic_memories"
+                        )
+                    ).fetchall()
+                    updates: list[tuple[float, float, int, str, str, str]] = []
+                    for row in topic_rows:
+                        semantic = max(
+                            0.0, min(1.0, float(row["semantic_importance"] or 0.5))
+                        )
+                        metadata = self._migration_json_object(row["metadata"])
+                        projection = metadata.get("importance_projection")
+                        if not isinstance(projection, dict):
+                            projection = {}
+                        projection.update(
+                            {
+                                "policy_version": IMPORTANCE_POLICY_VERSION,
+                                "semantic_importance": semantic,
+                                "source_state_influence": SOURCE_STATE_INFLUENCE,
+                                "source_base_applied": False,
+                                "live": True,
+                            }
+                        )
+                        metadata["importance_projection"] = projection
+                        updates.append(
+                            (
+                                semantic,
+                                semantic,
+                                IMPORTANCE_POLICY_VERSION,
+                                "",
+                                json.dumps(metadata, ensure_ascii=False),
+                                str(row["topic_uid"]),
+                            )
+                        )
+                    if updates:
+                        await db.executemany(
+                            """
+                            UPDATE topic_memories
+                            SET base_importance = ?, importance = ?,
+                                importance_policy_version = ?,
+                                source_importance_hash = ?, metadata = ?
+                            WHERE topic_uid = ?
+                            """,
+                            updates,
+                        )
+            await db.commit()
+        if progress_callback:
+            progress_callback("重算 Topic 来源重要性贡献", 1, 1)
+        logger.info("v10.2 -> v10.3 迁移完成")
 
     @staticmethod
     def _migration_json_object(value: Any) -> dict[str, Any]:

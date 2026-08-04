@@ -18,6 +18,12 @@ Sharing one Timeline is only a weak continuity signal; it cannot force unrelated
 
 Formal fragments persist text, facts, source keys, actor references, affect, time, Timeline revision, embedding signature, and vector. They support both Topic reconstruction and concise recall supplements.
 
+## Importance
+
+A Topic derives base importance only from its own formal fragments and facts; it does not inherit the score of an entire Timeline window. This prevents one important event from inflating unrelated Topics extracted from the same window.
+
+Source Timeline decay and access state remain a bounded lifecycle reference and can never raise the Topic above its semantic base. Multiple sources are weighted by fact-level provenance for that Topic, while Topic access and decay are tracked independently.
+
 ## Browsing and search
 
 The Topic page supports status and actor filters alongside two explicit search modes:

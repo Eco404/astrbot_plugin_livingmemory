@@ -29,6 +29,7 @@ from ..fact_temporal import (
 )
 from ..importance_policy import (
     IMPORTANCE_POLICY_VERSION,
+    SOURCE_STATE_INFLUENCE,
     aggregate_source_importance,
     evidence_strength,
     fragment_semantic_importance,
@@ -123,6 +124,10 @@ class TopicSnapshotPublisherMixin:
         semantic_importance = topic_semantic_importance(
             (item.importance, item.confidence) for item in fragments
         )
+        importance_weights = self._timeline_importance_contribution_weights(
+            timeline_uids,
+            fragments,
+        )
         source_importance = aggregate_source_importance(
             {
                 "timeline_uid": uid,
@@ -140,10 +145,7 @@ class TopicSnapshotPublisherMixin:
                     if uid in candidate_map
                     else 1
                 ),
-                "weight": min(
-                    1.0,
-                    0.6 + 0.4 / max(1, cluster_sizes[timeline_cluster[uid]]),
-                ),
+                "weight": importance_weights.get(uid, 0.0),
             }
             for uid in timeline_uids
         )
@@ -241,6 +243,8 @@ class TopicSnapshotPublisherMixin:
                     "semantic_importance": semantic_importance,
                     "source_base_component": source_base_component,
                     "dynamic_factor": source_importance["dynamic_factor"],
+                    "source_state_influence": SOURCE_STATE_INFLUENCE,
+                    "source_base_applied": False,
                     "evidence_strength": topic_evidence_strength,
                     "source_importance_hash": source_importance[
                         "source_importance_hash"
@@ -285,6 +289,7 @@ class TopicSnapshotPublisherMixin:
                 contribution_weight=min(
                     1.0, 0.6 + 0.4 / max(1, cluster_sizes[timeline_cluster[uid]])
                 ),
+                importance_contribution_weight=importance_weights.get(uid, 0.0),
                 semantic_similarity=self._timeline_fragment_similarity(uid, fragments),
                 temporal_affinity=1.0 / max(1, cluster_sizes[timeline_cluster[uid]]),
                 source_timeline_revision=(
@@ -307,6 +312,7 @@ class TopicSnapshotPublisherMixin:
                         else 1
                     ),
                     "importance_policy_version": IMPORTANCE_POLICY_VERSION,
+                    "importance_contribution_weight": importance_weights.get(uid, 0.0),
                 },
             )
             for uid in timeline_uids

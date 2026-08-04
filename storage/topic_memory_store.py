@@ -15,6 +15,7 @@ import aiosqlite
 
 from ..core.importance_policy import (
     IMPORTANCE_POLICY_VERSION,
+    SOURCE_STATE_INFLUENCE,
     aggregate_source_importance,
     topic_base_importance,
     topic_effective_importance,
@@ -177,6 +178,7 @@ class TopicMemoryStore:
                 timeline_uid TEXT NOT NULL,
                 time_cluster_key TEXT NOT NULL,
                 contribution_weight REAL NOT NULL DEFAULT 1.0,
+                importance_contribution_weight REAL NOT NULL DEFAULT 1.0,
                 semantic_similarity REAL NOT NULL DEFAULT 1.0,
                 temporal_affinity REAL NOT NULL DEFAULT 1.0,
                 source_timeline_revision INTEGER NOT NULL,
@@ -1755,7 +1757,7 @@ class TopicMemoryStore:
                 await db.execute(
                     f"""
                     SELECT l.topic_uid, l.timeline_uid, l.time_cluster_key,
-                           l.contribution_weight, d.metadata
+                           l.importance_contribution_weight, d.metadata
                     FROM topic_timeline_links l
                     JOIN memory_registry r ON r.memory_uid = l.timeline_uid
                     JOIN documents d ON d.id = r.document_id
@@ -1786,7 +1788,7 @@ class TopicMemoryStore:
                         metadata.get("importance_revision"), 1
                     ),
                     "weight": self._bounded_score(
-                        row["contribution_weight"], 1.0
+                        row["importance_contribution_weight"], 1.0
                     ),
                 }
             )
@@ -1817,6 +1819,8 @@ class TopicMemoryStore:
                     "semantic_importance": topic.semantic_importance,
                     "source_base_component": source_base,
                     "dynamic_factor": projection["dynamic_factor"],
+                    "source_state_influence": SOURCE_STATE_INFLUENCE,
+                    "source_base_applied": False,
                     "evidence_strength": topic.evidence_strength,
                     "source_importance_hash": projection[
                         "source_importance_hash"
@@ -2481,7 +2485,9 @@ class TopicMemoryStore:
                 await db.execute(
                     f"""
                     SELECT l.topic_uid, l.timeline_uid, l.time_cluster_key,
-                           l.contribution_weight, l.semantic_similarity,
+                           l.contribution_weight,
+                           l.importance_contribution_weight,
+                           l.semantic_similarity,
                            l.temporal_affinity, s.session_id, s.start_index,
                            s.end_index, s.started_at, s.ended_at,
                            s.metadata AS source_metadata
@@ -2893,6 +2899,7 @@ class TopicMemoryStore:
             cursor = await db.execute(
                 """
                 SELECT t.*, l.time_cluster_key, l.contribution_weight,
+                       l.importance_contribution_weight,
                        l.semantic_similarity, l.temporal_affinity,
                        l.source_timeline_revision, l.topic_revision,
                        l.status AS link_status
@@ -4980,6 +4987,10 @@ class TopicMemoryStore:
                 "contribution_weight", link.contribution_weight
             )
             TopicMemoryStore._validate_score(
+                "importance_contribution_weight",
+                link.importance_contribution_weight,
+            )
+            TopicMemoryStore._validate_score(
                 "semantic_similarity", link.semantic_similarity
             )
             TopicMemoryStore._validate_score("temporal_affinity", link.temporal_affinity)
@@ -5156,15 +5167,17 @@ class TopicMemoryStore:
             """
             INSERT INTO topic_timeline_links (
                 topic_uid, timeline_uid, time_cluster_key, contribution_weight,
-                semantic_similarity, temporal_affinity, source_timeline_revision,
-                topic_revision, status, created_at, updated_at, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                importance_contribution_weight, semantic_similarity,
+                temporal_affinity, source_timeline_revision, topic_revision,
+                status, created_at, updated_at, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 link.topic_uid,
                 link.timeline_uid,
                 link.time_cluster_key,
                 float(link.contribution_weight),
+                float(link.importance_contribution_weight),
                 float(link.semantic_similarity),
                 float(link.temporal_affinity),
                 source_revision,

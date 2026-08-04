@@ -163,6 +163,7 @@ class TopicTimelineLink:
     timeline_uid: str
     time_cluster_key: str
     contribution_weight: float = 1.0
+    importance_contribution_weight: float = 1.0
     semantic_similarity: float = 1.0
     temporal_affinity: float = 1.0
     source_timeline_revision: int = 1

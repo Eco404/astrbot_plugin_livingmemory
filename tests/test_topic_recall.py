@@ -1112,6 +1112,7 @@ async def test_source_timeline_access_is_bounded_per_consumed_topic_and_deduplic
             {
                 "timeline_uid": f"timeline-{index}",
                 "contribution_weight": float(10 - index),
+                "importance_contribution_weight": float(index),
                 "semantic_similarity": 0.5,
             }
             for index in range(1, 6)
@@ -1122,10 +1123,26 @@ async def test_source_timeline_access_is_bounded_per_consumed_topic_and_deduplic
         "第二个话题",
         [0.9, 0.1],
         sources=[
-            {"timeline_uid": "timeline-2", "contribution_weight": 1.0},
-            {"timeline_uid": "timeline-6", "contribution_weight": 0.9},
-            {"timeline_uid": "timeline-7", "contribution_weight": 0.8},
-            {"timeline_uid": "timeline-8", "contribution_weight": 0.7},
+            {
+                "timeline_uid": "timeline-2",
+                "contribution_weight": 1.0,
+                "importance_contribution_weight": 1.0,
+            },
+            {
+                "timeline_uid": "timeline-6",
+                "contribution_weight": 0.9,
+                "importance_contribution_weight": 0.9,
+            },
+            {
+                "timeline_uid": "timeline-7",
+                "contribution_weight": 0.8,
+                "importance_contribution_weight": 0.8,
+            },
+            {
+                "timeline_uid": "timeline-8",
+                "contribution_weight": 0.7,
+                "importance_contribution_weight": 0.7,
+            },
         ],
     )
     store = _Store([first, second])
@@ -1148,4 +1165,4 @@ async def test_source_timeline_access_is_bounded_per_consumed_topic_and_deduplic
 
     # Each Topic contributes at most three sources. The repeated timeline-2 is
     # refreshed once, so one broad Topic cannot keep its entire history alive.
-    assert document_ids == [1, 2, 3, 6, 7]
+    assert document_ids == [5, 4, 3, 2, 6, 7]

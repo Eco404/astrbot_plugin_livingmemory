@@ -9,7 +9,8 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 
-IMPORTANCE_POLICY_VERSION = 2
+IMPORTANCE_POLICY_VERSION = 3
+SOURCE_STATE_INFLUENCE = 0.15
 
 
 def clamp_score(value: Any, default: float = 0.5) -> float:
@@ -74,9 +75,8 @@ def aggregate_source_importance(
         cluster = str(source.get("time_cluster_key") or f"timeline:{uid}")
         base = clamp_score(source.get("base_importance"), 0.5)
         effective = clamp_score(source.get("effective_importance"), base)
-        weight = max(0.01, clamp_score(source.get("weight"), 1.0))
+        weight = clamp_score(source.get("weight"), 1.0)
         revision = max(1, int(source.get("importance_revision") or 1))
-        grouped[cluster].append((base, effective, weight, uid, revision))
         normalized_rows.append(
             {
                 "timeline_uid": uid,
@@ -87,6 +87,22 @@ def aggregate_source_importance(
                 "importance_revision": revision,
             }
         )
+        if weight > 0.0:
+            grouped[cluster].append((base, effective, weight, uid, revision))
+    if normalized_rows and not grouped:
+        # Corrupt or legacy callers may provide only zero weights. Preserve a
+        # usable projection by falling back to equal source participation.
+        for row in normalized_rows:
+            row["weight"] = round(1.0 / len(normalized_rows), 6)
+            grouped[row["time_cluster_key"]].append(
+                (
+                    row["base_importance"],
+                    row["effective_importance"],
+                    row["weight"],
+                    row["timeline_uid"],
+                    row["importance_revision"],
+                )
+            )
     if not grouped:
         return {
             "source_base_component": 0.5,
@@ -132,12 +148,28 @@ def aggregate_source_importance(
     }
 
 
-def topic_base_importance(semantic: float, source_base: float) -> float:
-    return round(
-        clamp_score(0.8 * clamp_score(semantic) + 0.2 * clamp_score(source_base)),
-        6,
-    )
+def topic_base_importance(
+    semantic: float,
+    source_base: float | None = None,
+) -> float:
+    """Keep Topic meaning authoritative instead of importing a window-wide score.
+
+    ``source_base`` remains accepted for callers and audit compatibility. A Timeline
+    can contain several unrelated subjects, so its aggregate score is not a valid
+    prior for every Topic derived from that Timeline.
+    """
+    del source_base
+    return round(clamp_score(semantic), 6)
 
 
-def topic_effective_importance(base: float, dynamic_factor: float) -> float:
-    return round(clamp_score(clamp_score(base) * float(dynamic_factor)), 6)
+def topic_effective_importance(
+    base: float,
+    dynamic_factor: float,
+    *,
+    source_state_influence: float = SOURCE_STATE_INFLUENCE,
+) -> float:
+    """Apply source lifecycle as a bounded modifier, never as Topic semantics."""
+    influence = max(0.0, min(1.0, float(source_state_influence)))
+    source_state = max(0.0, min(1.0, float(dynamic_factor)))
+    bounded_factor = (1.0 - influence) + influence * source_state
+    return round(clamp_score(clamp_score(base) * bounded_factor), 6)
