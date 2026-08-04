@@ -1549,7 +1549,7 @@ def test_format_injection_group_chat_v1_legacy():
 
 
 def test_format_injection_private_chat_v2_new():
-    """私聊新数据（v2）注入格式化：canonical_summary 内容通过 content 字段展示。"""
+    """私聊新数据（v2）：content 中的富检索正文可直接用于注入。"""
     memories = [
         {
             "content": PRIVATE_METADATA_V2["canonical_summary"]

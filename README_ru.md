@@ -49,3 +49,7 @@
 [Документация](https://eco404.github.io/astrbot_plugin_livingmemory/en/) · [Релизы](https://github.com/Eco404/astrbot_plugin_livingmemory/releases) · [История изменений](CHANGELOG.md) · [Журнал разработки](docs/DEVELOPMENT_LOG.md) · [Проблемы](https://github.com/Eco404/astrbot_plugin_livingmemory/issues)
 
 LivingMemory распространяется по лицензии [AGPL-3.0](LICENSE).
+
+## Исходный проект и авторство
+
+Этот репозиторий поддерживается **econeco** как независимо развиваемая ветка. Он основан на исходном проекте [astrbot_plugin_livingmemory](https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory), созданном **lxfight**. Мы сохраняем указание исходного проекта и автора, заложивших основу этой ветки.

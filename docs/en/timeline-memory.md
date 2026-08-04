@@ -14,7 +14,7 @@ The current-message embedding already produced by Topic recall is cached in the 
 
 ## Structured fields
 
-New records may include summaries, timestamped facts, topics, affect, importance, quality state, conversation and persona identity, role bindings, source ranges or source snapshots, stable memory identity, and revision.
+New records may include summaries, timestamped facts, topics, affect, importance, quality state, conversation and persona identity, role bindings, source ranges or source snapshots, stable memory identity, and revision. `canonical_summary` preserves the model summary and appends key facts as the rich retrieval and Timeline-injection body; `persona_summary` retains the original model summary without that fact expansion.
 
 ## Quality and reconstruction
 

@@ -19,6 +19,8 @@ export class MemoryPage {
     this.ROW_HEIGHT = 56;
     this.SCROLL_BUFFER = 15;
     this._fetchGeneration = 0;
+    this._batchEditRunning = false;
+    this._batchEditResolve = null;
   }
 
   /**
@@ -185,6 +187,16 @@ export class MemoryPage {
     }
 
     const selectedCount = selectedIds.size;
+    const batchEditButton = document.getElementById("mem-batch-edit");
+    if (batchEditButton) {
+      batchEditButton.disabled = selectedCount === 0 || this._batchEditRunning;
+    }
+    const batchEditLabel = document.getElementById("mem-batch-edit-label");
+    if (batchEditLabel) {
+      batchEditLabel.textContent = selectedCount
+        ? window.t("batchEdit.buttonCount", selectedCount)
+        : window.t("batchEdit.button");
+    }
     const deleteButton = document.getElementById("mem-delete-selected");
     if (deleteButton) deleteButton.disabled = selectedCount === 0;
     const deleteLabel = document.getElementById("mem-delete-selected-label");
@@ -236,6 +248,128 @@ export class MemoryPage {
       await this.fetch();
     } catch (error) {
       this.showToast(error.message || window.t("transfer.failed"), true);
+      this.updateSelectionControls();
+    }
+  }
+
+  setBatchEditField(field) {
+    for (const item of ["importance", "status", "type"]) {
+      document.getElementById(`memory-batch-edit-${item}-group`)?.classList.toggle(
+        "hidden",
+        item !== field
+      );
+    }
+    const help = document.getElementById("memory-batch-edit-help");
+    if (help) help.textContent = window.t(`batchEdit.help.${field}`);
+    const error = document.getElementById("memory-batch-edit-error");
+    if (error) {
+      error.hidden = true;
+      error.textContent = "";
+    }
+  }
+
+  showBatchEditDialog(count) {
+    if (this._batchEditResolve) return Promise.resolve(null);
+    const overlay = document.getElementById("memory-batch-edit-overlay");
+    if (!overlay) return Promise.resolve(null);
+    const field = document.getElementById("memory-batch-edit-field");
+    field.value = "importance";
+    document.getElementById("memory-batch-edit-importance").value = "5";
+    document.getElementById("memory-batch-edit-status").value = "active";
+    document.getElementById("memory-batch-edit-type").value = "GENERAL";
+    document.getElementById("memory-batch-edit-reason").value = "";
+    document.getElementById("memory-batch-edit-summary").textContent = window.t(
+      "batchEdit.summary",
+      count
+    );
+    this.setBatchEditField("importance");
+    overlay.classList.add("visible");
+    overlay.setAttribute("aria-hidden", "false");
+    field.focus();
+    return new Promise(resolve => {
+      this._batchEditResolve = resolve;
+    });
+  }
+
+  closeBatchEditDialog(result = null) {
+    if (!this._batchEditResolve) return;
+    const overlay = document.getElementById("memory-batch-edit-overlay");
+    overlay?.classList.remove("visible");
+    overlay?.setAttribute("aria-hidden", "true");
+    const resolve = this._batchEditResolve;
+    this._batchEditResolve = null;
+    resolve(result);
+  }
+
+  submitBatchEditDialog() {
+    const field = document.getElementById("memory-batch-edit-field")?.value || "importance";
+    const reason = document.getElementById("memory-batch-edit-reason")?.value.trim() || "";
+    const error = document.getElementById("memory-batch-edit-error");
+    let value;
+    let valueScale;
+    if (field === "importance") {
+      value = Number(document.getElementById("memory-batch-edit-importance")?.value);
+      if (!Number.isFinite(value) || value < 0 || value > 10) {
+        if (error) {
+          error.textContent = window.t("batchEdit.importanceRange");
+          error.hidden = false;
+        }
+        return;
+      }
+      valueScale = "display";
+    } else if (field === "status") {
+      value = document.getElementById("memory-batch-edit-status")?.value || "active";
+    } else {
+      value = document.getElementById("memory-batch-edit-type")?.value || "GENERAL";
+    }
+    this.closeBatchEditDialog({ field, value, value_scale: valueScale, reason });
+  }
+
+  async batchEdit() {
+    const ids = Array.from(this.state.memory.selectedIds);
+    if (!ids.length || this._batchEditRunning) return;
+    this._batchEditRunning = true;
+    this.updateSelectionControls();
+    try {
+      const edit = await this.showBatchEditDialog(ids.length);
+      if (!edit) return;
+      if (edit.field === "status" && edit.value === "archived") {
+        const confirmed = await this.confirmDialog?.show({
+          title: window.t("batchEdit.archiveConfirmTitle"),
+          message: window.t("batchEdit.archiveConfirm", ids.length),
+          confirmLabel: window.t("batchEdit.archiveApply"),
+          danger: false,
+        });
+        if (!confirmed) return;
+      }
+
+      const payload = {
+        memory_ids: ids,
+        field: edit.field,
+        value: edit.value,
+        reason: edit.reason,
+      };
+      if (edit.value_scale) payload.value_scale = edit.value_scale;
+      const result = await this.api.post("memories/batch-update", payload);
+      const updated = Number(result.updated_count || 0);
+      const failedIds = Array.isArray(result.failed_ids) ? result.failed_ids : [];
+      const failed = Number(result.failed_count || failedIds.length || 0);
+      this.showToast(
+        failed
+          ? window.t("batchEdit.partialFailed", updated, failed)
+          : window.t("batchEdit.success", updated),
+        failed > 0
+      );
+      this.state.memory.selectedIds.clear();
+      for (const id of failedIds) {
+        const parsed = Number(id);
+        if (Number.isFinite(parsed)) this.state.memory.selectedIds.add(parsed);
+      }
+      await this.fetch();
+    } catch (error) {
+      this.showToast(error.message || window.t("batchEdit.error"), true);
+    } finally {
+      this._batchEditRunning = false;
       this.updateSelectionControls();
     }
   }
@@ -375,6 +509,24 @@ export class MemoryPage {
     });
     document.getElementById("mem-delete-selected")?.addEventListener("click", () => {
       this.deleteSelected();
+    });
+    document.getElementById("mem-batch-edit")?.addEventListener("click", () => {
+      this.batchEdit();
+    });
+    document.getElementById("memory-batch-edit-field")?.addEventListener("change", event => {
+      this.setBatchEditField(event.target.value);
+    });
+    document.getElementById("memory-batch-edit-apply")?.addEventListener("click", () => {
+      this.submitBatchEditDialog();
+    });
+    document.getElementById("memory-batch-edit-cancel")?.addEventListener("click", () => {
+      this.closeBatchEditDialog(null);
+    });
+    document.getElementById("memory-batch-edit-close")?.addEventListener("click", () => {
+      this.closeBatchEditDialog(null);
+    });
+    document.getElementById("memory-batch-edit-overlay")?.addEventListener("click", event => {
+      if (event.target === event.currentTarget) this.closeBatchEditDialog(null);
     });
     document.getElementById("mem-export")?.addEventListener("click", () => {
       this.exportMemories();

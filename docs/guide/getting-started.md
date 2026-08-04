@@ -35,6 +35,10 @@
 插件使用 GitHub 分发。网络受限时，可在 AstrBot 的其他设置中配置 HTTP 代理，或者改用 ZIP 压缩包上传。如果报错缺少 Python 依赖，先检查平台日志，再使用 WebUI 提供的 Pip 库安装功能补充依赖。
 :::
 
+::: tip FAISS 版本建议
+建议在 AstrBot 实际使用的 Python 环境中安装 `faiss-cpu>=1.14.3`。已知不兼容的 `1.14.2` 已被插件依赖排除；为兼容 AstrBot `4.24.2+` 的既有环境，插件暂不把 `1.14.3` 设为硬性最低版本。修复 FAISS 时请确认操作的是 AstrBot 所在环境，并避免无意覆盖部署方的锁定版本。
+:::
+
 更新的管理面板操作说明可参考 [AstrBot 官方 WebUI 文档](https://docs.astrbot.app/use/webui.html#插件)。
 
 进入 AstrBot 的插件配置页面，优先确认以下项目：

@@ -284,7 +284,7 @@ async def test_supplemental_identity_does_not_match_same_name_with_other_id():
 async def test_dual_channel_summary_stores_canonical_and_persona():
     """
     process_conversation 应在 metadata 中同时存储
-    canonical_summary（检索用）和 persona_summary（人格风格用）。
+    canonical_summary（富检索/注入正文）和 persona_summary（原始模型摘要）。
     """
     llm = _DummyLLMProvider(
         """{
@@ -311,7 +311,7 @@ async def test_dual_channel_summary_stores_canonical_and_persona():
     assert "persona_summary" in metadata
     assert "张三" in metadata["persona_summary"]
 
-    # content 应使用 canonical_summary（事实导向）
+    # content 应使用拼接关键事实后的 canonical_summary
     assert content == metadata["canonical_summary"]
 
     # schema 版本标记

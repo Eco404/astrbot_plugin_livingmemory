@@ -1466,8 +1466,8 @@ class MemoryProcessor:
         summary = structured_data.get("summary", "")
         key_facts = structured_data.get("key_facts", [])
 
-        # canonical_summary：事实导向、风格中性，用于检索
-        # 由 summary + key_facts 拼接，去除人格语气词
+        # canonical_summary is the rich retrieval/injection body. It preserves
+        # the model summary verbatim and appends key facts for broader recall.
         canonical_parts = [summary] if summary else []
         if key_facts:
             canonical_parts.append(
@@ -1475,7 +1475,7 @@ class MemoryProcessor:
             )
         canonical_summary = " | ".join(canonical_parts) if canonical_parts else ""
 
-        # content 字段使用 canonical_summary，提升检索稳定性
+        # content is consumed by both retrieval and Timeline injection paths.
         if str(structured_data.get("memory_decision") or "store") == "no_memory":
             content = ""
         elif canonical_summary:
@@ -1503,7 +1503,8 @@ class MemoryProcessor:
             "message_coverage": structured_data.get("message_coverage", []),
             "sentiment": structured_data.get("sentiment", "neutral"),
             "interaction_type": "group_chat" if is_group_chat else "private_chat",
-            # 双通道：canonical 用于检索，persona_summary 保留原始人格风格摘要
+            # Dual channel: canonical adds fact coverage; persona keeps the
+            # original summary as a separate compatibility/presentation field.
             "canonical_summary": canonical_summary,
             "persona_summary": summary,
             "summary_schema_version": TIMELINE_SUMMARY_SCHEMA_VERSION,

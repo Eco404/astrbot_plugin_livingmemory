@@ -470,6 +470,63 @@ async def test_replace_memory_preserves_logical_uid_and_increments_revision(
 
 
 @pytest.mark.asyncio
+async def test_timeline_status_updates_registry_and_topic_sync(tmp_path: Path):
+    engine = MemoryEngine(
+        db_path=str(tmp_path / "status_sync.db"),
+        faiss_db=_FakeFaissDB(),
+        config={},
+    )
+    await engine.initialize()
+    memory_id = await engine.add_memory(
+        content="可归档的 Timeline",
+        session_id="bot-a:FriendMessage:user-1",
+        persona_id="p1",
+        importance=0.5,
+        metadata={"topics": ["测试"], "key_facts": ["测试事实"]},
+    )
+    memory = await engine.get_memory(memory_id)
+    memory_uid = memory["metadata"]["memory_uid"]
+
+    async def update_metadata(document_id, metadata_updates):
+        engine.faiss_db.docs[document_id]["metadata"].update(metadata_updates)
+        return True
+
+    engine.hybrid_retriever.update_metadata = AsyncMock(side_effect=update_metadata)
+    engine._mark_dependent_topics_stale = AsyncMock(return_value=["topic-1"])
+    engine._queue_deleted_timeline_repair = AsyncMock()
+    engine._schedule_topic_maintenance = Mock()
+
+    assert await engine.update_memory(
+        memory_id, {"metadata": {"status": "archived"}}
+    )
+    archived = await engine.memory_identity_store.get_by_uid(memory_uid)
+    assert archived is not None
+    assert archived.status == "archived"
+    engine._mark_dependent_topics_stale.assert_awaited_once_with(
+        memory_uid,
+        reason="timeline_deleted_status_archived",
+    )
+    engine._queue_deleted_timeline_repair.assert_awaited_once_with(
+        memory["metadata"]["memory_space_id"],
+        deleted_timeline_uids=[memory_uid],
+        affected_topic_uids=["topic-1"],
+    )
+
+    assert await engine.update_memory(
+        memory_id, {"metadata": {"status": "active"}}
+    )
+    active = await engine.memory_identity_store.get_by_uid(memory_uid)
+    assert active is not None
+    assert active.status == "active"
+    engine._schedule_topic_maintenance.assert_called_once_with(
+        memory["metadata"]["memory_space_id"],
+        full=False,
+        timeline_uids=[memory_uid],
+    )
+    await engine.close()
+
+
+@pytest.mark.asyncio
 async def test_rewrite_memory_in_place_preserves_document_id(tmp_path: Path):
     engine = MemoryEngine(
         db_path=str(tmp_path / "rewrite_in_place.db"),

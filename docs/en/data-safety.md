@@ -6,7 +6,7 @@
 
 ## Version path
 
-Version 3.5.0 uses the v10 schema family. The public migration path is:
+Version 3.5.x uses the v10 schema family. The public migration path is:
 
 ```text
 v8 -> v9 -> v10 -> current v10.x

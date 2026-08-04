@@ -582,6 +582,9 @@ class MemoryEngine:
         """Persist the logical-to-physical mapping and optional source span."""
         created_at = safe_float(metadata.get("create_time"), time.time())
         updated_at = safe_float(metadata.get("updated_at"), created_at)
+        status = str(metadata.get("status") or "active").strip().lower()
+        if status not in {"active", "archived", "deleted"}:
+            status = "active"
         await self.memory_identity_store.upsert_memory(
             memory_uid=str(metadata["memory_uid"]),
             document_id=int(document_id),
@@ -590,6 +593,7 @@ class MemoryEngine:
             revision=int(metadata.get("revision", 1)),
             created_at=created_at,
             updated_at=updated_at,
+            status=status,
         )
         await self.memory_identity_store.upsert_source_span(
             str(metadata["memory_uid"]),
@@ -2173,6 +2177,8 @@ class MemoryEngine:
                 except (json.JSONDecodeError, TypeError):
                     current_metadata = {}
 
+            old_status = str(current_metadata.get("status") or "active").strip().lower()
+
             # 合并元数据
             current_metadata.update(metadata_updates)
             current_metadata["updated_at"] = time.time()
@@ -2215,7 +2221,33 @@ class MemoryEngine:
                     "topics",
                     "key_facts",
                 }
-                if topic_source_fields & metadata_updates.keys():
+                new_status = str(
+                    current_metadata.get("status") or "active"
+                ).strip().lower()
+                status_changed = old_status != new_status
+                if status_changed and new_status in {"archived", "deleted"}:
+                    memory_uid = str(current_metadata.get("memory_uid") or "")
+                    affected_topic_uids = await self._mark_dependent_topics_stale(
+                        memory_uid,
+                        reason=f"timeline_deleted_status_{new_status}",
+                    )
+                    await self._queue_deleted_timeline_repair(
+                        str(current_metadata.get("memory_space_id") or ""),
+                        deleted_timeline_uids=[memory_uid],
+                        affected_topic_uids=affected_topic_uids,
+                    )
+                elif status_changed and new_status == "active":
+                    self._schedule_topic_maintenance(
+                        str(current_metadata.get("memory_space_id") or ""),
+                        full=False,
+                        timeline_uids=[
+                            str(current_metadata.get("memory_uid") or "")
+                        ],
+                    )
+                elif (
+                    new_status == "active"
+                    and topic_source_fields & metadata_updates.keys()
+                ):
                     await self._mark_dependent_topics_stale(
                         str(current_metadata.get("memory_uid") or ""),
                         reason="timeline_metadata_updated",

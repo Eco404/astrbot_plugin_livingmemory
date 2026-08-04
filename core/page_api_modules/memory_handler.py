@@ -1656,61 +1656,113 @@ class MemoryHandler:
         field = str(payload.get("field", "")).strip()
         value = payload.get("value")
         value_scale = str(payload.get("value_scale", "auto")).strip().lower()
+        reason = str(payload.get("reason", "")).strip()
 
         if not isinstance(memory_ids, list) or not memory_ids:
             return self.utils.error("需要提供记忆 ID 列表")
+        if len(memory_ids) > 500:
+            return self.utils.error("单次批量编辑最多支持 500 条 Timeline")
         if not field or value is None:
             return self.utils.error("需要指定 field 和 value")
 
         if field not in ("status", "importance", "type"):
             return self.utils.error(f"批量更新不支持字段: {field}")
 
-        updated_count = 0
-        failed_ids: list[Any] = []
-
+        normalized_ids: list[int] = []
+        invalid_ids: list[Any] = []
+        seen_ids: set[int] = set()
         for raw_id in memory_ids:
             try:
                 memory_id = int(raw_id)
             except (TypeError, ValueError):
-                failed_ids.append(raw_id)
+                invalid_ids.append(raw_id)
                 continue
-
+            if memory_id not in seen_ids:
+                seen_ids.add(memory_id)
+                normalized_ids.append(memory_id)
+        normalized_value: Any = value
+        if field == "status":
+            normalized_value = str(value).strip().lower()
+            if normalized_value not in {"active", "archived"}:
+                return self.utils.error(
+                    "批量状态修改仅支持 active 或 archived；删除请使用删除功能"
+                )
+        elif field == "importance":
             try:
+                normalized_value = self._normalize_importance_update(
+                    value, value_scale
+                )
+            except ValueError as exc:
+                return self.utils.error(str(exc))
+        else:
+            normalized_value = str(value).strip().upper()
+            if not normalized_value:
+                return self.utils.error("类型不能为空")
+
+        updated_count = 0
+        failed_ids: list[Any] = list(invalid_ids)
+
+        for memory_id in normalized_ids:
+            try:
+                memory = await self._get_memory_record(memory_id, memory_engine)
+                if not memory:
+                    failed_ids.append(memory_id)
+                    continue
+                current_metadata = self.utils.normalize_metadata(
+                    memory.get("metadata")
+                )
                 updates: dict[str, Any] = {}
                 if field == "status":
-                    status_value = str(value).strip()
-                    if status_value not in {"active", "archived", "deleted"}:
-                        failed_ids.append(raw_id)
-                        continue
-                    updates["metadata"] = {"status": status_value}
+                    updates["metadata"] = {"status": normalized_value}
+                    old_value = current_metadata.get("status", "active")
+                    history_value = normalized_value
                 elif field == "importance":
-                    try:
-                        updates["importance"] = self._normalize_importance_update(
-                            value, value_scale
-                        )
-                    except ValueError:
-                        failed_ids.append(raw_id)
-                        continue
+                    updates["importance"] = normalized_value
+                    old_value = self.utils.importance_to_display(
+                        current_metadata.get("importance", 0.5)
+                    )
+                    history_value = round(float(normalized_value) * 10.0, 2)
                 elif field == "type":
-                    type_value = str(value).strip()
-                    if not type_value:
-                        failed_ids.append(raw_id)
-                        continue
-                    updates["metadata"] = {"memory_type": type_value}
+                    updates["metadata"] = {"memory_type": normalized_value}
+                    old_value = current_metadata.get("memory_type", "GENERAL")
+                    history_value = normalized_value
+
+                updated_at = time.time()
+                updates.setdefault("metadata", {})
+                updates["metadata"]["update_history"] = (
+                    self.utils.append_update_history(
+                        current_metadata,
+                        field=field,
+                        old_value=old_value,
+                        new_value=history_value,
+                        reason=reason,
+                        timestamp=updated_at,
+                    )
+                )
+                updates["metadata"]["updated_at"] = updated_at
+                if reason:
+                    updates["metadata"]["update_reason"] = reason
 
                 success = await memory_engine.update_memory(memory_id, updates)
                 if success:
                     updated_count += 1
                 else:
-                    failed_ids.append(raw_id)
-            except Exception:
-                failed_ids.append(raw_id)
+                    failed_ids.append(memory_id)
+            except Exception as exc:
+                logger.error(
+                    "[PageAPI] 批量更新记忆失败 (memory_id=%s, field=%s): %s",
+                    memory_id,
+                    field,
+                    exc,
+                    exc_info=True,
+                )
+                failed_ids.append(memory_id)
 
         return self.utils.ok(
             {
                 "updated_count": updated_count,
                 "failed_count": len(failed_ids),
-                "total": len(memory_ids),
+                "total": len(normalized_ids) + len(invalid_ids),
                 "failed_ids": failed_ids,
             }
         )

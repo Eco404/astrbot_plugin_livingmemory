@@ -203,6 +203,10 @@
                   <span data-i18n="transfer.import">Import</span>
                 </button>
                 <input type="file" id="mem-import-file" accept=".json,.csv,application/json,text/csv" hidden />
+                <button class="btn btn-sm btn-secondary" id="mem-batch-edit" disabled data-i18n-title="batchEdit.title">
+                  <i data-lucide="pencil" aria-hidden="true"></i>
+                  <span id="mem-batch-edit-label" data-i18n="batchEdit.button">Batch edit</span>
+                </button>
                 <button class="btn btn-sm btn-danger" id="mem-delete-selected" disabled data-i18n-title="transfer.deleteSelectedTitle">
                   <i data-lucide="trash-2" aria-hidden="true"></i>
                   <span id="mem-delete-selected-label" data-i18n="transfer.deleteSelected">Delete selected</span>
@@ -1052,6 +1056,62 @@
           <button class="btn btn-ghost" id="session-picker-clear" data-i18n="common.clear">清空</button>
           <button class="btn btn-secondary" id="session-picker-cancel" data-i18n="common.cancel">取消</button>
           <button class="btn btn-primary" id="session-picker-apply" data-i18n="sessionPicker.apply">使用此会话</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Timeline Batch Edit Modal -->
+    <div class="modal-overlay" id="memory-batch-edit-overlay" aria-hidden="true">
+      <div class="modal memory-batch-edit-modal" role="dialog" aria-modal="true" aria-labelledby="memory-batch-edit-title">
+        <div class="modal-header">
+          <div class="modal-title" id="memory-batch-edit-title" data-i18n="batchEdit.title">Batch edit Timeline</div>
+          <button class="modal-close" id="memory-batch-edit-close" data-i18n-aria="common.close" aria-label="Close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="batch-edit-summary" id="memory-batch-edit-summary"></p>
+          <div class="form-group">
+            <label class="form-label" for="memory-batch-edit-field" data-i18n="batchEdit.field">Field</label>
+            <select id="memory-batch-edit-field" class="select input">
+              <option value="importance" data-i18n="batchEdit.importance">Importance</option>
+              <option value="status" data-i18n="batchEdit.status">Status</option>
+              <option value="type" data-i18n="batchEdit.type">Type</option>
+            </select>
+            <div class="form-help" id="memory-batch-edit-help"></div>
+          </div>
+          <div class="form-group" id="memory-batch-edit-importance-group">
+            <label class="form-label" for="memory-batch-edit-importance" data-i18n="batchEdit.importanceValue">Importance (0-10)</label>
+            <input type="number" id="memory-batch-edit-importance" class="input" min="0" max="10" step="0.1" value="5" />
+          </div>
+          <div class="form-group hidden" id="memory-batch-edit-status-group">
+            <label class="form-label" for="memory-batch-edit-status" data-i18n="batchEdit.statusValue">Status</label>
+            <select id="memory-batch-edit-status" class="select input">
+              <option value="active" data-i18n="status.active">Active</option>
+              <option value="archived" data-i18n="status.archived">Archived</option>
+            </select>
+          </div>
+          <div class="form-group hidden" id="memory-batch-edit-type-group">
+            <label class="form-label" for="memory-batch-edit-type" data-i18n="batchEdit.typeValue">Type</label>
+            <select id="memory-batch-edit-type" class="select input">
+              <option value="GENERAL" data-i18n="type.general">General</option>
+              <option value="FACT" data-i18n="type.fact">Fact</option>
+              <option value="EVENT" data-i18n="type.event">Event</option>
+              <option value="PREFERENCE" data-i18n="type.preference">Preference</option>
+              <option value="OPINION" data-i18n="type.opinion">Opinion</option>
+              <option value="FACTUAL" data-i18n="type.factual">Factual</option>
+              <option value="EPISODIC" data-i18n="type.episodic">Episodic</option>
+              <option value="RELATIONAL" data-i18n="type.relational">Relational</option>
+              <option value="PLANNED" data-i18n="type.planned">Planned</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="memory-batch-edit-reason" data-i18n="batchEdit.reason">Reason (optional)</label>
+            <input type="text" id="memory-batch-edit-reason" class="input" maxlength="240" data-i18n-placeholder="batchEdit.reasonPlaceholder" placeholder="Record why this batch was changed" />
+          </div>
+          <div class="batch-edit-error" id="memory-batch-edit-error" role="alert" hidden></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="memory-batch-edit-cancel" data-i18n="common.cancel">Cancel</button>
+          <button class="btn btn-primary" id="memory-batch-edit-apply" data-i18n="batchEdit.apply">Apply</button>
         </div>
       </div>
     </div>

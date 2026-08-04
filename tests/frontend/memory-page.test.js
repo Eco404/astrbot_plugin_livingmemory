@@ -150,3 +150,100 @@ test("the bound scroll listener uses current items and table spacer rows", () =>
     delete globalThis.window;
   }
 });
+
+test("batch editing importance posts the display scale and clears successful selections", async () => {
+  const state = createState();
+  state.memory.selectedIds = new Set([11, 12]);
+  const calls = [];
+  const api = {
+    async post(path, body) {
+      calls.push({ path, body });
+      return { updated_count: 2, failed_count: 0, failed_ids: [] };
+    },
+  };
+  globalThis.window = { t: (key, ...args) => [key, ...args].join(" ") };
+  try {
+    const page = new MemoryPage(state, api, {}, {});
+    page.updateSelectionControls = () => {};
+    page.showBatchEditDialog = async () => ({
+      field: "importance",
+      value: 7.5,
+      value_scale: "display",
+      reason: "reviewed",
+    });
+    page.showToast = () => {};
+    page.fetch = async () => {};
+
+    await page.batchEdit();
+
+    assert.deepEqual(calls, [{
+      path: "memories/batch-update",
+      body: {
+        memory_ids: [11, 12],
+        field: "importance",
+        value: 7.5,
+        reason: "reviewed",
+        value_scale: "display",
+      },
+    }]);
+    assert.deepEqual([...state.memory.selectedIds], []);
+  } finally {
+    delete globalThis.window;
+  }
+});
+
+test("batch editing retains only failed items and ignores a repeated submit", async () => {
+  const state = createState();
+  state.memory.selectedIds = new Set([21, 22]);
+  const dialog = deferred();
+  let postCount = 0;
+  const api = {
+    async post() {
+      postCount += 1;
+      return { updated_count: 1, failed_count: 1, failed_ids: [22] };
+    },
+  };
+  globalThis.window = { t: (key, ...args) => [key, ...args].join(" ") };
+  try {
+    const page = new MemoryPage(state, api, {}, {});
+    page.updateSelectionControls = () => {};
+    page.showBatchEditDialog = () => dialog.promise;
+    page.showToast = () => {};
+    page.fetch = async () => {};
+
+    const first = page.batchEdit();
+    const repeated = page.batchEdit();
+    dialog.resolve({ field: "type", value: "FACT", reason: "" });
+    await Promise.all([first, repeated]);
+
+    assert.equal(postCount, 1);
+    assert.deepEqual([...state.memory.selectedIds], [22]);
+  } finally {
+    delete globalThis.window;
+  }
+});
+
+test("batch archive requires confirmation before sending the update", async () => {
+  const state = createState();
+  state.memory.selectedIds = new Set([31]);
+  let postCount = 0;
+  const api = { async post() { postCount += 1; } };
+  const confirmDialog = { async show() { return false; } };
+  globalThis.window = { t: (key, ...args) => [key, ...args].join(" ") };
+  try {
+    const page = new MemoryPage(state, api, {}, confirmDialog);
+    page.updateSelectionControls = () => {};
+    page.showBatchEditDialog = async () => ({
+      field: "status",
+      value: "archived",
+      reason: "",
+    });
+
+    await page.batchEdit();
+
+    assert.equal(postCount, 0);
+    assert.deepEqual([...state.memory.selectedIds], [31]);
+  } finally {
+    delete globalThis.window;
+  }
+});

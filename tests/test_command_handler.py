@@ -196,7 +196,7 @@ async def test_handle_reset_and_help(handler, mock_event, conversation_manager):
     help_msg = [msg async for msg in handler.handle_help(mock_event)]
     assert "/lmem status" in help_msg[0]
     assert (
-        "https://github.com/lxfight-s-Astrbot-Plugins/astrbot_plugin_livingmemory"
+        "https://github.com/Eco404/astrbot_plugin_livingmemory"
         in help_msg[0]
     )
 

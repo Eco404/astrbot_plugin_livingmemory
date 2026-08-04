@@ -35,6 +35,10 @@ Use manual installation when the market does not yet contain the required versio
 AstrBot distributes plugins through GitHub. If network access is restricted, configure an HTTP proxy in AstrBot's other settings or upload a downloaded ZIP archive. If a Python dependency is missing, inspect the platform log first and then use the WebUI Pip-package installer when needed.
 :::
 
+::: tip Recommended FAISS version
+Install `faiss-cpu>=1.14.3` in the Python environment that actually runs AstrBot. The known-incompatible `1.14.2` release is excluded by the plugin dependency. To remain compatible with existing AstrBot `4.24.2+` deployments, `1.14.3` is a recommendation rather than a hard minimum. Verify the active AstrBot environment before repairing FAISS and avoid unintentionally replacing deployment lock constraints.
+:::
+
 See the [official AstrBot WebUI documentation](https://docs.astrbot.app/en/use/webui.html#plugins) for the current plugin-management workflow.
 
 ## Configure

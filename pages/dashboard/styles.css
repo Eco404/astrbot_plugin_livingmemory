@@ -851,6 +851,27 @@ body {
 .memory-transfer-select { width: 86px; }
 .memory-duplicate-select { width: 138px; }
 
+.memory-batch-edit-modal { width: min(560px, calc(100vw - 32px)); }
+.batch-edit-summary {
+  margin: 0 0 var(--space-4);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.form-help {
+  margin-top: var(--space-2);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.batch-edit-error {
+  padding: var(--space-3);
+  border: 1px solid var(--danger-border, rgba(220, 38, 38, 0.25));
+  border-radius: var(--radius-md);
+  background: var(--danger-soft, rgba(220, 38, 38, 0.08));
+  color: var(--danger, #dc2626);
+  font-size: 13px;
+}
+
 .memory-page-body .table-container {
   display: flex;
   flex: 1 1 auto;
@@ -4557,7 +4578,8 @@ select.timeline-setting-input { width: min(220px, 100%); }
   .memory-transfer-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
   .memory-transfer-actions > .btn,
   .memory-transfer-actions > .select { width: 100%; min-width: 0; }
-  .memory-transfer-actions #mem-delete-selected { grid-column: 1 / -1; }
+  .memory-transfer-actions #mem-batch-edit,
+  .memory-transfer-actions #mem-delete-selected { grid-column: auto; }
   .memory-page-body .table-container { flex: 0 0 auto; min-height: min(54dvh, 460px); }
   .memory-page-body .table-scroll { min-height: 340px; max-height: 54dvh; }
   .data-table { min-width: 820px; }
