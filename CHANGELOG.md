@@ -7,6 +7,13 @@
 
 每个版本的详细技术变更见 [docs/DEVELOPMENT_LOG.md](docs/DEVELOPMENT_LOG.md)。本文件仅保留面向发布的简要说明，两者在发版时同步更新。
 
+## [3.6.0] - 2026-08-05
+
+### 变更
+
+- Topic 基础重要性改由自身正式片段与事实决定，来源 Timeline 只提供有界生命周期参考，避免同一 Timeline 中的高重要话题拉高其他 Topic。
+- 数据库升级到 v10.3，按事实级溯源回填 Timeline 贡献权重；中文 README 改为仓库主入口，英文版保留在 `README_en.md`。
+
 ## [3.5.6] - 2026-08-04
 
 - Timeline 列表新增批量修改重要性、状态和类型，并同步维护关联 Topic 状态。
