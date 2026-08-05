@@ -260,6 +260,97 @@ async def test_idle_scheduler_only_schedules_resolved_persona(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_summary_service_skips_unchanged_insufficient_window(tmp_path: Path):
+    store, manager = await _conversation(tmp_path)
+    original_get_messages_range = manager.get_messages_range
+    manager.get_messages_range = AsyncMock(wraps=original_get_messages_range)
+    processor = AsyncMock()
+    processor.process_conversation.return_value = (
+        "summary",
+        {"topics": ["topic"], "facts": ["fact"]},
+        7.0,
+    )
+    processor.classify_atoms_from_metadata = MagicMock(return_value=[])
+    service = TimelineSummaryService(
+        config_manager=ConfigManager({}),
+        conversation_manager=manager,
+        memory_engine=AsyncMock(),
+        memory_processor=processor,
+    )
+
+    first = await service.summarize_if_needed(
+        "test:FriendMessage:user",
+        persona_id="persona",
+        trigger_type="idle",
+        min_rounds=3,
+    )
+    second = await service.summarize_if_needed(
+        "test:FriendMessage:user",
+        persona_id="persona",
+        trigger_type="idle",
+        min_rounds=3,
+    )
+
+    assert first.status == second.status == "insufficient"
+    assert manager.get_messages_range.await_count == 1
+    processor.process_conversation.assert_not_awaited()
+
+    changed_setting = await service.summarize_if_needed(
+        "test:FriendMessage:user",
+        persona_id="persona",
+        trigger_type="idle",
+        min_rounds=2,
+    )
+
+    assert changed_setting.status == "created"
+    assert manager.get_messages_range.await_count == 2
+    processor.process_conversation.assert_awaited_once()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_summary_service_rechecks_insufficient_window_after_new_messages(
+    tmp_path: Path,
+):
+    store, manager = await _conversation(tmp_path)
+    original_get_messages_range = manager.get_messages_range
+    manager.get_messages_range = AsyncMock(wraps=original_get_messages_range)
+    processor = AsyncMock()
+    processor.process_conversation.return_value = (
+        "summary",
+        {"topics": ["topic"], "facts": ["fact"]},
+        7.0,
+    )
+    processor.classify_atoms_from_metadata = MagicMock(return_value=[])
+    service = TimelineSummaryService(
+        config_manager=ConfigManager({}),
+        conversation_manager=manager,
+        memory_engine=AsyncMock(),
+        memory_processor=processor,
+    )
+
+    insufficient = await service.summarize_if_needed(
+        "test:FriendMessage:user",
+        persona_id="persona",
+        trigger_type="idle",
+        min_rounds=3,
+    )
+    await _add_round(store, "new message", "new answer")
+    after_new_messages = await service.summarize_if_needed(
+        "test:FriendMessage:user",
+        persona_id="persona",
+        trigger_type="idle",
+        min_rounds=3,
+    )
+
+    assert insufficient.status == "insufficient"
+    assert after_new_messages.status == "created"
+    assert manager.get_messages_range.await_count == 2
+    processor.process_conversation.assert_awaited_once()
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_topic_continuation_reuses_multiple_base_centers_and_splits_new_topic(
     tmp_path: Path,
 ):

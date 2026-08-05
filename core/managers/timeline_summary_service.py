@@ -40,6 +40,7 @@ class TimelineSummaryService:
     """Coordinate threshold, idle, and manual summaries with one session lock."""
 
     MAX_AUTOMATIC_RETRIES = 3
+    MAX_INSUFFICIENT_SIGNATURES = 2048
 
     def __init__(
         self,
@@ -60,6 +61,7 @@ class TimelineSummaryService:
         )
         self._locks: dict[str, asyncio.Lock] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._insufficient_signatures: dict[str, tuple[int, int, int, int]] = {}
         self._closing = False
 
     def schedule_if_needed(
@@ -172,6 +174,24 @@ class TimelineSummaryService:
                 message_count=unsummarized,
             )
 
+        insufficient_signature = (
+            total_messages,
+            start_index,
+            end_index,
+            min_rounds,
+        )
+        if (
+            not force
+            and self._insufficient_signatures.get(session_id) == insufficient_signature
+        ):
+            return TimelineSummaryResult(
+                "insufficient",
+                session_id,
+                start_index=start_index,
+                end_index=end_index,
+                message_count=unsummarized,
+            )
+
         history = await self.conversation_manager.get_messages_range(
             session_id=session_id,
             start_index=start_index,
@@ -188,6 +208,7 @@ class TimelineSummaryService:
 
         units = build_dialogue_units(history)
         if not force and len(units) < min_rounds:
+            self._remember_insufficient(session_id, insufficient_signature)
             return TimelineSummaryResult(
                 "insufficient",
                 session_id,
@@ -195,6 +216,7 @@ class TimelineSummaryService:
                 end_index=end_index,
                 message_count=len(history),
             )
+        self._insufficient_signatures.pop(session_id, None)
 
         boundary_diagnostics: dict[str, Any] = {}
         continuation_enabled = bool(
@@ -447,6 +469,16 @@ class TimelineSummaryService:
         except Exception as exc:
             logger.warning("清理已总结消息的短期查询特征失败: %s", exc)
 
+    def _remember_insufficient(
+        self, session_id: str, signature: tuple[int, int, int, int]
+    ) -> None:
+        if (
+            session_id not in self._insufficient_signatures
+            and len(self._insufficient_signatures) >= self.MAX_INSUFFICIENT_SIGNATURES
+        ):
+            self._insufficient_signatures.pop(next(iter(self._insufficient_signatures)))
+        self._insufficient_signatures[session_id] = signature
+
     def _on_task_done(self, session_id: str, task: asyncio.Task) -> None:
         if self._tasks.get(session_id) is task:
             self._tasks.pop(session_id, None)
@@ -463,6 +495,7 @@ class TimelineSummaryService:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._insufficient_signatures.clear()
 
 
 __all__ = ["TimelineSummaryResult", "TimelineSummaryService"]

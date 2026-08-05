@@ -688,7 +688,7 @@ class ConversationManager:
             limit=needed_count,
         )
 
-        logger.info(
+        logger.debug(
             f"[get_messages_range] [{session_id}] 返回 {len(result)} 条消息 (索引 {start_index} 到 {actual_end})"
         )
 
