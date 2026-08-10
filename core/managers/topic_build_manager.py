@@ -1661,6 +1661,7 @@ class TopicBuildManager(
             )
 
             assignments: list[dict[str, Any]] = []
+            assignment_proposals: list[dict[str, Any]] = []
             for position, (initial_fragments, synthesis) in enumerate(
                 zip(component_fragment_sets, initial_syntheses, strict=True),
                 1,
@@ -1693,6 +1694,32 @@ class TopicBuildManager(
                     incremental=(run_mode is TopicMaintenanceMode.INCREMENTAL),
                     diagnostics=match_diagnostics,
                 )
+                proposal = {
+                    "position": position,
+                    "component_uid": component_uid,
+                    "fragments": component_fragments,
+                    "synthesis": synthesis,
+                    "matched": matched,
+                    "match_scores": match_scores,
+                    "match_diagnostics": match_diagnostics,
+                    "ambiguous": ambiguous,
+                }
+                assignment_proposals.append(proposal)
+                if matched and run_mode is not TopicMaintenanceMode.INCREMENTAL:
+                    used_existing.add(matched.topic_uid)
+
+            if run_mode is TopicMaintenanceMode.INCREMENTAL:
+                self._refine_incremental_event_assignments(assignment_proposals)
+
+            for proposal in assignment_proposals:
+                position = int(proposal["position"])
+                component_uid = str(proposal["component_uid"])
+                component_fragments = list(proposal["fragments"])
+                synthesis = proposal["synthesis"]
+                matched = proposal["matched"]
+                match_scores = list(proposal["match_scores"])
+                match_diagnostics = dict(proposal["match_diagnostics"])
+                ambiguous = bool(proposal["ambiguous"])
                 if ambiguous:
                     review_topic_uids = [item[1].topic_uid for item in match_scores[:2]]
                     pending_review_topic_uids.update(review_topic_uids)
@@ -1766,8 +1793,6 @@ class TopicBuildManager(
                         "match_diagnostics": match_diagnostics,
                     }
                 )
-                if matched and run_mode is not TopicMaintenanceMode.INCREMENTAL:
-                    used_existing.add(matched.topic_uid)
 
             # Incremental components are assigned before any Topic is materialized.
             # This removes order dependence and lets several coherent deltas extend

@@ -155,6 +155,268 @@ async def test_summary_service_failure_preserves_source_range(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_summary_service_records_new_boundaries_while_blocked(tmp_path: Path):
+    store, manager = await _conversation(tmp_path)
+    session_id = "test:FriendMessage:user"
+    await manager.update_session_metadata(
+        session_id,
+        "pending_summary",
+        {
+            "start_index": 0,
+            "end_index": 2,
+            "retry_count": 3,
+            "next_retry_at": 9_999_999_999.0,
+            "blocked": True,
+            "error": "provider unavailable",
+            "trigger_type": "round_limit",
+            "persona_id": "persona",
+        },
+    )
+    processor = AsyncMock()
+    processor.process_conversation.side_effect = RuntimeError("still unavailable")
+    service = TimelineSummaryService(
+        config_manager=ConfigManager({}),
+        conversation_manager=manager,
+        memory_engine=AsyncMock(),
+        memory_processor=processor,
+    )
+
+    result = await service.summarize_if_needed(
+        session_id,
+        persona_id="persona",
+        trigger_type="round_limit",
+        min_rounds=1,
+    )
+
+    assert result.status == "failed"
+    session = await store.get_session(session_id)
+    assert session is not None
+    pending = session.metadata["pending_summary"]
+    assert pending["start_index"] == 0
+    assert pending["end_index"] == 2
+    assert pending["retry_count"] == 4
+    assert pending["blocked"] is True
+    assert pending["next_retry_at"] is not None
+    assert [
+        (item["start_index"], item["end_index"]) for item in pending["queued_windows"]
+    ] == [(2, 4)]
+    processor.process_conversation.assert_awaited_once_with(
+        messages=await manager.get_messages_range(session_id, 0, 2),
+        is_group_chat=False,
+        persona_id="persona",
+        allow_no_memory=True,
+    )
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_summary_service_provider_change_bypasses_blocked_cooldown(
+    tmp_path: Path,
+):
+    store, manager = await _conversation(tmp_path)
+    session_id = "test:FriendMessage:user"
+    await manager.update_session_metadata(
+        session_id,
+        "pending_summary",
+        {
+            "start_index": 0,
+            "end_index": 4,
+            "retry_count": 3,
+            "next_retry_at": 9_999_999_999.0,
+            "blocked": True,
+            "error": "old provider unavailable",
+            "trigger_type": "round_limit",
+            "persona_id": "persona",
+            "provider_signature": {
+                "configured_provider_id": "provider-old",
+                "provider_id": "",
+                "model_id": "",
+                "runtime_class": "",
+            },
+        },
+    )
+    processor = AsyncMock()
+    processor.process_conversation.return_value = (
+        "summary",
+        {"topics": ["topic"], "facts": ["fact"]},
+        7.0,
+    )
+    processor.classify_atoms_from_metadata = MagicMock(return_value=[])
+    config = ConfigManager({})
+    config.apply_runtime_overrides(
+        {"provider_settings.llm_provider_id": "provider-new"}
+    )
+    service = TimelineSummaryService(
+        config_manager=config,
+        conversation_manager=manager,
+        memory_engine=AsyncMock(),
+        memory_processor=processor,
+    )
+
+    result = await service.summarize_if_needed(
+        session_id,
+        persona_id="persona",
+        trigger_type="round_limit",
+        min_rounds=2,
+    )
+
+    assert result.status == "created"
+    processor.process_conversation.assert_awaited_once()
+    session = await store.get_session(session_id)
+    assert session is not None
+    assert session.metadata["last_summarized_index"] == 4
+    assert "pending_summary" not in session.metadata
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_summary_service_recovers_blocked_windows_in_original_order(
+    tmp_path: Path,
+):
+    store, manager = await _conversation(tmp_path)
+    session_id = "test:FriendMessage:user"
+    await manager.update_session_metadata(
+        session_id,
+        "pending_summary",
+        {
+            "start_index": 0,
+            "end_index": 2,
+            "retry_count": 3,
+            "next_retry_at": 9_999_999_999.0,
+            "blocked": True,
+            "error": "provider unavailable",
+            "trigger_type": "round_limit",
+            "persona_id": "persona",
+        },
+    )
+    processor = AsyncMock()
+    processor.process_conversation.side_effect = [
+        ("summary-1", {"topics": ["topic-1"], "facts": ["fact-1"]}, 7.0),
+        ("summary-2", {"topics": ["topic-2"], "facts": ["fact-2"]}, 6.0),
+    ]
+    processor.classify_atoms_from_metadata = MagicMock(return_value=[])
+    engine = AsyncMock()
+    service = TimelineSummaryService(
+        config_manager=ConfigManager({}),
+        conversation_manager=manager,
+        memory_engine=engine,
+        memory_processor=processor,
+    )
+
+    result = await service.summarize_if_needed(
+        session_id,
+        persona_id="persona",
+        trigger_type="round_limit",
+        min_rounds=1,
+    )
+
+    assert result.status == "created"
+    assert result.start_index == 0
+    assert result.end_index == 4
+    assert result.message_count == 4
+    assert result.topics == ["topic-1", "topic-2"]
+    assert engine.add_memory.await_count == 2
+    windows = [
+        call.kwargs["metadata"]["source_window"]
+        for call in engine.add_memory.await_args_list
+    ]
+    assert [(item["start_index"], item["end_index"]) for item in windows] == [
+        (0, 2),
+        (2, 4),
+    ]
+    session = await store.get_session(session_id)
+    assert session is not None
+    assert session.metadata["last_summarized_index"] == 4
+    assert "pending_summary" not in session.metadata
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_summary_service_reconstructs_multiple_missed_boundaries(tmp_path: Path):
+    store = ConversationStore(str(tmp_path / "conversations.db"))
+    await store.initialize()
+    manager = ConversationManager(store)
+    session_id = "test:FriendMessage:user"
+    for index in range(40):
+        await _add_round(store, f"user-{index}", f"assistant-{index}")
+    await manager.update_session_metadata_values(
+        session_id,
+        {
+            "last_summarized_index": 16,
+            "pending_summary": {
+                "start_index": 16,
+                "end_index": 32,
+                "retry_count": 3,
+                "next_retry_at": None,
+                "blocked": True,
+                "error": "provider unavailable",
+                "trigger_type": "round_limit",
+                "persona_id": "persona",
+            },
+        },
+    )
+    processor = AsyncMock()
+    processor.process_conversation.side_effect = [
+        (
+            "",
+            {
+                "memory_decision": "no_memory",
+                "no_memory_reason": "ack_only",
+                "summary_quality": "normal",
+                "message_coverage": [],
+            },
+            0.1,
+        ),
+        *[
+            (f"summary-{index}", {"topics": [f"topic-{index}"], "facts": []}, 6.0)
+            for index in range(2, 6)
+        ],
+    ]
+    processor.classify_atoms_from_metadata = MagicMock(return_value=[])
+    engine = AsyncMock()
+    config = ConfigManager({})
+    config.apply_runtime_overrides(
+        {"reflection_engine.topic_continuation_enabled": False}
+    )
+    service = TimelineSummaryService(
+        config_manager=config,
+        conversation_manager=manager,
+        memory_engine=engine,
+        memory_processor=processor,
+    )
+
+    result = await service.summarize_if_needed(
+        session_id,
+        persona_id="persona",
+        trigger_type="round_limit",
+        min_rounds=8,
+    )
+
+    assert result.status == "created"
+    assert result.start_index == 16
+    assert result.end_index == 80
+    assert result.message_count == 64
+    assert processor.process_conversation.await_count == 4
+    windows = [
+        call.kwargs["messages"]
+        for call in processor.process_conversation.await_args_list
+    ]
+    assert [len(messages) for messages in windows] == [16, 16, 16, 16]
+    assert [messages[0].content for messages in windows] == [
+        "user-8",
+        "user-16",
+        "user-24",
+        "user-32",
+    ]
+    assert engine.add_memory.await_count == 3
+    session = await store.get_session(session_id)
+    assert session is not None
+    assert session.metadata["last_summarized_index"] == 80
+    assert "pending_summary" not in session.metadata
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_summary_service_audits_no_memory_and_advances_checkpoint(tmp_path: Path):
     store, manager = await _conversation(tmp_path)
     processor = AsyncMock()
@@ -197,9 +459,7 @@ async def test_summary_service_audits_no_memory_and_advances_checkpoint(tmp_path
     engine.add_memory.assert_not_awaited()
     processor.classify_atoms_from_metadata.assert_not_called()
     processor.process_conversation.assert_awaited_once_with(
-        messages=await manager.get_messages_range(
-            "test:FriendMessage:user", 0, 4
-        ),
+        messages=await manager.get_messages_range("test:FriendMessage:user", 0, 4),
         is_group_chat=False,
         persona_id="persona",
         allow_no_memory=True,
@@ -210,9 +470,7 @@ async def test_summary_service_audits_no_memory_and_advances_checkpoint(tmp_path
     assert session.metadata["last_summary_decision"] == "no_memory"
     assert "pending_summary" not in session.metadata
     assert await store.get_message_count("test:FriendMessage:user") == 4
-    decisions = await store.list_summary_decisions(
-        session_id="test:FriendMessage:user"
-    )
+    decisions = await store.list_summary_decisions(session_id="test:FriendMessage:user")
     assert len(decisions) == 1
     assert decisions[0]["reason"] == "ack_only"
     assert len(decisions[0]["message_coverage"]) == 4
@@ -474,9 +732,12 @@ async def test_topic_continuation_force_limit_summarizes_all(tmp_path: Path):
     )
     assert result.status == "created"
     assert result.end_index == 8
-    assert engine.add_memory.await_args.kwargs["metadata"]["source_window"][
-        "boundary_reason"
-    ] == "force_summary_limit"
+    assert (
+        engine.add_memory.await_args.kwargs["metadata"]["source_window"][
+            "boundary_reason"
+        ]
+        == "force_summary_limit"
+    )
     await store.close()
 
 
@@ -488,9 +749,7 @@ async def test_idle_summary_bypasses_topic_continuation(tmp_path: Path):
     manager = ConversationManager(store)
     await _add_round(store, "alpha", "answer alpha")
     await _add_round(store, "alpha followup", "continued answer")
-    provider = _EmbeddingProvider(
-        {"alpha": [1.0, 0.0], "alpha followup": [0.99, 0.01]}
-    )
+    provider = _EmbeddingProvider({"alpha": [1.0, 0.0], "alpha followup": [0.99, 0.01]})
     processor = AsyncMock()
     processor.process_conversation.return_value = (
         "summary",
@@ -525,6 +784,7 @@ async def test_failed_summary_retry_keeps_original_end_index(tmp_path: Path):
     processor.process_conversation.side_effect = [
         RuntimeError("provider unavailable"),
         ("summary", {"topics": ["topic"], "facts": ["fact"]}, 7.0),
+        ("later summary", {"topics": ["later"], "facts": ["fact"]}, 6.0),
     ]
     processor.classify_atoms_from_metadata = MagicMock(return_value=[])
     engine = AsyncMock()
@@ -550,7 +810,10 @@ async def test_failed_summary_retry_keeps_original_end_index(tmp_path: Path):
         force=True,
     )
     assert retried.status == "created"
-    assert retried.end_index == 4
-    assert len(processor.process_conversation.await_args.kwargs["messages"]) == 4
+    assert retried.start_index == 0
+    assert retried.end_index == 6
+    assert retried.message_count == 6
+    successful_calls = processor.process_conversation.await_args_list[1:]
+    assert [len(call.kwargs["messages"]) for call in successful_calls] == [4, 2]
     assert await store.get_message_count("test:FriendMessage:user") == 6
     await store.close()
