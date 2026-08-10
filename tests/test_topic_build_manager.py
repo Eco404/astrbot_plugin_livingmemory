@@ -5043,3 +5043,188 @@ async def test_immediate_scheduled_rebuild_keeps_target_timeline_uids():
     assert call.args[0] == "space-1"
     assert call.kwargs["timeline_uids"] == ["timeline-1", "timeline-2"]
     assert call.kwargs["since"] is None
+
+
+def test_incremental_joint_assignment_uses_dominant_same_event_anchors():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={
+            "incremental_topic_match_threshold": 0.55,
+            "incremental_topic_match_margin": 0.04,
+            "incremental_event_anchor_min_count": 2,
+            "incremental_event_continuity_bonus": 0.10,
+            "incremental_event_rescue_band": 0.10,
+        },
+    )
+    trip = TopicMemory(
+        topic_uid="topic-trip",
+        memory_space_id="space-1",
+        title="返程行程",
+        summary="从上海返回家乡的连续行程",
+    )
+    supplies = TopicMemory(
+        topic_uid="topic-supplies",
+        memory_space_id="space-1",
+        title="展会准备",
+        summary="证件袋与充电线等用品",
+    )
+
+    def fragment(index: int) -> TopicFragmentDraft:
+        return TopicFragmentDraft(
+            run_uid="run-1",
+            candidate_group_uid="group-1",
+            memory_space_id="space-1",
+            fragment_uid=f"fragment-{index}",
+            label=f"行程片段 {index}",
+            summary=f"同一返程事件的片段 {index}",
+            timeline_uids=["timeline-60"],
+            source_revisions={"timeline-60": 1},
+            time_cluster_keys=["cluster-return-trip"],
+            facts=[],
+        )
+
+    proposals = []
+    for index, (trip_score, supply_score, matched) in enumerate(
+        [
+            (0.72, 0.58, trip),
+            (0.70, 0.57, trip),
+            (0.68, 0.56, trip),
+            (0.54, 0.61, supplies),
+        ],
+        1,
+    ):
+        ranked = sorted(
+            [(trip_score, trip), (supply_score, supplies)],
+            key=lambda item: -item[0],
+        )
+        proposals.append(
+            {
+                "component_uid": f"component-{index}",
+                "fragments": [fragment(index)],
+                "matched": matched,
+                "match_scores": ranked,
+                "match_diagnostics": {
+                    trip.topic_uid: {"semantic": 0.56, "representative": 0.55},
+                    supplies.topic_uid: {
+                        "semantic": 0.62,
+                        "representative": 0.60,
+                    },
+                },
+                "ambiguous": False,
+            }
+        )
+
+    manager._refine_incremental_event_assignments(proposals)
+
+    rescued = proposals[-1]
+    assert rescued["matched"] is trip
+    assert rescued["ambiguous"] is False
+    assert rescued["match_scores"][0][1] is trip
+    assert rescued["match_diagnostics"]["_joint_assignment"]["reason"] == (
+        "dominant_same_event_siblings"
+    )
+    assert rescued["match_diagnostics"][trip.topic_uid]["event_anchor_count"] == 3
+
+
+def test_incremental_joint_assignment_does_not_break_split_event_tie():
+    manager = TopicBuildManager(":memory:", None, None)
+    first = TopicMemory(
+        topic_uid="topic-first",
+        memory_space_id="space-1",
+        title="返程",
+        summary="返程",
+    )
+    second = TopicMemory(
+        topic_uid="topic-second",
+        memory_space_id="space-1",
+        title="行李准备",
+        summary="行李准备",
+    )
+
+    def proposal(index: int, matched: TopicMemory) -> dict:
+        other = second if matched is first else first
+        fragment = TopicFragmentDraft(
+            run_uid="run-1",
+            candidate_group_uid="group-1",
+            memory_space_id="space-1",
+            fragment_uid=f"fragment-tie-{index}",
+            label="片段",
+            summary="片段",
+            timeline_uids=["timeline-60"],
+            source_revisions={"timeline-60": 1},
+            time_cluster_keys=["cluster-return-trip"],
+            facts=[],
+        )
+        return {
+            "component_uid": f"component-tie-{index}",
+            "fragments": [fragment],
+            "matched": matched,
+            "match_scores": [(0.70, matched), (0.56, other)],
+            "match_diagnostics": {
+                first.topic_uid: {"semantic": 0.6, "representative": 0.6},
+                second.topic_uid: {"semantic": 0.6, "representative": 0.6},
+            },
+            "ambiguous": False,
+        }
+
+    proposals = [
+        proposal(1, first),
+        proposal(2, first),
+        proposal(3, second),
+        proposal(4, second),
+    ]
+
+    manager._refine_incremental_event_assignments(proposals)
+
+    assert [item["matched"] for item in proposals] == [
+        first,
+        first,
+        second,
+        second,
+    ]
+    assert all(
+        "_joint_assignment" not in item["match_diagnostics"] for item in proposals
+    )
+
+
+def test_incremental_time_proximity_decays_with_event_gap():
+    manager = TopicBuildManager(
+        ":memory:",
+        None,
+        None,
+        config={"incremental_topic_time_proximity_days": 7.0},
+    )
+    fragment = TopicFragmentDraft(
+        run_uid="run-1",
+        candidate_group_uid="group-1",
+        memory_space_id="space-1",
+        fragment_uid="fragment-time",
+        label="返程",
+        summary="返程",
+        timeline_uids=["timeline-60"],
+        source_revisions={"timeline-60": 1},
+        facts=[],
+        started_at=1_000_000.0,
+        ended_at=1_001_000.0,
+    )
+    near = TopicMemory(
+        topic_uid="near",
+        memory_space_id="space-1",
+        title="邻近事件",
+        summary="邻近事件",
+        started_at=1_000_500.0,
+        ended_at=1_002_000.0,
+    )
+    far = TopicMemory(
+        topic_uid="far",
+        memory_space_id="space-1",
+        title="较早事件",
+        summary="较早事件",
+        started_at=1_000.0,
+        ended_at=2_000.0,
+    )
+
+    assert manager._topic_fragment_time_proximity(near, [fragment]) == 1.0
+    assert manager._topic_fragment_time_proximity(far, [fragment]) < 1.0

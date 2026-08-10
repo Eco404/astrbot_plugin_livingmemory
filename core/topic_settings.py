@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-TOPIC_SETTINGS_REVISION = 10
+TOPIC_SETTINGS_REVISION = 11
 
 
 TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -63,6 +63,11 @@ TOPIC_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "incremental_topic_match_threshold": {"default": 0.55, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "增量 Topic 延续阈值", "effect": "next_build"},
     "incremental_topic_review_threshold": {"default": 0.72, "type": "float", "min": 0.0, "max": 1.0, "step": 0.01, "category": "build", "label": "增量人工审查阈值", "effect": "next_build"},
     "incremental_topic_match_margin": {"default": 0.04, "type": "float", "min": 0.0, "max": 0.5, "step": 0.01, "category": "build", "label": "增量匹配歧义间隔", "effect": "next_build"},
+    "incremental_topic_time_proximity_days": {"default": 7.0, "type": "float", "min": 0.25, "max": 90.0, "step": 0.25, "category": "build", "label": "增量事件时间邻近半衰期（天）", "effect": "next_build"},
+    "incremental_event_anchor_margin": {"default": 0.03, "type": "float", "min": 0.0, "max": 0.2, "step": 0.01, "category": "build", "label": "同事件锚点最小优势", "effect": "next_build"},
+    "incremental_event_anchor_min_count": {"default": 2, "type": "int", "min": 2, "max": 10, "category": "build", "label": "同事件最少锚点数", "effect": "next_build"},
+    "incremental_event_continuity_bonus": {"default": 0.10, "type": "float", "min": 0.0, "max": 0.15, "step": 0.01, "category": "build", "label": "同事件连续性加分上限", "effect": "next_build"},
+    "incremental_event_rescue_band": {"default": 0.10, "type": "float", "min": 0.0, "max": 0.2, "step": 0.01, "category": "build", "label": "同事件片段救回区间", "effect": "next_build"},
 }
 
 
@@ -121,6 +126,11 @@ TOPIC_SETTING_DESCRIPTIONS: dict[str, str] = {
     "incremental_topic_match_threshold": "新增组件更新已有 Topic 所需的最低综合得分；低于该值时创建新 Topic。",
     "incremental_topic_review_threshold": "只有两个以上候选均达到该强相关阈值且仍难区分时才进入人工审查；普通的相邻大类会直接新建 Topic。",
     "incremental_topic_match_margin": "最佳与次佳已有 Topic 的分差低于该值时不自动合并；强候选进入人工审查，边缘候选直接新建 Topic。",
+    "incremental_topic_time_proximity_days": "增量匹配时，事件时间邻近度按该半衰期衰减且最多只提供 0.05 弱加分；不会覆盖明显的语义冲突。",
+    "incremental_event_anchor_margin": "同一来源窗口内，一个片段对已有 Topic 的领先优势达到该值后才可作为事件锚点。",
+    "incremental_event_anchor_min_count": "同一 Timeline 与时间簇中，至少需要多少个明确片段指向同一 Topic，才允许辅助判断其他模糊片段。",
+    "incremental_event_continuity_bonus": "同事件锚点对语义已接近合格线的兄弟片段最多提供的加分；代码同时限制其不超过 0.15。",
+    "incremental_event_rescue_band": "兄弟片段原始得分距离增量匹配阈值不超过该范围时，才允许使用事件连续性补强。",
 }
 
 for _setting_key, _description in TOPIC_SETTING_DESCRIPTIONS.items():

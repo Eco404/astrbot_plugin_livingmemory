@@ -1402,6 +1402,7 @@ class TopicComponentMatcherMixin:
                 fallback=semantic,
             )
             rerank_support = rerank_relative.get(topic.topic_uid, 0.0)
+            temporal_proximity = self._topic_fragment_time_proximity(topic, fragments)
             has_source_continuity = continuity > 0.0 or overlap > 0.0
             if has_source_continuity:
                 lane = "source_continuity"
@@ -1426,6 +1427,7 @@ class TopicComponentMatcherMixin:
                     + 0.13 * lexical
                     + 0.02 * rerank_support
                 )
+                score = min(1.0, score + 0.05 * temporal_proximity)
                 if incoming_actors and existing_actors:
                     score -= 0.05 * (1.0 - actor_affinity)
                 semantic_floor = float(
@@ -1456,12 +1458,11 @@ class TopicComponentMatcherMixin:
                 "time_affinity": round(
                     self._topic_fragment_time_affinity(topic, fragments), 6
                 ),
+                "temporal_proximity": round(temporal_proximity, 6),
                 "source_continuity": round(continuity, 6),
                 "timeline_overlap": round(overlap, 6),
                 "rerank_relative": round(rerank_support, 6),
-                "formal_fragment_count": len(
-                    formal_by_topic.get(topic.topic_uid, [])
-                ),
+                "formal_fragment_count": len(formal_by_topic.get(topic.topic_uid, [])),
                 "extension_eligible": (
                     extension_eligible if lane == "semantic_extension" else None
                 ),
@@ -1536,13 +1537,184 @@ class TopicComponentMatcherMixin:
             diagnostics["_decision"] = {
                 "action": "update",
                 "reason": str(
-                    diagnostics.get(ranked[0][1].topic_uid, {}).get("lane")
-                    or "matched"
+                    diagnostics.get(ranked[0][1].topic_uid, {}).get("lane") or "matched"
                 ),
                 "threshold": threshold,
                 "topic_uid": ranked[0][1].topic_uid,
             }
         return ranked[0][1], ranked, False
+
+    def _refine_incremental_event_assignments(
+        self,
+        proposals: list[dict[str, Any]],
+    ) -> None:
+        """Use strong sibling decisions to resolve only local event ambiguity.
+
+        Fragment extraction is intentionally allowed to split one Timeline into
+        several Topics. Event continuity therefore acts as a bounded rescue signal,
+        never as a rule that all fragments from one source must share a Topic.
+        """
+        if len(proposals) < 2:
+            return
+        threshold = float(self.config.get("incremental_topic_match_threshold", 0.55))
+        margin = float(self.config.get("incremental_topic_match_margin", 0.04))
+        anchor_margin = float(self.config.get("incremental_event_anchor_margin", 0.03))
+        minimum_anchors = max(
+            2, int(self.config.get("incremental_event_anchor_min_count", 2))
+        )
+        bonus_cap = max(
+            0.0,
+            min(
+                0.15,
+                float(self.config.get("incremental_event_continuity_bonus", 0.10)),
+            ),
+        )
+        rescue_band = max(
+            0.0,
+            min(
+                0.20,
+                float(self.config.get("incremental_event_rescue_band", 0.10)),
+            ),
+        )
+
+        anchor_votes: dict[tuple[str, str], dict[str, list[tuple[float, str]]]] = {}
+        for proposal in proposals:
+            matched = proposal.get("matched")
+            ranked = list(proposal.get("match_scores") or [])
+            if matched is None or bool(proposal.get("ambiguous")) or not ranked:
+                continue
+            top_score = float(ranked[0][0])
+            second_score = float(ranked[1][0]) if len(ranked) > 1 else 0.0
+            if top_score < threshold or top_score - second_score < anchor_margin:
+                continue
+            component_uid = str(proposal.get("component_uid") or "")
+            for event_key in self._component_event_keys(
+                proposal.get("fragments") or []
+            ):
+                anchor_votes.setdefault(event_key, {}).setdefault(
+                    matched.topic_uid, []
+                ).append((top_score, component_uid))
+
+        dominant_by_event: dict[tuple[str, str], tuple[str, int, float]] = {}
+        for event_key, topic_votes in anchor_votes.items():
+            ranked_votes = sorted(
+                (
+                    (len(values), sum(score for score, _ in values), topic_uid)
+                    for topic_uid, values in topic_votes.items()
+                ),
+                key=lambda item: (-item[0], -item[1], item[2]),
+            )
+            if not ranked_votes or ranked_votes[0][0] < minimum_anchors:
+                continue
+            if len(ranked_votes) > 1 and ranked_votes[0][0] <= ranked_votes[1][0]:
+                continue
+            count, score_sum, topic_uid = ranked_votes[0]
+            dominant_by_event[event_key] = (topic_uid, count, score_sum)
+
+        for proposal in proposals:
+            event_targets = [
+                dominant_by_event[key]
+                for key in self._component_event_keys(proposal.get("fragments") or [])
+                if key in dominant_by_event
+            ]
+            if not event_targets:
+                continue
+            target_counts: dict[str, tuple[int, float]] = {}
+            for topic_uid, count, score_sum in event_targets:
+                previous = target_counts.get(topic_uid, (0, 0.0))
+                target_counts[topic_uid] = (
+                    previous[0] + count,
+                    previous[1] + score_sum,
+                )
+            target_uid, (anchor_count, anchor_score_sum) = min(
+                target_counts.items(),
+                key=lambda item: (-item[1][0], -item[1][1], item[0]),
+            )
+            ranked = list(proposal.get("match_scores") or [])
+            target_item = next(
+                (item for item in ranked if item[1].topic_uid == target_uid), None
+            )
+            if target_item is None:
+                continue
+            current_match = proposal.get("matched")
+            if (
+                current_match is not None
+                and current_match.topic_uid == target_uid
+                and ranked
+                and ranked[0][1].topic_uid == target_uid
+                and not bool(proposal.get("ambiguous"))
+            ):
+                # This component already supplied an unambiguous anchor vote.
+                # Keep its original score; continuity is only a rescue signal
+                # for sibling components whose own decision is uncertain.
+                continue
+            diagnostics = proposal.get("match_diagnostics")
+            diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+            signals = diagnostics.get(target_uid, {})
+            semantic = float(signals.get("semantic") or 0.0)
+            representative = float(signals.get("representative") or 0.0)
+            if semantic < 0.50 and representative < 0.50:
+                continue
+            base_score = float(target_item[0])
+            if base_score < threshold - rescue_band:
+                continue
+            boosted_score = min(1.0, base_score + bonus_cap)
+            adjusted = [
+                (
+                    boosted_score if topic.topic_uid == target_uid else float(score),
+                    topic,
+                )
+                for score, topic in ranked
+            ]
+            adjusted.sort(key=lambda item: (-item[0], item[1].topic_uid))
+            if adjusted[0][1].topic_uid != target_uid or adjusted[0][0] < threshold:
+                continue
+            second_score = float(adjusted[1][0]) if len(adjusted) > 1 else 0.0
+            # A multi-anchor event vote is stronger than a single-component
+            # decision, but still needs a measurable lead after the bounded bonus.
+            joint_margin = min(margin, anchor_margin)
+            if adjusted[0][0] - second_score < joint_margin:
+                continue
+            target_topic = adjusted[0][1]
+            target_signals = diagnostics.setdefault(target_uid, {})
+            target_signals["base_score"] = round(base_score, 6)
+            target_signals["event_continuity_bonus"] = round(
+                boosted_score - base_score, 6
+            )
+            target_signals["event_anchor_count"] = anchor_count
+            target_signals["event_anchor_score_sum"] = round(anchor_score_sum, 6)
+            target_signals["score"] = round(boosted_score, 6)
+            diagnostics["_joint_assignment"] = {
+                "action": "update",
+                "reason": "dominant_same_event_siblings",
+                "topic_uid": target_uid,
+                "anchor_count": anchor_count,
+                "base_score": round(base_score, 6),
+                "adjusted_score": round(boosted_score, 6),
+            }
+            diagnostics["_decision"] = {
+                "action": "update",
+                "reason": "dominant_same_event_siblings",
+                "threshold": threshold,
+                "margin": margin,
+                "topic_uid": target_uid,
+            }
+            proposal["matched"] = target_topic
+            proposal["match_scores"] = adjusted
+            proposal["ambiguous"] = False
+            proposal["match_diagnostics"] = diagnostics
+
+    @staticmethod
+    def _component_event_keys(
+        fragments: list[TopicFragmentDraft],
+    ) -> set[tuple[str, str]]:
+        return {
+            (str(timeline_uid), str(cluster_key))
+            for fragment in fragments
+            for timeline_uid in fragment.timeline_uids
+            for cluster_key in fragment.time_cluster_keys
+            if str(timeline_uid) and str(cluster_key)
+        }
 
     def _existing_topic_match_text(
         self,
@@ -1621,6 +1793,32 @@ class TopicComponentMatcherMixin:
         return (overlap_end - overlap_start + 1.0) / max(
             1.0, union_end - union_start + 1.0
         )
+
+    def _topic_fragment_time_proximity(
+        self,
+        topic: TopicMemory,
+        fragments: list[TopicFragmentDraft],
+    ) -> float:
+        affinity = self._topic_fragment_time_affinity(topic, fragments)
+        if affinity > 0.0:
+            return 1.0
+        starts = [item.started_at for item in fragments if item.started_at is not None]
+        ends = [item.ended_at for item in fragments if item.ended_at is not None]
+        if not starts or not ends or topic.started_at is None or topic.ended_at is None:
+            return 0.0
+        fragment_start = min(float(value) for value in starts)
+        fragment_end = max(float(value) for value in ends)
+        if fragment_start > float(topic.ended_at):
+            gap_seconds = fragment_start - float(topic.ended_at)
+        elif float(topic.started_at) > fragment_end:
+            gap_seconds = float(topic.started_at) - fragment_end
+        else:
+            gap_seconds = 0.0
+        half_life_days = max(
+            0.25,
+            float(self.config.get("incremental_topic_time_proximity_days", 7.0)),
+        )
+        return math.exp(-gap_seconds / (half_life_days * 86400.0))
 
     async def _match_existing_topic(
         self,
