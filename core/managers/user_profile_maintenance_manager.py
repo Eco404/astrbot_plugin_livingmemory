@@ -307,6 +307,10 @@ class UserProfileMaintenanceManager:
                         "timeline_uid": event.get("timeline_uid"),
                         "timeline_revision": event.get("timeline_revision"),
                         "metadata": event.get("payload", {}).get("metadata") or {},
+                        "identity_resolution": event.get("payload", {}).get(
+                            "identity_resolution"
+                        )
+                        or {},
                     }
                     for event in active_events
                 ],
@@ -605,6 +609,11 @@ class UserProfileMaintenanceManager:
                 sources = self.fact_maintainer.extract_candidates(
                     event_payload,
                     actor_id=str(event_payload.get("profile_actor_id") or ""),
+                    legacy_attribution_confidence=float(
+                        settings.get(
+                            "user_profile.legacy_summary_candidate_confidence", 0.45
+                        )
+                    ),
                 )
             projections.append(
                 {
@@ -713,6 +722,10 @@ class UserProfileMaintenanceManager:
                     "timeline_uid": event["timeline_uid"],
                     "timeline_revision": event["timeline_revision"],
                     "metadata": event["payload"].get("metadata") or {},
+                    "identity_resolution": event["payload"].get(
+                        "identity_resolution"
+                    )
+                    or {},
                 }
                 for event in events
             ],

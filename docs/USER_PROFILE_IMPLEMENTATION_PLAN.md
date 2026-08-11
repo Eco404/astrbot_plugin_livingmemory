@@ -2,7 +2,7 @@
 
 > 状态：已按方案实施并完成发布验收<br>
 > 目标插件版本：`3.8.0`<br>
-> 目标数据库版本：`v10.4`<br>
+> 目标数据库版本：`v10.5`<br>
 > 文档日期：2026-08-11<br>
 > 用途：作为用户画像功能开发、评审、测试和实机验收的事实基线。
 
@@ -78,7 +78,7 @@
 ### 3.3 版本与发布
 
 - 插件版本提升到 `3.8.0`。
-- 数据库版本提升到 `v10.4`。
+- 数据库版本提升到 `v10.5`；`v10.4 -> v10.5` 只增加旧 Timeline 身份解析旁表和人工审查状态。
 - 开发中分阶段提交和验收，但 `3.8.0` 一次性交付数据库、客观画像、人格关系、注入、主动工具、设置和维护页面。
 
 ## 4. 身份、作用域与共享
@@ -129,7 +129,7 @@ persona_id + logical_user_uid
 
 ## 5. 数据库设计
 
-全部表位于 `livingmemory.db`，由 `DBMigration v10.3 -> v10.4` 创建。迁移不扫描旧 Timeline，不调用模型，不改写现有 Timeline、Topic 或补充人物资料。
+全部表位于 `livingmemory.db`。`DBMigration v10.3 -> v10.4` 创建画像主体结构，`v10.4 -> v10.5` 增加旧 Timeline 身份解析旁表。迁移本身不扫描旧 Timeline、不调用模型，也不改写现有 Timeline、Topic、会话或补充人物资料；只有管理员显式扫描或历史重建时才写入派生身份结果。
 
 ### 5.1 用户与作用域
 
@@ -289,6 +289,17 @@ cancelled
 ```
 
 临时 persona 提示只在未完成任务中保存；任务完成后立即清空，只保留签名。
+
+### 5.5 旧 Timeline 身份解析旁表
+
+`user_profile_timeline_identities` 按 `timeline_uid + timeline_revision + memory_space_id` 保存派生身份，不修改 Timeline 原始 metadata。
+
+- `resolved`：原生 `role_bindings` 或同一私聊会话中的唯一稳定账号证据可确定归属，直接参与历史重建，不要求人工确认。
+- `pending_review`：证据缺失、多个候选、平台不一致或账号冲突，保持在审查队列中，不参与画像维护。
+- `ignored`：管理员明确忽略，但记录仍保留，可恢复为 `pending_review`，不会永久丢弃。
+- `admin_binding` 与 `admin_ignore` 不被后续自动扫描静默覆盖；重新考虑后可再次根据新证据扫描或人工绑定。
+
+自动解析只组合相同 Bot/persona 下的精确证据：Timeline 私聊目标、同 session 的新版本稳定 actor、`conversations.db` 中明确的人类 sender/actor、规范平台，以及已经存在的精确账号绑定。禁止按昵称、相似 ID 或跨平台猜测。会话证据按 500 条分批读取，并按旧 schema 实际存在的列降级；证据不足时进入人工审查。
 
 ## 6. Timeline 变更投影
 
@@ -754,6 +765,7 @@ WebUI 设置页新增一级分类 **用户画像**，所有本方案涉及的可
 | --- | --- | --- | --- | --- |
 | `user_profile.fact_accept_confidence` | float | `0.85` | `0.0-1.0` | 维护模型接受事实并立即生效的门槛 |
 | `user_profile.fact_min_profile_value` | float | `0.65` | `0.0-1.0` | 对未来理解用户有长期价值的最低门槛；与事实真实性置信度分离 |
+| `user_profile.legacy_summary_candidate_confidence` | float | `0.45` | `0.1-0.69` | 缺少消息级归属的旧摘要事实作为待确认候选时的置信度上限 |
 | `user_profile.pending_retention_days` | int | `180` | `1-3650` | 待确认候选归档期限 |
 
 Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维护模型。
@@ -816,6 +828,8 @@ Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维�
 | 配置键 | 类型 | 默认 | 范围/选项 | 说明 |
 | --- | --- | --- | --- | --- |
 | `user_profile.relationship_narrative_max_chars` | int | `500` | `100-2000` | 主观叙述存储上限 |
+| `user_profile.legacy_relationship_initial_dimension_cap` | float | `0.35` | `0.0-1.0` | 仅由旧摘要创建关系时的单维初始上限 |
+| `user_profile.legacy_relationship_soft_limit` | float | `0.04` | `0.0-0.25` | 仅由旧摘要更新关系时的单批维度变化上限 |
 | `user_profile.relationship_aftereffect_min_days` | int | `1` | `1-30` | 模型建议余韵的最小值 |
 | `user_profile.relationship_aftereffect_default_days` | int | `7` | `1-30` | 模型未返回期限时默认值 |
 | `user_profile.relationship_aftereffect_max_days` | int | `14` | `1-365` | 模型建议余韵的最大值 |
@@ -938,6 +952,8 @@ POST   /user-profiles/facts/action
 POST   /user-profiles/conflicts/resolve
 POST   /user-profiles/rebuild/preview
 POST   /user-profiles/rebuild/start
+POST   /user-profiles/identity-reviews/scan
+POST   /user-profiles/identity-reviews/action
 GET    /user-profiles/tasks
 GET    /user-profiles/task
 POST   /user-profiles/tasks/retry
@@ -974,7 +990,7 @@ POST   /user-profiles/share-groups/save
 
 ### 17.2 修改模块
 
-- `storage/db_migration.py`：数据库 `v10.4` 迁移和健康检查。
+- `storage/db_migration.py`：数据库 `v10.5` 迁移和健康检查。
 - `core/plugin_initializer.py`：Store、Manager、Provider、启动恢复和关闭流程。
 - `core/managers/memory_engine.py`：Timeline 提交后的统一投影事件。
 - `core/managers/timeline_rebuild_manager.py`：重构后的画像事件与任务联动。
@@ -1006,8 +1022,10 @@ POST   /user-profiles/share-groups/save
 
 ### 19.1 数据库和 Store
 
-- `v10.3 -> v10.4` 迁移幂等。
-- 新安装直接创建 `v10.4`。
+- `v10.3 -> v10.4 -> v10.5` 迁移幂等。
+- 新安装直接创建 `v10.5`。
+- 旧 Timeline 的确定性自动解析、冲突入审查、人工绑定、可逆忽略和恢复。
+- 大量会话分批取证及旧 `conversations.db` 缺列降级。
 - 外键、唯一约束和级联行为。
 - actor 绑定、逻辑用户合并与解绑重新投影。
 - 客观共享组不共享关系状态。
@@ -1098,7 +1116,7 @@ POST   /user-profiles/share-groups/save
 ### 阶段一：契约、设置和数据库
 
 - 确定设置修订号、数据枚举和 SQL 表结构。
-- 完成 `v10.4` 迁移、Store 和数据库测试。
+- 完成 `v10.5` 迁移、Store 和数据库测试。
 - 完成 Settings API 的用户画像所有者与交叉校验。
 
 验收：新旧数据库初始化通过，不产生历史回填或模型调用。
@@ -1160,15 +1178,18 @@ POST   /user-profiles/share-groups/save
 9. 当前消息和当前对话始终高于历史画像。
 10. 被动注入和主动工具只能访问当前私聊用户。
 11. 所有本方案中的可调阈值、时长、长度、并发和默认行为均可在“设置 -> 用户画像”查看、修改和恢复默认。
-12. `3.8.0 / DB v10.4` 的迁移、测试、文档和发布元数据全部通过校验。
+12. `3.8.0 / DB v10.5` 的迁移、测试、文档和发布元数据全部通过校验。
 
 ## 22. 真实数据校准结果
 
 2026-08-11 使用真实 v10.3 数据库和真实 API 在临时副本中完成迭代验收，原库与凭据文件保持只读：
 
-- 71 条私聊 Timeline 中，31 条具有精确稳定身份并可回填，40 条保持歧义状态且不猜测归属；回填后二次预览缺失数为 0。
-- 初始规则产生 61 条当前事实，独立审计的平均长期用途为 0.278；区分画像价值、行为证据和关系事实并收紧时效后，最终当前有效事实为 9 条，平均长期用途为 0.741，确定性为 0.962。
+- 71 条私聊 Timeline 中，31 条具有原生 `role_bindings`；其余 40 条通过同一私聊 session 的稳定账号和会话消息证据自动归入同一用户，0 条待审查。第二次预览缺失数为 0，原 Timeline metadata 未改写。
+- 缺少消息级事实归属的 40 条旧 Timeline 只作为 `timeline_summary_only` 弱证据：旧摘要事实置信度上限为 0.45，始终先进入 pending，不能单独 supersede、制造冲突、强化现有事实或成为代表来源；关系可以利用其保持宽泛连续性，但不能触发重大事件。
+- 最终第二轮真实 API 运行共 9 个维护批次、18 次维护调用和 2 次独立审计，全部成功且无 API 错误。形成 13 条逻辑事实，其中 4 条有效、9 条 pending；9 条事实含旧来源，但 0 条有效事实仅由旧摘要支撑，3 条敏感事实均未进入注入。
+- 有效事实平均审计用途为 0.812、确定性为 0.925；审计把 4 条事实都标记为过长，但事实实际平均 27.3 字、最大 55 字，该问题码与长度指标矛盾，因此未据此针对单一样本继续压缩。另有 1 条当前状态被标记为一次性事件，由现有时效规则继续短期管理。
 - 保持 `fact_accept_confidence=0.85`、`fact_min_profile_value=0.65` 和总注入预算 800，不为单一数据集继续抬高全局门槛。
-- 关系预留调整为 300 后，在 800 总预算中仍可注入 8 条当前事实，并同时保留态度标签、近期余韵和主观叙述；扩大总预算没有带来必要收益。
+- 关系重建共 9 个 revision，旧摘要初始单维变化被限制在 0.35，后续仅旧摘要批次按 0.04 限幅，无重大事件更新。独立关系审计 groundedness 为 0.95、proportionality 为 0.90、continuity value 为 0.93、persona specificity 为 0.90；复制数据中没有可用 persona 提示快照，因此最后一项只能视为有限参考。
+- 默认 800/300 预算实际注入 4 条当前事实，总长 574 字符，并同时保留态度标签、近期余韵和主观叙述；200 字关系预留会丢失近期余韵，扩大总预算没有带来必要收益。
 - 有日期计划结束后的默认宽限从 14 天收紧为 3 天，无日期计划复核从 60 天收紧为 30 天；中低耐久偏好只作为行为证据，人工固定事实不受自动时效过滤。
-- 关系审计保持较高落地性和连续性，同时提示主观叙述存在复述私密细节的风险，因此关系提示增加数据最小化约束，但不限制人格的主观评价空间。
+- 原始数据库和凭据文件哈希在测试前后保持一致；迁移、身份旁表、画像、关系和审计写入全部发生在自动删除的临时副本中。

@@ -120,7 +120,9 @@ async def test_fact_governance_conflicts_and_later_evidence(tmp_path):
         expected_revision=paused["fact_revision"],
     )
     facts = await store.list_facts_for_maintenance(scope.fact_namespace_uid)
-    governed = next(item for item in facts if item["profile_fact_uid"] == pending.profile_fact_uid)
+    governed = next(
+        item for item in facts if item["profile_fact_uid"] == pending.profile_fact_uid
+    )
     assert governed["status"] == "active"
     assert governed["admin_confirmed"] is True
 
@@ -181,12 +183,12 @@ async def test_fact_governance_conflicts_and_later_evidence(tmp_path):
     )
     detail = await store.profile_detail(scope.profile_scope_uid)
     assert detail is not None
-    conflict = next(item for item in detail["conflicts"] if item["conflict_uid"] == conflict_uid)
+    conflict = next(
+        item for item in detail["conflicts"] if item["conflict_uid"] == conflict_uid
+    )
     assert conflict["status"] == "resolved"
     assert conflict["resolution_kind"] == "select"
-    statuses = {
-        item["profile_fact_uid"]: item["status"] for item in detail["facts"]
-    }
+    statuses = {item["profile_fact_uid"]: item["status"] for item in detail["facts"]}
     assert statuses[conflict_facts[0].profile_fact_uid] == "active"
     assert statuses[conflict_facts[1].profile_fact_uid] == "superseded"
 
@@ -240,7 +242,9 @@ async def test_fact_governance_conflicts_and_later_evidence(tmp_path):
     )
     detail = await store.profile_detail(scope.profile_scope_uid)
     assert detail is not None
-    later_conflict = next(item for item in detail["conflicts"] if item["conflict_uid"] == later_uid)
+    later_conflict = next(
+        item for item in detail["conflicts"] if item["conflict_uid"] == later_uid
+    )
     assert later_conflict["status"] == "auto_resolved"
     assert later_conflict["resolution_kind"] == "new_evidence"
 
@@ -428,11 +432,15 @@ async def test_objective_share_group_keeps_relationships_persona_isolated(tmp_pa
         raw_fact="用户喜欢简洁回答",
     )
     await store.publish_relationship(
-        UserRelationshipState(profile_scope_uid=scope_one.profile_scope_uid, warmth=0.2),
+        UserRelationshipState(
+            profile_scope_uid=scope_one.profile_scope_uid, warmth=0.2
+        ),
         expected_revision=0,
     )
     await store.publish_relationship(
-        UserRelationshipState(profile_scope_uid=scope_two.profile_scope_uid, warmth=0.9),
+        UserRelationshipState(
+            profile_scope_uid=scope_two.profile_scope_uid, warmth=0.9
+        ),
         expected_revision=0,
     )
 
@@ -456,8 +464,12 @@ async def test_objective_share_group_keeps_relationships_persona_isolated(tmp_pa
     }
     relationship_one = await store.get_relationship(scope_one.profile_scope_uid)
     relationship_two = await store.get_relationship(scope_two.profile_scope_uid)
-    assert relationship_one is not None and relationship_one.warmth == pytest.approx(0.2)
-    assert relationship_two is not None and relationship_two.warmth == pytest.approx(0.9)
+    assert relationship_one is not None and relationship_one.warmth == pytest.approx(
+        0.2
+    )
+    assert relationship_two is not None and relationship_two.warmth == pytest.approx(
+        0.9
+    )
     assert relationship_one.relationship_uid != relationship_two.relationship_uid
 
 
@@ -491,9 +503,7 @@ async def test_task_page_api_never_exposes_persona_prompt():
         vars(module)["request"] = previous
 
     assert result["status"] == "ok"
-    assert result["data"]["items"] == [
-        {"task_uid": "task-1", "status": "failed"}
-    ]
+    assert result["data"]["items"] == [{"task_uid": "task-1", "status": "failed"}]
 
 
 @pytest.mark.asyncio
@@ -608,3 +618,56 @@ async def test_enabling_profile_marks_gap_when_historical_timelines_are_missing(
     assert result["data"]["has_gap"] is True
     store.set_scope_state.assert_awaited_once_with("scope-1", has_gap=True)
     manager.schedule_scope.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_identity_review_binding_marks_profile_gap_and_rescans():
+    store = MagicMock()
+    store.resolve_timeline_identity_review = AsyncMock(
+        return_value={"status": "resolved", "identity_basis": "admin_binding"}
+    )
+    store.set_scope_state = AsyncMock()
+    history = MagicMock()
+    history.preview = AsyncMock(
+        return_value={"missing_timeline_count": 1, "pending_review_count": 0}
+    )
+    engine = SimpleNamespace(
+        user_profile_store=store,
+        user_profile_maintenance_manager=MagicMock(),
+        user_profile_history_manager=history,
+    )
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={
+            "profile_scope_uid": "scope-1",
+            "timeline_uid": "timeline-legacy",
+            "timeline_revision": 2,
+            "memory_space_id": "space-1",
+            "evidence_fingerprint": "fingerprint-1",
+            "action": "bind",
+            "actor_id": "test:human:user-1",
+        }
+    )
+    import astrbot_plugin_livingmemory.core.page_api_modules.user_profile_handler as module
+
+    previous = vars(module).get("request")
+    vars(module)["request"] = request
+    try:
+        result = await UserProfileHandler(PageApiUtils()).identity_review_action(engine)
+    finally:
+        vars(module)["request"] = previous
+
+    assert result["status"] == "ok"
+    store.resolve_timeline_identity_review.assert_awaited_once_with(
+        timeline_uid="timeline-legacy",
+        timeline_revision=2,
+        memory_space_id="space-1",
+        action="bind",
+        expected_evidence_fingerprint="fingerprint-1",
+        profile_scope_uid="scope-1",
+        actor_id="test:human:user-1",
+        reason=None,
+    )
+    assert history.preview.await_count == 2
+    history.preview.assert_any_await("scope-1")
+    store.set_scope_state.assert_awaited_once_with("scope-1", has_gap=True)

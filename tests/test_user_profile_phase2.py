@@ -52,9 +52,7 @@ class _AcceptingProvider:
             }
             for item in candidates
         ]
-        return SimpleNamespace(
-            completion_text=json.dumps({"operations": operations})
-        )
+        return SimpleNamespace(completion_text=json.dumps({"operations": operations}))
 
 
 def _timeline_payload(*, revision: int = 1, facts: list[str] | None = None):
@@ -89,6 +87,7 @@ def _timeline_payload(*, revision: int = 1, facts: list[str] | None = None):
                     "fact_index": index,
                     "fact_type": "preference",
                     "durability": "high",
+                    "selection_reason": "stable_personal_fact",
                 }
                 for index in range(len(facts))
             ],
@@ -135,6 +134,54 @@ def test_candidate_extraction_requires_exact_current_actor():
 
     assert [item.raw_fact for item in candidates] == ["Alice明确说自己喜欢无糖茶"]
     assert candidates[0].actor_id == "test:human:user-1"
+
+
+def test_legacy_summary_candidates_are_always_pending_and_cannot_supersede():
+    payload = {
+        "profile_actor_id": "test:human:user-1",
+        "identity_resolution": {
+            "identity_basis": "legacy_private_session",
+            "evidence_basis": "timeline_summary_only",
+            "source_granularity": "timeline",
+        },
+        "metadata": {
+            "memory_uid": "legacy-timeline",
+            "revision": 1,
+            "create_time": 1000,
+            "key_facts": ["旧摘要称用户偏好简短回答"],
+        },
+    }
+    candidates = UserProfileFactMaintainer.extract_candidates(
+        payload,
+        actor_id="test:human:user-1",
+        legacy_attribution_confidence=0.45,
+    )
+    assert len(candidates) == 1
+    assert candidates[0].claim_type == "legacy_summary_candidate"
+    assert candidates[0].metadata["evidence_basis"] == "timeline_summary_only"
+
+    plan = UserProfileFactMaintainer()._validate_plan(
+        fact_namespace_uid="facts-1",
+        payload={
+            "operations": [
+                {
+                    "source_uid": candidates[0].source_uid,
+                    "operation": "accept_new",
+                    "category": "communication_preference",
+                    "confidence": 0.99,
+                    "importance": 0.8,
+                    "profile_value": 0.9,
+                    "inference_kind": "explicit",
+                }
+            ]
+        },
+        candidates=candidates,
+        existing_facts=[],
+        settings=effective_user_profile_settings(),
+    )
+    assert len(plan.facts) == 1
+    assert plan.facts[0].status == UserProfileFactStatus.PENDING
+    assert plan.facts[0].confidence == pytest.approx(0.45)
 
 
 def test_candidate_extraction_marks_one_off_events_as_behavior_evidence():
@@ -325,9 +372,7 @@ def test_fact_contract_requires_profile_value_and_restricts_behavior_support():
     )
     assert plan.facts == []
     assert set(plan.ignored_source_uids) == {primary.source_uid, evidence.source_uid}
-    assert plan.diagnostics["policy_rejections"] == {
-        "invalid_behavior_support_mode": 1
-    }
+    assert plan.diagnostics["policy_rejections"] == {"invalid_behavior_support_mode": 1}
 
 
 def test_standalone_historical_evidence_operation_is_ignored_safely():
@@ -477,9 +522,7 @@ async def test_behavioral_inference_can_use_evidence_from_prior_batches(tmp_path
     assert len(facts) == 1
     assert facts[0]["category"] == "habit"
     assert facts[0]["inference_kind"] == "behavioral_inference"
-    remaining = await store.list_unassigned_behavior_evidence(
-        scope.profile_scope_uid
-    )
+    remaining = await store.list_unassigned_behavior_evidence(scope.profile_scope_uid)
     assert remaining == []
     await manager.close()
 

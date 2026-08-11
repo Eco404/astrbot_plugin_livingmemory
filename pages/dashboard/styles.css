@@ -3530,14 +3530,19 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .user-profile-conflict,
 .user-profile-account,
 .user-profile-task,
+.user-profile-identity-review,
 .relationship-revision { display: flex; align-items: center; justify-content: space-between; min-width: 0; gap: 12px; padding: 10px 0; border-bottom: 1px dashed var(--border); }
 .user-profile-fact:last-child,
 .user-profile-account:last-child,
 .user-profile-task:last-child,
+.user-profile-identity-review:last-child,
 .relationship-revision:last-child { border-bottom: 0; }
 .user-profile-fact-main,
 .user-profile-account > div,
 .user-profile-task > div { display: grid; min-width: 0; gap: 4px; }
+.user-profile-identity-review > div:first-child { display: grid; min-width: 0; flex: 1 1 240px; gap: 4px; }
+.user-profile-identity-review small { color: var(--text-tertiary); font-size: 12px; overflow-wrap: anywhere; }
+.user-profile-identity-review .select { width: min(280px, 100%); }
 .user-profile-fact-main strong,
 .user-profile-account strong,
 .user-profile-task small { overflow-wrap: anywhere; }
@@ -3572,7 +3577,8 @@ select.timeline-setting-input { width: min(220px, 100%); }
   .user-profile-inline-form { grid-template-columns: 1fr; }
   .user-profile-fact,
   .user-profile-account,
-  .user-profile-task { align-items: flex-start; flex-direction: column; }
+  .user-profile-task,
+  .user-profile-identity-review { align-items: flex-start; flex-direction: column; }
   .user-profile-head-actions .btn,
   .user-profile-fact-actions .btn { min-height: 40px; }
 }

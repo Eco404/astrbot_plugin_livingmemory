@@ -154,9 +154,7 @@ def _relationship_event_payload(
                 "selection_reason": "stable_personal_fact",
             }
         )
-        metadata["key_fact_evidence"].append(
-            {"fact_index": 1, "message_refs": ["M1"]}
-        )
+        metadata["key_fact_evidence"].append({"fact_index": 1, "message_refs": ["M1"]})
         metadata["key_fact_attributions"].append(
             {
                 "fact_index": 1,
@@ -175,12 +173,52 @@ def test_relationship_trigger_rejects_assistant_only_evidence():
         [
             {
                 "operation": "upsert",
-                "metadata": _relationship_event_payload(assistant_only=True)["metadata"],
+                "metadata": _relationship_event_payload(assistant_only=True)[
+                    "metadata"
+                ],
             }
         ],
         actor_id=user_actor,
     )
     assert meaningful == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_summary_relationship_is_weak_and_initially_capped():
+    timelines = UserRelationshipMaintainer.meaningful_timelines(
+        [
+            {
+                "operation": "upsert",
+                "timeline_uid": "legacy-relationship",
+                "timeline_revision": 1,
+                "identity_resolution": {"evidence_basis": "timeline_summary_only"},
+                "metadata": {
+                    "memory_uid": "legacy-relationship",
+                    "create_time": 1000,
+                    "canonical_summary": "旧摘要记录了一次积极互动。",
+                    "key_facts": ["对话气氛友好"],
+                },
+            }
+        ],
+        actor_id="test:human:user-1",
+    )
+    assert timelines[0]["weak_history"] is True
+    settings = effective_user_profile_settings(
+        {"user_profile.maintenance_max_retries": 0}
+    )
+    result = await UserRelationshipMaintainer(_RelationshipProvider()).maintain(
+        profile_scope_uid="scope-legacy",
+        timelines=timelines,
+        current_state=None,
+        persona_snapshot={"signature": {}},
+        objective_facts=[],
+        sensitivity="balanced",
+        behavior_mode="natural",
+        settings=settings,
+    )
+    assert result is not None
+    assert max(result.state.dimensions().values()) <= 0.35
+    assert result.diagnostics["legacy_summary_only"] is True
 
 
 def test_relationship_prompt_minimizes_private_detail_repetition():
@@ -240,7 +278,9 @@ async def test_relationship_soft_limit_and_aftereffect_clamp():
     assert result.state.familiarity == pytest.approx(0.57)
     assert result.state.tension == pytest.approx(0.43)
     assert result.diagnostics["soft_limited"]
-    remaining_days = (result.state.aftereffect_expires_at - __import__("time").time()) / 86400
+    remaining_days = (
+        result.state.aftereffect_expires_at - __import__("time").time()
+    ) / 86400
     assert 13.9 <= remaining_days <= 14.0
 
 
@@ -258,9 +298,7 @@ async def test_relationship_stage_publishes_and_clears_persona_prompt(tmp_path):
     settings = effective_user_profile_settings(
         {"user_profile.maintenance_max_retries": 0}
     )
-    manager = UserProfileMaintenanceManager(
-        store, provider=provider, config=settings
-    )
+    manager = UserProfileMaintenanceManager(store, provider=provider, config=settings)
     event_uid = await store.enqueue_projection_event(
         UserProfileProjectionEvent(
             timeline_uid="relationship-timeline-1",
@@ -294,9 +332,12 @@ async def test_relationship_stage_publishes_and_clears_persona_prompt(tmp_path):
         ).fetchone()
     assert task_row["persona_prompt"] == ""
     assert json.loads(task_row["result_summary"])["relationship_checkpoint"] is True
-    assert json.loads(task_row["result_summary"])["relationship_diagnostics"][
-        "persona_basis"
-    ] == "timeline_snapshot"
+    assert (
+        json.loads(task_row["result_summary"])["relationship_diagnostics"][
+            "persona_basis"
+        ]
+        == "timeline_snapshot"
+    )
     assert event_row["status"] == "completed"
     assert provider.fact_calls == 0
     assert provider.relationship_calls == 1
@@ -320,9 +361,7 @@ async def test_relationship_runs_when_fact_stage_fails(tmp_path):
             "user_profile.maintenance_retry_max_seconds": 60,
         }
     )
-    manager = UserProfileMaintenanceManager(
-        store, provider=provider, config=settings
-    )
+    manager = UserProfileMaintenanceManager(store, provider=provider, config=settings)
     await store.enqueue_projection_event(
         UserProfileProjectionEvent(
             timeline_uid="relationship-timeline-1",

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-USER_PROFILE_SETTINGS_REVISION = 2
+USER_PROFILE_SETTINGS_REVISION = 3
 
 
 def _setting(
@@ -40,6 +40,7 @@ USER_PROFILE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "user_profile.maintenance_retry_max_seconds": _setting(3600, "int", "model_tasks", "重试最大等待", "画像维护失败后的最大冷却秒数。", min=60, max=86400),
     "user_profile.fact_accept_confidence": _setting(0.85, "float", "fact_admission", "事实接受置信度", "候选事实立即成为有效画像所需的最低维护置信度。", min=0.0, max=1.0, step=0.01),
     "user_profile.fact_min_profile_value": _setting(0.65, "float", "fact_admission", "事实画像价值", "候选事实对未来理解用户的长期价值下限；普通一次性事件应低于该值并忽略。", min=0.0, max=1.0, step=0.01),
+    "user_profile.legacy_summary_candidate_confidence": _setting(0.45, "float", "fact_admission", "旧摘要候选置信度", "缺少消息级归属的旧版 Timeline 摘要事实进入待确认画像时使用的置信度上限。", min=0.1, max=0.69, step=0.01),
     "user_profile.pending_retention_days": _setting(180, "int", "fact_admission", "候选保留天数", "未确认 pending 事实超过该期限后归档。", min=1, max=3650),
     "user_profile.behavior_inference_min_timelines": _setting(3, "int", "inference", "行为推断最少 Timeline", "从行为归纳习惯或交流偏好所需的独立 Timeline 数。", min=2, max=20),
     "user_profile.behavior_inference_min_span_days": _setting(14, "int", "inference", "行为证据最小跨度", "普通行为推断证据必须覆盖的天数。", min=1, max=365),
@@ -67,6 +68,8 @@ USER_PROFILE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "user_profile.relationship_reserved_chars": _setting(300, "int", "injection", "关系状态预留字符", "总预算中优先为人格关系保留的字符数；未使用时回流给事实。", min=0, max=1000),
     "user_profile.fact_injection_max_chars": _setting(200, "int", "injection", "单条事实字符上限", "单条原始事实注入时允许的最大字符数。", min=50, max=1000),
     "user_profile.relationship_narrative_max_chars": _setting(500, "int", "relationship", "主观叙述字符上限", "人格对用户的第一人称主观叙述存储上限。", min=100, max=2000),
+    "user_profile.legacy_relationship_initial_dimension_cap": _setting(0.35, "float", "relationship", "旧摘要关系初始上限", "仅由旧版摘要重建关系时，任一关系维度可达到的初始上限。", min=0.0, max=1.0, step=0.01),
+    "user_profile.legacy_relationship_soft_limit": _setting(0.04, "float", "relationship", "旧摘要关系变化限幅", "仅有旧版摘要支撑一次关系更新时，单个维度相对当前状态的最大变化。", min=0.0, max=0.25, step=0.01),
     "user_profile.relationship_aftereffect_min_days": _setting(1, "int", "relationship", "余韵最短天数", "关系维护模型建议短期余韵时允许的最短持续时间。", min=1, max=30),
     "user_profile.relationship_aftereffect_default_days": _setting(7, "int", "relationship", "余韵默认天数", "关系维护模型没有提供期限时使用的持续时间。", min=1, max=30),
     "user_profile.relationship_aftereffect_max_days": _setting(14, "int", "relationship", "余韵最长天数", "关系维护模型建议短期余韵时允许的最长持续时间。", min=1, max=365),

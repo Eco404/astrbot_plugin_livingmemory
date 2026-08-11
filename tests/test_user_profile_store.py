@@ -61,11 +61,14 @@ async def test_private_scope_requires_stable_actor_and_preserves_names(tmp_path)
     store = UserProfileStore(str(tmp_path / "identity.db"))
     await store.initialize()
 
-    assert await store.ensure_private_scope(
-        actor_id="temporary-session",
-        bot_account="bot-1",
-        persona_id="persona-1",
-    ) is None
+    assert (
+        await store.ensure_private_scope(
+            actor_id="temporary-session",
+            bot_account="bot-1",
+            persona_id="persona-1",
+        )
+        is None
+    )
     first = await store.ensure_private_scope(
         actor_id="qq:human:user-1",
         bot_account="bot-1",
@@ -293,7 +296,7 @@ async def test_projection_event_is_idempotent_and_task_keeps_order(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_migration_v10_3_to_v10_4_creates_profile_schema(tmp_path):
+async def test_migration_v10_3_to_v10_5_creates_profile_schema(tmp_path):
     db_path = str(tmp_path / "migration.db")
     async with aiosqlite.connect(db_path) as db:
         await db.executescript(
@@ -314,8 +317,8 @@ async def test_migration_v10_3_to_v10_4_creates_profile_schema(tmp_path):
     result = await DBMigration(db_path).migrate()
 
     assert result["success"] is True
-    assert result["to_version"] == "10.4"
-    assert await DBMigration(db_path).get_db_version() == "10.4"
+    assert result["to_version"] == "10.5"
+    assert await DBMigration(db_path).get_db_version() == "10.5"
     async with aiosqlite.connect(db_path) as db:
         row = await (
             await db.execute(

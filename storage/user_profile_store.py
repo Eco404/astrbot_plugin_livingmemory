@@ -326,6 +326,41 @@ class UserProfileStore:
             CREATE INDEX IF NOT EXISTS idx_user_relationship_revisions_recent
                 ON user_relationship_revisions(relationship_uid, revision DESC);
 
+            CREATE TABLE IF NOT EXISTS user_profile_timeline_identities (
+                timeline_uid TEXT NOT NULL,
+                timeline_revision INTEGER NOT NULL CHECK(timeline_revision >= 1),
+                memory_space_id TEXT NOT NULL,
+                document_id INTEGER,
+                session_id TEXT NOT NULL DEFAULT '',
+                bot_account TEXT NOT NULL DEFAULT '',
+                persona_id TEXT NOT NULL DEFAULT '',
+                private_target_id TEXT NOT NULL DEFAULT '',
+                profile_scope_uid TEXT,
+                actor_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending_review'
+                    CHECK(status IN ('resolved', 'pending_review', 'ignored')),
+                identity_basis TEXT NOT NULL DEFAULT '',
+                evidence_basis TEXT NOT NULL DEFAULT 'timeline_summary_only',
+                source_granularity TEXT NOT NULL DEFAULT 'timeline',
+                resolver_version TEXT NOT NULL DEFAULT '',
+                evidence_fingerprint TEXT NOT NULL DEFAULT '',
+                evidence_json TEXT NOT NULL DEFAULT '{}',
+                review_reason TEXT,
+                reviewed_by TEXT,
+                reviewed_at REAL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(timeline_uid, timeline_revision, memory_space_id),
+                FOREIGN KEY(profile_scope_uid) REFERENCES user_profile_scopes(profile_scope_uid)
+                    ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_profile_timeline_identity_review
+                ON user_profile_timeline_identities(
+                    status, bot_account, persona_id, updated_at DESC
+                );
+            CREATE INDEX IF NOT EXISTS idx_user_profile_timeline_identity_scope
+                ON user_profile_timeline_identities(profile_scope_uid, status, updated_at DESC);
+
             CREATE TABLE IF NOT EXISTS user_profile_projection_events (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_uid TEXT NOT NULL UNIQUE,
@@ -505,7 +540,9 @@ class UserProfileStore:
                         (actor_id,),
                     )
                 ).fetchone()
-                observed = self._json_list(names_row["observed_names"] if names_row else None)
+                observed = self._json_list(
+                    names_row["observed_names"] if names_row else None
+                )
                 clean_name = str(display_name or "").strip()
                 if clean_name and clean_name not in observed:
                     observed.append(clean_name)
@@ -610,6 +647,37 @@ class UserProfileStore:
                 )
             ).fetchone()
         return self._row_to_scope(row) if row else None
+
+    async def list_profile_identity_candidates(
+        self,
+        *,
+        bot_account: str,
+        persona_id: str,
+        stable_user_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return same Bot/persona accounts matching an exact social account ID."""
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT a.actor_id, a.platform, a.stable_user_id,
+                           a.last_observed_name, a.logical_user_uid,
+                           s.profile_scope_uid, s.enabled
+                    FROM user_profile_accounts a
+                    JOIN user_profile_scopes s
+                      ON s.logical_user_uid = a.logical_user_uid
+                    WHERE s.bot_account = ? AND s.persona_id = ?
+                      AND a.stable_user_id = ?
+                    ORDER BY a.platform, a.actor_id, s.profile_scope_uid
+                    """,
+                    (
+                        str(bot_account).strip(),
+                        str(persona_id).strip(),
+                        str(stable_user_id).strip(),
+                    ),
+                )
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     async def find_projection_scopes(
         self,
@@ -771,7 +839,10 @@ class UserProfileStore:
                 if row is None:
                     raise ValueError("Unknown user-profile fact namespace")
                 current_revision = int(row["current_revision"])
-                if expected_revision is not None and current_revision != expected_revision:
+                if (
+                    expected_revision is not None
+                    and current_revision != expected_revision
+                ):
                     raise UserProfileRevisionConflict(
                         f"Expected profile revision {expected_revision}, got {current_revision}"
                     )
@@ -979,7 +1050,10 @@ class UserProfileStore:
                 if row is None:
                     raise ValueError("Unknown user-profile fact namespace")
                 current_revision = int(row["current_revision"])
-                if expected_revision is not None and current_revision != expected_revision:
+                if (
+                    expected_revision is not None
+                    and current_revision != expected_revision
+                ):
                     raise UserProfileRevisionConflict(
                         f"Expected profile revision {expected_revision}, got {current_revision}"
                     )
@@ -1236,14 +1310,18 @@ class UserProfileStore:
                     ]
                     if not set(conflict_fact_uids) & affected_fact_uids:
                         continue
-                    status_rows = await (
-                        await db.execute(
-                            f"SELECT profile_fact_uid, status FROM user_profile_facts "
-                            f"WHERE profile_fact_uid IN "
-                            f"({','.join('?' for _ in conflict_fact_uids)})",
-                            conflict_fact_uids,
-                        )
-                    ).fetchall() if conflict_fact_uids else []
+                    status_rows = (
+                        await (
+                            await db.execute(
+                                f"SELECT profile_fact_uid, status FROM user_profile_facts "
+                                f"WHERE profile_fact_uid IN "
+                                f"({','.join('?' for _ in conflict_fact_uids)})",
+                                conflict_fact_uids,
+                            )
+                        ).fetchall()
+                        if conflict_fact_uids
+                        else []
+                    )
                     still_conflicted = [
                         str(item["profile_fact_uid"])
                         for item in status_rows
@@ -1336,7 +1414,10 @@ class UserProfileStore:
                     )
                 ).fetchone()
                 current_revision = int(existing["revision"]) if existing else 0
-                if expected_revision is not None and current_revision != expected_revision:
+                if (
+                    expected_revision is not None
+                    and current_revision != expected_revision
+                ):
                     raise UserProfileRevisionConflict(
                         f"Expected relationship revision {expected_revision}, got {current_revision}"
                     )
@@ -1514,9 +1595,7 @@ class UserProfileStore:
             "provider_signature": self._json_object(row["provider_signature"]),
         }
 
-    async def enqueue_projection_event(
-        self, event: UserProfileProjectionEvent
-    ) -> str:
+    async def enqueue_projection_event(self, event: UserProfileProjectionEvent) -> str:
         async with self._connect() as db:
             await db.execute(
                 """
@@ -1626,6 +1705,338 @@ class UserProfileStore:
                 )
             ).fetchall()
         return [self._event_row(row) for row in rows]
+
+    async def get_timeline_identity_resolution(
+        self,
+        timeline_uid: str,
+        timeline_revision: int,
+        memory_space_id: str,
+    ) -> dict[str, Any] | None:
+        async with self._connect() as db:
+            row = await (
+                await db.execute(
+                    """
+                    SELECT * FROM user_profile_timeline_identities
+                    WHERE timeline_uid = ? AND timeline_revision = ?
+                      AND memory_space_id = ?
+                    """,
+                    (
+                        str(timeline_uid),
+                        max(1, int(timeline_revision)),
+                        str(memory_space_id),
+                    ),
+                )
+            ).fetchone()
+        return self._timeline_identity_row(row) if row is not None else None
+
+    async def record_timeline_identity_resolution(
+        self,
+        *,
+        timeline_uid: str,
+        timeline_revision: int,
+        memory_space_id: str,
+        document_id: int | None,
+        session_id: str,
+        bot_account: str,
+        persona_id: str,
+        private_target_id: str,
+        profile_scope_uid: str | None,
+        actor_id: str | None,
+        status: str,
+        identity_basis: str,
+        evidence_basis: str,
+        source_granularity: str,
+        resolver_version: str,
+        evidence_fingerprint: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist automatic identity state without overriding administrator decisions."""
+        if status not in {"resolved", "pending_review"}:
+            raise ValueError(
+                "Automatic Timeline identity status must be resolved or pending_review"
+            )
+        key = (
+            str(timeline_uid).strip(),
+            max(1, int(timeline_revision)),
+            str(memory_space_id).strip(),
+        )
+        if not key[0] or not key[2]:
+            raise ValueError(
+                "Timeline identity requires timeline_uid and memory_space_id"
+            )
+        now = time.time()
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                current = await (
+                    await db.execute(
+                        """
+                        SELECT * FROM user_profile_timeline_identities
+                        WHERE timeline_uid = ? AND timeline_revision = ?
+                          AND memory_space_id = ?
+                        """,
+                        key,
+                    )
+                ).fetchone()
+                if current is not None:
+                    current_basis = str(current["identity_basis"] or "")
+                    current_status = str(current["status"] or "")
+                    if current_basis in {"admin_binding", "admin_ignore"}:
+                        await db.rollback()
+                        return self._timeline_identity_row(current)
+                    if current_status == "resolved" and status == "pending_review":
+                        await db.rollback()
+                        return self._timeline_identity_row(current)
+                    unchanged = (
+                        current_status == status
+                        and str(current["profile_scope_uid"] or "")
+                        == str(profile_scope_uid or "")
+                        and str(current["actor_id"] or "") == str(actor_id or "")
+                        and current_basis == str(identity_basis)
+                        and str(current["evidence_fingerprint"] or "")
+                        == str(evidence_fingerprint)
+                        and str(current["resolver_version"] or "")
+                        == str(resolver_version)
+                    )
+                    if unchanged:
+                        await db.rollback()
+                        return self._timeline_identity_row(current)
+                await db.execute(
+                    """
+                    INSERT INTO user_profile_timeline_identities (
+                        timeline_uid, timeline_revision, memory_space_id,
+                        document_id, session_id, bot_account, persona_id,
+                        private_target_id, profile_scope_uid, actor_id, status,
+                        identity_basis, evidence_basis, source_granularity,
+                        resolver_version, evidence_fingerprint, evidence_json,
+                        review_reason, reviewed_by, reviewed_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              NULL, NULL, NULL, ?, ?)
+                    ON CONFLICT(timeline_uid, timeline_revision, memory_space_id)
+                    DO UPDATE SET
+                        document_id = excluded.document_id,
+                        session_id = excluded.session_id,
+                        bot_account = excluded.bot_account,
+                        persona_id = excluded.persona_id,
+                        private_target_id = excluded.private_target_id,
+                        profile_scope_uid = excluded.profile_scope_uid,
+                        actor_id = excluded.actor_id,
+                        status = excluded.status,
+                        identity_basis = excluded.identity_basis,
+                        evidence_basis = excluded.evidence_basis,
+                        source_granularity = excluded.source_granularity,
+                        resolver_version = excluded.resolver_version,
+                        evidence_fingerprint = excluded.evidence_fingerprint,
+                        evidence_json = excluded.evidence_json,
+                        review_reason = NULL,
+                        reviewed_by = NULL,
+                        reviewed_at = NULL,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        *key,
+                        int(document_id) if document_id is not None else None,
+                        str(session_id or ""),
+                        str(bot_account or ""),
+                        str(persona_id or ""),
+                        str(private_target_id or ""),
+                        str(profile_scope_uid or "") or None,
+                        str(actor_id or "") or None,
+                        status,
+                        str(identity_basis or ""),
+                        str(evidence_basis or "timeline_summary_only"),
+                        str(source_granularity or "timeline"),
+                        str(resolver_version or ""),
+                        str(evidence_fingerprint or ""),
+                        self._json(evidence or {}),
+                        now,
+                        now,
+                    ),
+                )
+                row = await (
+                    await db.execute(
+                        """
+                        SELECT * FROM user_profile_timeline_identities
+                        WHERE timeline_uid = ? AND timeline_revision = ?
+                          AND memory_space_id = ?
+                        """,
+                        key,
+                    )
+                ).fetchone()
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        if row is None:
+            raise RuntimeError("Timeline identity resolution was not persisted")
+        return self._timeline_identity_row(row)
+
+    async def list_timeline_identity_resolutions(
+        self,
+        *,
+        statuses: Iterable[str] = ("pending_review",),
+        bot_account: str | None = None,
+        persona_id: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        selected = [
+            str(value)
+            for value in dict.fromkeys(statuses)
+            if str(value) in {"resolved", "pending_review", "ignored"}
+        ]
+        if not selected:
+            return []
+        clauses = [f"status IN ({','.join('?' for _ in selected)})"]
+        params: list[Any] = list(selected)
+        if bot_account is not None:
+            clauses.append("bot_account = ?")
+            params.append(str(bot_account))
+        if persona_id is not None:
+            clauses.append("persona_id = ?")
+            params.append(str(persona_id))
+        params.extend((max(1, min(1000, int(limit))), max(0, int(offset))))
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT * FROM user_profile_timeline_identities
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY updated_at DESC, timeline_uid ASC
+                    LIMIT ? OFFSET ?
+                    """,
+                    params,
+                )
+            ).fetchall()
+        return [self._timeline_identity_row(row) for row in rows]
+
+    async def resolve_timeline_identity_review(
+        self,
+        *,
+        timeline_uid: str,
+        timeline_revision: int,
+        memory_space_id: str,
+        action: str,
+        expected_evidence_fingerprint: str,
+        profile_scope_uid: str | None = None,
+        actor_id: str | None = None,
+        reason: str | None = None,
+        reviewed_by: str = "administrator",
+    ) -> dict[str, Any]:
+        """Apply a reversible administrator decision to one unresolved Timeline."""
+        if action not in {"bind", "ignore", "restore"}:
+            raise ValueError("Unsupported Timeline identity review action")
+        key = (
+            str(timeline_uid).strip(),
+            max(1, int(timeline_revision)),
+            str(memory_space_id).strip(),
+        )
+        now = time.time()
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                current = await (
+                    await db.execute(
+                        """
+                        SELECT * FROM user_profile_timeline_identities
+                        WHERE timeline_uid = ? AND timeline_revision = ?
+                          AND memory_space_id = ?
+                        """,
+                        key,
+                    )
+                ).fetchone()
+                if current is None:
+                    raise ValueError("Timeline identity review item no longer exists")
+                supplied = str(expected_evidence_fingerprint or "")
+                if not supplied or supplied != str(
+                    current["evidence_fingerprint"] or ""
+                ):
+                    raise UserProfileRevisionConflict(
+                        "Timeline identity evidence changed; refresh before reviewing"
+                    )
+                if action == "bind":
+                    scope_uid = str(profile_scope_uid or "").strip()
+                    selected_actor = str(actor_id or "").strip()
+                    scope = await (
+                        await db.execute(
+                            "SELECT * FROM user_profile_scopes WHERE profile_scope_uid = ?",
+                            (scope_uid,),
+                        )
+                    ).fetchone()
+                    account = await (
+                        await db.execute(
+                            "SELECT * FROM user_profile_accounts WHERE actor_id = ?",
+                            (selected_actor,),
+                        )
+                    ).fetchone()
+                    if scope is None or account is None:
+                        raise ValueError(
+                            "Selected profile scope or account no longer exists"
+                        )
+                    if str(scope["logical_user_uid"]) != str(
+                        account["logical_user_uid"]
+                    ):
+                        raise ValueError(
+                            "Selected account is not bound to this profile"
+                        )
+                    if str(scope["bot_account"]) != str(current["bot_account"]) or str(
+                        scope["persona_id"]
+                    ) != str(current["persona_id"]):
+                        raise ValueError(
+                            "Timeline and profile Bot/persona scopes do not match"
+                        )
+                    status = "resolved"
+                    basis = "admin_binding"
+                    scope_value = scope_uid
+                    actor_value = selected_actor
+                elif action == "ignore":
+                    status = "ignored"
+                    basis = "admin_ignore"
+                    scope_value = None
+                    actor_value = None
+                else:
+                    status = "pending_review"
+                    basis = "admin_reconsidered"
+                    scope_value = None
+                    actor_value = None
+                await db.execute(
+                    """
+                    UPDATE user_profile_timeline_identities
+                    SET status = ?, identity_basis = ?, profile_scope_uid = ?,
+                        actor_id = ?, review_reason = ?, reviewed_by = ?,
+                        reviewed_at = ?, updated_at = ?
+                    WHERE timeline_uid = ? AND timeline_revision = ?
+                      AND memory_space_id = ?
+                    """,
+                    (
+                        status,
+                        basis,
+                        scope_value,
+                        actor_value,
+                        str(reason or "").strip()[:2000] or None,
+                        str(reviewed_by or "administrator")[:200],
+                        now,
+                        now,
+                        *key,
+                    ),
+                )
+                row = await (
+                    await db.execute(
+                        """
+                        SELECT * FROM user_profile_timeline_identities
+                        WHERE timeline_uid = ? AND timeline_revision = ?
+                          AND memory_space_id = ?
+                        """,
+                        key,
+                    )
+                ).fetchone()
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        if row is None:
+            raise RuntimeError("Timeline identity review was not updated")
+        return self._timeline_identity_row(row)
 
     async def list_recoverable_tasks(self, *, limit: int = 64) -> list[dict[str, Any]]:
         now = time.time()
@@ -1844,9 +2255,7 @@ class UserProfileStore:
         for item in items:
             converted = dict(item)
             converted["result"] = self._json_object(converted["result"])
-            converted["event_payload"] = self._json_object(
-                converted["event_payload"]
-            )
+            converted["event_payload"] = self._json_object(converted["event_payload"])
             result["items"].append(converted)
         return result
 
@@ -1985,7 +2394,11 @@ class UserProfileStore:
             await db.execute(
                 "UPDATE user_profile_users SET status = ?, updated_at = ? "
                 "WHERE logical_user_uid = ?",
-                ("active" if enabled else "disabled", time.time(), scope.logical_user_uid),
+                (
+                    "active" if enabled else "disabled",
+                    time.time(),
+                    scope.logical_user_uid,
+                ),
             )
             await db.commit()
         gap = await self.profile_gap_status(profile_scope_uid)
@@ -2011,9 +2424,10 @@ class UserProfileStore:
                 (namespace_uid,),
             )
         ).fetchone()
-        shared = bool(namespace and namespace["share_group_uid"]) or int(
-            count_row["value"] if count_row else 0
-        ) > 1
+        shared = (
+            bool(namespace and namespace["share_group_uid"])
+            or int(count_row["value"] if count_row else 0) > 1
+        )
         if not shared:
             return namespace_uid
         new_uid = f"profile-facts-v1-{uuid.uuid4()}"
@@ -2321,7 +2735,9 @@ class UserProfileStore:
                 fact_uids = [str(value) for value in self._json_list(row["fact_uids"])]
                 if resolution == "select":
                     if not selected_fact_uid or selected_fact_uid not in fact_uids:
-                        raise ValueError("selected_fact_uid must belong to the conflict")
+                        raise ValueError(
+                            "selected_fact_uid must belong to the conflict"
+                        )
                     await db.execute(
                         "UPDATE user_profile_facts SET status = 'active', updated_at = ? "
                         "WHERE profile_fact_uid = ?",
@@ -2530,13 +2946,17 @@ class UserProfileStore:
                 for row in accounts
                 if str(row["logical_user_uid"]) != str(target["logical_user_uid"])
             }
-            impacted_accounts = await (
-                await db.execute(
-                    f"SELECT * FROM user_profile_accounts WHERE logical_user_uid IN "
-                    f"({','.join('?' for _ in source_users)})",
-                    list(source_users),
-                )
-            ).fetchall() if source_users else []
+            impacted_accounts = (
+                await (
+                    await db.execute(
+                        f"SELECT * FROM user_profile_accounts WHERE logical_user_uid IN "
+                        f"({','.join('?' for _ in source_users)})",
+                        list(source_users),
+                    )
+                ).fetchall()
+                if source_users
+                else []
+            )
             scope_users = [str(target["logical_user_uid"]), *sorted(source_users)]
             scopes = await (
                 await db.execute(
@@ -2580,7 +3000,11 @@ class UserProfileStore:
         blocked = any(row["share_group_uid"] for row in scopes)
         fingerprint_payload = {
             "accounts": [
-                (str(row["actor_id"]), str(row["logical_user_uid"]), float(row["updated_at"]))
+                (
+                    str(row["actor_id"]),
+                    str(row["logical_user_uid"]),
+                    float(row["updated_at"]),
+                )
                 for row in accounts
             ],
             "scopes": [
@@ -2705,7 +3129,10 @@ class UserProfileStore:
                                 await db.execute(
                                     "UPDATE user_profile_conflicts SET conflict_key = "
                                     "conflict_key || ':' || ? WHERE conflict_uid = ?",
-                                    (source_scope_uid[:8], str(conflict["conflict_uid"])),
+                                    (
+                                        source_scope_uid[:8],
+                                        str(conflict["conflict_uid"]),
+                                    ),
                                 )
                             await db.execute(
                                 "UPDATE user_profile_facts SET fact_namespace_uid = ? "
@@ -2815,7 +3242,11 @@ class UserProfileStore:
             ).fetchall()
         blocked = any(row["share_group_uid"] for row in scopes)
         payload = {
-            "account": (actor_id, str(account["logical_user_uid"]), float(account["updated_at"])),
+            "account": (
+                actor_id,
+                str(account["logical_user_uid"]),
+                float(account["updated_at"]),
+            ),
             "scopes": [
                 (
                     str(row["profile_scope_uid"]),
@@ -2991,7 +3422,9 @@ class UserProfileStore:
         profile_scope_uids: Iterable[str],
         share_group_uid: str | None = None,
     ) -> dict[str, Any]:
-        scope_uids = list(dict.fromkeys(str(value) for value in profile_scope_uids if value))
+        scope_uids = list(
+            dict.fromkeys(str(value) for value in profile_scope_uids if value)
+        )
         if len(scope_uids) < 2:
             raise ValueError("An objective share group requires at least two scopes")
         async with self._connect() as db:
@@ -3412,6 +3845,12 @@ class UserProfileStore:
             else []
         )
         gap = await self.profile_gap_status(profile_scope_uid)
+        identity_reviews = await self.list_timeline_identity_resolutions(
+            statuses=("pending_review", "ignored"),
+            bot_account=scope.bot_account,
+            persona_id=scope.persona_id,
+            limit=500,
+        )
         fingerprint = await self.profile_fingerprint(profile_scope_uid)
         return {
             "scope": asdict(scope),
@@ -3453,6 +3892,7 @@ class UserProfileStore:
                 else None
             ),
             "tasks": tasks,
+            "identity_reviews": identity_reviews,
         }
 
     @staticmethod
@@ -3461,6 +3901,12 @@ class UserProfileStore:
         if len(parts) != 3 or parts[1] != "human" or not parts[0] or not parts[2]:
             return "", ""
         return parts[0], parts[2]
+
+    @classmethod
+    def _timeline_identity_row(cls, row: Any) -> dict[str, Any]:
+        converted = dict(row)
+        converted["evidence"] = cls._json_object(converted.pop("evidence_json", "{}"))
+        return converted
 
     @staticmethod
     def _row_to_scope(row: aiosqlite.Row) -> UserProfileScope:
@@ -3477,9 +3923,7 @@ class UserProfileStore:
             has_gap=bool(row["has_gap"]),
             relationship_frozen=bool(row["relationship_frozen"]),
             relationship_reset_after=row["relationship_reset_after"],
-            relationship_sensitivity_override=row[
-                "relationship_sensitivity_override"
-            ],
+            relationship_sensitivity_override=row["relationship_sensitivity_override"],
             relationship_behavior_override=row["relationship_behavior_override"],
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),

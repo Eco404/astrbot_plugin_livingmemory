@@ -146,6 +146,7 @@ export class UserProfileMaintenance {
       ${this.renderFactSection(window.t("profile.pendingConflicts"), pendingFacts, true)}
       ${this.renderConflicts(data.conflicts || [])}
       ${this.renderFactSection(window.t("profile.historyFacts"), historicalFacts, false)}
+      ${this.renderIdentityReviews(data.identity_reviews || [], accounts)}
       ${this.renderRelationship(relationship, data.relationship_revisions || [], scope)}
       ${this.renderAccounts(accounts)}
       ${this.renderSharing(data.share_group, scope)}
@@ -196,6 +197,22 @@ export class UserProfileMaintenance {
     </section>`;
   }
 
+  renderIdentityReviews(items, accounts) {
+    const rows = items.map((item, index) => {
+      const pending = item.status === "pending_review";
+      const reason = item.evidence?.decision_reason || item.identity_basis || "";
+      const options = accounts.map(account => `<option value="${esc(account.actor_id)}">${esc(account.actor_id)}</option>`).join("");
+      return `<div class="user-profile-identity-review" data-identity-review-row>
+        <div><a href="#" data-open-timeline="${esc(item.timeline_uid)}"><strong>${esc(item.timeline_uid)}</strong></a><small>r${Number(item.timeline_revision || 1)} · ${esc(reason)} · ${this.formatTime(item.updated_at)}</small></div>
+        <span class="status-badge ${pending ? "warning" : ""}">${esc(window.t(`profile.identityStatus.${item.status}`))}</span>
+        <div class="user-profile-fact-actions">
+          ${pending ? `<select class="select input" data-identity-actor="${index}">${options}</select><button class="btn btn-primary btn-sm" data-identity-review-action="bind" data-timeline-uid="${esc(item.timeline_uid)}" data-timeline-revision="${Number(item.timeline_revision || 1)}" data-memory-space-id="${esc(item.memory_space_id)}" data-evidence-fingerprint="${esc(item.evidence_fingerprint)}">${esc(window.t("profile.bindTimeline"))}</button><button class="btn btn-secondary btn-sm" data-identity-review-action="ignore" data-timeline-uid="${esc(item.timeline_uid)}" data-timeline-revision="${Number(item.timeline_revision || 1)}" data-memory-space-id="${esc(item.memory_space_id)}" data-evidence-fingerprint="${esc(item.evidence_fingerprint)}">${esc(window.t("profile.ignoreTimeline"))}</button>` : `<button class="btn btn-secondary btn-sm" data-identity-review-action="restore" data-timeline-uid="${esc(item.timeline_uid)}" data-timeline-revision="${Number(item.timeline_revision || 1)}" data-memory-space-id="${esc(item.memory_space_id)}" data-evidence-fingerprint="${esc(item.evidence_fingerprint)}">${esc(window.t("profile.restoreTimelineReview"))}</button>`}
+        </div>
+      </div>`;
+    }).join("");
+    return `<section class="user-profile-section"><div class="user-profile-section-head"><h3>${esc(window.t("profile.identityReviews"))}</h3><button class="btn btn-secondary btn-sm" data-identity-review-scan>${esc(window.t("profile.scanIdentityReviews"))}</button></div>${rows || `<div class="identity-state compact">${esc(window.t("profile.noIdentityReviews"))}</div>`}</section>`;
+  }
+
   renderAccounts(accounts) {
     const rows = accounts.map(account => `<div class="user-profile-account"><div><strong>${esc(account.actor_id)}</strong><small>${esc((account.observed_names || []).join(" · "))}</small></div>${accounts.length > 1 ? `<button class="btn btn-secondary btn-sm" data-account-unbind="${esc(account.actor_id)}">${esc(window.t("profile.unbind"))}</button>` : ""}</div>`).join("");
     return `<section class="user-profile-section"><h3>${esc(window.t("profile.accounts"))}</h3>${rows}<div class="user-profile-inline-form"><input class="input" id="profile-bind-target" placeholder="${esc(window.t("profile.bindTargetPlaceholder"))}"><input class="input" id="profile-bind-actors" placeholder="${esc(window.t("profile.bindActorsPlaceholder"))}"><button class="btn btn-secondary btn-sm" data-account-action="bind">${esc(window.t("profile.bind"))}</button></div></section>`;
@@ -232,6 +249,9 @@ export class UserProfileMaintenance {
     if (unbind) return this.unbindAccount(unbind.dataset.accountUnbind);
     if (event.target.closest('[data-account-action="bind"]')) return this.bindAccounts();
     if (event.target.closest('[data-share-action="save"]')) return this.saveSharing();
+    if (event.target.closest("[data-identity-review-scan]")) return this.scanIdentityReviews();
+    const identityReview = event.target.closest("[data-identity-review-action]");
+    if (identityReview) return this.identityReviewAction(identityReview);
     const retry = event.target.closest("[data-task-retry]");
     if (retry) return this.retryTask(retry.dataset.taskRetry);
   }
@@ -358,6 +378,35 @@ export class UserProfileMaintenance {
 
   async retryTask(task_uid) {
     try { await this.api.post("user-profiles/tasks/retry", { task_uid }); await this.loadDetail(); } catch (error) { this.showToast(error.message, "error"); }
+  }
+
+  async scanIdentityReviews() {
+    try {
+      const data = await this.api.post("user-profiles/identity-reviews/scan", { profile_scope_uid: this.selectedScopeUid });
+      if (this.detail) this.detail.identity_reviews = data.items || [];
+      this.renderDetail();
+      this.showToast(window.t("profile.identityScanDone", data.diagnostics?.legacy_auto_resolved_count || 0, data.diagnostics?.pending_review_count || 0), "success");
+    } catch (error) { this.showToast(error.message, "error"); }
+  }
+
+  async identityReviewAction(button) {
+    const action = button.dataset.identityReviewAction;
+    const confirmed = await this.confirmDialog.show({ title: window.t(`profile.identityAction.${action}`), message: window.t(`profile.confirm.identity-${action}`), confirmLabel: window.t("common.confirm") });
+    if (!confirmed) return;
+    const row = button.closest("[data-identity-review-row]");
+    const actor_id = action === "bind" ? row?.querySelector("[data-identity-actor]")?.value || "" : null;
+    try {
+      await this.api.post("user-profiles/identity-reviews/action", {
+        profile_scope_uid: this.selectedScopeUid,
+        timeline_uid: button.dataset.timelineUid,
+        timeline_revision: Number(button.dataset.timelineRevision || 1),
+        memory_space_id: button.dataset.memorySpaceId,
+        evidence_fingerprint: button.dataset.evidenceFingerprint,
+        action,
+        actor_id,
+      });
+      await this.loadDetail();
+    } catch (error) { this.showToast(error.message, "error"); }
   }
 
   formatTime(value) {

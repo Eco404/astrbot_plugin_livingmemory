@@ -158,3 +158,45 @@ test("profile rebuild submits both profile and Timeline history fingerprints", a
   assert.equal(calls[1].body.history_fingerprint, "history-fingerprint");
   assert.equal(calls[1].body.clear_overrides, true);
 });
+
+test("legacy Timeline review sends a reversible scoped binding decision", async () => {
+  const calls = [];
+  const select = { value: "test:human:user-1" };
+  const row = { querySelector() { return select; } };
+  const button = {
+    dataset: {
+      identityReviewAction: "bind",
+      timelineUid: "timeline-legacy",
+      timelineRevision: "2",
+      memorySpaceId: "space-1",
+      evidenceFingerprint: "evidence-1",
+    },
+    closest() { return row; },
+  };
+  globalThis.window = { t(key) { return key; } };
+  try {
+    const profile = new UserProfileMaintenance({
+      async post(path, body) { calls.push({ path, body }); },
+    }, () => {}, {
+      async show() { return true; },
+    });
+    profile.selectedScopeUid = "scope-1";
+    profile.loadDetail = async () => {};
+    await profile.identityReviewAction(button);
+  } finally {
+    delete globalThis.window;
+  }
+
+  assert.deepEqual(calls, [{
+    path: "user-profiles/identity-reviews/action",
+    body: {
+      profile_scope_uid: "scope-1",
+      timeline_uid: "timeline-legacy",
+      timeline_revision: 2,
+      memory_space_id: "space-1",
+      evidence_fingerprint: "evidence-1",
+      action: "bind",
+      actor_id: "test:human:user-1",
+    },
+  }]);
+});

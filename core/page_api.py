@@ -538,6 +538,8 @@ class PluginPageApi:
             ("/user-profiles/conflicts/resolve", self.resolve_user_profile_conflict, ["POST"]),
             ("/user-profiles/rebuild/preview", self.preview_user_profile_rebuild, ["POST"]),
             ("/user-profiles/rebuild/start", self.start_user_profile_rebuild, ["POST"]),
+            ("/user-profiles/identity-reviews/scan", self.scan_user_profile_identity_reviews, ["POST"]),
+            ("/user-profiles/identity-reviews/action", self.review_user_profile_identity, ["POST"]),
             ("/user-profiles/tasks", self.list_user_profile_tasks, ["GET"]),
             ("/user-profiles/task", self.get_user_profile_task, ["GET"]),
             ("/user-profiles/tasks/retry", self.retry_user_profile_task, ["POST"]),
@@ -1148,6 +1150,12 @@ class PluginPageApi:
 
     async def start_user_profile_rebuild(self):
         return await self._with_user_profiles("rebuild_start")
+
+    async def scan_user_profile_identity_reviews(self):
+        return await self._with_user_profiles("identity_review_scan")
+
+    async def review_user_profile_identity(self):
+        return await self._with_user_profiles("identity_review_action")
 
     async def list_user_profile_tasks(self):
         return await self._with_user_profiles("list_tasks")

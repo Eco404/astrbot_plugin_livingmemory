@@ -14,7 +14,9 @@ from astrbot_plugin_livingmemory.core.user_profile_settings import (
 def test_user_profile_settings_have_complete_metadata_and_defaults():
     defaults = user_profile_setting_defaults()
 
-    assert USER_PROFILE_SETTINGS_REVISION == 2
+    assert USER_PROFILE_SETTINGS_REVISION == 3
+    assert defaults["user_profile.legacy_summary_candidate_confidence"] == 0.45
+    assert defaults["user_profile.legacy_relationship_initial_dimension_cap"] == 0.35
     assert defaults["user_profile.enabled"] is True
     assert defaults["user_profile.relationship_enabled"] is True
     assert defaults["user_profile.injection_max_chars"] == 800

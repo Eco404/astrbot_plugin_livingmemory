@@ -278,6 +278,7 @@ async def test_migrate_v9_22_to_v10_records_release_boundary(tmp_path):
         ("建立文档索引维护状态", 1, 1),
         ("重算 Topic 来源重要性贡献", 1, 1),
         ("创建用户画像、人格关系与维护任务表", 1, 1),
+        ("创建旧 Timeline 身份解析与人工审查表", 1, 1),
     ]
 
 
@@ -388,7 +389,7 @@ async def test_migrate_v10_2_to_v10_3_backfills_topic_importance_weights(tmp_pat
     result = await DBMigration(db_path).migrate()
 
     assert result["success"] is True
-    assert result["to_version"] == "10.4"
+    assert result["to_version"] == "10.5"
     async with aiosqlite.connect(db_path) as db:
         topic = await (
             await db.execute(

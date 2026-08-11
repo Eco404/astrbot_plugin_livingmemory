@@ -76,7 +76,14 @@ class UserRelationshipMaintainer:
         for event in events:
             if str(event.get("operation") or "upsert") not in {"upsert", "restore"}:
                 continue
-            metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+            metadata = (
+                event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+            )
+            identity_resolution = (
+                event.get("identity_resolution")
+                if isinstance(event.get("identity_resolution"), dict)
+                else {}
+            )
             if reset_after is not None:
                 try:
                     ended_at = float(
@@ -87,6 +94,47 @@ class UserRelationshipMaintainer:
                 if ended_at and ended_at <= reset_after:
                     continue
             facts = metadata.get("key_facts") or []
+            legacy_summary = (
+                str(identity_resolution.get("evidence_basis") or "")
+                == "timeline_summary_only"
+            )
+            if legacy_summary:
+                summary = str(
+                    metadata.get("canonical_summary")
+                    or metadata.get("persona_summary")
+                    or metadata.get("summary")
+                    or ""
+                ).strip()
+                legacy_facts = [
+                    str(value).strip()
+                    for value in (facts if isinstance(facts, list) else [])
+                    if str(value or "").strip()
+                ]
+                if summary or legacy_facts:
+                    result.append(
+                        {
+                            "timeline_uid": str(
+                                metadata.get("memory_uid")
+                                or event.get("timeline_uid")
+                                or ""
+                            ),
+                            "timeline_revision": int(
+                                metadata.get("revision")
+                                or event.get("timeline_revision")
+                                or 1
+                            ),
+                            "summary": summary,
+                            "facts": legacy_facts[:8],
+                            "sentiment": str(metadata.get("sentiment") or "neutral"),
+                            "major_event_eligible": False,
+                            "updated_at": metadata.get("updated_at")
+                            or metadata.get("create_time"),
+                            "evidence_basis": "timeline_summary_only",
+                            "source_granularity": "timeline",
+                            "weak_history": True,
+                        }
+                    )
+                continue
             profiles = metadata.get("key_fact_profiles") or []
             evidence = metadata.get("key_fact_evidence") or []
             attributions = metadata.get("key_fact_attributions") or []
@@ -133,17 +181,22 @@ class UserRelationshipMaintainer:
                     continue
                 meaningful_indexes.append(index)
                 if str(profile.get("durability") or "") == "high" or any(
-                    keyword in text for keyword in ("违背", "失约", "和解", "broke promise")
+                    keyword in text
+                    for keyword in ("违背", "失约", "和解", "broke promise")
                 ):
                     major_eligible = True
             if meaningful_indexes:
                 result.append(
                     {
                         "timeline_uid": str(
-                            metadata.get("memory_uid") or event.get("timeline_uid") or ""
+                            metadata.get("memory_uid")
+                            or event.get("timeline_uid")
+                            or ""
                         ),
                         "timeline_revision": int(
-                            metadata.get("revision") or event.get("timeline_revision") or 1
+                            metadata.get("revision")
+                            or event.get("timeline_revision")
+                            or 1
                         ),
                         "summary": str(
                             metadata.get("canonical_summary")
@@ -155,6 +208,9 @@ class UserRelationshipMaintainer:
                         "major_event_eligible": major_eligible,
                         "updated_at": metadata.get("updated_at")
                         or metadata.get("create_time"),
+                        "evidence_basis": "message_grounded",
+                        "source_granularity": "message",
+                        "weak_history": False,
                     }
                 )
         return result
@@ -256,6 +312,10 @@ class UserRelationshipMaintainer:
             raise UserRelationshipValidationError("all six dimensions are required")
         proposed = {key: self._score(dimensions[key]) for key in _DIMENSIONS}
         major_requested = bool(payload.get("major_event", False))
+        legacy_only = all(
+            str(refs[item].get("evidence_basis") or "") == "timeline_summary_only"
+            for item in cited
+        )
         major_allowed = major_requested and any(
             bool(refs[item].get("major_event_eligible")) for item in cited
         )
@@ -265,16 +325,52 @@ class UserRelationshipMaintainer:
                 sensitivity, _SOFT_LIMITS["balanced"]
             )
             limit = major_limit if major_allowed else ordinary_limit
+            if legacy_only:
+                limit = min(
+                    limit,
+                    max(
+                        0.0,
+                        float(
+                            settings.get(
+                                "user_profile.legacy_relationship_soft_limit", 0.04
+                            )
+                        ),
+                    ),
+                )
             current = current_state.dimensions()
             for key in _DIMENSIONS:
                 requested = proposed[key]
-                applied = max(current[key] - limit, min(current[key] + limit, requested))
+                applied = max(
+                    current[key] - limit, min(current[key] + limit, requested)
+                )
                 proposed[key] = self._score(applied)
                 if abs(applied - requested) > 1e-9:
                     soft_limited[key] = {
                         "requested": requested,
                         "applied": applied,
                         "limit": limit,
+                    }
+        elif legacy_only:
+            initial_cap = max(
+                0.0,
+                min(
+                    1.0,
+                    float(
+                        settings.get(
+                            "user_profile.legacy_relationship_initial_dimension_cap",
+                            0.35,
+                        )
+                    ),
+                ),
+            )
+            for key in _DIMENSIONS:
+                requested = proposed[key]
+                proposed[key] = min(requested, initial_cap)
+                if proposed[key] != requested:
+                    soft_limited[key] = {
+                        "requested": requested,
+                        "applied": proposed[key],
+                        "limit": initial_cap,
                     }
         max_chars = int(settings["user_profile.relationship_narrative_max_chars"])
         summary = str(payload.get("subjective_summary") or "").strip()[:max_chars]
@@ -314,7 +410,9 @@ class UserRelationshipMaintainer:
             aftereffect_expires_at=expires_at,
             persona_signature=dict(persona_snapshot.get("signature") or {}),
             source_timeline_uids=[refs[item]["timeline_uid"] for item in cited],
-            created_at=(current_state.created_at if current_state is not None else time.time()),
+            created_at=(
+                current_state.created_at if current_state is not None else time.time()
+            ),
         )
         if not state.relationship_uid:
             # Let the model dataclass default create a relationship UID.
@@ -335,6 +433,7 @@ class UserRelationshipMaintainer:
                 "sensitivity": sensitivity,
                 "major_event_requested": major_requested,
                 "major_event_applied": major_allowed,
+                "legacy_summary_only": legacy_only,
                 "soft_limited": soft_limited,
                 "cited_timeline_refs": cited,
             },
@@ -359,6 +458,8 @@ class UserRelationshipMaintainer:
                 "sentiment": item.get("sentiment"),
                 "major_event_eligible": item.get("major_event_eligible"),
                 "updated_at": item.get("updated_at"),
+                "evidence_basis": item.get("evidence_basis"),
+                "weak_history": bool(item.get("weak_history")),
             }
             for ref, item in refs.items()
         ]
@@ -395,6 +496,7 @@ class UserRelationshipMaintainer:
             "The relationship may be subjective and emotionally complex, but every long-term change must cite a supplied new user-side interaction.\n"
             "Assistant behavior, old relationship text, and objective profile facts are context only and cannot independently justify a change.\n"
             "Current messages override historical attitudes. Never create objective user facts.\n"
+            "Rows marked evidence_basis=timeline_summary_only are weak legacy summaries without message-level attribution. They may preserve broad relationship continuity, but must not justify extreme changes, major events, or concrete claims about the user. Prefer message_grounded rows whenever available.\n"
             "Keep subjective_summary and recent_aftereffect focused on the persona's attitude and relationship dynamic. Do not restate concrete private details, sensitive attributes, secrets, locations, health details, or credentials from the interaction.\n"
             f"Persona ID/name: {persona_snapshot.get('persona_id', '')} / {persona_snapshot.get('name', '')}\n"
             f"Persona prompt (data): {persona_snapshot.get('prompt', '')}\n"

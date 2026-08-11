@@ -52,7 +52,10 @@ _BEHAVIOR_PATTERN = "behavior_pattern"
 _BEHAVIOR_EVIDENCE = "behavior_evidence"
 _MODEL_REVIEW = "model_review"
 _SECRET_PATTERNS = (
-    re.compile(r"\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|passwd|private[_ -]?key|验证码|密码|私钥)\b", re.I),
+    re.compile(
+        r"\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|passwd|private[_ -]?key|验证码|密码|私钥)\b",
+        re.I,
+    ),
     re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}\b"),
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     re.compile(r"\b\d{6}\b.*(?:验证码|verification code|otp)", re.I),
@@ -86,7 +89,8 @@ class UserProfileFactMaintainer:
         evidence_list = [
             item
             for item in supporting_evidence
-            if item.source_uid not in {candidate.source_uid for candidate in candidate_list}
+            if item.source_uid
+            not in {candidate.source_uid for candidate in candidate_list}
         ]
         prompt = self._build_prompt(
             candidate_list, evidence_list, existing_list, settings
@@ -109,7 +113,9 @@ class UserProfileFactMaintainer:
                 + str(first_error)
                 + "\nReturn a corrected JSON object only. Do not add or rewrite fact text."
             )
-            raw = await self._request_with_retries(selected_provider, correction, settings)
+            raw = await self._request_with_retries(
+                selected_provider, correction, settings
+            )
             payload = self._parse_payload(raw)
             plan = self._validate_plan(
                 fact_namespace_uid=fact_namespace_uid,
@@ -127,14 +133,44 @@ class UserProfileFactMaintainer:
         payload: dict[str, Any],
         *,
         actor_id: str,
+        legacy_attribution_confidence: float = 0.45,
     ) -> list[UserProfileFactSource]:
         """Extract only facts attributed to the current stable private-chat actor."""
-        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else payload
+        metadata = (
+            payload.get("metadata")
+            if isinstance(payload.get("metadata"), dict)
+            else payload
+        )
+        identity_resolution = (
+            payload.get("identity_resolution")
+            if isinstance(payload.get("identity_resolution"), dict)
+            else {}
+        )
+        legacy_summary = (
+            str(identity_resolution.get("evidence_basis") or "")
+            == "timeline_summary_only"
+        )
         facts = metadata.get("key_facts") if isinstance(metadata, dict) else []
-        attributions = metadata.get("key_fact_attributions") if isinstance(metadata, dict) else []
-        profiles = metadata.get("key_fact_profiles") if isinstance(metadata, dict) else []
-        temporal = metadata.get("key_fact_temporal") if isinstance(metadata, dict) else []
-        quality = metadata.get("summary_quality_report") or metadata.get("quality_report") or {}
+        attributions = (
+            metadata.get("key_fact_attributions") or []
+            if isinstance(metadata, dict)
+            else []
+        )
+        profiles = (
+            metadata.get("key_fact_profiles") or []
+            if isinstance(metadata, dict)
+            else []
+        )
+        temporal = (
+            metadata.get("key_fact_temporal") or []
+            if isinstance(metadata, dict)
+            else []
+        )
+        quality = (
+            metadata.get("summary_quality_report")
+            or metadata.get("quality_report")
+            or {}
+        )
         if not isinstance(facts, list) or not isinstance(attributions, list):
             return []
         attribution_by_index = {
@@ -152,14 +188,63 @@ class UserProfileFactMaintainer:
             for index, row in enumerate(temporal or [])
             if isinstance(row, dict)
         }
-        timeline_uid = str(metadata.get("memory_uid") or payload.get("timeline_uid") or "")
+        timeline_uid = str(
+            metadata.get("memory_uid") or payload.get("timeline_uid") or ""
+        )
         try:
-            revision = max(1, int(metadata.get("revision", payload.get("timeline_revision", 1))))
+            revision = max(
+                1, int(metadata.get("revision", payload.get("timeline_revision", 1)))
+            )
         except (TypeError, ValueError):
             revision = 1
         result: list[UserProfileFactSource] = []
         for index, value in enumerate(facts):
             raw_fact = str(value or "").strip()
+            if legacy_summary and not attribution_by_index:
+                if not raw_fact:
+                    continue
+                confidence = max(0.0, min(0.69, float(legacy_attribution_confidence)))
+                result.append(
+                    UserProfileFactSource(
+                        source_uid=str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                "\x1f".join(
+                                    (timeline_uid, str(revision), str(index), actor_id)
+                                ),
+                            )
+                        ),
+                        timeline_uid=timeline_uid,
+                        timeline_revision=revision,
+                        fact_index=index,
+                        raw_fact=raw_fact,
+                        actor_id=actor_id,
+                        claim_type="legacy_summary_candidate",
+                        attribution_confidence=confidence,
+                        timeline_quality=(
+                            dict(quality) if isinstance(quality, dict) else {}
+                        ),
+                        evidence_started_at=_timestamp(metadata.get("create_time")),
+                        evidence_ended_at=_timestamp(
+                            metadata.get("updated_at") or metadata.get("create_time")
+                        ),
+                        metadata={
+                            "fact_profile": {},
+                            "fact_temporal": {},
+                            "timeline_importance": _score(
+                                metadata.get("importance"), 0.5
+                            ),
+                            "profile_signal": _MODEL_REVIEW,
+                            "evidence_basis": "timeline_summary_only",
+                            "source_granularity": "timeline",
+                            "identity_basis": str(
+                                identity_resolution.get("identity_basis") or ""
+                            ),
+                            "legacy_attribution_unverified": True,
+                        },
+                    )
+                )
+                continue
             attribution = attribution_by_index.get(index, {})
             refs = attribution.get("subject_refs") or []
             subject_actor_ids = {
@@ -219,6 +304,17 @@ class UserProfileFactMaintainer:
                         "fact_temporal": dict(temporal_row),
                         "timeline_importance": _score(metadata.get("importance"), 0.5),
                         "profile_signal": profile_signal,
+                        "evidence_basis": str(
+                            identity_resolution.get("evidence_basis")
+                            or "message_grounded"
+                        ),
+                        "source_granularity": str(
+                            identity_resolution.get("source_granularity") or "message"
+                        ),
+                        "identity_basis": str(
+                            identity_resolution.get("identity_basis")
+                            or "native_role_binding"
+                        ),
                     },
                 )
             )
@@ -259,7 +355,9 @@ class UserProfileFactMaintainer:
             operation = str(row.get("operation") or "")
             source_uid = str(row.get("source_uid") or "")
             if operation not in _ALLOWED_OPERATIONS:
-                raise UserProfileFactValidationError(f"unsupported operation: {operation}")
+                raise UserProfileFactValidationError(
+                    f"unsupported operation: {operation}"
+                )
             if source_uid in evidence_by_uid:
                 self._record_policy_rejection(
                     plan,
@@ -268,26 +366,36 @@ class UserProfileFactMaintainer:
                 )
                 continue
             if source_uid not in candidate_by_uid:
-                raise UserProfileFactValidationError(f"unknown source_uid: {source_uid}")
+                raise UserProfileFactValidationError(
+                    f"unknown source_uid: {source_uid}"
+                )
             supporting_source_uids = [
                 str(item)
                 for item in (row.get("supporting_source_uids") or [])
                 if str(item)
             ]
             operation_source_uids = [source_uid]
-            if operation in {"accept_new", "mark_pending", "supersede", "mark_conflict"}:
+            if operation in {
+                "accept_new",
+                "mark_pending",
+                "supersede",
+                "mark_conflict",
+            }:
                 operation_source_uids.extend(supporting_source_uids)
             elif supporting_source_uids:
                 raise UserProfileFactValidationError(
                     f"{operation} cannot consume supporting_source_uids"
                 )
             if len(operation_source_uids) != len(set(operation_source_uids)):
-                raise UserProfileFactValidationError("duplicate source within one operation")
+                raise UserProfileFactValidationError(
+                    "duplicate source within one operation"
+                )
             known_sources = {**candidate_by_uid, **evidence_by_uid}
             unknown_support = set(operation_source_uids) - set(known_sources)
             if unknown_support:
                 raise UserProfileFactValidationError(
-                    "unknown supporting source_uid: " + ", ".join(sorted(unknown_support))
+                    "unknown supporting source_uid: "
+                    + ", ".join(sorted(unknown_support))
                 )
             duplicates = (set(operation_source_uids) & seen) | (
                 set(operation_source_uids) & consumed_evidence
@@ -297,9 +405,7 @@ class UserProfileFactMaintainer:
                     "duplicate source result: " + ", ".join(sorted(duplicates))
                 )
             seen.update(set(operation_source_uids) & set(candidate_by_uid))
-            consumed_evidence.update(
-                set(operation_source_uids) & set(evidence_by_uid)
-            )
+            consumed_evidence.update(set(operation_source_uids) & set(evidence_by_uid))
             source = candidate_by_uid[source_uid]
             operation_sources = [known_sources[item] for item in operation_source_uids]
             secret_uids = [
@@ -322,8 +428,18 @@ class UserProfileFactMaintainer:
                     raise UserProfileFactValidationError(
                         f"{operation} requires a known profile_fact_uid"
                     )
-                fact = mutable_existing.setdefault(target_uid, self._fact_from_row(target))
+                fact = mutable_existing.setdefault(
+                    target_uid, self._fact_from_row(target)
+                )
                 signal = str(source.metadata.get("profile_signal") or _MODEL_REVIEW)
+                legacy_summary = self._is_legacy_summary_source(source)
+                if legacy_summary and operation == "select_representative_source":
+                    self._record_policy_rejection(
+                        plan,
+                        [source_uid],
+                        "legacy_summary_cannot_be_representative",
+                    )
+                    continue
                 if signal in {_BEHAVIOR_EVIDENCE, _BEHAVIOR_PATTERN} and not (
                     str(target.get("category") or "")
                     in {"habit", "communication_preference"}
@@ -338,15 +454,27 @@ class UserProfileFactMaintainer:
                     )
                     continue
                 plan.source_assignments[source_uid] = target_uid
-                fact.last_confirmed_at = source.evidence_ended_at or source.updated_at
-                fact.confidence = max(fact.confidence, _score(row.get("confidence"), fact.confidence))
+                if not legacy_summary:
+                    fact.last_confirmed_at = (
+                        source.evidence_ended_at or source.updated_at
+                    )
+                    fact.confidence = max(
+                        fact.confidence,
+                        _score(row.get("confidence"), fact.confidence),
+                    )
                 if operation == "select_representative_source":
                     fact.representative_source_uid = source_uid
-                if fact.status in {
-                    UserProfileFactStatus.PENDING,
-                    UserProfileFactStatus.STALE,
-                    UserProfileFactStatus.ARCHIVED,
-                } and fact.confidence >= float(settings["user_profile.fact_accept_confidence"]):
+                if (
+                    not legacy_summary
+                    and fact.status
+                    in {
+                        UserProfileFactStatus.PENDING,
+                        UserProfileFactStatus.STALE,
+                        UserProfileFactStatus.ARCHIVED,
+                    }
+                    and fact.confidence
+                    >= float(settings["user_profile.fact_accept_confidence"])
+                ):
                     fact.status = UserProfileFactStatus.ACTIVE
                 continue
 
@@ -354,6 +482,23 @@ class UserProfileFactMaintainer:
             inference = self._inference(row.get("inference_kind"))
             sensitive = bool(row.get("sensitive", False))
             confidence = _score(row.get("confidence"), source.attribution_confidence)
+            legacy_sources = [
+                item
+                for item in operation_sources
+                if self._is_legacy_summary_source(item)
+            ]
+            if legacy_sources:
+                confidence = min(
+                    confidence,
+                    min(item.attribution_confidence for item in legacy_sources),
+                )
+                if operation in {"supersede", "mark_conflict"}:
+                    self._record_policy_rejection(
+                        plan,
+                        operation_source_uids,
+                        "legacy_summary_cannot_change_existing_fact",
+                    )
+                    continue
             if "profile_value" not in row:
                 raise UserProfileFactValidationError("profile_value is required")
             profile_value = _score(row.get("profile_value"), 0.0)
@@ -385,6 +530,7 @@ class UserProfileFactMaintainer:
             status = (
                 UserProfileFactStatus.PENDING
                 if operation == "mark_pending"
+                or legacy_sources
                 or confidence < float(settings["user_profile.fact_accept_confidence"])
                 else UserProfileFactStatus.ACTIVE
             )
@@ -405,6 +551,9 @@ class UserProfileFactMaintainer:
                     "profile_signal": str(
                         source.metadata.get("profile_signal") or _MODEL_REVIEW
                     ),
+                    "evidence_basis": str(
+                        source.metadata.get("evidence_basis") or "message_grounded"
+                    ),
                 },
             )
             for consumed_uid in operation_source_uids:
@@ -414,7 +563,9 @@ class UserProfileFactMaintainer:
                     raise UserProfileFactValidationError(
                         "supersede requires a known profile_fact_uid"
                     )
-                old = mutable_existing.setdefault(target_uid, self._fact_from_row(target))
+                old = mutable_existing.setdefault(
+                    target_uid, self._fact_from_row(target)
+                )
                 old.status = UserProfileFactStatus.SUPERSEDED
                 old.superseded_by = fact.profile_fact_uid
             elif operation == "mark_conflict":
@@ -422,7 +573,9 @@ class UserProfileFactMaintainer:
                     raise UserProfileFactValidationError(
                         "mark_conflict requires a known profile_fact_uid"
                     )
-                old = mutable_existing.setdefault(target_uid, self._fact_from_row(target))
+                old = mutable_existing.setdefault(
+                    target_uid, self._fact_from_row(target)
+                )
                 old.status = UserProfileFactStatus.CONFLICT
                 fact.status = UserProfileFactStatus.CONFLICT
                 plan.conflicts.append(
@@ -437,7 +590,8 @@ class UserProfileFactMaintainer:
         missing = set(candidate_by_uid) - seen
         if missing:
             raise UserProfileFactValidationError(
-                "every candidate must have exactly one result: " + ", ".join(sorted(missing))
+                "every candidate must have exactly one result: "
+                + ", ".join(sorted(missing))
             )
         plan.facts.extend(mutable_existing.values())
         plan.diagnostics.update(
@@ -479,7 +633,9 @@ class UserProfileFactMaintainer:
             ("confidence is too low", "insufficient_inference_confidence"),
             ("unsupported inferred claim", "invalid_inference_claim"),
         )
-        return next((code for fragment, code in mapping if fragment in message), "policy")
+        return next(
+            (code for fragment, code in mapping if fragment in message), "policy"
+        )
 
     @staticmethod
     def _validate_profile_value(
@@ -496,11 +652,17 @@ class UserProfileFactMaintainer:
             raise UserProfileFactValidationError(
                 "one-off behavior evidence must be ignored or used only as supporting evidence"
             )
-        if signal == _BEHAVIOR_PATTERN and inference != UserProfileInferenceKind.BEHAVIORAL_INFERENCE:
+        if (
+            signal == _BEHAVIOR_PATTERN
+            and inference != UserProfileInferenceKind.BEHAVIORAL_INFERENCE
+        ):
             raise UserProfileFactValidationError(
                 "repeated behavior patterns require behavioral_inference"
             )
-        if inference == UserProfileInferenceKind.BEHAVIORAL_INFERENCE and signal != _BEHAVIOR_PATTERN:
+        if (
+            inference == UserProfileInferenceKind.BEHAVIORAL_INFERENCE
+            and signal != _BEHAVIOR_PATTERN
+        ):
             raise UserProfileFactValidationError(
                 "behavioral inference requires a behavior-pattern primary source"
             )
@@ -545,7 +707,9 @@ class UserProfileFactMaintainer:
         if sensitive and not bool(
             settings["user_profile.sensitive_behavior_inference_enabled"]
         ):
-            raise UserProfileFactValidationError("sensitive behavioral inference is disabled")
+            raise UserProfileFactValidationError(
+                "sensitive behavioral inference is disabled"
+            )
         prefix = "sensitive_inference" if sensitive else "behavior_inference"
         timeline_count = len({source.timeline_uid for source in sources})
         evidence_times = [
@@ -560,17 +724,31 @@ class UserProfileFactMaintainer:
             else 0.0
         )
         if timeline_count < int(settings[f"user_profile.{prefix}_min_timelines"]):
-            raise UserProfileFactValidationError("behavioral inference has too few Timelines")
+            raise UserProfileFactValidationError(
+                "behavioral inference has too few Timelines"
+            )
         if span_days < float(settings[f"user_profile.{prefix}_min_span_days"]):
-            raise UserProfileFactValidationError("behavioral inference span is too short")
+            raise UserProfileFactValidationError(
+                "behavioral inference span is too short"
+            )
         if confidence < float(settings[f"user_profile.{prefix}_min_confidence"]):
-            raise UserProfileFactValidationError("behavioral inference confidence is too low")
-        if any(str(source.claim_type) not in _ALLOWED_CLAIM_TYPES for source in sources):
+            raise UserProfileFactValidationError(
+                "behavioral inference confidence is too low"
+            )
+        if any(
+            str(source.claim_type) not in _ALLOWED_CLAIM_TYPES for source in sources
+        ):
             raise UserProfileFactValidationError("unsupported inferred claim type")
 
     @staticmethod
     def is_security_secret(text: str) -> bool:
         return any(pattern.search(str(text or "")) for pattern in _SECRET_PATTERNS)
+
+    @staticmethod
+    def _is_legacy_summary_source(source: UserProfileFactSource) -> bool:
+        return (
+            str(source.metadata.get("evidence_basis") or "") == "timeline_summary_only"
+        )
 
     @staticmethod
     def _profile_signal(profile: dict[str, Any]) -> str:
@@ -582,9 +760,7 @@ class UserProfileFactMaintainer:
             "affective_significance",
         }:
             return "relationship_only"
-        if reason == "stable_personal_fact" or (
-            fact_type == "preference" and durability == "high"
-        ):
+        if reason == "stable_personal_fact":
             return _PROFILE_DIRECT
         if fact_type == "preference":
             return _BEHAVIOR_EVIDENCE
@@ -611,7 +787,9 @@ class UserProfileFactMaintainer:
         try:
             return UserProfileFactCategory(str(value))
         except ValueError as exc:
-            raise UserProfileFactValidationError(f"unsupported category: {value}") from exc
+            raise UserProfileFactValidationError(
+                f"unsupported category: {value}"
+            ) from exc
 
     @staticmethod
     def _inference(value: Any) -> UserProfileInferenceKind:
@@ -662,6 +840,9 @@ class UserProfileFactMaintainer:
                 "confidence": row.get("confidence"),
                 "inference_kind": row.get("inference_kind"),
                 "last_confirmed_at": row.get("last_confirmed_at"),
+                "evidence_basis": (row.get("metadata") or {}).get(
+                    "evidence_basis", "message_grounded"
+                ),
             }
             for row in existing_facts
         ]
@@ -678,6 +859,12 @@ class UserProfileFactMaintainer:
                 "evidence_ended_at": item.evidence_ended_at,
                 "fact_profile": item.metadata.get("fact_profile", {}),
                 "profile_signal": item.metadata.get("profile_signal", _MODEL_REVIEW),
+                "evidence_basis": item.metadata.get(
+                    "evidence_basis", "message_grounded"
+                ),
+                "source_granularity": item.metadata.get(
+                    "source_granularity", "message"
+                ),
             }
             for item in candidates
         ]
@@ -691,7 +878,9 @@ class UserProfileFactMaintainer:
                 "evidence_started_at": item.evidence_started_at,
                 "evidence_ended_at": item.evidence_ended_at,
                 "fact_profile": item.metadata.get("fact_profile", {}),
-                "profile_signal": item.metadata.get("profile_signal", _BEHAVIOR_EVIDENCE),
+                "profile_signal": item.metadata.get(
+                    "profile_signal", _BEHAVIOR_EVIDENCE
+                ),
             }
             for item in supporting_evidence
         ]
@@ -722,8 +911,11 @@ class UserProfileFactMaintainer:
             "Every candidate must appear exactly once. You may only reference supplied source_uid and profile_fact_uid values.\n"
             "Never output, normalize, summarize, or rewrite fact text. The application always keeps raw_fact verbatim.\n"
             "speaker_reports_other and unresolved subjects have already been excluded. Behavioral inference is allowed only for habit and communication_preference.\n"
+            "A source with evidence_basis=timeline_summary_only comes from a legacy summary without message-level attribution. Ignore it unless it plausibly concerns the current user and has long-term value; if retained, use mark_pending. It cannot supersede, conflict with, confirm, or become the representative source of an existing fact without newer grounded evidence or administrator confirmation.\n"
             "Truth confidence and long-term profile value are different. A claim being true, grounded, or tagged future_utility does not by itself make it profile-worthy. Ignore ordinary completed events, situational choices, transient activities, external-object observations, expired plans, and short-lived states that will not improve future conversations. Treat a preference as durable only when the source expresses a general preference rather than a choice made for one episode.\n"
+            "Immediate preference admission requires fact_profile.selection_reason=stable_personal_fact. A high durability label alone is insufficient; keep uncertain generalizations out of the active profile. Mark health, sexuality, finances, exact location, legal matters, identity attributes, and intimate relationships as sensitive when applicable so serving policy can control them.\n"
             "profile_signal=behavior_evidence must be ignored as a primary result. It may only appear in supporting_source_uids for a behavioral_inference whose primary source is a supplied behavior_pattern.\n"
+            "Existing facts with evidence_basis=timeline_summary_only remain weak pending history. Merge a new grounded source into one only when it directly corroborates the same user fact; otherwise ignore the old candidate rather than letting it bias a new fact.\n"
             "Historical behavior evidence is optional support and may only be cited by exact source_uid inside supporting_source_uids. Never create a standalone operation whose source_uid comes from Historical behavior evidence.\n"
             "Use mark_conflict when evidence cannot be safely reconciled; never silently overwrite. Security secrets must be ignored.\n"
             f"Acceptance threshold: {settings['user_profile.fact_accept_confidence']}.\n"
@@ -789,7 +981,9 @@ class UserProfileFactMaintainer:
                     delay = min(cap, base * (2**attempt))
                     if delay:
                         await asyncio.sleep(delay + random.uniform(0, min(0.5, delay)))
-        raise RuntimeError(f"User-profile fact Provider request failed: {last_error}") from last_error
+        raise RuntimeError(
+            f"User-profile fact Provider request failed: {last_error}"
+        ) from last_error
 
 
 def _score(value: Any, default: float) -> float:

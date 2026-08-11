@@ -277,6 +277,59 @@ class UserProfileHandler:
         except Exception as exc:
             return self._error(exc)
 
+    async def identity_review_scan(self, memory_engine: Any) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        try:
+            store, _manager = self._components(memory_engine)
+            scope_uid = self._scope_uid(payload)
+            history_manager = self._history_manager(memory_engine)
+            if history_manager is None:
+                raise RuntimeError("用户画像历史解析器尚未初始化")
+            diagnostics = await history_manager.preview(scope_uid)
+            detail = await store.profile_detail(scope_uid)
+            if detail is None:
+                raise ValueError("Unknown user-profile scope")
+            return self.utils.ok(
+                {
+                    "diagnostics": diagnostics,
+                    "items": detail.get("identity_reviews") or [],
+                }
+            )
+        except Exception as exc:
+            return self._error(exc)
+
+    async def identity_review_action(self, memory_engine: Any) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        try:
+            store, _manager = self._components(memory_engine)
+            scope_uid = self._scope_uid(payload)
+            action = str(payload.get("action") or "").strip()
+            history_manager = self._history_manager(memory_engine)
+            if history_manager is not None:
+                await history_manager.preview(scope_uid)
+            result = await store.resolve_timeline_identity_review(
+                timeline_uid=str(payload.get("timeline_uid") or ""),
+                timeline_revision=int(payload.get("timeline_revision") or 1),
+                memory_space_id=str(payload.get("memory_space_id") or ""),
+                action=action,
+                expected_evidence_fingerprint=str(
+                    payload.get("evidence_fingerprint") or ""
+                ),
+                profile_scope_uid=scope_uid if action == "bind" else None,
+                actor_id=(
+                    str(payload.get("actor_id") or "") if action == "bind" else None
+                ),
+                reason=self._reason(payload),
+            )
+            diagnostics = None
+            if action in {"bind", "restore"} and history_manager is not None:
+                diagnostics = await history_manager.preview(scope_uid)
+                if action == "bind" or diagnostics.get("missing_timeline_count"):
+                    await store.set_scope_state(scope_uid, has_gap=True)
+            return self.utils.ok({"item": result, "diagnostics": diagnostics})
+        except Exception as exc:
+            return self._error(exc)
+
     async def list_tasks(self, memory_engine: Any) -> dict[str, Any]:
         try:
             store, _manager = self._components(memory_engine)
