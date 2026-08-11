@@ -526,6 +526,15 @@ class PluginInitializer:
             "rerank_provider": rerank,
         }
 
+    def resolve_user_profile_provider(self, provider_id: str = ""):
+        """Resolve the explicit profile Provider, falling back to Timeline's LLM."""
+        selected_id = str(provider_id or "").strip()
+        if selected_id:
+            candidate = self._get_provider_by_id(selected_id, silent=True)
+            if isinstance(candidate, Provider):
+                return candidate
+        return self.resolve_topic_providers().get("llm_provider")
+
     def _check_faiss_runtime(self) -> None:
         try:
             result = subprocess.run(
@@ -866,6 +875,15 @@ class PluginInitializer:
                 identity_profile_store=self.identity_profile_store,
                 topic_provider_resolver=self.resolve_topic_providers,
             )
+            if hasattr(self.memory_engine, "user_profile_provider_resolver"):
+                self.memory_engine.user_profile_provider_resolver = (
+                    self.resolve_user_profile_provider
+                )
+            profile_manager = getattr(
+                self.memory_engine, "user_profile_maintenance_manager", None
+            )
+            if profile_manager is not None:
+                profile_manager.provider_resolver = self.resolve_user_profile_provider
             await self.memory_engine.initialize()
             self.recall_trace_store = RecallTraceStore(str(db_path))
             await self.recall_trace_store.initialize()

@@ -25,6 +25,10 @@ from ..managers.atom_lifecycle_manager import AtomLifecycleManager
 from ..managers.graph_memory_manager import GraphMemoryManager
 from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
 from ..models.memory_identity import resolve_memory_space
+from ..models.user_profile import (
+    UserProfileProjectionEvent,
+    UserProfileProjectionOperation,
+)
 from ..models.identity_profile import SupplementalIdentityStore
 from ..importance_policy import IMPORTANCE_POLICY_VERSION
 from ..memory_source import serialize_source_messages
@@ -60,6 +64,7 @@ from ..user_profile_settings import (
 )
 from .topic_build_manager import TopicBuildManager
 from .topic_maintenance_manager import TopicMaintenanceManager
+from .user_profile_maintenance_manager import UserProfileMaintenanceManager
 
 
 class MemoryEngine:
@@ -115,6 +120,7 @@ class MemoryEngine:
         config: dict[str, Any] | None = None,
         identity_profile_store: SupplementalIdentityStore | None = None,
         topic_provider_resolver: Callable[[], dict[str, Any]] | None = None,
+        user_profile_provider_resolver: Callable[..., Any] | None = None,
     ):
         """
         初始化记忆引擎
@@ -141,6 +147,9 @@ class MemoryEngine:
             identity_profile_store or SupplementalIdentityStore()
         )
         self.topic_provider_resolver = topic_provider_resolver
+        self.user_profile_provider_resolver = (
+            user_profile_provider_resolver or topic_provider_resolver
+        )
         self.recall_trace_store = None
         self._session_scope_resolver: Callable[[str], Any] | None = None
         self.config = config or {}
@@ -165,6 +174,7 @@ class MemoryEngine:
         # Serialize scheduled and user-triggered storage maintenance. VACUUM
         # needs exclusive database access and must not overlap another cleanup.
         self._storage_maintenance_lock = asyncio.Lock()
+        self._user_profile_projection_suppressed = 0
 
         # 初始化组件(在initialize中完成)
         self.text_processor = None
@@ -186,6 +196,12 @@ class MemoryEngine:
         self.topic_memory_store = TopicMemoryStore(self.db_path)
         self.user_profile_store = UserProfileStore(self.db_path)
         self.user_profile_config: dict[str, Any] = effective_user_profile_settings()
+        self.user_profile_maintenance_manager = UserProfileMaintenanceManager(
+            self.user_profile_store,
+            provider=self.llm_provider,
+            provider_resolver=self.user_profile_provider_resolver,
+            config=self.user_profile_config,
+        )
         self.topic_vector_index = TopicVectorIndex(self.topic_memory_store)
         self.topic_maintenance_manager = TopicMaintenanceManager(
             self.db_path,
@@ -259,6 +275,7 @@ class MemoryEngine:
         await self.user_profile_store.initialize()
         await self._initialize_topic_runtime_settings()
         await self._initialize_user_profile_runtime_settings()
+        await self.user_profile_maintenance_manager.start()
 
         # 3. 初始化文本处理器
         stopwords_path = self.config.get("stopwords_path")
@@ -331,6 +348,7 @@ class MemoryEngine:
 
     async def close(self):
         """关闭数据库连接和清理资源"""
+        await self.user_profile_maintenance_manager.close()
         await self.topic_build_manager.close()
         rerank_config = getattr(self.rerank_provider, "provider_config", {}) or {}
         close_rerank = getattr(self.rerank_provider, "aclose", None)
@@ -1060,6 +1078,194 @@ class MemoryEngine:
         self.apply_user_profile_runtime_settings(stored)
         return await self.get_user_profile_runtime_settings()
 
+    async def ensure_private_user_profile(
+        self,
+        *,
+        session_id: str,
+        persona_id: str | None,
+        actor_id: str,
+        display_name: str | None = None,
+    ):
+        """Create an empty profile only for a stable private-chat human actor."""
+        if not bool(self.user_profile_config.get("user_profile.enabled", True)):
+            return None
+        if not bool(
+            self.user_profile_config.get(
+                "user_profile.auto_enable_private_users", True
+            )
+        ):
+            return None
+        space = resolve_memory_space(session_id, persona_id)
+        if space.chat_type != "private" or not self._is_stable_profile_actor(actor_id):
+            return None
+        return await self.user_profile_store.ensure_private_scope(
+            actor_id=actor_id,
+            bot_account=space.bot_account,
+            persona_id=space.persona_id,
+            display_name=display_name,
+            auto_enable=True,
+        )
+
+    async def _queue_user_profile_projection(
+        self,
+        *,
+        operation: UserProfileProjectionOperation | str,
+        metadata: dict[str, Any] | None = None,
+        timeline_uid: str | None = None,
+        timeline_revision: int | None = None,
+        memory_space_id: str | None = None,
+    ) -> list[str]:
+        """Persist a post-commit Timeline projection without failing the Timeline write."""
+        if self._user_profile_projection_suppressed > 0 or not bool(
+            self.user_profile_config.get("user_profile.enabled", True)
+        ):
+            return []
+        normalized = dict(metadata or {})
+        if normalized and str(normalized.get("memory_layer") or "timeline") != "timeline":
+            return []
+        uid = str(timeline_uid or normalized.get("memory_uid") or "").strip()
+        if not uid:
+            return []
+        try:
+            revision = max(
+                1,
+                int(timeline_revision or normalized.get("revision") or 1),
+            )
+        except (TypeError, ValueError):
+            revision = 1
+        space = resolve_memory_space(
+            normalized.get("session_id"), normalized.get("persona_id")
+        ) if normalized else None
+        resolved_space_id = str(
+            memory_space_id
+            or normalized.get("memory_space_id")
+            or (space.memory_space_id if space else "")
+        )
+        scopes = []
+        actor_id = ""
+        display_name = None
+        if normalized:
+            if space is None or space.chat_type != "private":
+                return []
+            actor_id, display_name = self._profile_actor_from_metadata(normalized, space.target_id)
+            if not actor_id:
+                return []
+            scope = await self.user_profile_store.get_scope_by_actor(
+                actor_id=actor_id,
+                bot_account=space.bot_account,
+                persona_id=space.persona_id,
+                include_disabled=True,
+            )
+            if scope is None:
+                scope = await self.ensure_private_user_profile(
+                    session_id=str(normalized.get("session_id") or ""),
+                    persona_id=str(normalized.get("persona_id") or ""),
+                    actor_id=actor_id,
+                    display_name=display_name,
+                )
+            if scope is not None:
+                scopes = [scope]
+        else:
+            scopes = await self.user_profile_store.find_projection_scopes(
+                timeline_uid=uid,
+                memory_space_id=resolved_space_id or None,
+            )
+        if not scopes:
+            return []
+
+        event_uids: list[str] = []
+        for scope in scopes:
+            if not scope.enabled:
+                await self.user_profile_store.set_scope_state(
+                    scope.profile_scope_uid, has_gap=True
+                )
+                continue
+            payload = {
+                "metadata": normalized,
+                "profile_actor_id": actor_id,
+                "profile_display_name": display_name,
+            }
+            try:
+                event_uid = await self.user_profile_store.enqueue_projection_event(
+                    UserProfileProjectionEvent(
+                        timeline_uid=uid,
+                        timeline_revision=revision,
+                        operation=operation,
+                        memory_space_id=resolved_space_id,
+                        profile_scope_uid=scope.profile_scope_uid,
+                        payload=payload,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self.user_profile_store.set_scope_state(
+                    scope.profile_scope_uid, has_gap=True
+                )
+                logger.error(
+                    "[UserProfile] Timeline 投影事件写入失败 "
+                    "(timeline_uid=%s, revision=%s): %s",
+                    uid,
+                    revision,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+            event_uids.append(event_uid)
+            self.user_profile_maintenance_manager.schedule_scope(
+                scope.profile_scope_uid
+            )
+        return event_uids
+
+    async def _delete_memory_without_profile_projection(self, memory_id: int) -> bool:
+        """Preserve the public delete signature during physical replacements."""
+        self._user_profile_projection_suppressed += 1
+        try:
+            return await self.delete_memory(memory_id)
+        finally:
+            self._user_profile_projection_suppressed = max(
+                0, self._user_profile_projection_suppressed - 1
+            )
+
+    @staticmethod
+    def _is_stable_profile_actor(actor_id: str) -> bool:
+        parts = str(actor_id or "").strip().split(":", 2)
+        return (
+            len(parts) == 3
+            and parts[0] not in {"", "unknown"}
+            and parts[1] == "human"
+            and parts[2] not in {"", "unknown"}
+        )
+
+    @classmethod
+    def _profile_actor_from_metadata(
+        cls,
+        metadata: dict[str, Any],
+        private_target_id: str,
+    ) -> tuple[str, str | None]:
+        bindings = metadata.get("role_bindings")
+        actors = bindings.get("actors") if isinstance(bindings, dict) else []
+        humans = [
+            item
+            for item in (actors or [])
+            if isinstance(item, dict)
+            and str(item.get("actor_type") or "") == "human"
+            and cls._is_stable_profile_actor(str(item.get("actor_id") or ""))
+        ]
+        target_matches = [
+            item
+            for item in humans
+            if str(item.get("sender_id") or "") == str(private_target_id or "")
+        ]
+        selected = target_matches[0] if len(target_matches) == 1 else None
+        if selected is None and len(humans) == 1:
+            selected = humans[0]
+        if selected is None:
+            return "", None
+        names = selected.get("observed_names") or []
+        display_name = str(names[-1]).strip() if names else None
+        return str(selected["actor_id"]), display_name
+
     def _serialize_atom_for_repair(self, atom: Any) -> dict[str, Any]:
         """Convert a MemoryAtom-like object into JSON-safe repair payload."""
         atom_type = getattr(atom, "atom_type", AtomType.UNKNOWN)
@@ -1306,6 +1512,10 @@ class MemoryEngine:
             status="completed",
             memory_id=int(memory_id),
         )
+        await self._queue_user_profile_projection(
+            operation=UserProfileProjectionOperation.UPSERT,
+            metadata=metadata,
+        )
         return True
 
     async def _repair_delete_write_op(
@@ -1322,6 +1532,9 @@ class MemoryEngine:
             )
             return False
 
+        registry_record = await self.memory_identity_store.get_by_document_id(
+            int(memory_id)
+        )
         if self.graph_memory_manager is not None:
             await self.graph_memory_manager.delete_memory(int(memory_id))
         if self.atom_store is not None:
@@ -1334,6 +1547,13 @@ class MemoryEngine:
             status="completed",
             memory_id=int(memory_id),
         )
+        if registry_record is not None:
+            await self._queue_user_profile_projection(
+                operation=UserProfileProjectionOperation.DELETE,
+                timeline_uid=registry_record.memory_uid,
+                timeline_revision=registry_record.revision,
+                memory_space_id=registry_record.memory_space_id,
+            )
         return True
 
     async def _repair_batch_delete_write_op(
@@ -1375,6 +1595,11 @@ class MemoryEngine:
         for uuid_doc_id in failed_vector_doc_uuids:
             await self.faiss_db.delete(uuid_doc_id)
 
+        registry_records = []
+        for memory_id in memory_ids:
+            record = await self.memory_identity_store.get_by_document_id(memory_id)
+            if record is not None:
+                registry_records.append(record)
         await self._delete_document_indexes_for_batch(memory_ids)
         await self._delete_graph_and_atoms_for_batch(memory_ids)
         await self.memory_identity_store.delete_by_document_ids(memory_ids)
@@ -1384,6 +1609,13 @@ class MemoryEngine:
             status="completed",
             payload_patch={"deleted_count": len(memory_ids)},
         )
+        for record in registry_records:
+            await self._queue_user_profile_projection(
+                operation=UserProfileProjectionOperation.DELETE,
+                timeline_uid=record.memory_uid,
+                timeline_revision=record.revision,
+                memory_space_id=record.memory_space_id,
+            )
         return True
 
     async def _delete_document_indexes_for_batch(self, memory_ids: list[int]) -> int:
@@ -1616,6 +1848,7 @@ class MemoryEngine:
         preserve_create_time: bool = False,
         source_messages: list[Any] | None = None,
         source_retention_reason: str = "importance_threshold",
+        schedule_user_profile_projection: bool = True,
     ) -> int:
         """
         添加新记忆
@@ -1902,6 +2135,17 @@ class MemoryEngine:
             full=False,
             since=current_time - 1.0,
         )
+        if schedule_user_profile_projection:
+            status = str(full_metadata.get("status") or "active").strip().lower()
+            operation = (
+                UserProfileProjectionOperation.ARCHIVE
+                if status in {"archived", "deleted"}
+                else UserProfileProjectionOperation.UPSERT
+            )
+            await self._queue_user_profile_projection(
+                operation=operation,
+                metadata=full_metadata,
+            )
         self._invalidate_search_cache()
         return doc_id
 
@@ -2284,6 +2528,23 @@ class MemoryEngine:
             # 合并元数据
             current_metadata.update(metadata_updates)
             current_metadata["updated_at"] = time.time()
+            projection_source_fields = {
+                "status",
+                "key_facts",
+                "key_fact_evidence",
+                "key_fact_attributions",
+                "key_fact_profiles",
+                "key_fact_temporal",
+                "role_bindings",
+                "summary_quality_report",
+                "quality_report",
+            }
+            if projection_source_fields & metadata_updates.keys():
+                try:
+                    current_revision = int(current_metadata.get("revision", 1))
+                except (TypeError, ValueError):
+                    current_revision = 1
+                current_metadata["revision"] = max(1, current_revision) + 1
             current_metadata = self._apply_stable_identity(
                 current_metadata,
                 session_id=current_metadata.get("session_id"),
@@ -2361,6 +2622,15 @@ class MemoryEngine:
                             str(current_metadata.get("memory_uid") or "")
                         ],
                     )
+                profile_operation = UserProfileProjectionOperation.UPSERT
+                if new_status in {"archived", "deleted"}:
+                    profile_operation = UserProfileProjectionOperation.ARCHIVE
+                elif status_changed and new_status == "active":
+                    profile_operation = UserProfileProjectionOperation.RESTORE
+                await self._queue_user_profile_projection(
+                    operation=profile_operation,
+                    metadata=current_metadata,
+                )
                 self._invalidate_search_cache()
             else:
                 logger.error(f"[更新] 元数据更新失败 (memory_id={memory_id})")
@@ -2519,6 +2789,10 @@ class MemoryEngine:
                         str(replacement_metadata.get("memory_uid") or "")
                     ],
                 )
+            await self._queue_user_profile_projection(
+                operation=UserProfileProjectionOperation.UPSERT,
+                metadata=replacement_metadata,
+            )
 
             self._invalidate_search_cache()
             logger.info(f"[原位更新] 记忆及派生索引更新完成 (memory_id={memory_id})")
@@ -2621,16 +2895,21 @@ class MemoryEngine:
                 metadata=replacement_metadata,
                 atoms=atoms,
                 preserve_create_time=True,
+                schedule_user_profile_projection=False,
             )
             if new_memory_id is None:
                 raise RuntimeError("新记忆创建失败")
-            if not await self.delete_memory(memory_id):
-                await self.delete_memory(new_memory_id)
+            if not await self._delete_memory_without_profile_projection(memory_id):
+                await self._delete_memory_without_profile_projection(new_memory_id)
                 await self._register_memory_identity(memory_id, current_metadata)
                 raise RuntimeError("旧记忆删除失败，已回滚新记忆")
             await self._mark_dependent_topics_stale(
                 str(replacement_metadata.get("memory_uid") or ""),
                 reason="timeline_replaced",
+            )
+            await self._queue_user_profile_projection(
+                operation=UserProfileProjectionOperation.UPSERT,
+                metadata=replacement_metadata,
             )
             return new_memory_id
         except asyncio.CancelledError:
@@ -2639,7 +2918,7 @@ class MemoryEngine:
             if new_memory_id is not None:
                 try:
                     if await self.get_memory(new_memory_id):
-                        await self.delete_memory(new_memory_id)
+                        await self._delete_memory_without_profile_projection(new_memory_id)
                 except Exception:
                     logger.error(
                         f"[替换] 回滚新记忆失败 (memory_id={new_memory_id})",
@@ -2766,6 +3045,13 @@ class MemoryEngine:
                 registry_record.memory_space_id,
                 deleted_timeline_uids=[registry_record.memory_uid],
                 affected_topic_uids=affected_topic_uids,
+            )
+        if registry_record:
+            await self._queue_user_profile_projection(
+                operation=UserProfileProjectionOperation.DELETE,
+                timeline_uid=registry_record.memory_uid,
+                timeline_revision=registry_record.revision,
+                memory_space_id=registry_record.memory_space_id,
             )
         self._invalidate_search_cache()
         return success
@@ -3110,7 +3396,7 @@ class MemoryEngine:
 
             try:
                 registry_cursor = await self.db_connection.execute(
-                    f"SELECT memory_uid, memory_space_id FROM memory_registry "
+                    f"SELECT memory_uid, memory_space_id, revision FROM memory_registry "
                     f"WHERE document_id IN ({placeholders})",
                     batch,
                 )
@@ -3221,6 +3507,13 @@ class MemoryEngine:
                         affected_topic_uids=affected_by_space.get(
                             memory_space_id, set()
                         ),
+                    )
+                for row in registry_rows:
+                    await self._queue_user_profile_projection(
+                        operation=UserProfileProjectionOperation.DELETE,
+                        timeline_uid=str(row["memory_uid"]),
+                        timeline_revision=int(row["revision"]),
+                        memory_space_id=str(row["memory_space_id"]),
                     )
                 await self._advance_write_op(
                     op_id,

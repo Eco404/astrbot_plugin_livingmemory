@@ -598,6 +598,33 @@ class UserProfileStore:
             ).fetchone()
         return self._row_to_scope(row) if row else None
 
+    async def find_projection_scopes(
+        self,
+        *,
+        timeline_uid: str,
+        memory_space_id: str | None = None,
+    ) -> list[UserProfileScope]:
+        """Resolve scopes previously associated with a Timeline for delete events."""
+        where_space = "AND e.memory_space_id = ?" if memory_space_id else ""
+        params: list[Any] = [timeline_uid]
+        if memory_space_id:
+            params.append(memory_space_id)
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT DISTINCT s.*
+                    FROM user_profile_projection_events e
+                    JOIN user_profile_scopes s
+                      ON s.profile_scope_uid = e.profile_scope_uid
+                    WHERE e.timeline_uid = ? {where_space}
+                    ORDER BY s.created_at
+                    """,
+                    params,
+                )
+            ).fetchall()
+        return [self._row_to_scope(row) for row in rows]
+
     async def set_scope_state(
         self,
         profile_scope_uid: str,
@@ -605,6 +632,8 @@ class UserProfileStore:
         enabled: bool | None = None,
         auto_enable_blocked: bool | None = None,
         has_gap: bool | None = None,
+        projection_cursor: int | None = None,
+        reset_after: float | None | object = ...,
         relationship_frozen: bool | None = None,
         sensitivity_override: str | None | object = ...,
         behavior_override: str | None | object = ...,
@@ -620,6 +649,12 @@ class UserProfileStore:
             if value is not None:
                 assignments.append(f"{column} = ?")
                 values.append(int(value))
+        if projection_cursor is not None:
+            assignments.append("projection_cursor = ?")
+            values.append(max(0, int(projection_cursor)))
+        if reset_after is not ...:
+            assignments.append("reset_after = ?")
+            values.append(reset_after)
         for column, value in (
             ("relationship_sensitivity_override", sensitivity_override),
             ("relationship_behavior_override", behavior_override),
@@ -824,6 +859,339 @@ class UserProfileStore:
                 )
             ).fetchall()
         return [self._fact_row(row) for row in rows]
+
+    async def list_facts_for_maintenance(
+        self, fact_namespace_uid: str
+    ) -> list[dict[str, Any]]:
+        """Return every current logical fact with its immutable display source."""
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT f.*, s.raw_fact, s.actor_id, s.timeline_uid,
+                           s.timeline_revision, s.fact_index, s.claim_type,
+                           s.evidence_started_at, s.evidence_ended_at,
+                           s.active AS representative_source_active
+                    FROM user_profile_facts f
+                    LEFT JOIN user_profile_fact_sources s
+                      ON s.source_uid = f.representative_source_uid
+                    WHERE f.fact_namespace_uid = ?
+                    ORDER BY f.updated_at DESC, f.profile_fact_uid
+                    """,
+                    (fact_namespace_uid,),
+                )
+            ).fetchall()
+        return [self._fact_row(row) for row in rows]
+
+    async def get_fact_namespace_revision(self, fact_namespace_uid: str) -> int:
+        async with self._connect() as db:
+            row = await (
+                await db.execute(
+                    "SELECT current_revision FROM user_profile_fact_namespaces "
+                    "WHERE fact_namespace_uid = ?",
+                    (fact_namespace_uid,),
+                )
+            ).fetchone()
+        if row is None:
+            raise ValueError("Unknown user-profile fact namespace")
+        return int(row["current_revision"])
+
+    async def apply_fact_projection_batch(
+        self,
+        *,
+        fact_namespace_uid: str,
+        projections: Iterable[dict[str, Any]],
+        facts: Iterable[UserProfileFact] = (),
+        source_assignments: dict[str, str] | None = None,
+        conflicts: Iterable[dict[str, Any]] = (),
+        expected_revision: int | None = None,
+        checkpoint_task_uid: str | None = None,
+    ) -> int:
+        """Atomically replace Timeline contributions and publish a fact revision."""
+        projection_list = list(projections)
+        fact_list = list(facts)
+        conflict_list = list(conflicts)
+        assignments = dict(source_assignments or {})
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                row = await (
+                    await db.execute(
+                        "SELECT current_revision FROM user_profile_fact_namespaces "
+                        "WHERE fact_namespace_uid = ?",
+                        (fact_namespace_uid,),
+                    )
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Unknown user-profile fact namespace")
+                current_revision = int(row["current_revision"])
+                if expected_revision is not None and current_revision != expected_revision:
+                    raise UserProfileRevisionConflict(
+                        f"Expected profile revision {expected_revision}, got {current_revision}"
+                    )
+
+                affected_fact_uids: set[str] = set()
+                for projection in projection_list:
+                    timeline_uid = str(projection.get("timeline_uid") or "")
+                    if not timeline_uid:
+                        continue
+                    affected_rows = await (
+                        await db.execute(
+                            """
+                            SELECT DISTINCT s.profile_fact_uid
+                            FROM user_profile_fact_sources s
+                            JOIN user_profile_facts f
+                              ON f.profile_fact_uid = s.profile_fact_uid
+                            WHERE s.timeline_uid = ? AND s.active = 1
+                              AND f.fact_namespace_uid = ?
+                            """,
+                            (timeline_uid, fact_namespace_uid),
+                        )
+                    ).fetchall()
+                    affected_fact_uids.update(
+                        str(item["profile_fact_uid"])
+                        for item in affected_rows
+                        if item["profile_fact_uid"]
+                    )
+                    await db.execute(
+                        """
+                        UPDATE user_profile_fact_sources
+                        SET active = 0, updated_at = ?
+                        WHERE timeline_uid = ? AND active = 1
+                          AND (
+                            profile_fact_uid IS NULL OR profile_fact_uid IN (
+                                SELECT profile_fact_uid FROM user_profile_facts
+                                WHERE fact_namespace_uid = ?
+                            )
+                          )
+                        """,
+                        (now, timeline_uid, fact_namespace_uid),
+                    )
+                    for source in projection.get("sources") or []:
+                        if not isinstance(source, UserProfileFactSource):
+                            continue
+                        await db.execute(
+                            """
+                            INSERT INTO user_profile_fact_sources (
+                                source_uid, profile_fact_uid, timeline_uid,
+                                timeline_revision, fact_index, fact_fingerprint,
+                                raw_fact, actor_id, claim_type,
+                                attribution_confidence, timeline_quality,
+                                evidence_started_at, evidence_ended_at,
+                                source_account_actor_id, active,
+                                created_at, updated_at, metadata
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                            ON CONFLICT(timeline_uid, timeline_revision, fact_index, actor_id)
+                            DO UPDATE SET
+                                raw_fact = excluded.raw_fact,
+                                fact_fingerprint = excluded.fact_fingerprint,
+                                claim_type = excluded.claim_type,
+                                attribution_confidence = excluded.attribution_confidence,
+                                timeline_quality = excluded.timeline_quality,
+                                evidence_started_at = excluded.evidence_started_at,
+                                evidence_ended_at = excluded.evidence_ended_at,
+                                source_account_actor_id = excluded.source_account_actor_id,
+                                active = 1, updated_at = excluded.updated_at,
+                                metadata = excluded.metadata
+                            """,
+                            (
+                                source.source_uid,
+                                source.profile_fact_uid,
+                                source.timeline_uid,
+                                max(1, int(source.timeline_revision)),
+                                max(0, int(source.fact_index)),
+                                source.fact_fingerprint,
+                                source.raw_fact,
+                                source.actor_id,
+                                source.claim_type,
+                                self._score(source.attribution_confidence),
+                                self._json(source.timeline_quality),
+                                source.evidence_started_at,
+                                source.evidence_ended_at,
+                                source.source_account_actor_id,
+                                source.created_at,
+                                now,
+                                self._json(source.metadata),
+                            ),
+                        )
+
+                for fact in fact_list:
+                    await db.execute(
+                        """
+                        INSERT INTO user_profile_facts (
+                            profile_fact_uid, fact_namespace_uid, category, status,
+                            representative_source_uid, confidence, importance,
+                            inference_kind, sensitive, admin_confirmed, pinned,
+                            first_seen_at, last_confirmed_at, fixed_injection_until,
+                            review_after, superseded_by, created_at, updated_at, metadata
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(profile_fact_uid) DO UPDATE SET
+                            category = excluded.category,
+                            status = excluded.status,
+                            representative_source_uid = excluded.representative_source_uid,
+                            confidence = excluded.confidence,
+                            importance = excluded.importance,
+                            inference_kind = excluded.inference_kind,
+                            sensitive = excluded.sensitive,
+                            admin_confirmed = excluded.admin_confirmed,
+                            pinned = excluded.pinned,
+                            first_seen_at = COALESCE(
+                                user_profile_facts.first_seen_at, excluded.first_seen_at
+                            ),
+                            last_confirmed_at = excluded.last_confirmed_at,
+                            fixed_injection_until = excluded.fixed_injection_until,
+                            review_after = excluded.review_after,
+                            superseded_by = excluded.superseded_by,
+                            updated_at = excluded.updated_at,
+                            metadata = excluded.metadata
+                        """,
+                        (
+                            fact.profile_fact_uid,
+                            fact_namespace_uid,
+                            self._enum(fact.category),
+                            self._enum(fact.status),
+                            fact.representative_source_uid,
+                            self._score(fact.confidence),
+                            self._score(fact.importance),
+                            self._enum(fact.inference_kind),
+                            int(fact.sensitive),
+                            int(fact.admin_confirmed),
+                            int(fact.pinned),
+                            fact.first_seen_at,
+                            fact.last_confirmed_at,
+                            fact.fixed_injection_until,
+                            fact.review_after,
+                            fact.superseded_by,
+                            fact.created_at,
+                            now,
+                            self._json(fact.metadata),
+                        ),
+                    )
+                    affected_fact_uids.add(fact.profile_fact_uid)
+
+                for source_uid, profile_fact_uid in assignments.items():
+                    cursor = await db.execute(
+                        """
+                        UPDATE user_profile_fact_sources
+                        SET profile_fact_uid = ?, updated_at = ?
+                        WHERE source_uid = ? AND active = 1
+                        """,
+                        (profile_fact_uid, now, source_uid),
+                    )
+                    if cursor.rowcount != 1:
+                        raise ValueError(f"Unknown active profile source: {source_uid}")
+                    affected_fact_uids.add(profile_fact_uid)
+
+                for conflict in conflict_list:
+                    conflict_uid = str(conflict.get("conflict_uid") or uuid.uuid4())
+                    await db.execute(
+                        """
+                        INSERT INTO user_profile_conflicts (
+                            conflict_uid, fact_namespace_uid, topic_key, fact_uids,
+                            status, first_detected_at, last_evidence_at,
+                            resolution, resolution_reason, created_at, updated_at,
+                            metadata
+                        ) VALUES (?, ?, ?, ?, 'open', ?, ?, NULL, ?, ?, ?, '{}')
+                        """,
+                        (
+                            conflict_uid,
+                            fact_namespace_uid,
+                            str(conflict.get("topic_key") or "")[:500],
+                            self._json(conflict.get("fact_uids") or []),
+                            now,
+                            now,
+                            str(conflict.get("reason") or "")[:2000] or None,
+                            now,
+                            now,
+                        ),
+                    )
+
+                for fact_uid in affected_fact_uids:
+                    fact_row = await (
+                        await db.execute(
+                            "SELECT status, representative_source_uid "
+                            "FROM user_profile_facts WHERE profile_fact_uid = ? "
+                            "AND fact_namespace_uid = ?",
+                            (fact_uid, fact_namespace_uid),
+                        )
+                    ).fetchone()
+                    if fact_row is None:
+                        continue
+                    best = await (
+                        await db.execute(
+                            """
+                            SELECT source_uid FROM user_profile_fact_sources
+                            WHERE profile_fact_uid = ? AND active = 1
+                            ORDER BY attribution_confidence DESC,
+                                     COALESCE(evidence_ended_at, updated_at) DESC,
+                                     timeline_revision DESC LIMIT 1
+                            """,
+                            (fact_uid,),
+                        )
+                    ).fetchone()
+                    status = str(fact_row["status"])
+                    if best is None and status in {"active", "pending", "stale"}:
+                        await db.execute(
+                            "UPDATE user_profile_facts SET status = 'archived', "
+                            "updated_at = ? WHERE profile_fact_uid = ?",
+                            (now, fact_uid),
+                        )
+                    elif best is not None:
+                        representative_active = await (
+                            await db.execute(
+                                "SELECT active FROM user_profile_fact_sources "
+                                "WHERE source_uid = ?",
+                                (str(fact_row["representative_source_uid"]),),
+                            )
+                        ).fetchone()
+                        if representative_active is None or not bool(
+                            representative_active["active"]
+                        ):
+                            await db.execute(
+                                "UPDATE user_profile_facts "
+                                "SET representative_source_uid = ?, updated_at = ? "
+                                "WHERE profile_fact_uid = ?",
+                                (str(best["source_uid"]), now, fact_uid),
+                            )
+
+                new_revision = current_revision + 1
+                await db.execute(
+                    "UPDATE user_profile_fact_namespaces "
+                    "SET current_revision = ?, updated_at = ? "
+                    "WHERE fact_namespace_uid = ?",
+                    (new_revision, now, fact_namespace_uid),
+                )
+                if checkpoint_task_uid:
+                    task_row = await (
+                        await db.execute(
+                            "SELECT result_summary FROM user_profile_tasks "
+                            "WHERE task_uid = ?",
+                            (checkpoint_task_uid,),
+                        )
+                    ).fetchone()
+                    if task_row is None:
+                        raise ValueError("Unknown user-profile checkpoint task")
+                    summary = self._json_object(task_row["result_summary"])
+                    summary.update(
+                        {
+                            "facts_checkpoint": True,
+                            "fact_revision": new_revision,
+                        }
+                    )
+                    await db.execute(
+                        """
+                        UPDATE user_profile_tasks
+                        SET status = 'facts_completed', result_summary = ?,
+                            error = NULL, updated_at = ?
+                        WHERE task_uid = ?
+                        """,
+                        (self._json(summary), now, checkpoint_task_uid),
+                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return new_revision
 
     async def get_relationship(
         self, profile_scope_uid: str
@@ -1054,6 +1422,58 @@ class UserProfileStore:
             ).fetchall()
         return [self._event_row(row) for row in rows]
 
+    async def list_projection_events_for_scope(
+        self,
+        profile_scope_uid: str,
+        *,
+        statuses: Iterable[str] = ("pending",),
+        limit: int = 64,
+    ) -> list[dict[str, Any]]:
+        status_list = [str(item) for item in statuses]
+        if not status_list:
+            return []
+        placeholders = ",".join("?" for _ in status_list)
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT * FROM user_profile_projection_events
+                    WHERE profile_scope_uid = ?
+                      AND status IN ({placeholders})
+                    ORDER BY sequence ASC LIMIT ?
+                    """,
+                    [
+                        profile_scope_uid,
+                        *status_list,
+                        max(1, min(1000, int(limit))),
+                    ],
+                )
+            ).fetchall()
+        return [self._event_row(row) for row in rows]
+
+    async def list_recoverable_tasks(self, *, limit: int = 64) -> list[dict[str, Any]]:
+        now = time.time()
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT task_uid FROM user_profile_tasks
+                    WHERE status IN (
+                        'pending', 'running_facts', 'facts_completed',
+                        'facts_failed', 'running_relationship'
+                    ) AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                    ORDER BY created_at ASC LIMIT ?
+                    """,
+                    (now, max(1, min(1000, int(limit)))),
+                )
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            task = await self.get_task(str(row["task_uid"]))
+            if task is not None:
+                result.append(task)
+        return result
+
     async def update_projection_event(
         self,
         event_uid: str,
@@ -1073,6 +1493,82 @@ class UserProfileStore:
                 (status, profile_scope_uid, error, time.time(), event_uid),
             )
             await db.commit()
+
+    async def update_task_items(
+        self,
+        task_uid: str,
+        *,
+        status: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        now = time.time()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                UPDATE user_profile_task_items
+                SET status = ?, result = COALESCE(?, result), updated_at = ?
+                WHERE task_uid = ?
+                """,
+                (
+                    status,
+                    self._json(result) if result is not None else None,
+                    now,
+                    task_uid,
+                ),
+            )
+            await db.commit()
+
+    async def finish_task_events(
+        self,
+        task_uid: str,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> int:
+        """Move every event in a task to one final or retryable status."""
+        now = time.time()
+        async with self._connect() as db:
+            await db.execute(
+                """
+                UPDATE user_profile_projection_events
+                SET status = ?, error = ?, updated_at = ?
+                WHERE event_uid IN (
+                    SELECT event_uid FROM user_profile_task_items WHERE task_uid = ?
+                )
+                """,
+                (status, error, now, task_uid),
+            )
+            row = await (
+                await db.execute(
+                    """
+                    SELECT COALESCE(MAX(e.sequence), 0) AS max_sequence
+                    FROM user_profile_projection_events e
+                    JOIN user_profile_task_items i ON i.event_uid = e.event_uid
+                    WHERE i.task_uid = ?
+                    """,
+                    (task_uid,),
+                )
+            ).fetchone()
+            await db.commit()
+        return int(row["max_sequence"] if row else 0)
+
+    async def mark_memory_space_gap(self, memory_space_id: str) -> int:
+        """Mark known private scopes for a failed Timeline projection."""
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                UPDATE user_profile_scopes
+                SET has_gap = 1, updated_at = ?
+                WHERE profile_scope_uid IN (
+                    SELECT DISTINCT profile_scope_uid
+                    FROM user_profile_projection_events
+                    WHERE memory_space_id = ? AND profile_scope_uid IS NOT NULL
+                )
+                """,
+                (time.time(), memory_space_id),
+            )
+            await db.commit()
+        return max(0, int(cursor.rowcount))
 
     async def create_task(
         self,
@@ -1146,8 +1642,17 @@ class UserProfileStore:
                 return None
             items = await (
                 await db.execute(
-                    "SELECT * FROM user_profile_task_items "
-                    "WHERE task_uid = ? ORDER BY item_order",
+                    """
+                    SELECT i.*, e.sequence AS event_sequence,
+                           e.operation AS event_operation,
+                           e.memory_space_id AS event_memory_space_id,
+                           e.profile_scope_uid AS event_profile_scope_uid,
+                           e.payload AS event_payload
+                    FROM user_profile_task_items i
+                    JOIN user_profile_projection_events e
+                      ON e.event_uid = i.event_uid
+                    WHERE i.task_uid = ? ORDER BY i.item_order
+                    """,
                     (task_uid,),
                 )
             ).fetchall()
@@ -1159,10 +1664,14 @@ class UserProfileStore:
             "result_summary",
         ):
             result[key] = self._json_object(result[key])
-        result["items"] = [
-            {**dict(item), "result": self._json_object(item["result"])}
-            for item in items
-        ]
+        result["items"] = []
+        for item in items:
+            converted = dict(item)
+            converted["result"] = self._json_object(converted["result"])
+            converted["event_payload"] = self._json_object(
+                converted["event_payload"]
+            )
+            result["items"].append(converted)
         return result
 
     async def update_task(
