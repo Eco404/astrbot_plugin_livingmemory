@@ -20,6 +20,7 @@ from ...storage.atom_store import AtomStore
 from ...storage.graph_store import GraphStore
 from ...storage.memory_identity_store import MemoryIdentityStore
 from ...storage.topic_memory_store import TopicMemoryStore
+from ...storage.user_profile_store import UserProfileStore
 from ..managers.atom_lifecycle_manager import AtomLifecycleManager
 from ..managers.graph_memory_manager import GraphMemoryManager
 from ..models.memory_atom import AtomStatus, AtomType, DecayType, MemoryAtom
@@ -50,6 +51,13 @@ from ..topic_settings import (
     validate_topic_setting,
 )
 from ..topic_vector_index import TopicVectorIndex
+from ..user_profile_settings import (
+    USER_PROFILE_SETTING_DEFINITIONS,
+    USER_PROFILE_SETTINGS_REVISION,
+    effective_user_profile_settings,
+    validate_user_profile_setting,
+    validate_user_profile_settings,
+)
 from .topic_build_manager import TopicBuildManager
 from .topic_maintenance_manager import TopicMaintenanceManager
 
@@ -176,6 +184,8 @@ class MemoryEngine:
         self.atom_retriever = None
         self.memory_identity_store = MemoryIdentityStore(self.db_path)
         self.topic_memory_store = TopicMemoryStore(self.db_path)
+        self.user_profile_store = UserProfileStore(self.db_path)
+        self.user_profile_config: dict[str, Any] = effective_user_profile_settings()
         self.topic_vector_index = TopicVectorIndex(self.topic_memory_store)
         self.topic_maintenance_manager = TopicMaintenanceManager(
             self.db_path,
@@ -246,7 +256,9 @@ class MemoryEngine:
         await self._create_tables()
         await self.memory_identity_store.initialize()
         await self.topic_memory_store.initialize()
+        await self.user_profile_store.initialize()
         await self._initialize_topic_runtime_settings()
+        await self._initialize_user_profile_runtime_settings()
 
         # 3. 初始化文本处理器
         stopwords_path = self.config.get("stopwords_path")
@@ -957,6 +969,96 @@ class MemoryEngine:
         )
         self.apply_topic_runtime_settings(stored)
         return await self.get_topic_runtime_settings()
+
+    async def _initialize_user_profile_runtime_settings(self) -> None:
+        stored = await self.user_profile_store.get_setting_overrides()
+        if not stored.get("__plugin_config_imported_v1__"):
+            imported: dict[str, Any] = {}
+            initial = self.config.get("user_profile_initial_overrides", {})
+            if isinstance(initial, dict):
+                for short_key, value in initial.items():
+                    key = f"user_profile.{short_key}"
+                    if key not in USER_PROFILE_SETTING_DEFINITIONS:
+                        continue
+                    try:
+                        imported[key] = validate_user_profile_setting(key, value)
+                    except ValueError:
+                        continue
+            imported["__plugin_config_imported_v1__"] = True
+            stored = await self.user_profile_store.update_setting_overrides(
+                imported,
+                settings_revision=USER_PROFILE_SETTINGS_REVISION,
+            )
+        self.apply_user_profile_runtime_settings(stored)
+
+    def apply_user_profile_runtime_settings(
+        self, overrides: dict[str, Any]
+    ) -> dict[str, Any]:
+        public_overrides = {
+            key: value
+            for key, value in overrides.items()
+            if key in USER_PROFILE_SETTING_DEFINITIONS
+        }
+        effective = effective_user_profile_settings(public_overrides)
+        self.user_profile_config = effective
+        manager = getattr(self, "user_profile_maintenance_manager", None)
+        if manager is not None:
+            manager.apply_config(effective)
+        return effective
+
+    async def get_user_profile_runtime_settings(self) -> dict[str, Any]:
+        stored = await self.user_profile_store.get_setting_overrides()
+        overrides = {
+            key: value
+            for key, value in stored.items()
+            if key in USER_PROFILE_SETTING_DEFINITIONS
+        }
+        effective = effective_user_profile_settings(overrides)
+        definitions = {
+            key: {**definition, "customized": key in overrides}
+            for key, definition in USER_PROFILE_SETTING_DEFINITIONS.items()
+        }
+        return {
+            "settings_revision": USER_PROFILE_SETTINGS_REVISION,
+            "definitions": definitions,
+            "overrides": overrides,
+            "effective": effective,
+        }
+
+    async def update_user_profile_runtime_settings(
+        self,
+        changes: dict[str, Any],
+        *,
+        reset_keys: list[str] | None = None,
+        reset_all: bool = False,
+    ) -> dict[str, Any]:
+        normalized = {
+            str(key): validate_user_profile_setting(str(key), value)
+            for key, value in changes.items()
+        }
+        normalized_reset = [
+            str(key)
+            for key in (reset_keys or [])
+            if str(key) in USER_PROFILE_SETTING_DEFINITIONS
+        ]
+        current = await self.get_user_profile_runtime_settings()
+        prospective_overrides = dict(current["overrides"])
+        if reset_all:
+            prospective_overrides.clear()
+        else:
+            for key in normalized_reset:
+                prospective_overrides.pop(key, None)
+        prospective_overrides.update(normalized)
+        prospective = effective_user_profile_settings(prospective_overrides)
+        validate_user_profile_settings(prospective)
+        stored = await self.user_profile_store.update_setting_overrides(
+            normalized,
+            reset_keys=normalized_reset,
+            reset_all=bool(reset_all),
+            settings_revision=USER_PROFILE_SETTINGS_REVISION,
+        )
+        self.apply_user_profile_runtime_settings(stored)
+        return await self.get_user_profile_runtime_settings()
 
     def _serialize_atom_for_repair(self, atom: Any) -> dict[str, Any]:
         """Convert a MemoryAtom-like object into JSON-safe repair payload."""

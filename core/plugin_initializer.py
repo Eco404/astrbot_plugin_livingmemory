@@ -851,6 +851,9 @@ class PluginInitializer:
                 "topic_memory_legacy_overrides": self.config_manager.get_raw_section(
                     "topic_memory"
                 ),
+                "user_profile_initial_overrides": self.config_manager.get_raw_section(
+                    "user_profile"
+                ),
             }
 
             self.memory_engine = MemoryEngine(

@@ -11,6 +11,7 @@ from ..timeline_settings import (
     TIMELINE_SETTING_DEFINITIONS,
 )
 from ..topic_settings import TOPIC_SETTING_DEFINITIONS
+from ..user_profile_settings import USER_PROFILE_SETTING_DEFINITIONS
 
 if TYPE_CHECKING:
     from .utils import PageApiUtils
@@ -19,11 +20,14 @@ if TYPE_CHECKING:
 _CATEGORY_ORDER = (
     "recall", "timeline", "topic", "session", "graph",
     "lifecycle", "model", "index", "maintenance",
+    "user_profile",
 )
 
 
 def _placement(owner: str, key: str, definition: dict[str, Any]) -> tuple[str, str]:
     category = str(definition.get("category") or "")
+    if owner == "user_profile":
+        return "user_profile", f"user_profile_{definition.get('group') or 'basic'}"
     if owner == "topic":
         if category == "recall":
             return "recall", "topic_recall"
@@ -88,6 +92,15 @@ _GROUP_LABELS = {
     "timeline_index": "settings.group.timelineIndex",
     "backup": "settings.group.backup",
     "database_maintenance": "settings.group.databaseMaintenance",
+    "user_profile_basic": "settings.group.userProfileBasic",
+    "user_profile_model_tasks": "settings.group.userProfileModelTasks",
+    "user_profile_fact_admission": "settings.group.userProfileFactAdmission",
+    "user_profile_inference": "settings.group.userProfileInference",
+    "user_profile_conflicts": "settings.group.userProfileConflicts",
+    "user_profile_lifecycle": "settings.group.userProfileLifecycle",
+    "user_profile_injection": "settings.group.userProfileInjection",
+    "user_profile_relationship": "settings.group.userProfileRelationship",
+    "user_profile_recovery": "settings.group.userProfileRecovery",
 }
 
 
@@ -98,8 +111,8 @@ class SettingsHandler:
     async def get_settings(self, memory_engine: Any, initializer: Any) -> dict[str, Any]:
         try:
             view = str(request.args.get("view") or "").strip().lower()
-            if view not in {"", "timeline", "topic"}:
-                return self.utils.error("view 只能是 timeline 或 topic")
+            if view not in {"", "timeline", "topic", "user_profile"}:
+                return self.utils.error("view 只能是 timeline、topic 或 user_profile")
             return self.utils.ok(
                 await self._payload(memory_engine, initializer, view=view or None)
             )
@@ -112,13 +125,17 @@ class SettingsHandler:
         reset_keys = payload.get("reset_keys", [])
         reset_all = bool(payload.get("reset_all", False))
         view = str(payload.get("view") or request.args.get("view") or "").strip().lower()
-        if view not in {"", "timeline", "topic"}:
-            return self.utils.error("view 只能是 timeline 或 topic")
+        if view not in {"", "timeline", "topic", "user_profile"}:
+            return self.utils.error("view 只能是 timeline、topic 或 user_profile")
         if not isinstance(changes, dict):
             return self.utils.error("changes 必须是对象")
         if not isinstance(reset_keys, list):
             return self.utils.error("reset_keys 必须是数组")
-        known = set(TIMELINE_SETTING_DEFINITIONS) | set(TOPIC_SETTING_DEFINITIONS)
+        known = (
+            set(TIMELINE_SETTING_DEFINITIONS)
+            | set(TOPIC_SETTING_DEFINITIONS)
+            | set(USER_PROFILE_SETTING_DEFINITIONS)
+        )
         supplied = set(changes) | {str(key) for key in reset_keys}
         unknown = supplied - known
         if unknown:
@@ -135,8 +152,15 @@ class SettingsHandler:
             key: value for key, value in changes.items()
             if key in TIMELINE_SETTING_DEFINITIONS
         }
+        profile_changes = {
+            key: value for key, value in changes.items()
+            if key in USER_PROFILE_SETTING_DEFINITIONS
+        }
         topic_resets = [key for key in reset_keys if key in TOPIC_SETTING_DEFINITIONS]
         timeline_resets = [key for key in reset_keys if key in TIMELINE_SETTING_DEFINITIONS]
+        profile_resets = [
+            key for key in reset_keys if key in USER_PROFILE_SETTING_DEFINITIONS
+        ]
         if reset_all and view == "topic":
             timeline_resets = sorted(set(timeline_resets) | set(SHARED_QUERY_SETTING_KEYS))
         try:
@@ -152,6 +176,14 @@ class SettingsHandler:
                     reset_keys=timeline_resets,
                     reset_all=reset_all and (not view or view == "timeline"),
                 )
+            if profile_changes or profile_resets or (
+                reset_all and (not view or view == "user_profile")
+            ):
+                await memory_engine.update_user_profile_runtime_settings(
+                    profile_changes,
+                    reset_keys=profile_resets,
+                    reset_all=reset_all and (not view or view == "user_profile"),
+                )
             return self.utils.ok(
                 await self._payload(memory_engine, initializer, view=view or None)
             )
@@ -164,7 +196,13 @@ class SettingsHandler:
             return set(TIMELINE_SETTING_DEFINITIONS)
         if view == "topic":
             return set(TOPIC_SETTING_DEFINITIONS) | set(SHARED_QUERY_SETTING_KEYS)
-        return set(TIMELINE_SETTING_DEFINITIONS) | set(TOPIC_SETTING_DEFINITIONS)
+        if view == "user_profile":
+            return set(USER_PROFILE_SETTING_DEFINITIONS)
+        return (
+            set(TIMELINE_SETTING_DEFINITIONS)
+            | set(TOPIC_SETTING_DEFINITIONS)
+            | set(USER_PROFILE_SETTING_DEFINITIONS)
+        )
 
     async def _payload(
         self,
@@ -175,6 +213,7 @@ class SettingsHandler:
     ) -> dict[str, Any]:
         timeline = await initializer.get_timeline_runtime_settings()
         topic = await memory_engine.get_topic_runtime_settings()
+        user_profile = await memory_engine.get_user_profile_runtime_settings()
         build_active = bool(memory_engine.topic_build_manager.has_active_builds())
         allowed = self._view_keys(view)
         definitions: dict[str, dict[str, Any]] = {}
@@ -184,8 +223,13 @@ class SettingsHandler:
         for owner, source in (
             ("timeline", TIMELINE_SETTING_DEFINITIONS),
             ("topic", TOPIC_SETTING_DEFINITIONS),
+            ("user_profile", USER_PROFILE_SETTING_DEFINITIONS),
         ):
-            source_payload = timeline if owner == "timeline" else topic
+            source_payload = {
+                "timeline": timeline,
+                "topic": topic,
+                "user_profile": user_profile,
+            }[owner]
             for key, raw_definition in source.items():
                 if key not in allowed:
                     continue

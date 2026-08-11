@@ -2091,6 +2091,19 @@ class TestSharedTopicQuerySettings:
             ),
         }
 
+    @staticmethod
+    def _user_profile_payload():
+        from astrbot_plugin_livingmemory.core.user_profile_settings import (
+            USER_PROFILE_SETTING_DEFINITIONS,
+            effective_user_profile_settings,
+        )
+
+        return {
+            "definitions": USER_PROFILE_SETTING_DEFINITIONS,
+            "overrides": {},
+            "effective": effective_user_profile_settings({}),
+        }
+
     @pytest.mark.asyncio
     async def test_topic_settings_include_shared_query_controls(self, api):
         engine = api.plugin.initializer.memory_engine
@@ -2172,6 +2185,9 @@ class TestSharedTopicQuerySettings:
             }
         )
         engine.topic_build_manager = SimpleNamespace(has_active_builds=lambda: False)
+        engine.get_user_profile_runtime_settings = AsyncMock(
+            return_value=self._user_profile_payload()
+        )
         api.plugin.initializer.get_timeline_runtime_settings = AsyncMock(
             return_value=self._timeline_payload()
         )
@@ -2186,7 +2202,9 @@ class TestSharedTopicQuerySettings:
         assert data["definitions"]["recall_top_k"]["settings_category"] == "recall"
         assert data["definitions"]["related_topic_top_n"]["settings_group"] == "topic_relations"
         assert data["definitions"]["recall_engine.recent_user_weight"]["views"] == ["timeline", "topic"]
-        assert {item["id"] for item in data["categories"]} >= {"recall", "timeline", "topic"}
+        assert {item["id"] for item in data["categories"]} >= {
+            "recall", "timeline", "topic", "user_profile"
+        }
 
     @pytest.mark.asyncio
     async def test_unified_settings_update_splits_internal_owners(self, api):
@@ -2204,6 +2222,12 @@ class TestSharedTopicQuerySettings:
         engine.get_topic_runtime_settings = AsyncMock(return_value=topic_payload)
         engine.update_topic_runtime_settings = AsyncMock(return_value=topic_payload)
         engine.topic_build_manager = SimpleNamespace(has_active_builds=lambda: False)
+        engine.get_user_profile_runtime_settings = AsyncMock(
+            return_value=self._user_profile_payload()
+        )
+        engine.update_user_profile_runtime_settings = AsyncMock(
+            return_value=self._user_profile_payload()
+        )
         initializer = api.plugin.initializer
         initializer.get_timeline_runtime_settings = AsyncMock(
             return_value=self._timeline_payload()
