@@ -1476,6 +1476,63 @@ async def test_top_k_0_skips_search_memories(
 
 
 @pytest.mark.asyncio
+async def test_top_k_0_still_injects_current_user_profile(
+    tmp_path, memory_engine, memory_processor, conversation_manager
+):
+    from astrbot_plugin_livingmemory.core.models.user_profile import (
+        UserProfileFact,
+        UserProfileFactCategory,
+        UserProfileFactSource,
+    )
+    from astrbot_plugin_livingmemory.storage.user_profile_store import UserProfileStore
+
+    store = UserProfileStore(str(tmp_path / "event-profile.db"))
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="test:human:user-1",
+        bot_account="test",
+        persona_id="persona_1",
+    )
+    assert scope is not None
+    source = UserProfileFactSource(
+        timeline_uid="timeline-event-profile",
+        timeline_revision=1,
+        fact_index=0,
+        raw_fact="用户常住杭州",
+        actor_id="test:human:user-1",
+    )
+    await store.save_fact_sources([source])
+    fact = UserProfileFact(
+        fact_namespace_uid=scope.fact_namespace_uid,
+        category=UserProfileFactCategory.STABLE_INFO,
+        representative_source_uid=source.source_uid,
+    )
+    await store.publish_fact_changes(
+        fact_namespace_uid=scope.fact_namespace_uid,
+        upserts=[fact],
+        source_assignments={source.source_uid: fact.profile_fact_uid},
+    )
+    memory_engine.user_profile_store = store
+    memory_engine.user_profile_config = {"user_profile.injection_enabled": True}
+    handler = _make_handler_with_top_k_0(
+        memory_engine, memory_processor, conversation_manager
+    )
+    event = _make_event(group=False)
+    req = _make_req("杭州天气如何")
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.event_handler.get_persona_id",
+        new=AsyncMock(return_value="persona_1"),
+    ):
+        await handler.handle_memory_recall(event, req)
+
+    assert len(req.extra_user_content_parts) == 1
+    assert "用户常住杭州" in req.extra_user_content_parts[0].text
+    assert req.extra_user_content_parts[0]._no_save is True
+    memory_engine.search_memories.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_top_k_0_still_cleans_injected_memories(
     memory_engine, memory_processor, conversation_manager
 ):

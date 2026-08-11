@@ -24,6 +24,11 @@ from ..retrieval.unified_recall import (
     UnifiedRecallCoordinator,
     UnifiedRecallRequest,
 )
+from ..user_profile_injection import (
+    PROFILE_INJECTION_FOOTER,
+    PROFILE_INJECTION_HEADER,
+    UserProfileInjectionService,
+)
 from ..utils import (
     OperationContext,
     format_memories_for_fake_tool_call,
@@ -121,6 +126,9 @@ class MemoryRecall:
                         logger.info(
                             f"[{session_id}] 已清理 {removed} 处历史记忆注入片段"
                         )
+                profile_removed = self._remove_user_profile_injection(req)
+                if profile_removed:
+                    logger.info(f"[{session_id}] 已清理 {profile_removed} 处历史用户画像注入")
 
                 # 先提取用户消息（消息存储和召回都需要）。组件提取保留
                 # 图片、文件等非纯文本消息，避免它们从原始证据链中消失。
@@ -141,6 +149,21 @@ class MemoryRecall:
 
                 # 存储用户消息（仅私聊），无论是否启用召回都需要
                 is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
+                sender_id = (
+                    event.get_sender_id()
+                    if hasattr(event, "get_sender_id")
+                    else getattr(event, "sender_id", "")
+                )
+                platform = (
+                    event.get_platform_name()
+                    if hasattr(event, "get_platform_name")
+                    else ""
+                )
+                actor_id = (
+                    stable_actor_id(platform, str(sender_id), "human")
+                    if sender_id
+                    else ""
+                )
                 stored_user_message = None
                 if not is_group and actual_query:
                     # 原始事件内容优先于 ProviderRequest.prompt，后者可能已被
@@ -154,16 +177,6 @@ class MemoryRecall:
                     )
                     await self.message_utils.enforce_message_limit(session_id)
                     if stored_user_message is not None:
-                        sender_id = (
-                            event.get_sender_id()
-                            if hasattr(event, "get_sender_id")
-                            else getattr(event, "sender_id", "")
-                        )
-                        platform = (
-                            event.get_platform_name()
-                            if hasattr(event, "get_platform_name")
-                            else ""
-                        )
                         display_name = (
                             event.get_sender_name()
                             if hasattr(event, "get_sender_name")
@@ -179,15 +192,55 @@ class MemoryRecall:
                                 await ensure_profile(
                                     session_id=session_id,
                                     persona_id=persona_id,
-                                    actor_id=stable_actor_id(
-                                        platform, str(sender_id), "human"
-                                    ),
+                                    actor_id=actor_id,
                                     display_name=(
                                         str(display_name)
                                         if display_name is not None
                                         else None
                                     ),
                                 )
+
+                if (
+                    not is_group
+                    and actor_id
+                ):
+                    profile_config = getattr(
+                        self.memory_engine, "user_profile_config", None
+                    )
+                    if not isinstance(profile_config, dict):
+                        profile_config = {}
+                    store = getattr(self.memory_engine, "user_profile_store", None)
+                    scope_loader = getattr(store, "get_scope_by_actor", None)
+                    if bool(
+                        profile_config.get("user_profile.injection_enabled", True)
+                    ) and inspect.iscoroutinefunction(scope_loader):
+                        try:
+                            profile = await UserProfileInjectionService(
+                                store, profile_config
+                            ).render_current_user(
+                                session_id=session_id,
+                                persona_id=persona_id,
+                                actor_id=actor_id,
+                                query=actual_query or request_query,
+                            )
+                            if profile.status == "available":
+                                if getattr(req, "extra_user_content_parts", None) is None:
+                                    req.extra_user_content_parts = []
+                                req.extra_user_content_parts.append(
+                                    TextPart(text=profile.content).mark_as_temp()
+                                )
+                                logger.info(
+                                    f"[{session_id}] 已注入当前用户画像 "
+                                    f"({profile.fact_count} 条事实, "
+                                    f"{profile.total_chars} 字符)"
+                                )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            logger.warning(
+                                f"[{session_id}] 当前用户画像读取失败，继续普通记忆召回",
+                                exc_info=True,
+                            )
 
                 # 若 top_k <= 0，跳过记忆检索和注入，但上述清理和消息存储已执行
                 top_k = self.config_manager.get("recall_engine.top_k", 5)
@@ -798,6 +851,24 @@ class MemoryRecall:
             and MEMORY_INJECTION_HEADER in text
             and MEMORY_INJECTION_FOOTER in text
         )
+
+    @staticmethod
+    def _remove_user_profile_injection(req: ProviderRequest) -> int:
+        parts = list(getattr(req, "extra_user_content_parts", []) or [])
+        kept = []
+        removed = 0
+        for part in parts:
+            text = getattr(part, "text", "")
+            if (
+                isinstance(text, str)
+                and PROFILE_INJECTION_HEADER in text
+                and PROFILE_INJECTION_FOOTER in text
+            ):
+                removed += 1
+            else:
+                kept.append(part)
+        req.extra_user_content_parts = kept
+        return removed
 
     async def _cache_current_query_vector(
         self, message, recall_outcome, topic_outcome
