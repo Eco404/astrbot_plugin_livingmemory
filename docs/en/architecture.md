@@ -12,6 +12,30 @@ LivingMemory uses Timeline as its editable source layer and Topic as its derived
 | Timeline | Summary, facts, topics, affect, actor bindings | Yes | Chronological experience |
 | Formal fragment | One retrieval intent plus fact-level provenance | No | Topic construction and concise supplements |
 | Topic | Derived summary, atoms, actors, relations, affect | No | Cross-time organization and primary recall |
+| User profile | Objective facts about the current user plus persona relationship state | Governance operations only | Private-user context and attitude continuity |
+
+## User-profile derived layer
+
+User profiles derive from Timeline alongside Topic; they are not a freely editable source-memory layer:
+
+```text
+stable private actor + Timeline revision
+  -> objective sources and conflict projection
+  -> Bot/persona/user profile revision
+
+new user-side interaction
+  -> persona/user relationship revision
+
+current private request
+  -> resolve its exact scope
+  -> inject within a hard character budget
+```
+
+Objective facts keep the original Timeline key-fact text. The maintenance model may decide admission, category, confidence, importance, conflicts, and lifecycle, but cannot rewrite source text. Timeline edits, reconstruction, archive, and deletion withdraw the old revision's contribution and atomically publish a new profile; a failed job leaves the old profile available.
+
+Relationship state is the current persona's subjective view of a logical user: six continuous dimensions, a few tags, a first-person narrative, and a short-lived aftereffect. It may read non-sensitive objective facts as context, but requires a new user-side interaction to change. It cannot create objective facts or feed Timeline summarization.
+
+A stable account maps to a logical user. Objective facts are isolated by Bot account, persona, and logical user by default; an explicit share group can join selected scopes for the same logical user. Relationship state always stays persona-specific. Nicknames never merge identity, and cross-platform accounts require manual administrator binding.
 
 ## Identity and provenance
 
