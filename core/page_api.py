@@ -25,6 +25,7 @@ from .page_api_modules import (
     StatsHandler,
     TimelineHandler,
     TopicHandler,
+    UserProfileHandler,
 )
 
 PLUGIN_NAME = "astrbot_plugin_livingmemory"
@@ -51,6 +52,7 @@ class PluginPageApi:
         self.identity_handler = IdentityHandler(self.utils)
         self.topic_handler = TopicHandler(self.utils)
         self.timeline_handler = TimelineHandler(self.utils)
+        self.user_profile_handler = UserProfileHandler(self.utils)
         self.database_handler = DatabaseHandler(self.utils)
 
         # BackupHandler 需要 data_dir，延迟初始化
@@ -525,6 +527,39 @@ class PluginPageApi:
             ["POST"],
             "LivingMemory Page save supplemental identity profiles",
         )
+        user_profile_routes = (
+            ("/user-profiles", self.list_user_profiles, ["GET"]),
+            ("/user-profiles/detail", self.get_user_profile_detail, ["GET"]),
+            ("/user-profiles/enable", self.enable_user_profile, ["POST"]),
+            ("/user-profiles/disable", self.disable_user_profile, ["POST"]),
+            ("/user-profiles/reset", self.reset_user_profile, ["POST"]),
+            ("/user-profiles/delete-disable", self.delete_disable_user_profile, ["POST"]),
+            ("/user-profiles/facts/action", self.user_profile_fact_action, ["POST"]),
+            ("/user-profiles/conflicts/resolve", self.resolve_user_profile_conflict, ["POST"]),
+            ("/user-profiles/rebuild/preview", self.preview_user_profile_rebuild, ["POST"]),
+            ("/user-profiles/rebuild/start", self.start_user_profile_rebuild, ["POST"]),
+            ("/user-profiles/tasks", self.list_user_profile_tasks, ["GET"]),
+            ("/user-profiles/task", self.get_user_profile_task, ["GET"]),
+            ("/user-profiles/tasks/retry", self.retry_user_profile_task, ["POST"]),
+            ("/user-profiles/relationship/update", self.update_user_relationship, ["POST"]),
+            ("/user-profiles/relationship/freeze", self.freeze_user_relationship, ["POST"]),
+            ("/user-profiles/relationship/reset", self.reset_user_relationship, ["POST"]),
+            ("/user-profiles/relationship/rollback", self.rollback_user_relationship, ["POST"]),
+            ("/user-profiles/relationship/rebuild", self.rebuild_user_relationship, ["POST"]),
+            ("/user-profiles/accounts/bind/preview", self.preview_user_profile_account_binding, ["POST"]),
+            ("/user-profiles/accounts/bind", self.bind_user_profile_accounts, ["POST"]),
+            ("/user-profiles/accounts/unbind/preview", self.preview_user_profile_account_unbind, ["POST"]),
+            ("/user-profiles/accounts/unbind", self.unbind_user_profile_account, ["POST"]),
+            ("/user-profiles/share-groups/preview", self.preview_user_profile_share_group, ["POST"]),
+            ("/user-profiles/share-groups/save", self.save_user_profile_share_group, ["POST"]),
+        )
+        for suffix, handler, methods in user_profile_routes:
+            register(
+                f"{PAGE_API_PREFIX}{suffix}",
+                handler,
+                methods,
+                f"LivingMemory Page {suffix.removeprefix('/')}",
+            )
 
     # ==================== 路由处理方法 ====================
     # 所有方法都委托给相应的处理器
@@ -1083,6 +1118,85 @@ class PluginPageApi:
             platform_manager=getattr(self.plugin.context, "platform_manager", None),
             conversation_manager=ready.get("conversation_manager"),
         )
+
+    async def list_user_profiles(self):
+        return await self._with_user_profiles("list_profiles")
+
+    async def get_user_profile_detail(self):
+        return await self._with_user_profiles("get_detail")
+
+    async def enable_user_profile(self):
+        return await self._with_user_profiles("set_enabled", True)
+
+    async def disable_user_profile(self):
+        return await self._with_user_profiles("set_enabled", False)
+
+    async def reset_user_profile(self):
+        return await self._with_user_profiles("reset_profile")
+
+    async def delete_disable_user_profile(self):
+        return await self._with_user_profiles("delete_disable")
+
+    async def user_profile_fact_action(self):
+        return await self._with_user_profiles("fact_action")
+
+    async def resolve_user_profile_conflict(self):
+        return await self._with_user_profiles("resolve_conflict")
+
+    async def preview_user_profile_rebuild(self):
+        return await self._with_user_profiles("rebuild_preview")
+
+    async def start_user_profile_rebuild(self):
+        return await self._with_user_profiles("rebuild_start")
+
+    async def list_user_profile_tasks(self):
+        return await self._with_user_profiles("list_tasks")
+
+    async def get_user_profile_task(self):
+        return await self._with_user_profiles("get_task")
+
+    async def retry_user_profile_task(self):
+        return await self._with_user_profiles("retry_task")
+
+    async def update_user_relationship(self):
+        return await self._with_user_profiles("relationship_update")
+
+    async def freeze_user_relationship(self):
+        return await self._with_user_profiles("relationship_freeze")
+
+    async def reset_user_relationship(self):
+        return await self._with_user_profiles("relationship_reset")
+
+    async def rollback_user_relationship(self):
+        return await self._with_user_profiles("relationship_rollback")
+
+    async def rebuild_user_relationship(self):
+        return await self._with_user_profiles("relationship_rebuild")
+
+    async def preview_user_profile_account_binding(self):
+        return await self._with_user_profiles("bind_preview")
+
+    async def bind_user_profile_accounts(self):
+        return await self._with_user_profiles("bind_accounts")
+
+    async def preview_user_profile_account_unbind(self):
+        return await self._with_user_profiles("unbind_preview")
+
+    async def unbind_user_profile_account(self):
+        return await self._with_user_profiles("unbind_account")
+
+    async def preview_user_profile_share_group(self):
+        return await self._with_user_profiles("share_preview")
+
+    async def save_user_profile_share_group(self):
+        return await self._with_user_profiles("share_save")
+
+    async def _with_user_profiles(self, method: str, *args):
+        ready, error = await self._ensure_plugin_ready()
+        if error:
+            return error
+        handler = getattr(self.user_profile_handler, method)
+        return await handler(ready["memory_engine"], *args)
 
     async def shutdown(self) -> None:
         """Stop page-owned background work before runtime components are closed."""

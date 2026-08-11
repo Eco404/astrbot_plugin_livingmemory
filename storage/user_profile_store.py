@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -1103,16 +1104,20 @@ class UserProfileStore:
                     await db.execute(
                         """
                         INSERT INTO user_profile_conflicts (
-                            conflict_uid, fact_namespace_uid, topic_key, fact_uids,
+                            conflict_uid, fact_namespace_uid, conflict_key, fact_uids,
                             status, first_detected_at, last_evidence_at,
-                            resolution, resolution_reason, created_at, updated_at,
+                            resolution_kind, resolution_reason, created_at, updated_at,
                             metadata
                         ) VALUES (?, ?, ?, ?, 'open', ?, ?, NULL, ?, ?, ?, '{}')
                         """,
                         (
                             conflict_uid,
                             fact_namespace_uid,
-                            str(conflict.get("topic_key") or "")[:500],
+                            str(
+                                conflict.get("conflict_key")
+                                or conflict.get("topic_key")
+                                or ""
+                            )[:500],
                             self._json(conflict.get("fact_uids") or []),
                             now,
                             now,
@@ -1169,6 +1174,46 @@ class UserProfileStore:
                                 "WHERE profile_fact_uid = ?",
                                 (str(best["source_uid"]), now, fact_uid),
                             )
+
+                open_conflicts = await (
+                    await db.execute(
+                        "SELECT conflict_uid, fact_uids FROM user_profile_conflicts "
+                        "WHERE fact_namespace_uid = ? AND status = 'open'",
+                        (fact_namespace_uid,),
+                    )
+                ).fetchall()
+                for conflict_row in open_conflicts:
+                    conflict_fact_uids = [
+                        str(value)
+                        for value in self._json_list(conflict_row["fact_uids"])
+                    ]
+                    if not set(conflict_fact_uids) & affected_fact_uids:
+                        continue
+                    status_rows = await (
+                        await db.execute(
+                            f"SELECT profile_fact_uid, status FROM user_profile_facts "
+                            f"WHERE profile_fact_uid IN "
+                            f"({','.join('?' for _ in conflict_fact_uids)})",
+                            conflict_fact_uids,
+                        )
+                    ).fetchall() if conflict_fact_uids else []
+                    still_conflicted = [
+                        str(item["profile_fact_uid"])
+                        for item in status_rows
+                        if str(item["status"]) == "conflict"
+                    ]
+                    if len(still_conflicted) <= 1:
+                        resolved_uid = still_conflicted[0] if still_conflicted else None
+                        await db.execute(
+                            """
+                            UPDATE user_profile_conflicts
+                            SET status = 'auto_resolved',
+                                resolution_kind = 'new_evidence',
+                                resolved_fact_uid = ?, resolved_at = ?, updated_at = ?
+                            WHERE conflict_uid = ?
+                            """,
+                            (resolved_uid, now, now, str(conflict_row["conflict_uid"])),
+                        )
 
                 new_revision = current_revision + 1
                 await db.execute(
@@ -1796,11 +1841,1356 @@ class UserProfileStore:
             )
             await db.commit()
 
+    async def profile_fingerprint(self, profile_scope_uid: str) -> str:
+        """Return a stale-preview fingerprint for all administrator-visible state."""
+        async with self._connect() as db:
+            scope = await (
+                await db.execute(
+                    """
+                    SELECT s.*, n.current_revision,
+                           COALESCE(r.revision, 0) AS relationship_revision,
+                           COALESCE(MAX(a.updated_at), 0) AS account_updated_at,
+                           COALESCE(MAX(c.updated_at), 0) AS conflict_updated_at
+                    FROM user_profile_scopes s
+                    JOIN user_profile_fact_namespaces n
+                      ON n.fact_namespace_uid = s.fact_namespace_uid
+                    LEFT JOIN user_relationship_states r
+                      ON r.profile_scope_uid = s.profile_scope_uid
+                    LEFT JOIN user_profile_accounts a
+                      ON a.logical_user_uid = s.logical_user_uid
+                    LEFT JOIN user_profile_conflicts c
+                      ON c.fact_namespace_uid = s.fact_namespace_uid
+                    WHERE s.profile_scope_uid = ?
+                    GROUP BY s.profile_scope_uid
+                    """,
+                    (profile_scope_uid,),
+                )
+            ).fetchone()
+        if scope is None:
+            raise ValueError("Unknown user-profile scope")
+        payload = {
+            key: scope[key]
+            for key in (
+                "profile_scope_uid",
+                "logical_user_uid",
+                "fact_namespace_uid",
+                "enabled",
+                "auto_enable_blocked",
+                "projection_cursor",
+                "has_gap",
+                "relationship_frozen",
+                "updated_at",
+                "current_revision",
+                "relationship_revision",
+                "account_updated_at",
+                "conflict_updated_at",
+            )
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    async def profile_gap_status(self, profile_scope_uid: str) -> dict[str, Any]:
+        scope = await self.get_scope(profile_scope_uid)
+        if scope is None:
+            raise ValueError("Unknown user-profile scope")
+        async with self._connect() as db:
+            row = await (
+                await db.execute(
+                    """
+                    SELECT COALESCE(MAX(sequence), 0) AS max_sequence,
+                           COUNT(CASE WHEN status IN (
+                               'pending', 'queued', 'running'
+                           ) THEN 1 END) AS pending_count
+                    FROM user_profile_projection_events
+                    WHERE profile_scope_uid = ?
+                    """,
+                    (profile_scope_uid,),
+                )
+            ).fetchone()
+        max_sequence = int(row["max_sequence"] if row else 0)
+        pending_count = int(row["pending_count"] if row else 0)
+        has_gap = bool(
+            scope.has_gap
+            or pending_count
+            or max_sequence > int(scope.projection_cursor)
+        )
+        return {
+            "has_gap": has_gap,
+            "pending_count": pending_count,
+            "projection_cursor": int(scope.projection_cursor),
+            "max_sequence": max_sequence,
+        }
+
+    async def set_profile_enabled(
+        self, profile_scope_uid: str, enabled: bool
+    ) -> dict[str, Any]:
+        scope = await self.get_scope(profile_scope_uid)
+        if scope is None:
+            raise ValueError("Unknown user-profile scope")
+        gap = await self.profile_gap_status(profile_scope_uid)
+        await self.set_scope_state(
+            profile_scope_uid,
+            enabled=bool(enabled),
+            auto_enable_blocked=False if enabled else None,
+            has_gap=bool(gap["has_gap"]) if enabled else True,
+        )
+        async with self._connect() as db:
+            await db.execute(
+                "UPDATE user_profile_users SET status = ?, updated_at = ? "
+                "WHERE logical_user_uid = ?",
+                ("active" if enabled else "disabled", time.time(), scope.logical_user_uid),
+            )
+            await db.commit()
+        gap = await self.profile_gap_status(profile_scope_uid)
+        gap["enabled"] = bool(enabled)
+        return gap
+
+    @classmethod
+    async def _detach_shared_namespace(
+        cls, db: aiosqlite.Connection, scope_row: aiosqlite.Row, now: float
+    ) -> str:
+        namespace_uid = str(scope_row["fact_namespace_uid"])
+        namespace = await (
+            await db.execute(
+                "SELECT share_group_uid FROM user_profile_fact_namespaces "
+                "WHERE fact_namespace_uid = ?",
+                (namespace_uid,),
+            )
+        ).fetchone()
+        count_row = await (
+            await db.execute(
+                "SELECT COUNT(*) AS value FROM user_profile_scopes "
+                "WHERE fact_namespace_uid = ?",
+                (namespace_uid,),
+            )
+        ).fetchone()
+        shared = bool(namespace and namespace["share_group_uid"]) or int(
+            count_row["value"] if count_row else 0
+        ) > 1
+        if not shared:
+            return namespace_uid
+        new_uid = f"profile-facts-v1-{uuid.uuid4()}"
+        await db.execute(
+            "INSERT INTO user_profile_fact_namespaces "
+            "(fact_namespace_uid, current_revision, created_at, updated_at) "
+            "VALUES (?, 0, ?, ?)",
+            (new_uid, now, now),
+        )
+        await db.execute(
+            "UPDATE user_profile_scopes SET fact_namespace_uid = ?, updated_at = ? "
+            "WHERE profile_scope_uid = ?",
+            (new_uid, now, str(scope_row["profile_scope_uid"])),
+        )
+        await db.execute(
+            "DELETE FROM user_profile_share_members WHERE profile_scope_uid = ?",
+            (str(scope_row["profile_scope_uid"]),),
+        )
+        return new_uid
+
+    @staticmethod
+    async def _clear_fact_namespace(
+        db: aiosqlite.Connection,
+        fact_namespace_uid: str,
+        *,
+        clear_overrides: bool,
+        now: float,
+    ) -> None:
+        if clear_overrides:
+            await db.execute(
+                "DELETE FROM user_profile_fact_overrides WHERE fact_namespace_uid = ?",
+                (fact_namespace_uid,),
+            )
+        await db.execute(
+            """
+            UPDATE user_profile_fact_sources
+            SET active = 0, profile_fact_uid = NULL, updated_at = ?
+            WHERE profile_fact_uid IN (
+                SELECT profile_fact_uid FROM user_profile_facts
+                WHERE fact_namespace_uid = ?
+            )
+            """,
+            (now, fact_namespace_uid),
+        )
+        await db.execute(
+            "DELETE FROM user_profile_conflicts WHERE fact_namespace_uid = ?",
+            (fact_namespace_uid,),
+        )
+        await db.execute(
+            "DELETE FROM user_profile_facts WHERE fact_namespace_uid = ?",
+            (fact_namespace_uid,),
+        )
+        await db.execute(
+            "UPDATE user_profile_fact_namespaces "
+            "SET current_revision = current_revision + 1, updated_at = ? "
+            "WHERE fact_namespace_uid = ?",
+            (now, fact_namespace_uid),
+        )
+
+    async def reset_objective_profile(
+        self,
+        profile_scope_uid: str,
+        *,
+        clear_overrides: bool = True,
+        detach_shared: bool = True,
+    ) -> dict[str, Any]:
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                scope_row = await (
+                    await db.execute(
+                        "SELECT * FROM user_profile_scopes WHERE profile_scope_uid = ?",
+                        (profile_scope_uid,),
+                    )
+                ).fetchone()
+                if scope_row is None:
+                    raise ValueError("Unknown user-profile scope")
+                namespace_uid = str(scope_row["fact_namespace_uid"])
+                if detach_shared:
+                    namespace_uid = await self._detach_shared_namespace(
+                        db, scope_row, now
+                    )
+                await self._clear_fact_namespace(
+                    db,
+                    namespace_uid,
+                    clear_overrides=clear_overrides,
+                    now=now,
+                )
+                cursor_row = await (
+                    await db.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) AS value "
+                        "FROM user_profile_projection_events "
+                        "WHERE profile_scope_uid = ?",
+                        (profile_scope_uid,),
+                    )
+                ).fetchone()
+                cursor = int(cursor_row["value"] if cursor_row else 0)
+                await db.execute(
+                    """
+                    UPDATE user_profile_scopes
+                    SET projection_cursor = ?, reset_after = ?, has_gap = 0,
+                        updated_at = ? WHERE profile_scope_uid = ?
+                    """,
+                    (cursor, now, now, profile_scope_uid),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "profile_scope_uid": profile_scope_uid,
+            "fact_namespace_uid": namespace_uid,
+            "projection_cursor": cursor,
+            "reset_after": now,
+        }
+
+    async def delete_and_disable_profile(
+        self, profile_scope_uid: str
+    ) -> dict[str, Any]:
+        reset = await self.reset_objective_profile(
+            profile_scope_uid, clear_overrides=True, detach_shared=True
+        )
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                scope = await (
+                    await db.execute(
+                        "SELECT logical_user_uid FROM user_profile_scopes "
+                        "WHERE profile_scope_uid = ?",
+                        (profile_scope_uid,),
+                    )
+                ).fetchone()
+                await db.execute(
+                    "DELETE FROM user_relationship_states WHERE profile_scope_uid = ?",
+                    (profile_scope_uid,),
+                )
+                await db.execute(
+                    "DELETE FROM user_profile_tasks WHERE profile_scope_uid = ?",
+                    (profile_scope_uid,),
+                )
+                await db.execute(
+                    "UPDATE user_profile_projection_events "
+                    "SET status = 'cancelled', error = 'Profile deleted and disabled', "
+                    "updated_at = ? WHERE profile_scope_uid = ?",
+                    (now, profile_scope_uid),
+                )
+                await db.execute(
+                    """
+                    UPDATE user_profile_scopes
+                    SET enabled = 0, auto_enable_blocked = 1, has_gap = 0,
+                        relationship_frozen = 0, relationship_reset_after = ?,
+                        updated_at = ? WHERE profile_scope_uid = ?
+                    """,
+                    (now, now, profile_scope_uid),
+                )
+                if scope is not None:
+                    await db.execute(
+                        "UPDATE user_profile_users SET status = 'deleted', updated_at = ? "
+                        "WHERE logical_user_uid = ?",
+                        (now, str(scope["logical_user_uid"])),
+                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {**reset, "enabled": False, "auto_enable_blocked": True}
+
+    async def apply_fact_admin_action(
+        self,
+        profile_scope_uid: str,
+        profile_fact_uid: str,
+        *,
+        action: str,
+        expected_revision: int,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        allowed = {"pause", "resume", "pin", "unpin", "confirm", "exclude"}
+        if action not in allowed:
+            raise ValueError("Unsupported profile fact action")
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                row = await (
+                    await db.execute(
+                        """
+                        SELECT f.*, s.fact_namespace_uid, n.current_revision
+                        FROM user_profile_facts f
+                        JOIN user_profile_scopes s
+                          ON s.fact_namespace_uid = f.fact_namespace_uid
+                        JOIN user_profile_fact_namespaces n
+                          ON n.fact_namespace_uid = f.fact_namespace_uid
+                        WHERE s.profile_scope_uid = ? AND f.profile_fact_uid = ?
+                        """,
+                        (profile_scope_uid, profile_fact_uid),
+                    )
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Unknown profile fact")
+                current_revision = int(row["current_revision"])
+                if current_revision != int(expected_revision):
+                    raise UserProfileRevisionConflict(
+                        f"Expected profile revision {expected_revision}, got {current_revision}"
+                    )
+                updates: dict[str, Any] = {}
+                if action == "pause":
+                    updates["status"] = "excluded"
+                elif action == "resume":
+                    updates["status"] = "active"
+                elif action in {"pin", "unpin"}:
+                    updates["pinned"] = 1 if action == "pin" else 0
+                elif action == "confirm":
+                    updates.update(status="active", admin_confirmed=1)
+                elif action == "exclude":
+                    updates["status"] = "excluded"
+                assignments = [f"{key} = ?" for key in updates]
+                values = list(updates.values())
+                assignments.append("updated_at = ?")
+                values.extend((now, profile_fact_uid))
+                await db.execute(
+                    f"UPDATE user_profile_facts SET {', '.join(assignments)} "
+                    "WHERE profile_fact_uid = ?",
+                    values,
+                )
+                await db.execute(
+                    "UPDATE user_profile_fact_overrides SET active = 0, updated_at = ? "
+                    "WHERE profile_fact_uid = ? AND override_type = ? AND active = 1",
+                    (now, profile_fact_uid, action),
+                )
+                await db.execute(
+                    """
+                    INSERT INTO user_profile_fact_overrides (
+                        override_uid, fact_namespace_uid, profile_fact_uid,
+                        override_type, active, payload, reason, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        str(row["fact_namespace_uid"]),
+                        profile_fact_uid,
+                        action,
+                        self._json(
+                            {
+                                "previous_status": str(row["status"]),
+                                "previous_pinned": bool(row["pinned"]),
+                            }
+                        ),
+                        str(reason or "")[:2000] or None,
+                        now,
+                        now,
+                    ),
+                )
+                new_revision = current_revision + 1
+                await db.execute(
+                    "UPDATE user_profile_fact_namespaces "
+                    "SET current_revision = ?, updated_at = ? "
+                    "WHERE fact_namespace_uid = ?",
+                    (new_revision, now, str(row["fact_namespace_uid"])),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "profile_fact_uid": profile_fact_uid,
+            "action": action,
+            "fact_revision": new_revision,
+        }
+
+    async def resolve_profile_conflict(
+        self,
+        profile_scope_uid: str,
+        conflict_uid: str,
+        *,
+        resolution: str,
+        selected_fact_uid: str | None,
+        expected_revision: int,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        if resolution not in {"select", "pause", "exclude"}:
+            raise ValueError("Unsupported conflict resolution")
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                row = await (
+                    await db.execute(
+                        """
+                        SELECT c.*, n.current_revision
+                        FROM user_profile_conflicts c
+                        JOIN user_profile_scopes s
+                          ON s.fact_namespace_uid = c.fact_namespace_uid
+                        JOIN user_profile_fact_namespaces n
+                          ON n.fact_namespace_uid = c.fact_namespace_uid
+                        WHERE s.profile_scope_uid = ? AND c.conflict_uid = ?
+                        """,
+                        (profile_scope_uid, conflict_uid),
+                    )
+                ).fetchone()
+                if row is None:
+                    raise ValueError("Unknown profile conflict")
+                current_revision = int(row["current_revision"])
+                if current_revision != int(expected_revision):
+                    raise UserProfileRevisionConflict(
+                        f"Expected profile revision {expected_revision}, got {current_revision}"
+                    )
+                fact_uids = [str(value) for value in self._json_list(row["fact_uids"])]
+                if resolution == "select":
+                    if not selected_fact_uid or selected_fact_uid not in fact_uids:
+                        raise ValueError("selected_fact_uid must belong to the conflict")
+                    await db.execute(
+                        "UPDATE user_profile_facts SET status = 'active', updated_at = ? "
+                        "WHERE profile_fact_uid = ?",
+                        (now, selected_fact_uid),
+                    )
+                    others = [uid for uid in fact_uids if uid != selected_fact_uid]
+                    if others:
+                        await db.execute(
+                            f"UPDATE user_profile_facts SET status = 'superseded', "
+                            f"superseded_by = ?, updated_at = ? WHERE profile_fact_uid IN "
+                            f"({','.join('?' for _ in others)})",
+                            [selected_fact_uid, now, *others],
+                        )
+                    conflict_status = "resolved"
+                elif resolution == "exclude":
+                    if fact_uids:
+                        await db.execute(
+                            f"UPDATE user_profile_facts SET status = 'excluded', "
+                            f"updated_at = ? WHERE profile_fact_uid IN "
+                            f"({','.join('?' for _ in fact_uids)})",
+                            [now, *fact_uids],
+                        )
+                    selected_fact_uid = None
+                    conflict_status = "resolved"
+                else:
+                    selected_fact_uid = None
+                    conflict_status = "open"
+                await db.execute(
+                    """
+                    UPDATE user_profile_conflicts
+                    SET status = ?, resolution_kind = ?, resolution_reason = ?,
+                        resolved_fact_uid = ?, resolved_at = ?, updated_at = ?
+                    WHERE conflict_uid = ?
+                    """,
+                    (
+                        conflict_status,
+                        resolution,
+                        str(reason or "")[:2000] or None,
+                        selected_fact_uid,
+                        now if conflict_status == "resolved" else None,
+                        now,
+                        conflict_uid,
+                    ),
+                )
+                await db.execute(
+                    """
+                    INSERT INTO user_profile_fact_overrides (
+                        override_uid, fact_namespace_uid, profile_fact_uid,
+                        override_type, payload, reason, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'conflict_resolution', ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        str(row["fact_namespace_uid"]),
+                        selected_fact_uid,
+                        self._json(
+                            {
+                                "conflict_uid": conflict_uid,
+                                "resolution": resolution,
+                                "fact_uids": fact_uids,
+                            }
+                        ),
+                        str(reason or "")[:2000] or None,
+                        now,
+                        now,
+                    ),
+                )
+                new_revision = current_revision + 1
+                await db.execute(
+                    "UPDATE user_profile_fact_namespaces "
+                    "SET current_revision = ?, updated_at = ? "
+                    "WHERE fact_namespace_uid = ?",
+                    (new_revision, now, str(row["fact_namespace_uid"])),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "conflict_uid": conflict_uid,
+            "resolution": resolution,
+            "fact_revision": new_revision,
+        }
+
+    async def prepare_profile_rebuild(
+        self,
+        profile_scope_uid: str,
+        *,
+        clear_overrides: bool,
+        expected_fingerprint: str,
+    ) -> dict[str, Any]:
+        current_fingerprint = await self.profile_fingerprint(profile_scope_uid)
+        if current_fingerprint != str(expected_fingerprint):
+            raise UserProfileRevisionConflict("Profile rebuild preview is stale")
+        if clear_overrides:
+            await self.reset_objective_profile(
+                profile_scope_uid,
+                clear_overrides=True,
+                detach_shared=True,
+            )
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                await db.execute(
+                    "UPDATE user_profile_tasks SET status = 'cancelled', "
+                    "error = 'Superseded by explicit profile rebuild', updated_at = ?, "
+                    "completed_at = ? WHERE profile_scope_uid = ? AND status NOT IN "
+                    "('completed', 'completed_partial', 'failed', 'cancelled')",
+                    (now, now, profile_scope_uid),
+                )
+                cursor = await db.execute(
+                    """
+                    UPDATE user_profile_projection_events
+                    SET status = 'pending', error = NULL, updated_at = ?
+                    WHERE profile_scope_uid = ?
+                    """,
+                    (now, profile_scope_uid),
+                )
+                await db.execute(
+                    "UPDATE user_profile_scopes SET enabled = 1, has_gap = 1, "
+                    "projection_cursor = 0, updated_at = ? WHERE profile_scope_uid = ?",
+                    (now, profile_scope_uid),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "profile_scope_uid": profile_scope_uid,
+            "event_count": max(0, int(cursor.rowcount)),
+            "clear_overrides": bool(clear_overrides),
+        }
+
+    async def list_profile_tasks(
+        self, profile_scope_uid: str, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    "SELECT task_uid FROM user_profile_tasks "
+                    "WHERE profile_scope_uid = ? ORDER BY created_at DESC LIMIT ?",
+                    (profile_scope_uid, max(1, min(500, int(limit)))),
+                )
+            ).fetchall()
+        result = []
+        for row in rows:
+            task = await self.get_task(str(row["task_uid"]))
+            if task is not None:
+                result.append(task)
+        return result
+
+    async def retry_profile_task(self, task_uid: str) -> str:
+        task = await self.get_task(task_uid)
+        if task is None:
+            raise ValueError("Unknown user-profile task")
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                await db.execute(
+                    "UPDATE user_profile_tasks SET status = 'pending', error = NULL, "
+                    "next_retry_at = NULL, updated_at = ? WHERE task_uid = ?",
+                    (now, task_uid),
+                )
+                await db.execute(
+                    "UPDATE user_profile_task_items SET status = 'pending', "
+                    "updated_at = ? WHERE task_uid = ?",
+                    (now, task_uid),
+                )
+                await db.execute(
+                    "UPDATE user_profile_projection_events SET status = 'pending', "
+                    "error = NULL, updated_at = ? WHERE event_uid IN "
+                    "(SELECT event_uid FROM user_profile_task_items WHERE task_uid = ?)",
+                    (now, task_uid),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return str(task["profile_scope_uid"])
+
+    async def preview_account_binding(
+        self, *, target_actor_id: str, actor_ids: Iterable[str]
+    ) -> dict[str, Any]:
+        requested = list(dict.fromkeys([target_actor_id, *[str(v) for v in actor_ids]]))
+        requested = [value for value in requested if value]
+        if len(requested) < 2:
+            raise ValueError("At least two stable accounts are required")
+        placeholders = ",".join("?" for _ in requested)
+        async with self._connect() as db:
+            accounts = await (
+                await db.execute(
+                    f"SELECT * FROM user_profile_accounts WHERE actor_id IN ({placeholders})",
+                    requested,
+                )
+            ).fetchall()
+            if len(accounts) != len(requested):
+                raise ValueError("One or more profile accounts do not exist")
+            target = next(
+                (row for row in accounts if str(row["actor_id"]) == target_actor_id),
+                None,
+            )
+            if target is None:
+                raise ValueError("Target account does not exist")
+            source_users = {
+                str(row["logical_user_uid"])
+                for row in accounts
+                if str(row["logical_user_uid"]) != str(target["logical_user_uid"])
+            }
+            impacted_accounts = await (
+                await db.execute(
+                    f"SELECT * FROM user_profile_accounts WHERE logical_user_uid IN "
+                    f"({','.join('?' for _ in source_users)})",
+                    list(source_users),
+                )
+            ).fetchall() if source_users else []
+            scope_users = [str(target["logical_user_uid"]), *sorted(source_users)]
+            scopes = await (
+                await db.execute(
+                    f"""
+                    SELECT s.*, n.current_revision, n.share_group_uid,
+                           COALESCE(r.revision, 0) AS relationship_revision,
+                           (SELECT COUNT(*) FROM user_profile_facts f
+                            WHERE f.fact_namespace_uid = s.fact_namespace_uid) AS fact_count,
+                           (SELECT COUNT(*) FROM user_profile_conflicts c
+                            WHERE c.fact_namespace_uid = s.fact_namespace_uid
+                              AND c.status = 'open') AS conflict_count
+                    FROM user_profile_scopes s
+                    JOIN user_profile_fact_namespaces n
+                      ON n.fact_namespace_uid = s.fact_namespace_uid
+                    LEFT JOIN user_relationship_states r
+                      ON r.profile_scope_uid = s.profile_scope_uid
+                    WHERE s.logical_user_uid IN ({','.join('?' for _ in scope_users)})
+                    ORDER BY s.bot_account, s.persona_id
+                    """,
+                    scope_users,
+                )
+            ).fetchall()
+        target_user_uid = str(target["logical_user_uid"])
+        target_keys = {
+            (str(row["bot_account"]), str(row["persona_id"]))
+            for row in scopes
+            if str(row["logical_user_uid"]) == target_user_uid
+        }
+        collisions = [
+            {
+                "profile_scope_uid": str(row["profile_scope_uid"]),
+                "bot_account": str(row["bot_account"]),
+                "persona_id": str(row["persona_id"]),
+                "fact_count": int(row["fact_count"]),
+                "relationship_revision": int(row["relationship_revision"]),
+            }
+            for row in scopes
+            if str(row["logical_user_uid"]) in source_users
+            and (str(row["bot_account"]), str(row["persona_id"])) in target_keys
+        ]
+        blocked = any(row["share_group_uid"] for row in scopes)
+        fingerprint_payload = {
+            "accounts": [
+                (str(row["actor_id"]), str(row["logical_user_uid"]), float(row["updated_at"]))
+                for row in accounts
+            ],
+            "scopes": [
+                (
+                    str(row["profile_scope_uid"]),
+                    str(row["fact_namespace_uid"]),
+                    int(row["current_revision"]),
+                    int(row["relationship_revision"]),
+                    float(row["updated_at"]),
+                )
+                for row in scopes
+            ],
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return {
+            "target_actor_id": target_actor_id,
+            "target_logical_user_uid": target_user_uid,
+            "requested_actor_ids": requested,
+            "moved_account_count": len(impacted_accounts),
+            "source_scope_count": sum(
+                1 for row in scopes if str(row["logical_user_uid"]) in source_users
+            ),
+            "fact_count": sum(int(row["fact_count"]) for row in scopes),
+            "open_conflict_count": sum(int(row["conflict_count"]) for row in scopes),
+            "scope_collisions": collisions,
+            "blocked_reason": (
+                "Remove objective share-group membership before binding accounts"
+                if blocked
+                else None
+            ),
+            "fingerprint": fingerprint,
+        }
+
+    async def bind_accounts(
+        self,
+        *,
+        target_actor_id: str,
+        actor_ids: Iterable[str],
+        expected_fingerprint: str,
+    ) -> dict[str, Any]:
+        preview = await self.preview_account_binding(
+            target_actor_id=target_actor_id, actor_ids=actor_ids
+        )
+        if preview["fingerprint"] != str(expected_fingerprint):
+            raise UserProfileRevisionConflict("Account binding preview is stale")
+        if preview["blocked_reason"]:
+            raise ValueError(str(preview["blocked_reason"]))
+        target_user_uid = str(preview["target_logical_user_uid"])
+        requested = list(preview["requested_actor_ids"])
+        now = time.time()
+        async with self._connect() as db:
+            try:
+                rows = await (
+                    await db.execute(
+                        f"SELECT logical_user_uid FROM user_profile_accounts "
+                        f"WHERE actor_id IN ({','.join('?' for _ in requested)})",
+                        requested,
+                    )
+                ).fetchall()
+                source_users = {
+                    str(row["logical_user_uid"])
+                    for row in rows
+                    if str(row["logical_user_uid"]) != target_user_uid
+                }
+                affected_target_scopes: set[str] = set()
+                for source_user_uid in source_users:
+                    source_scopes = await (
+                        await db.execute(
+                            "SELECT * FROM user_profile_scopes "
+                            "WHERE logical_user_uid = ? ORDER BY created_at",
+                            (source_user_uid,),
+                        )
+                    ).fetchall()
+                    for source_scope in source_scopes:
+                        target_scope = await (
+                            await db.execute(
+                                "SELECT * FROM user_profile_scopes WHERE logical_user_uid = ? "
+                                "AND bot_account = ? AND persona_id = ?",
+                                (
+                                    target_user_uid,
+                                    str(source_scope["bot_account"]),
+                                    str(source_scope["persona_id"]),
+                                ),
+                            )
+                        ).fetchone()
+                        if target_scope is None:
+                            await db.execute(
+                                "UPDATE user_profile_scopes SET logical_user_uid = ?, "
+                                "has_gap = 1, updated_at = ? WHERE profile_scope_uid = ?",
+                                (
+                                    target_user_uid,
+                                    now,
+                                    str(source_scope["profile_scope_uid"]),
+                                ),
+                            )
+                            affected_target_scopes.add(
+                                str(source_scope["profile_scope_uid"])
+                            )
+                            continue
+                        source_scope_uid = str(source_scope["profile_scope_uid"])
+                        target_scope_uid = str(target_scope["profile_scope_uid"])
+                        source_namespace = str(source_scope["fact_namespace_uid"])
+                        target_namespace = str(target_scope["fact_namespace_uid"])
+                        if source_namespace != target_namespace:
+                            duplicate_conflicts = await (
+                                await db.execute(
+                                    """
+                                    SELECT c.conflict_uid FROM user_profile_conflicts c
+                                    WHERE c.fact_namespace_uid = ? AND EXISTS (
+                                        SELECT 1 FROM user_profile_conflicts t
+                                        WHERE t.fact_namespace_uid = ?
+                                          AND t.conflict_key = c.conflict_key
+                                          AND t.status = c.status
+                                    )
+                                    """,
+                                    (source_namespace, target_namespace),
+                                )
+                            ).fetchall()
+                            for conflict in duplicate_conflicts:
+                                await db.execute(
+                                    "UPDATE user_profile_conflicts SET conflict_key = "
+                                    "conflict_key || ':' || ? WHERE conflict_uid = ?",
+                                    (source_scope_uid[:8], str(conflict["conflict_uid"])),
+                                )
+                            await db.execute(
+                                "UPDATE user_profile_facts SET fact_namespace_uid = ? "
+                                "WHERE fact_namespace_uid = ?",
+                                (target_namespace, source_namespace),
+                            )
+                            await db.execute(
+                                "UPDATE user_profile_conflicts SET fact_namespace_uid = ? "
+                                "WHERE fact_namespace_uid = ?",
+                                (target_namespace, source_namespace),
+                            )
+                            await db.execute(
+                                "UPDATE user_profile_fact_overrides SET fact_namespace_uid = ? "
+                                "WHERE fact_namespace_uid = ?",
+                                (target_namespace, source_namespace),
+                            )
+                            await db.execute(
+                                "UPDATE user_profile_fact_namespaces SET "
+                                "current_revision = current_revision + 1, updated_at = ? "
+                                "WHERE fact_namespace_uid = ?",
+                                (now, target_namespace),
+                            )
+                        await db.execute(
+                            "UPDATE user_profile_projection_events SET profile_scope_uid = ?, "
+                            "updated_at = ? WHERE profile_scope_uid = ?",
+                            (target_scope_uid, now, source_scope_uid),
+                        )
+                        await db.execute(
+                            "UPDATE user_profile_tasks SET status = 'cancelled', "
+                            "error = 'Account binding merged this scope', completed_at = ?, "
+                            "updated_at = ? WHERE profile_scope_uid = ? AND status NOT IN "
+                            "('completed', 'completed_partial', 'failed', 'cancelled')",
+                            (now, now, source_scope_uid),
+                        )
+                        await db.execute(
+                            "UPDATE user_profile_scopes SET enabled = 0, "
+                            "auto_enable_blocked = 1, has_gap = 1, updated_at = ? "
+                            "WHERE profile_scope_uid = ?",
+                            (now, source_scope_uid),
+                        )
+                        await db.execute(
+                            "UPDATE user_profile_scopes SET has_gap = 1, updated_at = ? "
+                            "WHERE profile_scope_uid = ?",
+                            (now, target_scope_uid),
+                        )
+                        affected_target_scopes.add(target_scope_uid)
+                    await db.execute(
+                        "UPDATE user_profile_accounts SET logical_user_uid = ?, "
+                        "linked_manually = 1, updated_at = ? WHERE logical_user_uid = ?",
+                        (target_user_uid, now, source_user_uid),
+                    )
+                    await db.execute(
+                        "UPDATE user_profile_users SET status = 'deleted', updated_at = ? "
+                        "WHERE logical_user_uid = ?",
+                        (now, source_user_uid),
+                    )
+                await db.execute(
+                    "UPDATE user_profile_users SET status = 'active', updated_at = ? "
+                    "WHERE logical_user_uid = ?",
+                    (now, target_user_uid),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "logical_user_uid": target_user_uid,
+            "affected_scope_uids": sorted(affected_target_scopes),
+            "requires_rebuild": bool(affected_target_scopes),
+        }
+
+    async def preview_account_unbind(self, actor_id: str) -> dict[str, Any]:
+        async with self._connect() as db:
+            account = await (
+                await db.execute(
+                    "SELECT * FROM user_profile_accounts WHERE actor_id = ?",
+                    (actor_id,),
+                )
+            ).fetchone()
+            if account is None:
+                raise ValueError("Unknown profile account")
+            accounts = await (
+                await db.execute(
+                    "SELECT * FROM user_profile_accounts WHERE logical_user_uid = ?",
+                    (str(account["logical_user_uid"]),),
+                )
+            ).fetchall()
+            if len(accounts) < 2:
+                raise ValueError("This account is not bound to another account")
+            scopes = await (
+                await db.execute(
+                    """
+                    SELECT s.*, n.current_revision, n.share_group_uid,
+                           (SELECT COUNT(*) FROM user_profile_fact_sources src
+                            JOIN user_profile_facts f
+                              ON f.profile_fact_uid = src.profile_fact_uid
+                            WHERE f.fact_namespace_uid = s.fact_namespace_uid
+                              AND src.source_account_actor_id = ? AND src.active = 1)
+                              AS source_count
+                    FROM user_profile_scopes s
+                    JOIN user_profile_fact_namespaces n
+                      ON n.fact_namespace_uid = s.fact_namespace_uid
+                    WHERE s.logical_user_uid = ?
+                    """,
+                    (actor_id, str(account["logical_user_uid"])),
+                )
+            ).fetchall()
+        blocked = any(row["share_group_uid"] for row in scopes)
+        payload = {
+            "account": (actor_id, str(account["logical_user_uid"]), float(account["updated_at"])),
+            "scopes": [
+                (
+                    str(row["profile_scope_uid"]),
+                    str(row["fact_namespace_uid"]),
+                    int(row["current_revision"]),
+                    float(row["updated_at"]),
+                )
+                for row in scopes
+            ],
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return {
+            "actor_id": actor_id,
+            "logical_user_uid": str(account["logical_user_uid"]),
+            "remaining_account_count": len(accounts) - 1,
+            "new_scope_count": len(scopes),
+            "source_count": sum(int(row["source_count"]) for row in scopes),
+            "blocked_reason": (
+                "Remove objective share-group membership before unbinding this account"
+                if blocked
+                else None
+            ),
+            "fingerprint": fingerprint,
+        }
+
+    async def unbind_account(
+        self, actor_id: str, *, expected_fingerprint: str
+    ) -> dict[str, Any]:
+        preview = await self.preview_account_unbind(actor_id)
+        if preview["fingerprint"] != str(expected_fingerprint):
+            raise UserProfileRevisionConflict("Account unbind preview is stale")
+        if preview["blocked_reason"]:
+            raise ValueError(str(preview["blocked_reason"]))
+        old_user_uid = str(preview["logical_user_uid"])
+        new_user_uid = str(uuid.uuid4())
+        now = time.time()
+        created_scope_uids: list[str] = []
+        affected_old_scope_uids: list[str] = []
+        async with self._connect() as db:
+            try:
+                await db.execute(
+                    "INSERT INTO user_profile_users "
+                    "(logical_user_uid, status, created_at, updated_at, metadata) "
+                    "VALUES (?, 'active', ?, ?, '{}')",
+                    (new_user_uid, now, now),
+                )
+                await db.execute(
+                    "UPDATE user_profile_accounts SET logical_user_uid = ?, "
+                    "linked_manually = 0, updated_at = ? WHERE actor_id = ?",
+                    (new_user_uid, now, actor_id),
+                )
+                old_scopes = await (
+                    await db.execute(
+                        "SELECT * FROM user_profile_scopes WHERE logical_user_uid = ?",
+                        (old_user_uid,),
+                    )
+                ).fetchall()
+                for old_scope in old_scopes:
+                    old_scope_uid = str(old_scope["profile_scope_uid"])
+                    affected_old_scope_uids.append(old_scope_uid)
+                    new_scope = UserProfileScope(
+                        logical_user_uid=new_user_uid,
+                        bot_account=str(old_scope["bot_account"]),
+                        persona_id=str(old_scope["persona_id"]),
+                        has_gap=True,
+                    )
+                    await db.execute(
+                        "INSERT INTO user_profile_fact_namespaces "
+                        "(fact_namespace_uid, current_revision, created_at, updated_at) "
+                        "VALUES (?, 0, ?, ?)",
+                        (new_scope.fact_namespace_uid, now, now),
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO user_profile_scopes (
+                            profile_scope_uid, logical_user_uid, bot_account, persona_id,
+                            fact_namespace_uid, enabled, has_gap, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?)
+                        """,
+                        (
+                            new_scope.profile_scope_uid,
+                            new_user_uid,
+                            new_scope.bot_account,
+                            new_scope.persona_id,
+                            new_scope.fact_namespace_uid,
+                            now,
+                            now,
+                        ),
+                    )
+                    created_scope_uids.append(new_scope.profile_scope_uid)
+                    events = await (
+                        await db.execute(
+                            "SELECT event_uid, payload FROM user_profile_projection_events "
+                            "WHERE profile_scope_uid = ?",
+                            (old_scope_uid,),
+                        )
+                    ).fetchall()
+                    for event in events:
+                        payload = self._json_object(event["payload"])
+                        if str(payload.get("profile_actor_id") or "") != actor_id:
+                            continue
+                        await db.execute(
+                            "UPDATE user_profile_projection_events SET profile_scope_uid = ?, "
+                            "status = 'pending', error = NULL, updated_at = ? "
+                            "WHERE event_uid = ?",
+                            (new_scope.profile_scope_uid, now, str(event["event_uid"])),
+                        )
+                    old_namespace = str(old_scope["fact_namespace_uid"])
+                    await db.execute(
+                        """
+                        UPDATE user_profile_fact_sources
+                        SET active = 0, updated_at = ?
+                        WHERE source_account_actor_id = ? AND active = 1
+                          AND profile_fact_uid IN (
+                              SELECT profile_fact_uid FROM user_profile_facts
+                              WHERE fact_namespace_uid = ?
+                          )
+                        """,
+                        (now, actor_id, old_namespace),
+                    )
+                    await db.execute(
+                        """
+                        UPDATE user_profile_facts
+                        SET status = 'archived', updated_at = ?
+                        WHERE fact_namespace_uid = ? AND NOT EXISTS (
+                            SELECT 1 FROM user_profile_fact_sources src
+                            WHERE src.profile_fact_uid = user_profile_facts.profile_fact_uid
+                              AND src.active = 1
+                        )
+                        """,
+                        (now, old_namespace),
+                    )
+                    await db.execute(
+                        "UPDATE user_profile_fact_namespaces SET "
+                        "current_revision = current_revision + 1, updated_at = ? "
+                        "WHERE fact_namespace_uid = ?",
+                        (now, old_namespace),
+                    )
+                    await db.execute(
+                        "UPDATE user_profile_projection_events SET status = 'pending', "
+                        "error = NULL, updated_at = ? WHERE profile_scope_uid = ?",
+                        (now, old_scope_uid),
+                    )
+                    await db.execute(
+                        "UPDATE user_profile_tasks SET status = 'cancelled', "
+                        "error = 'Account unbind requires reprojection', completed_at = ?, "
+                        "updated_at = ? WHERE profile_scope_uid = ? AND status NOT IN "
+                        "('completed', 'completed_partial', 'failed', 'cancelled')",
+                        (now, now, old_scope_uid),
+                    )
+                    await db.execute(
+                        "UPDATE user_profile_scopes SET has_gap = 1, updated_at = ? "
+                        "WHERE profile_scope_uid = ?",
+                        (now, old_scope_uid),
+                    )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "actor_id": actor_id,
+            "logical_user_uid": new_user_uid,
+            "created_scope_uids": created_scope_uids,
+            "affected_old_scope_uids": affected_old_scope_uids,
+            "requires_rebuild": True,
+        }
+
+    async def preview_share_group(
+        self,
+        *,
+        profile_scope_uids: Iterable[str],
+        share_group_uid: str | None = None,
+    ) -> dict[str, Any]:
+        scope_uids = list(dict.fromkeys(str(value) for value in profile_scope_uids if value))
+        if len(scope_uids) < 2:
+            raise ValueError("An objective share group requires at least two scopes")
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    f"""
+                    SELECT s.*, n.current_revision, n.share_group_uid,
+                           (SELECT COUNT(*) FROM user_profile_facts f
+                            WHERE f.fact_namespace_uid = s.fact_namespace_uid) AS fact_count,
+                           (SELECT COUNT(*) FROM user_profile_conflicts c
+                            WHERE c.fact_namespace_uid = s.fact_namespace_uid
+                              AND c.status = 'open') AS conflict_count
+                    FROM user_profile_scopes s
+                    JOIN user_profile_fact_namespaces n
+                      ON n.fact_namespace_uid = s.fact_namespace_uid
+                    WHERE s.profile_scope_uid IN ({','.join('?' for _ in scope_uids)})
+                    """,
+                    scope_uids,
+                )
+            ).fetchall()
+            if len(rows) != len(scope_uids):
+                raise ValueError("One or more user-profile scopes do not exist")
+            logical_users = {str(row["logical_user_uid"]) for row in rows}
+            if len(logical_users) != 1:
+                raise ValueError("Objective sharing is limited to one logical user")
+            blocked = [
+                str(row["profile_scope_uid"])
+                for row in rows
+                if row["share_group_uid"]
+                and str(row["share_group_uid"]) != str(share_group_uid or "")
+            ]
+            category_rows = await (
+                await db.execute(
+                    f"""
+                    SELECT category, COUNT(DISTINCT raw_fact) AS variants
+                    FROM user_profile_facts f
+                    JOIN user_profile_fact_sources src
+                      ON src.source_uid = f.representative_source_uid
+                    WHERE f.fact_namespace_uid IN (
+                        {','.join('?' for _ in rows)}
+                    ) AND f.status IN ('active', 'conflict')
+                    GROUP BY category HAVING variants > 1
+                    """,
+                    [str(row["fact_namespace_uid"]) for row in rows],
+                )
+            ).fetchall()
+        state = [
+            (
+                str(row["profile_scope_uid"]),
+                str(row["fact_namespace_uid"]),
+                int(row["current_revision"]),
+                str(row["share_group_uid"] or ""),
+                float(row["updated_at"]),
+            )
+            for row in rows
+        ]
+        fingerprint = hashlib.sha256(
+            json.dumps(state, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return {
+            "share_group_uid": share_group_uid,
+            "logical_user_uid": next(iter(logical_users)),
+            "profile_scope_uids": scope_uids,
+            "fact_count": sum(int(row["fact_count"]) for row in rows),
+            "open_conflict_count": sum(int(row["conflict_count"]) for row in rows),
+            "potential_conflict_categories": [
+                {"category": str(row["category"]), "variants": int(row["variants"])}
+                for row in category_rows
+            ],
+            "blocked_scope_uids": blocked,
+            "fingerprint": fingerprint,
+        }
+
+    async def save_share_group(
+        self,
+        *,
+        name: str,
+        profile_scope_uids: Iterable[str],
+        expected_fingerprint: str,
+        share_group_uid: str | None = None,
+    ) -> dict[str, Any]:
+        preview = await self.preview_share_group(
+            profile_scope_uids=profile_scope_uids,
+            share_group_uid=share_group_uid,
+        )
+        if preview["fingerprint"] != str(expected_fingerprint):
+            raise UserProfileRevisionConflict("Share-group preview is stale")
+        if preview["blocked_scope_uids"]:
+            raise ValueError("A selected scope already belongs to another share group")
+        clean_name = str(name or "").strip()
+        if not clean_name:
+            raise ValueError("Share-group name is required")
+        group_uid = str(share_group_uid or uuid.uuid4())
+        selected = list(preview["profile_scope_uids"])
+        now = time.time()
+        detached_scope_uids: list[str] = []
+        async with self._connect() as db:
+            try:
+                group = await (
+                    await db.execute(
+                        "SELECT * FROM user_profile_share_groups WHERE share_group_uid = ?",
+                        (group_uid,),
+                    )
+                ).fetchone()
+                if group is None:
+                    group_namespace = f"profile-shared-facts-v1-{uuid.uuid4()}"
+                    await db.execute(
+                        "INSERT INTO user_profile_fact_namespaces "
+                        "(fact_namespace_uid, current_revision, share_group_uid, "
+                        "created_at, updated_at) VALUES (?, 0, ?, ?, ?)",
+                        (group_namespace, group_uid, now, now),
+                    )
+                    await db.execute(
+                        """
+                        INSERT INTO user_profile_share_groups (
+                            share_group_uid, name, fact_namespace_uid,
+                            created_at, updated_at, metadata
+                        ) VALUES (?, ?, ?, ?, ?, '{}')
+                        """,
+                        (group_uid, clean_name[:200], group_namespace, now, now),
+                    )
+                else:
+                    group_namespace = str(group["fact_namespace_uid"])
+                    await db.execute(
+                        "UPDATE user_profile_share_groups SET name = ?, updated_at = ? "
+                        "WHERE share_group_uid = ?",
+                        (clean_name[:200], now, group_uid),
+                    )
+                    current_members = await (
+                        await db.execute(
+                            "SELECT profile_scope_uid FROM user_profile_share_members "
+                            "WHERE share_group_uid = ?",
+                            (group_uid,),
+                        )
+                    ).fetchall()
+                    removed = [
+                        str(row["profile_scope_uid"])
+                        for row in current_members
+                        if str(row["profile_scope_uid"]) not in selected
+                    ]
+                    for scope_uid in removed:
+                        new_namespace = f"profile-facts-v1-{uuid.uuid4()}"
+                        await db.execute(
+                            "INSERT INTO user_profile_fact_namespaces "
+                            "(fact_namespace_uid, current_revision, created_at, updated_at) "
+                            "VALUES (?, 0, ?, ?)",
+                            (new_namespace, now, now),
+                        )
+                        await db.execute(
+                            "UPDATE user_profile_scopes SET fact_namespace_uid = ?, "
+                            "has_gap = 1, updated_at = ? WHERE profile_scope_uid = ?",
+                            (new_namespace, now, scope_uid),
+                        )
+                        detached_scope_uids.append(scope_uid)
+                    if removed:
+                        await db.execute(
+                            f"DELETE FROM user_profile_share_members "
+                            f"WHERE share_group_uid = ? AND profile_scope_uid IN "
+                            f"({','.join('?' for _ in removed)})",
+                            [group_uid, *removed],
+                        )
+
+                scopes = await (
+                    await db.execute(
+                        f"SELECT * FROM user_profile_scopes WHERE profile_scope_uid IN "
+                        f"({','.join('?' for _ in selected)})",
+                        selected,
+                    )
+                ).fetchall()
+                for scope in scopes:
+                    scope_uid = str(scope["profile_scope_uid"])
+                    source_namespace = str(scope["fact_namespace_uid"])
+                    if source_namespace != group_namespace:
+                        duplicate_conflicts = await (
+                            await db.execute(
+                                """
+                                SELECT c.conflict_uid FROM user_profile_conflicts c
+                                WHERE c.fact_namespace_uid = ? AND EXISTS (
+                                    SELECT 1 FROM user_profile_conflicts t
+                                    WHERE t.fact_namespace_uid = ?
+                                      AND t.conflict_key = c.conflict_key
+                                      AND t.status = c.status
+                                )
+                                """,
+                                (source_namespace, group_namespace),
+                            )
+                        ).fetchall()
+                        for conflict in duplicate_conflicts:
+                            await db.execute(
+                                "UPDATE user_profile_conflicts SET conflict_key = "
+                                "conflict_key || ':' || ? WHERE conflict_uid = ?",
+                                (scope_uid[:8], str(conflict["conflict_uid"])),
+                            )
+                        await db.execute(
+                            "UPDATE user_profile_facts SET fact_namespace_uid = ? "
+                            "WHERE fact_namespace_uid = ?",
+                            (group_namespace, source_namespace),
+                        )
+                        await db.execute(
+                            "UPDATE user_profile_conflicts SET fact_namespace_uid = ? "
+                            "WHERE fact_namespace_uid = ?",
+                            (group_namespace, source_namespace),
+                        )
+                        await db.execute(
+                            "UPDATE user_profile_fact_overrides SET fact_namespace_uid = ? "
+                            "WHERE fact_namespace_uid = ?",
+                            (group_namespace, source_namespace),
+                        )
+                    await db.execute(
+                        "UPDATE user_profile_scopes SET fact_namespace_uid = ?, "
+                        "has_gap = 1, updated_at = ? WHERE profile_scope_uid = ?",
+                        (group_namespace, now, scope_uid),
+                    )
+                    await db.execute(
+                        "INSERT INTO user_profile_share_members "
+                        "(share_group_uid, profile_scope_uid, created_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(profile_scope_uid) DO UPDATE SET "
+                        "share_group_uid = excluded.share_group_uid",
+                        (group_uid, scope_uid, now),
+                    )
+                await db.execute(
+                    "UPDATE user_profile_fact_namespaces SET share_group_uid = ?, "
+                    "current_revision = current_revision + 1, updated_at = ? "
+                    "WHERE fact_namespace_uid = ?",
+                    (group_uid, now, group_namespace),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "share_group_uid": group_uid,
+            "fact_namespace_uid": group_namespace,
+            "profile_scope_uids": selected,
+            "detached_scope_uids": detached_scope_uids,
+            "requires_rebuild": bool(detached_scope_uids),
+        }
+
     async def list_profiles(
         self,
         *,
         search: str = "",
         status: str | None = None,
+        bot_account: str | None = None,
+        persona_id: str | None = None,
+        platform: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -1815,8 +3205,27 @@ class UserProfileStore:
             pattern = f"%{self._escape_like(clean_search)}%"
             params.extend((pattern, pattern, pattern))
         if status:
-            where.append("u.status = ?")
-            params.append(status)
+            if status == "enabled":
+                where.append("s.enabled = 1")
+            elif status == "disabled":
+                where.append("s.enabled = 0 AND s.auto_enable_blocked = 0")
+            elif status == "deleted":
+                where.append("s.auto_enable_blocked = 1")
+            else:
+                where.append("u.status = ?")
+                params.append(status)
+        if bot_account:
+            where.append("s.bot_account = ?")
+            params.append(str(bot_account))
+        if persona_id:
+            where.append("s.persona_id = ?")
+            params.append(str(persona_id))
+        if platform:
+            where.append(
+                "EXISTS (SELECT 1 FROM user_profile_accounts af "
+                "WHERE af.logical_user_uid = s.logical_user_uid AND af.platform = ?)"
+            )
+            params.append(str(platform))
         where_sql = "WHERE " + " AND ".join(where) if where else ""
         params.extend((max(1, min(500, int(limit))), max(0, int(offset))))
         async with self._connect() as db:
@@ -1824,24 +3233,38 @@ class UserProfileStore:
                 await db.execute(
                     f"""
                     SELECT s.*, u.status AS user_status, u.display_name_override,
-                           a.actor_id, a.platform, a.stable_user_id,
-                           a.last_observed_name,
+                           MIN(a.actor_id) AS actor_id, MIN(a.platform) AS platform,
+                           MIN(a.stable_user_id) AS stable_user_id,
+                           COALESCE(u.display_name_override,
+                                    MAX(a.last_observed_name), MIN(a.actor_id)) AS display_name,
+                           COUNT(DISTINCT a.actor_id) AS account_count,
                            COUNT(DISTINCT CASE WHEN f.status = 'active' THEN f.profile_fact_uid END)
                                AS active_fact_count,
                            COUNT(DISTINCT CASE WHEN f.status = 'pending' THEN f.profile_fact_uid END)
                                AS pending_fact_count,
                            COUNT(DISTINCT CASE WHEN f.status = 'conflict' THEN f.profile_fact_uid END)
                                AS conflict_fact_count,
+                           COUNT(DISTINCT CASE WHEN f.status = 'stale' THEN f.profile_fact_uid END)
+                               AS stale_fact_count,
                            r.revision AS relationship_revision,
-                           r.updated_at AS relationship_updated_at
+                           r.updated_at AS relationship_updated_at,
+                           n.current_revision AS fact_revision,
+                           n.share_group_uid,
+                           COUNT(DISTINCT CASE WHEN t.status NOT IN (
+                               'completed', 'completed_partial', 'failed', 'cancelled'
+                           ) THEN t.task_uid END) AS running_task_count
                     FROM user_profile_scopes s
                     JOIN user_profile_users u ON u.logical_user_uid = s.logical_user_uid
+                    JOIN user_profile_fact_namespaces n
+                      ON n.fact_namespace_uid = s.fact_namespace_uid
                     LEFT JOIN user_profile_accounts a
                       ON a.logical_user_uid = s.logical_user_uid
                     LEFT JOIN user_profile_facts f
                       ON f.fact_namespace_uid = s.fact_namespace_uid
                     LEFT JOIN user_relationship_states r
                       ON r.profile_scope_uid = s.profile_scope_uid
+                    LEFT JOIN user_profile_tasks t
+                      ON t.profile_scope_uid = s.profile_scope_uid
                     {where_sql}
                     GROUP BY s.profile_scope_uid
                     ORDER BY s.updated_at DESC
@@ -1856,9 +3279,7 @@ class UserProfileStore:
         scope = await self.get_scope(profile_scope_uid)
         if scope is None:
             return None
-        facts = await self.list_serving_facts(
-            scope.fact_namespace_uid, include_pending=True
-        )
+        facts = await self.list_facts_for_maintenance(scope.fact_namespace_uid)
         relationship = await self.get_relationship(profile_scope_uid)
         async with self._connect() as db:
             accounts = await (
@@ -1875,8 +3296,81 @@ class UserProfileStore:
                     (scope.fact_namespace_uid,),
                 )
             ).fetchall()
+            sources = await (
+                await db.execute(
+                    """
+                    SELECT src.* FROM user_profile_fact_sources src
+                    JOIN user_profile_facts f
+                      ON f.profile_fact_uid = src.profile_fact_uid
+                    WHERE f.fact_namespace_uid = ?
+                    ORDER BY src.evidence_ended_at DESC, src.updated_at DESC
+                    """,
+                    (scope.fact_namespace_uid,),
+                )
+            ).fetchall()
+            overrides = await (
+                await db.execute(
+                    "SELECT * FROM user_profile_fact_overrides "
+                    "WHERE fact_namespace_uid = ? ORDER BY updated_at DESC",
+                    (scope.fact_namespace_uid,),
+                )
+            ).fetchall()
+            namespace = await (
+                await db.execute(
+                    "SELECT * FROM user_profile_fact_namespaces "
+                    "WHERE fact_namespace_uid = ?",
+                    (scope.fact_namespace_uid,),
+                )
+            ).fetchone()
+            share_group = None
+            if namespace is not None and namespace["share_group_uid"]:
+                share_group = await (
+                    await db.execute(
+                        "SELECT * FROM user_profile_share_groups "
+                        "WHERE share_group_uid = ?",
+                        (str(namespace["share_group_uid"]),),
+                    )
+                ).fetchone()
+            member_rows = []
+            if share_group is not None:
+                member_rows = await (
+                    await db.execute(
+                        """
+                        SELECT s.profile_scope_uid, s.bot_account, s.persona_id
+                        FROM user_profile_share_members m
+                        JOIN user_profile_scopes s
+                          ON s.profile_scope_uid = m.profile_scope_uid
+                        WHERE m.share_group_uid = ? ORDER BY s.bot_account, s.persona_id
+                        """,
+                        (str(share_group["share_group_uid"]),),
+                    )
+                ).fetchall()
+        sources_by_fact: dict[str, list[dict[str, Any]]] = {}
+        for source in sources:
+            converted = dict(source)
+            converted["active"] = bool(converted["active"])
+            converted["timeline_quality"] = self._json_object(
+                converted["timeline_quality"]
+            )
+            converted["metadata"] = self._json_object(converted["metadata"])
+            sources_by_fact.setdefault(str(source["profile_fact_uid"]), []).append(
+                converted
+            )
+        for fact in facts:
+            fact["sources"] = sources_by_fact.get(str(fact["profile_fact_uid"]), [])
+        tasks = await self.list_profile_tasks(profile_scope_uid, limit=50)
+        revisions = (
+            await self.list_relationship_revisions(relationship.relationship_uid)
+            if relationship
+            else []
+        )
+        gap = await self.profile_gap_status(profile_scope_uid)
+        fingerprint = await self.profile_fingerprint(profile_scope_uid)
         return {
             "scope": asdict(scope),
+            "fingerprint": fingerprint,
+            "fact_revision": int(namespace["current_revision"] if namespace else 0),
+            "gap": gap,
             "accounts": [
                 {**dict(row), "observed_names": self._json_list(row["observed_names"])}
                 for row in accounts
@@ -1890,9 +3384,28 @@ class UserProfileStore:
                 }
                 for row in conflicts
             ],
+            "overrides": [
+                {
+                    **dict(row),
+                    "active": bool(row["active"]),
+                    "payload": self._json_object(row["payload"]),
+                }
+                for row in overrides
+            ],
             "relationship": (
                 self._relationship_state_dict(relationship) if relationship else None
             ),
+            "relationship_revisions": revisions,
+            "share_group": (
+                {
+                    **dict(share_group),
+                    "metadata": self._json_object(share_group["metadata"]),
+                    "members": [dict(row) for row in member_rows],
+                }
+                if share_group is not None
+                else None
+            ),
+            "tasks": tasks,
         }
 
     @staticmethod

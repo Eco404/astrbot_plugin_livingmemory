@@ -152,10 +152,15 @@ class MemoryHandler:
                     "CASE WHEN json_valid(metadata) "
                     "THEN json_extract(metadata, '$.memory_type') END,"
                     "''"
-                    ") LIKE ? COLLATE NOCASE"
+                    ") LIKE ? COLLATE NOCASE "
+                    "OR COALESCE("
+                    "CASE WHEN json_valid(metadata) "
+                    "THEN json_extract(metadata, '$.memory_uid') END,"
+                    "''"
+                    ") = ?"
                     ")"
                 )
-                params.extend([keyword_like, keyword_like])
+                params.extend([keyword_like, keyword_like, keyword])
 
         where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         created_expr = (

@@ -9,7 +9,10 @@ from typing import Any
 
 from astrbot.api import logger
 
-from ...storage.user_profile_store import UserProfileStore
+from ...storage.user_profile_store import (
+    UserProfileRevisionConflict,
+    UserProfileStore,
+)
 from ..models.user_profile import UserProfileTask, UserRelationshipState
 from .user_profile_fact_maintainer import (
     UserProfileFactMaintainer,
@@ -36,6 +39,7 @@ class UserProfileMaintenanceManager:
         self.fact_maintainer = UserProfileFactMaintainer(provider)
         self.relationship_maintainer = UserRelationshipMaintainer(provider)
         self._scope_locks: dict[str, asyncio.Lock] = {}
+        self._namespace_locks: dict[str, asyncio.Lock] = {}
         self._scheduled: dict[str, asyncio.Task] = {}
         self._retry_tasks: set[asyncio.Task] = set()
         self._closing = False
@@ -105,6 +109,7 @@ class UserProfileMaintenanceManager:
         *,
         changes: dict[str, Any],
         reason: str | None = None,
+        expected_revision: int | None = None,
         sensitivity_override: str | None | object = ...,
         behavior_override: str | None | object = ...,
     ) -> UserRelationshipState:
@@ -114,6 +119,14 @@ class UserProfileMaintenanceManager:
             if scope is None:
                 raise ValueError("Unknown user-profile scope")
             current = await self.store.get_relationship(profile_scope_uid)
+            current_revision = current.revision if current is not None else 0
+            if expected_revision is not None and current_revision != int(
+                expected_revision
+            ):
+                raise UserProfileRevisionConflict(
+                    f"Expected relationship revision {expected_revision}, "
+                    f"got {current_revision}"
+                )
             state = self._relationship_copy(current, profile_scope_uid)
             for key in (
                 "familiarity",
@@ -165,7 +178,7 @@ class UserProfileMaintenanceManager:
                 raise ValueError("Unsupported relationship behavior override")
             published = await self.store.publish_relationship(
                 state,
-                expected_revision=(current.revision if current is not None else 0),
+                expected_revision=current_revision,
                 operation="manual_update",
                 reason=reason,
                 change_summary="Administrator edited relationship state",
@@ -465,12 +478,16 @@ class UserProfileMaintenanceManager:
 
         if not result_summary.get("facts_checkpoint"):
             try:
-                fact_result = await self._run_fact_stage(
-                    task=task,
-                    scope=scope,
-                    settings=settings,
-                    provider=selected_provider,
+                namespace_lock = self._namespace_locks.setdefault(
+                    str(scope.fact_namespace_uid), asyncio.Lock()
                 )
+                async with namespace_lock:
+                    fact_result = await self._run_fact_stage(
+                        task=task,
+                        scope=scope,
+                        settings=settings,
+                        provider=selected_provider,
+                    )
                 result_summary.update(fact_result)
             except asyncio.CancelledError:
                 raise

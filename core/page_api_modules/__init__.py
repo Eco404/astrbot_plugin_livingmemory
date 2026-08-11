@@ -14,6 +14,7 @@ from .settings_handler import SettingsHandler
 from .stats_handler import StatsHandler
 from .topic_handler import TopicHandler
 from .timeline_handler import TimelineHandler
+from .user_profile_handler import UserProfileHandler
 from .utils import PageApiUtils
 
 __all__ = [
@@ -29,5 +30,6 @@ __all__ = [
     "DatabaseHandler",
     "TopicHandler",
     "TimelineHandler",
+    "UserProfileHandler",
     "PageApiUtils",
 ]

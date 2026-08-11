@@ -2483,7 +2483,7 @@ class TestRouteRegistration:
         plugin = FakePlugin()
         api = PluginPageApi(plugin)
         api.register_routes()
-        assert len(plugin._api_routes) == 76
+        assert len(plugin._api_routes) == 100
 
         paths = {route for route, _, _, _ in plugin._api_routes}
         prefix = PAGE_API_PREFIX
@@ -2500,6 +2500,12 @@ class TestRouteRegistration:
         assert f"{prefix}/memories/update" in paths
         assert f"{prefix}/memories/update/stage" in paths
         assert f"{prefix}/memories/related" in paths
+        assert f"{prefix}/user-profiles" in paths
+        assert f"{prefix}/user-profiles/detail" in paths
+        assert f"{prefix}/user-profiles/facts/action" in paths
+        assert f"{prefix}/user-profiles/relationship/update" in paths
+        assert f"{prefix}/user-profiles/accounts/bind/preview" in paths
+        assert f"{prefix}/user-profiles/share-groups/save" in paths
         assert f"{prefix}/memories/update/start" in paths
         assert f"{prefix}/timeline/staged-edits" in paths
         assert f"{prefix}/timeline/staged-edits/apply" in paths

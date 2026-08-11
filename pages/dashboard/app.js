@@ -16,7 +16,8 @@ import {
   SettingsPage,
   SystemPage,
   TopicPage,
-  TimelinePage,
+    TimelinePage,
+    UserProfileMaintenance,
   esc,
   statusPill,
   nodeBadge,
@@ -67,7 +68,8 @@ import {
   const recallPage = new RecallPage(state, api, topicPage, confirmDialog, showToast);
   const timelinePage = new TimelinePage(api, showToast);
   const settingsPage = new SettingsPage(api, showToast);
-  const maintenancePage = new MaintenancePage(topicPage, recallPage, modelPage, showToast, confirmDialog);
+  const userProfileMaintenance = new UserProfileMaintenance(api, showToast, confirmDialog);
+  const maintenancePage = new MaintenancePage(topicPage, recallPage, modelPage, showToast, confirmDialog, userProfileMaintenance);
 
   /* ================================================================
      Theme Management
@@ -336,6 +338,7 @@ import {
     timelinePage.initEventListeners();
     settingsPage.initEventListeners();
     maintenancePage.initEventListeners();
+    userProfileMaintenance.initEventListeners();
     modelPage.initEventListeners();
     identityPage.initEventListeners();
 
@@ -348,6 +351,14 @@ import {
       }
     });
     window.addEventListener("languagechange", refreshDynamicI18n);
+    window.addEventListener("livingmemory:open-timeline-source", event => {
+      const uid = String(event.detail?.timelineUid || "");
+      if (!uid) return;
+      state.memory.keyword = uid;
+      const input = document.getElementById("mem-keyword");
+      if (input) input.value = uid;
+      switchPage("memory");
+    });
 
     fetchGraphStats();
     switchPage("graph");
