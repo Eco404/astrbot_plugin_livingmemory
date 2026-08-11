@@ -8,6 +8,7 @@ from .graph_memory_manager import GraphMemoryManager
 from .memory_engine import MemoryEngine
 from .topic_maintenance_manager import TopicMaintenanceManager
 from .user_profile_fact_maintainer import UserProfileFactMaintainer
+from .user_profile_history_manager import UserProfileHistoryManager
 from .user_profile_maintenance_manager import UserProfileMaintenanceManager
 from .user_relationship_maintainer import UserRelationshipMaintainer
 
@@ -17,6 +18,7 @@ __all__ = [
     "MemoryEngine",
     "TopicMaintenanceManager",
     "UserProfileFactMaintainer",
+    "UserProfileHistoryManager",
     "UserProfileMaintenanceManager",
     "UserRelationshipMaintainer",
     "create_conversation_manager",

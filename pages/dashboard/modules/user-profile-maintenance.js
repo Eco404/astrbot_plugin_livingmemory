@@ -261,9 +261,20 @@ export class UserProfileMaintenance {
     try {
       const preview = await this.api.post("user-profiles/rebuild/preview", { profile_scope_uid: this.selectedScopeUid });
       const clear = document.getElementById("profile-rebuild-clear-overrides")?.checked || false;
-      const confirmed = await this.confirmDialog.show({ title: window.t("profile.rebuild"), message: window.t("profile.rebuildImpact", preview.timeline_count, preview.fact_count, preview.override_count), confirmLabel: window.t("profile.rebuild") });
+      const confirmed = await this.confirmDialog.show({
+        title: window.t("profile.rebuild"),
+        message: window.t(
+          "profile.rebuildImpact",
+          preview.timeline_count,
+          preview.missing_timeline_count,
+          preview.ambiguous_identity_count,
+          preview.fact_count,
+          preview.override_count,
+        ),
+        confirmLabel: window.t("profile.rebuild"),
+      });
       if (!confirmed) return;
-      await this.api.post("user-profiles/rebuild/start", { profile_scope_uid: this.selectedScopeUid, fingerprint: preview.fingerprint, clear_overrides: clear });
+      await this.api.post("user-profiles/rebuild/start", { profile_scope_uid: this.selectedScopeUid, fingerprint: preview.fingerprint, history_fingerprint: preview.history_fingerprint, clear_overrides: clear });
       this.showToast(window.t("profile.rebuildScheduled"), "success");
       await this.loadDetail();
     } catch (error) { this.showToast(error.message, "error"); }

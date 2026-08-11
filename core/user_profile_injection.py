@@ -161,14 +161,15 @@ class UserProfileInjectionService:
                 0,
                 min(
                     body_budget,
-                    int(self._get("user_profile.relationship_reserved_chars", 200)),
+                    int(self._get("user_profile.relationship_reserved_chars", 300)),
                 ),
             )
             relationship_text = self._render_relationship(
                 relationship, behavior_mode=behavior_mode, now=now, budget=reserve
             )
 
-        fact_budget = body_budget - len(relationship_text)
+        separator_budget = 2 if relationship_text else 0
+        fact_budget = body_budget - len(relationship_text) - separator_budget
         fact_text, fact_count = self._render_facts(
             facts, query=query, budget=fact_budget, now=now
         )
@@ -293,6 +294,8 @@ class UserProfileInjectionService:
     def _fact_is_current(fact: dict[str, Any], now: float) -> bool:
         if str(fact.get("status") or "") != "active":
             return False
+        if bool(fact.get("pinned")):
+            return True
         review_after = fact.get("review_after")
         return review_after is None or float(review_after) > now
 

@@ -900,6 +900,43 @@ class UserProfileStore:
             ).fetchall()
         return [self._fact_row(row) for row in rows]
 
+    async def list_unassigned_behavior_evidence(
+        self,
+        profile_scope_uid: str,
+        *,
+        limit: int = 128,
+        retention_days: int = 180,
+    ) -> list[UserProfileFactSource]:
+        cutoff = time.time() - max(1, int(retention_days)) * 86400.0
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT DISTINCT s.*
+                    FROM user_profile_fact_sources s
+                    JOIN user_profile_projection_events e
+                      ON e.timeline_uid = s.timeline_uid
+                     AND e.timeline_revision = s.timeline_revision
+                    WHERE e.profile_scope_uid = ?
+                      AND s.active = 1
+                      AND s.profile_fact_uid IS NULL
+                      AND json_extract(s.metadata, '$.profile_signal') IN (
+                          'behavior_evidence', 'behavior_pattern'
+                      )
+                      AND COALESCE(s.evidence_ended_at, s.updated_at) >= ?
+                    ORDER BY COALESCE(s.evidence_ended_at, s.updated_at) DESC,
+                             s.source_uid
+                    LIMIT ?
+                    """,
+                    (
+                        profile_scope_uid,
+                        cutoff,
+                        max(1, min(1000, int(limit))),
+                    ),
+                )
+            ).fetchall()
+        return [self._row_to_fact_source(row) for row in rows]
+
     async def get_fact_namespace_revision(self, fact_namespace_uid: str) -> int:
         async with self._connect() as db:
             row = await (
@@ -1000,6 +1037,16 @@ class UserProfileStore:
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                             ON CONFLICT(timeline_uid, timeline_revision, fact_index, actor_id)
                             DO UPDATE SET
+                                profile_fact_uid = CASE
+                                    WHEN EXISTS (
+                                        SELECT 1 FROM user_profile_fact_overrides o
+                                        WHERE o.profile_fact_uid =
+                                              user_profile_fact_sources.profile_fact_uid
+                                          AND o.active = 1
+                                    )
+                                    THEN user_profile_fact_sources.profile_fact_uid
+                                    ELSE excluded.profile_fact_uid
+                                END,
                                 raw_fact = excluded.raw_fact,
                                 fact_fingerprint = excluded.fact_fingerprint,
                                 claim_type = excluded.claim_type,
@@ -3482,6 +3529,30 @@ class UserProfileStore:
         result["pinned"] = bool(result["pinned"])
         result["metadata"] = cls._json_object(result["metadata"])
         return result
+
+    @classmethod
+    def _row_to_fact_source(cls, row: aiosqlite.Row) -> UserProfileFactSource:
+        return UserProfileFactSource(
+            source_uid=str(row["source_uid"]),
+            profile_fact_uid=(
+                str(row["profile_fact_uid"]) if row["profile_fact_uid"] else None
+            ),
+            timeline_uid=str(row["timeline_uid"]),
+            timeline_revision=int(row["timeline_revision"]),
+            fact_index=int(row["fact_index"]),
+            fact_fingerprint=str(row["fact_fingerprint"]),
+            raw_fact=str(row["raw_fact"]),
+            actor_id=str(row["actor_id"]),
+            claim_type=str(row["claim_type"]),
+            attribution_confidence=float(row["attribution_confidence"]),
+            timeline_quality=cls._json_object(row["timeline_quality"]),
+            evidence_started_at=row["evidence_started_at"],
+            evidence_ended_at=row["evidence_ended_at"],
+            source_account_actor_id=str(row["source_account_actor_id"] or ""),
+            metadata=cls._json_object(row["metadata"]),
+            created_at=float(row["created_at"]),
+            updated_at=float(row["updated_at"]),
+        )
 
     @classmethod
     def _event_row(cls, row: aiosqlite.Row) -> dict[str, Any]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-USER_PROFILE_SETTINGS_REVISION = 1
+USER_PROFILE_SETTINGS_REVISION = 2
 
 
 def _setting(
@@ -39,10 +39,12 @@ USER_PROFILE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "user_profile.maintenance_retry_base_seconds": _setting(60, "int", "model_tasks", "重试基础等待", "画像维护失败后的指数退避基础秒数。", min=5, max=3600),
     "user_profile.maintenance_retry_max_seconds": _setting(3600, "int", "model_tasks", "重试最大等待", "画像维护失败后的最大冷却秒数。", min=60, max=86400),
     "user_profile.fact_accept_confidence": _setting(0.85, "float", "fact_admission", "事实接受置信度", "候选事实立即成为有效画像所需的最低维护置信度。", min=0.0, max=1.0, step=0.01),
+    "user_profile.fact_min_profile_value": _setting(0.65, "float", "fact_admission", "事实画像价值", "候选事实对未来理解用户的长期价值下限；普通一次性事件应低于该值并忽略。", min=0.0, max=1.0, step=0.01),
     "user_profile.pending_retention_days": _setting(180, "int", "fact_admission", "候选保留天数", "未确认 pending 事实超过该期限后归档。", min=1, max=3650),
     "user_profile.behavior_inference_min_timelines": _setting(3, "int", "inference", "行为推断最少 Timeline", "从行为归纳习惯或交流偏好所需的独立 Timeline 数。", min=2, max=20),
     "user_profile.behavior_inference_min_span_days": _setting(14, "int", "inference", "行为证据最小跨度", "普通行为推断证据必须覆盖的天数。", min=1, max=365),
     "user_profile.behavior_inference_min_confidence": _setting(0.85, "float", "inference", "行为推断置信度", "普通行为推断所需的最低综合置信度。", min=0.0, max=1.0, step=0.01),
+    "user_profile.behavior_evidence_pool_limit": _setting(128, "int", "inference", "跨批行为证据上限", "每次维护最多提供给模型的历史未归纳行为证据数；证据保留期限沿用候选保留天数。", min=10, max=1000),
     "user_profile.sensitive_behavior_inference_enabled": _setting(False, "bool", "inference", "允许敏感行为推断", "允许根据多条行为证据推断敏感画像；安全秘密始终禁止。"),
     "user_profile.sensitive_inference_min_timelines": _setting(3, "int", "inference", "敏感推断最少 Timeline", "敏感行为推断所需的独立 Timeline 数。", min=2, max=20, visible_when={"key": "user_profile.sensitive_behavior_inference_enabled", "equals": True}),
     "user_profile.sensitive_inference_min_span_days": _setting(14, "int", "inference", "敏感证据最小跨度", "敏感行为推断证据必须覆盖的天数。", min=1, max=3650, visible_when={"key": "user_profile.sensitive_behavior_inference_enabled", "equals": True}),
@@ -58,11 +60,11 @@ USER_PROFILE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "user_profile.habit_review_days": _setting(180, "int", "lifecycle", "习惯复核天数", "习惯缺少新证据后进入待确认的期限。", min=1, max=3650),
     "user_profile.current_state_fixed_days": _setting(30, "int", "lifecycle", "当前状态固定天数", "当前状态进入分层固定核心的期限。", min=1, max=3650),
     "user_profile.current_state_review_days": _setting(90, "int", "lifecycle", "当前状态复核天数", "当前状态缺少新证据后进入待确认的期限。", min=1, max=3650),
-    "user_profile.undated_plan_review_days": _setting(60, "int", "lifecycle", "无日期计划复核天数", "没有明确日期的计划或承诺进入待确认的期限。", min=1, max=3650),
-    "user_profile.dated_plan_grace_days": _setting(14, "int", "lifecycle", "有日期计划宽限天数", "有明确日期的计划结束后继续保留的天数。", min=0, max=365),
+    "user_profile.undated_plan_review_days": _setting(30, "int", "lifecycle", "无日期计划复核天数", "没有明确日期的计划或承诺进入待确认的期限。", min=1, max=3650),
+    "user_profile.dated_plan_grace_days": _setting(3, "int", "lifecycle", "有日期计划宽限天数", "有明确日期的计划结束后继续保留的天数。", min=0, max=365),
     "user_profile.injection_mode": _setting("layered", "select", "injection", "画像注入模式", "分层动态选择或固定精简快照。", options=["layered", "compact_snapshot"]),
     "user_profile.injection_max_chars": _setting(800, "int", "injection", "画像注入总字符", "客观画像和人格关系合计的注入字符硬上限。", min=300, max=2000),
-    "user_profile.relationship_reserved_chars": _setting(200, "int", "injection", "关系状态预留字符", "总预算中优先为人格关系保留的字符数；未使用时回流给事实。", min=0, max=1000),
+    "user_profile.relationship_reserved_chars": _setting(300, "int", "injection", "关系状态预留字符", "总预算中优先为人格关系保留的字符数；未使用时回流给事实。", min=0, max=1000),
     "user_profile.fact_injection_max_chars": _setting(200, "int", "injection", "单条事实字符上限", "单条原始事实注入时允许的最大字符数。", min=50, max=1000),
     "user_profile.relationship_narrative_max_chars": _setting(500, "int", "relationship", "主观叙述字符上限", "人格对用户的第一人称主观叙述存储上限。", min=100, max=2000),
     "user_profile.relationship_aftereffect_min_days": _setting(1, "int", "relationship", "余韵最短天数", "关系维护模型建议短期余韵时允许的最短持续时间。", min=1, max=30),

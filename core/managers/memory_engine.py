@@ -65,6 +65,7 @@ from ..user_profile_settings import (
 from .topic_build_manager import TopicBuildManager
 from .topic_maintenance_manager import TopicMaintenanceManager
 from .user_profile_maintenance_manager import UserProfileMaintenanceManager
+from .user_profile_history_manager import UserProfileHistoryManager
 
 
 class MemoryEngine:
@@ -202,6 +203,16 @@ class MemoryEngine:
             provider=self.llm_provider,
             provider_resolver=self.user_profile_provider_resolver,
             config=self.user_profile_config,
+        )
+        self.user_profile_history_manager = UserProfileHistoryManager(
+            self.db_path,
+            self.user_profile_store,
+            actor_resolver=self._profile_actor_from_metadata,
+            persona_resolver=lambda persona_id: (
+                self.user_profile_persona_resolver(persona_id)
+                if self.user_profile_persona_resolver is not None
+                else None
+            ),
         )
         self.topic_vector_index = TopicVectorIndex(self.topic_memory_store)
         self.topic_maintenance_manager = TopicMaintenanceManager(

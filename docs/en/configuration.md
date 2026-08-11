@@ -30,8 +30,8 @@ Recall changes usually apply immediately. Build settings affect newly created jo
 | --- | --- |
 | Basic | Objective profiles, private-user auto-enrollment, relationships, and injection |
 | Models and tasks | Dedicated or fallback LLM provider, concurrency, batching, retries, and backoff |
-| Fact admission | Acceptance confidence and pending retention |
-| Inference and sensitive data | Independent Timeline count, evidence span, confidence, and sensitive-inference switch |
+| Fact admission | Truth confidence, long-term profile value, and pending retention |
+| Inference and sensitive data | Independent Timeline count, evidence span, confidence, cross-batch evidence pool, and sensitive-inference switch |
 | Conflicts | New-evidence count and span plus the automatic-resolution margin |
 | Freshness | Fixed and review periods for preferences, habits, states, plans, and communication style |
 | Injection | `layered` / `compact_snapshot`, total budget, relationship reserve, and per-fact limit |
@@ -42,4 +42,4 @@ Profiles process new private Timeline changes only; upgrading does not backfill 
 
 Objective facts and relationship state use separate model calls. Provider retries do not consume the per-batch business-call allowance, and one fact namespace is always maintained serially. Relationship behavior controls how state may influence a reply; subjective relationship text never becomes an objective fact.
 
-Budgets are hard limits. Defaults allow 800 injected characters, reserve 200 for the relationship, and cap each fact at 200. Cross-field validation prevents a relationship reserve above the total, fixed periods longer than review periods, or sensitive-inference thresholds below ordinary inference thresholds.
+Budgets are hard limits. Defaults allow 800 injected characters, reserve 300 for the relationship, and cap each fact at 200. Cross-field validation prevents a relationship reserve above the total, fixed periods longer than review periods, or sensitive-inference thresholds below ordinary inference thresholds.

@@ -47,6 +47,10 @@ _ALLOWED_CLAIM_TYPES = {
     "direct_observation",
     "speaker_requests_other",
 }
+_PROFILE_DIRECT = "profile_direct"
+_BEHAVIOR_PATTERN = "behavior_pattern"
+_BEHAVIOR_EVIDENCE = "behavior_evidence"
+_MODEL_REVIEW = "model_review"
 _SECRET_PATTERNS = (
     re.compile(r"\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|passwd|private[_ -]?key|验证码|密码|私钥)\b", re.I),
     re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{16,}\b"),
@@ -66,6 +70,7 @@ class UserProfileFactMaintainer:
         *,
         fact_namespace_uid: str,
         candidates: Iterable[UserProfileFactSource],
+        supporting_evidence: Iterable[UserProfileFactSource] = (),
         existing_facts: Iterable[dict[str, Any]],
         settings: dict[str, Any],
         provider: Any = None,
@@ -78,7 +83,14 @@ class UserProfileFactMaintainer:
             raise RuntimeError("User-profile fact maintenance requires an LLM Provider")
 
         existing_list = [dict(item) for item in existing_facts]
-        prompt = self._build_prompt(candidate_list, existing_list, settings)
+        evidence_list = [
+            item
+            for item in supporting_evidence
+            if item.source_uid not in {candidate.source_uid for candidate in candidate_list}
+        ]
+        prompt = self._build_prompt(
+            candidate_list, evidence_list, existing_list, settings
+        )
         raw = await self._request_with_retries(selected_provider, prompt, settings)
         try:
             payload = self._parse_payload(raw)
@@ -86,6 +98,7 @@ class UserProfileFactMaintainer:
                 fact_namespace_uid=fact_namespace_uid,
                 payload=payload,
                 candidates=candidate_list,
+                supporting_evidence=evidence_list,
                 existing_facts=existing_list,
                 settings=settings,
             )
@@ -102,6 +115,7 @@ class UserProfileFactMaintainer:
                 fact_namespace_uid=fact_namespace_uid,
                 payload=payload,
                 candidates=candidate_list,
+                supporting_evidence=evidence_list,
                 existing_facts=existing_list,
                 settings=settings,
             )
@@ -165,6 +179,9 @@ class UserProfileFactMaintainer:
             ):
                 continue
             profile = profile_by_index.get(index, {})
+            profile_signal = UserProfileFactMaintainer._profile_signal(profile)
+            if profile_signal == "relationship_only":
+                continue
             temporal_row = temporal_by_index.get(index, {})
             result.append(
                 UserProfileFactSource(
@@ -201,6 +218,7 @@ class UserProfileFactMaintainer:
                         "fact_profile": dict(profile),
                         "fact_temporal": dict(temporal_row),
                         "timeline_importance": _score(metadata.get("importance"), 0.5),
+                        "profile_signal": profile_signal,
                     },
                 )
             )
@@ -212,6 +230,7 @@ class UserProfileFactMaintainer:
         fact_namespace_uid: str,
         payload: dict[str, Any],
         candidates: list[UserProfileFactSource],
+        supporting_evidence: list[UserProfileFactSource] | None = None,
         existing_facts: list[dict[str, Any]],
         settings: dict[str, Any],
     ) -> UserProfileFactMaintenancePlan:
@@ -219,12 +238,18 @@ class UserProfileFactMaintainer:
         if not isinstance(operations, list):
             raise UserProfileFactValidationError("operations must be a list")
         candidate_by_uid = {item.source_uid: item for item in candidates}
+        evidence_by_uid = {
+            item.source_uid: item
+            for item in (supporting_evidence or [])
+            if item.source_uid not in candidate_by_uid
+        }
         existing_by_uid = {
             str(item.get("profile_fact_uid")): item
             for item in existing_facts
             if item.get("profile_fact_uid")
         }
         seen: set[str] = set()
+        consumed_evidence: set[str] = set()
         plan = UserProfileFactMaintenancePlan()
         mutable_existing: dict[str, UserProfileFact] = {}
 
@@ -235,6 +260,13 @@ class UserProfileFactMaintainer:
             source_uid = str(row.get("source_uid") or "")
             if operation not in _ALLOWED_OPERATIONS:
                 raise UserProfileFactValidationError(f"unsupported operation: {operation}")
+            if source_uid in evidence_by_uid:
+                self._record_policy_rejection(
+                    plan,
+                    [],
+                    "standalone_historical_evidence",
+                )
+                continue
             if source_uid not in candidate_by_uid:
                 raise UserProfileFactValidationError(f"unknown source_uid: {source_uid}")
             supporting_source_uids = [
@@ -251,19 +283,25 @@ class UserProfileFactMaintainer:
                 )
             if len(operation_source_uids) != len(set(operation_source_uids)):
                 raise UserProfileFactValidationError("duplicate source within one operation")
-            unknown_support = set(operation_source_uids) - set(candidate_by_uid)
+            known_sources = {**candidate_by_uid, **evidence_by_uid}
+            unknown_support = set(operation_source_uids) - set(known_sources)
             if unknown_support:
                 raise UserProfileFactValidationError(
                     "unknown supporting source_uid: " + ", ".join(sorted(unknown_support))
                 )
-            duplicates = set(operation_source_uids) & seen
+            duplicates = (set(operation_source_uids) & seen) | (
+                set(operation_source_uids) & consumed_evidence
+            )
             if duplicates:
                 raise UserProfileFactValidationError(
                     "duplicate source result: " + ", ".join(sorted(duplicates))
                 )
-            seen.update(operation_source_uids)
+            seen.update(set(operation_source_uids) & set(candidate_by_uid))
+            consumed_evidence.update(
+                set(operation_source_uids) & set(evidence_by_uid)
+            )
             source = candidate_by_uid[source_uid]
-            operation_sources = [candidate_by_uid[item] for item in operation_source_uids]
+            operation_sources = [known_sources[item] for item in operation_source_uids]
             secret_uids = [
                 item.source_uid
                 for item in operation_sources
@@ -285,6 +323,20 @@ class UserProfileFactMaintainer:
                         f"{operation} requires a known profile_fact_uid"
                     )
                 fact = mutable_existing.setdefault(target_uid, self._fact_from_row(target))
+                signal = str(source.metadata.get("profile_signal") or _MODEL_REVIEW)
+                if signal in {_BEHAVIOR_EVIDENCE, _BEHAVIOR_PATTERN} and not (
+                    str(target.get("category") or "")
+                    in {"habit", "communication_preference"}
+                    and str(target.get("inference_kind") or "")
+                    == "behavioral_inference"
+                    and operation == "merge_source"
+                ):
+                    self._record_policy_rejection(
+                        plan,
+                        [source_uid],
+                        "invalid_behavior_merge",
+                    )
+                    continue
                 plan.source_assignments[source_uid] = target_uid
                 fact.last_confirmed_at = source.evidence_ended_at or source.updated_at
                 fact.confidence = max(fact.confidence, _score(row.get("confidence"), fact.confidence))
@@ -302,15 +354,34 @@ class UserProfileFactMaintainer:
             inference = self._inference(row.get("inference_kind"))
             sensitive = bool(row.get("sensitive", False))
             confidence = _score(row.get("confidence"), source.attribution_confidence)
-            self._validate_admission(
-                sources=operation_sources,
-                category=category,
-                inference=inference,
-                sensitive=sensitive,
-                confidence=confidence,
-                settings=settings,
-                row=row,
-            )
+            if "profile_value" not in row:
+                raise UserProfileFactValidationError("profile_value is required")
+            profile_value = _score(row.get("profile_value"), 0.0)
+            try:
+                self._validate_profile_value(
+                    source=source,
+                    operation=operation,
+                    inference=inference,
+                    sources=operation_sources,
+                    profile_value=profile_value,
+                    settings=settings,
+                )
+                self._validate_admission(
+                    sources=operation_sources,
+                    category=category,
+                    inference=inference,
+                    sensitive=sensitive,
+                    confidence=confidence,
+                    settings=settings,
+                    row=row,
+                )
+            except UserProfileFactValidationError as exc:
+                self._record_policy_rejection(
+                    plan,
+                    operation_source_uids,
+                    self._policy_rejection_code(exc),
+                )
+                continue
             status = (
                 UserProfileFactStatus.PENDING
                 if operation == "mark_pending"
@@ -328,7 +399,13 @@ class UserProfileFactMaintainer:
                 sensitive=sensitive,
                 first_seen_at=source.evidence_started_at or source.created_at,
                 last_confirmed_at=source.evidence_ended_at or source.updated_at,
-                metadata={"maintenance_reason": str(row.get("reason") or "")[:1000]},
+                metadata={
+                    "maintenance_reason": str(row.get("reason") or "")[:1000],
+                    "profile_value": profile_value,
+                    "profile_signal": str(
+                        source.metadata.get("profile_signal") or _MODEL_REVIEW
+                    ),
+                },
             )
             for consumed_uid in operation_source_uids:
                 plan.source_assignments[consumed_uid] = fact.profile_fact_uid
@@ -368,9 +445,82 @@ class UserProfileFactMaintainer:
                 "candidate_count": len(candidates),
                 "accepted_or_pending": len(plan.source_assignments),
                 "ignored": len(plan.ignored_source_uids),
+                "historical_evidence_available": len(evidence_by_uid),
+                "historical_evidence_consumed": len(consumed_evidence),
             }
         )
         return plan
+
+    @staticmethod
+    def _record_policy_rejection(
+        plan: UserProfileFactMaintenancePlan,
+        source_uids: Iterable[str],
+        reason: str,
+    ) -> None:
+        values = [str(value) for value in source_uids if str(value)]
+        plan.ignored_source_uids.extend(values)
+        rejected = plan.diagnostics.setdefault("policy_rejections", {})
+        rejected[str(reason)] = int(rejected.get(str(reason), 0)) + 1
+
+    @staticmethod
+    def _policy_rejection_code(exc: Exception) -> str:
+        message = str(exc)
+        mapping = (
+            ("one-off behavior", "one_off_behavior"),
+            ("repeated behavior patterns", "pattern_requires_inference"),
+            ("behavior-pattern primary", "invalid_inference_primary"),
+            ("supporting behavior evidence", "invalid_behavior_support_mode"),
+            ("support must be behavior evidence", "invalid_behavior_support"),
+            ("insufficient long-term profile value", "low_profile_value"),
+            ("limited to habit", "invalid_inference_category"),
+            ("sensitive behavioral inference", "sensitive_inference_disabled"),
+            ("too few Timelines", "insufficient_inference_timelines"),
+            ("span is too short", "insufficient_inference_span"),
+            ("confidence is too low", "insufficient_inference_confidence"),
+            ("unsupported inferred claim", "invalid_inference_claim"),
+        )
+        return next((code for fragment, code in mapping if fragment in message), "policy")
+
+    @staticmethod
+    def _validate_profile_value(
+        *,
+        source: UserProfileFactSource,
+        operation: str,
+        inference: UserProfileInferenceKind,
+        sources: list[UserProfileFactSource],
+        profile_value: float,
+        settings: dict[str, Any],
+    ) -> None:
+        signal = str(source.metadata.get("profile_signal") or _MODEL_REVIEW)
+        if signal == _BEHAVIOR_EVIDENCE:
+            raise UserProfileFactValidationError(
+                "one-off behavior evidence must be ignored or used only as supporting evidence"
+            )
+        if signal == _BEHAVIOR_PATTERN and inference != UserProfileInferenceKind.BEHAVIORAL_INFERENCE:
+            raise UserProfileFactValidationError(
+                "repeated behavior patterns require behavioral_inference"
+            )
+        if inference == UserProfileInferenceKind.BEHAVIORAL_INFERENCE and signal != _BEHAVIOR_PATTERN:
+            raise UserProfileFactValidationError(
+                "behavioral inference requires a behavior-pattern primary source"
+            )
+        supporting = sources[1:]
+        if supporting and inference != UserProfileInferenceKind.BEHAVIORAL_INFERENCE:
+            raise UserProfileFactValidationError(
+                "supporting behavior evidence requires behavioral_inference"
+            )
+        if any(
+            str(item.metadata.get("profile_signal") or _MODEL_REVIEW)
+            not in {_BEHAVIOR_EVIDENCE, _BEHAVIOR_PATTERN}
+            for item in supporting
+        ):
+            raise UserProfileFactValidationError(
+                "behavioral inference support must be behavior evidence"
+            )
+        if profile_value < float(settings["user_profile.fact_min_profile_value"]):
+            raise UserProfileFactValidationError(
+                f"{operation} has insufficient long-term profile value"
+            )
 
     @staticmethod
     def _validate_admission(
@@ -423,6 +573,40 @@ class UserProfileFactMaintainer:
         return any(pattern.search(str(text or "")) for pattern in _SECRET_PATTERNS)
 
     @staticmethod
+    def _profile_signal(profile: dict[str, Any]) -> str:
+        fact_type = str(profile.get("fact_type") or "").strip()
+        durability = str(profile.get("durability") or "").strip()
+        reason = str(profile.get("selection_reason") or "").strip()
+        if fact_type in {"relationship_interaction", "affect"} or reason in {
+            "relationship_significance",
+            "affective_significance",
+        }:
+            return "relationship_only"
+        if reason == "stable_personal_fact" or (
+            fact_type == "preference" and durability == "high"
+        ):
+            return _PROFILE_DIRECT
+        if fact_type == "preference":
+            return _BEHAVIOR_EVIDENCE
+        if fact_type in {"plan", "commitment"} and (
+            durability == "high"
+            or reason in {"future_utility", "commitment_or_decision"}
+        ):
+            return _PROFILE_DIRECT
+        if fact_type == "state" and (
+            durability == "high" or reason in {"future_utility", "stable_personal_fact"}
+        ):
+            return _PROFILE_DIRECT
+        if reason == "repeated_completed_action":
+            return _BEHAVIOR_PATTERN
+        if fact_type in {"event", "observation", "state"} or reason in {
+            "completed_action",
+            "specific_grounded_observation",
+        }:
+            return _BEHAVIOR_EVIDENCE
+        return _MODEL_REVIEW
+
+    @staticmethod
     def _category(value: Any) -> UserProfileFactCategory:
         try:
             return UserProfileFactCategory(str(value))
@@ -465,6 +649,7 @@ class UserProfileFactMaintainer:
     @staticmethod
     def _build_prompt(
         candidates: list[UserProfileFactSource],
+        supporting_evidence: list[UserProfileFactSource],
         existing_facts: list[dict[str, Any]],
         settings: dict[str, Any],
     ) -> str:
@@ -492,8 +677,23 @@ class UserProfileFactMaintainer:
                 "evidence_started_at": item.evidence_started_at,
                 "evidence_ended_at": item.evidence_ended_at,
                 "fact_profile": item.metadata.get("fact_profile", {}),
+                "profile_signal": item.metadata.get("profile_signal", _MODEL_REVIEW),
             }
             for item in candidates
+        ]
+        evidence_payload = [
+            {
+                "source_uid": item.source_uid,
+                "timeline_uid": item.timeline_uid,
+                "raw_fact": item.raw_fact,
+                "claim_type": item.claim_type,
+                "attribution_confidence": item.attribution_confidence,
+                "evidence_started_at": item.evidence_started_at,
+                "evidence_ended_at": item.evidence_ended_at,
+                "fact_profile": item.metadata.get("fact_profile", {}),
+                "profile_signal": item.metadata.get("profile_signal", _BEHAVIOR_EVIDENCE),
+            }
+            for item in supporting_evidence
         ]
         contract = {
             "operations": [
@@ -507,6 +707,7 @@ class UserProfileFactMaintainer:
                     "category": "stable_info|preference|habit|current_state|plan_commitment|communication_preference",
                     "confidence": 0.0,
                     "importance": 0.0,
+                    "profile_value": 0.0,
                     "inference_kind": "explicit|direct_observation|behavioral_inference",
                     "sensitive": False,
                     "independent_timeline_count": 1,
@@ -521,10 +722,15 @@ class UserProfileFactMaintainer:
             "Every candidate must appear exactly once. You may only reference supplied source_uid and profile_fact_uid values.\n"
             "Never output, normalize, summarize, or rewrite fact text. The application always keeps raw_fact verbatim.\n"
             "speaker_reports_other and unresolved subjects have already been excluded. Behavioral inference is allowed only for habit and communication_preference.\n"
+            "Truth confidence and long-term profile value are different. A claim being true, grounded, or tagged future_utility does not by itself make it profile-worthy. Ignore ordinary completed events, situational choices, transient activities, external-object observations, expired plans, and short-lived states that will not improve future conversations. Treat a preference as durable only when the source expresses a general preference rather than a choice made for one episode.\n"
+            "profile_signal=behavior_evidence must be ignored as a primary result. It may only appear in supporting_source_uids for a behavioral_inference whose primary source is a supplied behavior_pattern.\n"
+            "Historical behavior evidence is optional support and may only be cited by exact source_uid inside supporting_source_uids. Never create a standalone operation whose source_uid comes from Historical behavior evidence.\n"
             "Use mark_conflict when evidence cannot be safely reconciled; never silently overwrite. Security secrets must be ignored.\n"
             f"Acceptance threshold: {settings['user_profile.fact_accept_confidence']}.\n"
+            f"Minimum long-term profile value: {settings['user_profile.fact_min_profile_value']}.\n"
             f"Existing facts: {json.dumps(existing, ensure_ascii=False)}\n"
             f"Candidate sources: {json.dumps(candidate_payload, ensure_ascii=False)}\n"
+            f"Historical behavior evidence: {json.dumps(evidence_payload, ensure_ascii=False)}\n"
             f"Output shape: {json.dumps(contract, ensure_ascii=False)}"
         )
 

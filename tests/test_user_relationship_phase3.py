@@ -35,7 +35,11 @@ class _RelationshipProvider:
             self.fact_calls += 1
             if self.fail_facts:
                 raise RuntimeError("fact stage unavailable")
-            match = re.search(r"Candidate sources: (.*?)\nOutput shape:", prompt, re.S)
+            match = re.search(
+                r"Candidate sources: (.*?)\nHistorical behavior evidence:",
+                prompt,
+                re.S,
+            )
             candidates = json.loads(match.group(1))
             return SimpleNamespace(
                 completion_text=json.dumps(
@@ -75,12 +79,14 @@ class _RelationshipProvider:
         )
 
 
-def _relationship_event_payload(*, assistant_only: bool = False):
+def _relationship_event_payload(
+    *, assistant_only: bool = False, include_objective_fact: bool = False
+):
     user_actor = "test:human:user-1"
     assistant_actor = "test:assistant:bot-1"
     evidence_actor = assistant_actor if assistant_only else user_actor
     subject_actor = assistant_actor if assistant_only else user_actor
-    return {
+    payload = {
         "profile_actor_id": user_actor,
         "persona_snapshot": {
             "persona_id": "persona-1",
@@ -137,6 +143,30 @@ def _relationship_event_payload(*, assistant_only: bool = False):
             },
         },
     }
+    if include_objective_fact:
+        metadata = payload["metadata"]
+        metadata["key_facts"].append("Alice明确表示她更喜欢简洁的回答")
+        metadata["key_fact_profiles"].append(
+            {
+                "fact_index": 1,
+                "fact_type": "preference",
+                "durability": "high",
+                "selection_reason": "stable_personal_fact",
+            }
+        )
+        metadata["key_fact_evidence"].append(
+            {"fact_index": 1, "message_refs": ["M1"]}
+        )
+        metadata["key_fact_attributions"].append(
+            {
+                "fact_index": 1,
+                "subject_refs": [{"actor_id": user_actor}],
+                "claim_type": "speaker_self",
+                "confidence": 1.0,
+                "attribution_status": "verified",
+            }
+        )
+    return payload
 
 
 def test_relationship_trigger_rejects_assistant_only_evidence():
@@ -151,6 +181,24 @@ def test_relationship_trigger_rejects_assistant_only_evidence():
         actor_id=user_actor,
     )
     assert meaningful == []
+
+
+def test_relationship_prompt_minimizes_private_detail_repetition():
+    prompt, _refs = UserRelationshipMaintainer._build_prompt(
+        timelines=[
+            {
+                "summary": "grounded interaction",
+                "facts": ["relationship signal"],
+                "sentiment": "neutral",
+            }
+        ],
+        current_state=None,
+        persona_snapshot={"persona_id": "persona-1", "name": "Companion"},
+        objective_facts=[],
+        sensitivity="balanced",
+        behavior_mode="natural",
+    )
+    assert "Do not restate concrete private details" in prompt
 
 
 @pytest.mark.asyncio
@@ -246,8 +294,11 @@ async def test_relationship_stage_publishes_and_clears_persona_prompt(tmp_path):
         ).fetchone()
     assert task_row["persona_prompt"] == ""
     assert json.loads(task_row["result_summary"])["relationship_checkpoint"] is True
+    assert json.loads(task_row["result_summary"])["relationship_diagnostics"][
+        "persona_basis"
+    ] == "timeline_snapshot"
     assert event_row["status"] == "completed"
-    assert provider.fact_calls == 1
+    assert provider.fact_calls == 0
     assert provider.relationship_calls == 1
     await manager.close()
 
@@ -279,7 +330,7 @@ async def test_relationship_runs_when_fact_stage_fails(tmp_path):
             operation="upsert",
             memory_space_id="space-relationship-1",
             profile_scope_uid=scope.profile_scope_uid,
-            payload=_relationship_event_payload(),
+            payload=_relationship_event_payload(include_objective_fact=True),
         )
     )
     await manager.drain_scope(scope.profile_scope_uid)
@@ -295,6 +346,7 @@ async def test_relationship_runs_when_fact_stage_fails(tmp_path):
     task = await store.get_task(str(row["task_uid"]))
     assert task["status"] == "facts_failed"
     assert task["result_summary"]["relationship_checkpoint"] is True
+    assert provider.fact_calls == 1
     assert provider.relationship_calls == 1
     await manager.close()
 

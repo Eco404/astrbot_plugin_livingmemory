@@ -14,6 +14,9 @@ from astrbot_plugin_livingmemory.core.models.user_profile import (
     UserProfileProjectionEvent,
     UserRelationshipState,
 )
+from astrbot_plugin_livingmemory.core.managers.user_profile_history_manager import (
+    UserProfileHistoryChangedError,
+)
 from astrbot_plugin_livingmemory.core.page_api_modules import PageApiUtils
 from astrbot_plugin_livingmemory.core.page_api_modules.user_profile_handler import (
     UserProfileHandler,
@@ -491,3 +494,117 @@ async def test_task_page_api_never_exposes_persona_prompt():
     assert result["data"]["items"] == [
         {"task_uid": "task-1", "status": "failed"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_profile_rebuild_preview_includes_history_discovery_counts():
+    store = MagicMock()
+    store.profile_detail = AsyncMock(
+        return_value={
+            "fingerprint": "profile-fingerprint",
+            "facts": [{"profile_fact_uid": "fact-1"}],
+            "overrides": [{"active": True}],
+            "conflicts": [{"status": "open"}],
+            "share_group": {"members": []},
+        }
+    )
+    store.list_projection_history = AsyncMock(return_value=[{"timeline_uid": "T1"}])
+    history = MagicMock()
+    history.preview = AsyncMock(
+        return_value={
+            "eligible_timeline_count": 4,
+            "missing_timeline_count": 3,
+            "ambiguous_identity_count": 2,
+            "history_fingerprint": "history-fingerprint",
+        }
+    )
+    engine = SimpleNamespace(
+        user_profile_store=store,
+        user_profile_maintenance_manager=MagicMock(),
+        user_profile_history_manager=history,
+    )
+    request = MagicMock()
+    request.get_json = AsyncMock(return_value={"profile_scope_uid": "scope-1"})
+    import astrbot_plugin_livingmemory.core.page_api_modules.user_profile_handler as module
+
+    previous = vars(module).get("request")
+    vars(module)["request"] = request
+    try:
+        result = await UserProfileHandler(PageApiUtils()).rebuild_preview(engine)
+    finally:
+        vars(module)["request"] = previous
+
+    assert result["status"] == "ok"
+    assert result["data"]["timeline_count"] == 4
+    assert result["data"]["missing_timeline_count"] == 3
+    assert result["data"]["ambiguous_identity_count"] == 2
+    assert result["data"]["history_fingerprint"] == "history-fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_profile_rebuild_rejects_stale_history_before_mutating_profile():
+    store = MagicMock()
+    store.prepare_profile_rebuild = AsyncMock()
+    history = MagicMock()
+    history.validate_fingerprint = AsyncMock(
+        side_effect=UserProfileHistoryChangedError("history changed")
+    )
+    manager = MagicMock()
+    engine = SimpleNamespace(
+        user_profile_store=store,
+        user_profile_maintenance_manager=manager,
+        user_profile_history_manager=history,
+    )
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={
+            "profile_scope_uid": "scope-1",
+            "fingerprint": "profile-fingerprint",
+            "history_fingerprint": "history-fingerprint",
+        }
+    )
+    import astrbot_plugin_livingmemory.core.page_api_modules.user_profile_handler as module
+
+    previous = vars(module).get("request")
+    vars(module)["request"] = request
+    try:
+        result = await UserProfileHandler(PageApiUtils()).rebuild_start(engine)
+    finally:
+        vars(module)["request"] = previous
+
+    assert result["status"] == "error"
+    assert result["message"].startswith("stale_preview:")
+    store.prepare_profile_rebuild.assert_not_awaited()
+    manager.schedule_scope.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_enabling_profile_marks_gap_when_historical_timelines_are_missing():
+    store = MagicMock()
+    store.set_profile_enabled = AsyncMock(return_value={"has_gap": False})
+    store.set_scope_state = AsyncMock()
+    history = MagicMock()
+    history.preview = AsyncMock(
+        return_value={"missing_timeline_count": 2, "history_fingerprint": "history"}
+    )
+    manager = MagicMock()
+    engine = SimpleNamespace(
+        user_profile_store=store,
+        user_profile_maintenance_manager=manager,
+        user_profile_history_manager=history,
+    )
+    request = MagicMock()
+    request.get_json = AsyncMock(return_value={"profile_scope_uid": "scope-1"})
+    import astrbot_plugin_livingmemory.core.page_api_modules.user_profile_handler as module
+
+    previous = vars(module).get("request")
+    vars(module)["request"] = request
+    try:
+        result = await UserProfileHandler(PageApiUtils()).set_enabled(engine, True)
+    finally:
+        vars(module)["request"] = previous
+
+    assert result["status"] == "ok"
+    assert result["data"]["has_gap"] is True
+    store.set_scope_state.assert_awaited_once_with("scope-1", has_gap=True)
+    manager.schedule_scope.assert_not_called()

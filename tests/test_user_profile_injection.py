@@ -121,6 +121,29 @@ async def test_profile_excludes_expired_fact_and_aftereffect_and_empty_reset(tmp
 
 
 @pytest.mark.asyncio
+async def test_pinned_fact_remains_current_after_review_deadline(tmp_path):
+    store, scope = await _profile_store(tmp_path)
+    await _publish_fact(
+        store,
+        scope,
+        text="用户确认这条事实应长期保留",
+        category=UserProfileFactCategory.PREFERENCE,
+        review_after=time.time() - 1,
+        pinned=True,
+    )
+
+    result = await UserProfileInjectionService(store, {}).render_current_user(
+        session_id="bot:private:user-1",
+        persona_id="persona",
+        actor_id="qq:human:user-1",
+        query="",
+    )
+
+    assert result.status == "available"
+    assert "用户确认这条事实应长期保留" in result.content
+
+
+@pytest.mark.asyncio
 async def test_compact_snapshot_hard_budget_and_relationship_rendering(tmp_path):
     store, scope = await _profile_store(tmp_path)
     for index in range(10):
@@ -165,6 +188,43 @@ async def test_compact_snapshot_hard_budget_and_relationship_rendering(tmp_path)
     assert "用户偏好第 0 项" in result.content
     assert len(result.content) <= 420
     assert result.content.endswith(PROFILE_INJECTION_FOOTER)
+
+
+@pytest.mark.asyncio
+async def test_profile_budget_includes_fact_relationship_separator(tmp_path):
+    store, scope = await _profile_store(tmp_path)
+    for index in range(30):
+        await _publish_fact(
+            store,
+            scope,
+            text="x" * 80 + str(index),
+            category=UserProfileFactCategory.STABLE_INFO,
+            importance=1.0,
+        )
+    await store.publish_relationship(
+        UserRelationshipState(
+            profile_scope_uid=scope.profile_scope_uid,
+            familiarity=0.8,
+            subjective_summary="relationship narrative " * 20,
+        )
+    )
+    for max_chars, reserve in ((800, 200), (1000, 300), (1200, 350)):
+        result = await UserProfileInjectionService(
+            store,
+            {
+                "user_profile.injection_max_chars": max_chars,
+                "user_profile.relationship_reserved_chars": reserve,
+                "user_profile.fact_injection_max_chars": 200,
+            },
+        ).render_current_user(
+            session_id="bot:private:user-1",
+            persona_id="persona",
+            actor_id="qq:human:user-1",
+            query="x" * 80,
+        )
+        assert result.status == "available"
+        assert 0 < result.total_chars <= max_chars
+        assert result.relationship_included is True
 
 
 @pytest.mark.asyncio

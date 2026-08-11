@@ -30,6 +30,10 @@ class UserProfileHandler:
         return store, manager
 
     @staticmethod
+    def _history_manager(memory_engine: Any) -> Any:
+        return getattr(memory_engine, "user_profile_history_manager", None)
+
+    @staticmethod
     def _task_public(task: dict[str, Any]) -> dict[str, Any]:
         result = dict(task)
         result.pop("persona_prompt", None)
@@ -103,6 +107,13 @@ class UserProfileHandler:
             store, manager = self._components(memory_engine)
             scope_uid = self._scope_uid(payload)
             result = await store.set_profile_enabled(scope_uid, enabled)
+            history_manager = self._history_manager(memory_engine)
+            if enabled and history_manager is not None:
+                history = await history_manager.preview(scope_uid)
+                result["history"] = history
+                if history["missing_timeline_count"]:
+                    await store.set_scope_state(scope_uid, has_gap=True)
+                    result["has_gap"] = True
             if enabled and manager is not None and not result["has_gap"]:
                 manager.schedule_scope(scope_uid)
             return self.utils.ok(result)
@@ -186,15 +197,34 @@ class UserProfileHandler:
             detail = await store.profile_detail(scope_uid)
             if detail is None:
                 raise ValueError("Unknown user-profile scope")
-            history = await store.list_projection_history(scope_uid)
+            projection_history = await store.list_projection_history(scope_uid)
+            history_manager = self._history_manager(memory_engine)
+            history = (
+                await history_manager.preview(scope_uid)
+                if history_manager is not None
+                else {
+                    "eligible_timeline_count": len(
+                        {
+                            str(event.get("timeline_uid") or "")
+                            for event in projection_history
+                        }
+                    ),
+                    "missing_timeline_count": 0,
+                    "ambiguous_identity_count": 0,
+                    "history_fingerprint": "",
+                }
+            )
             return self.utils.ok(
                 {
                     "profile_scope_uid": scope_uid,
                     "fingerprint": detail["fingerprint"],
-                    "timeline_event_count": len(history),
-                    "timeline_count": len(
-                        {str(event.get("timeline_uid") or "") for event in history}
-                    ),
+                    "timeline_event_count": len(projection_history),
+                    "timeline_count": history["eligible_timeline_count"],
+                    "missing_timeline_count": history["missing_timeline_count"],
+                    "ambiguous_identity_count": history[
+                        "ambiguous_identity_count"
+                    ],
+                    "history_fingerprint": history["history_fingerprint"],
                     "fact_count": len(detail.get("facts") or []),
                     "override_count": sum(
                         1 for item in detail.get("overrides") or [] if item.get("active")
@@ -219,11 +249,28 @@ class UserProfileHandler:
             if manager is None:
                 raise RuntimeError("用户画像维护器尚未初始化")
             scope_uid = self._scope_uid(payload)
+            history_manager = self._history_manager(memory_engine)
+            if history_manager is not None:
+                await history_manager.validate_fingerprint(
+                    scope_uid,
+                    expected_history_fingerprint=str(
+                        payload.get("history_fingerprint") or ""
+                    ),
+                )
             result = await store.prepare_profile_rebuild(
                 scope_uid,
                 clear_overrides=bool(payload.get("clear_overrides", False)),
                 expected_fingerprint=str(payload.get("fingerprint") or ""),
             )
+            if history_manager is not None:
+                backfill = await history_manager.backfill(
+                    scope_uid,
+                    expected_history_fingerprint=str(
+                        payload.get("history_fingerprint") or ""
+                    ),
+                )
+                result["history"] = backfill
+                result["event_count"] += int(backfill["inserted_event_count"])
             manager.schedule_scope(scope_uid)
             result["status"] = "scheduled" if result["event_count"] else "no_history"
             return self.utils.ok(result)

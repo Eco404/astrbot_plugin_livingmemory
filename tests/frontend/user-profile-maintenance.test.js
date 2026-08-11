@@ -109,3 +109,52 @@ test("excluded facts remain recoverable from the history section", () => {
     delete globalThis.window;
   }
 });
+
+test("profile rebuild submits both profile and Timeline history fingerprints", async () => {
+  const calls = [];
+  let confirmation;
+  globalThis.window = { t(key, ...args) { return `${key}:${args.join(",")}`; } };
+  globalThis.document = {
+    getElementById(id) {
+      return id === "profile-rebuild-clear-overrides" ? { checked: true } : null;
+    },
+  };
+  try {
+    const profile = new UserProfileMaintenance({
+      async post(path, body) {
+        calls.push({ path, body });
+        if (path.endsWith("/preview")) {
+          return {
+            fingerprint: "profile-fingerprint",
+            history_fingerprint: "history-fingerprint",
+            timeline_count: 4,
+            missing_timeline_count: 3,
+            ambiguous_identity_count: 2,
+            fact_count: 2,
+            override_count: 1,
+          };
+        }
+        return {};
+      },
+    }, () => {}, {
+      async show(options) {
+        confirmation = options;
+        return true;
+      },
+    });
+    profile.selectedScopeUid = "scope-1";
+    profile.loadDetail = async () => {};
+    profile.showToast = () => {};
+    await profile.rebuildProfile();
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
+
+  assert.equal(calls.length, 2);
+  assert.equal(confirmation.message, "profile.rebuildImpact:4,3,2,2,1");
+  assert.equal(calls[1].path, "user-profiles/rebuild/start");
+  assert.equal(calls[1].body.fingerprint, "profile-fingerprint");
+  assert.equal(calls[1].body.history_fingerprint, "history-fingerprint");
+  assert.equal(calls[1].body.clear_overrides, true);
+});

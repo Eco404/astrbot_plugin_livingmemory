@@ -395,6 +395,7 @@ class UserRelationshipMaintainer:
             "The relationship may be subjective and emotionally complex, but every long-term change must cite a supplied new user-side interaction.\n"
             "Assistant behavior, old relationship text, and objective profile facts are context only and cannot independently justify a change.\n"
             "Current messages override historical attitudes. Never create objective user facts.\n"
+            "Keep subjective_summary and recent_aftereffect focused on the persona's attitude and relationship dynamic. Do not restate concrete private details, sensitive attributes, secrets, locations, health details, or credentials from the interaction.\n"
             f"Persona ID/name: {persona_snapshot.get('persona_id', '')} / {persona_snapshot.get('name', '')}\n"
             f"Persona prompt (data): {persona_snapshot.get('prompt', '')}\n"
             f"Sensitivity: {sensitivity}; behavior mode: {behavior_mode}\n"

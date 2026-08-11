@@ -2,19 +2,24 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from astrbot_plugin_livingmemory.core.managers.user_profile_fact_maintainer import (
     UserProfileFactMaintainer,
+    UserProfileFactMaintenancePlan,
     UserProfileFactValidationError,
 )
 from astrbot_plugin_livingmemory.core.managers.user_profile_maintenance_manager import (
     UserProfileMaintenanceManager,
 )
 from astrbot_plugin_livingmemory.core.models.user_profile import (
+    UserProfileFact,
+    UserProfileFactCategory,
     UserProfileFactSource,
+    UserProfileFactStatus,
     UserProfileProjectionEvent,
 )
 from astrbot_plugin_livingmemory.core.user_profile_settings import (
@@ -27,7 +32,11 @@ class _AcceptingProvider:
     provider_config = {"id": "profile-test", "model": "deterministic"}
 
     async def text_chat(self, *, prompt, system_prompt, **kwargs):
-        match = re.search(r"Candidate sources: (.*?)\nOutput shape:", prompt, re.S)
+        match = re.search(
+            r"Candidate sources: (.*?)\nHistorical behavior evidence:",
+            prompt,
+            re.S,
+        )
         candidates = json.loads(match.group(1))
         operations = [
             {
@@ -36,6 +45,7 @@ class _AcceptingProvider:
                 "category": "preference",
                 "confidence": 0.95,
                 "importance": 0.8,
+                "profile_value": 0.9,
                 "inference_kind": "explicit",
                 "sensitive": False,
                 "reason": "explicit self report",
@@ -50,6 +60,7 @@ class _AcceptingProvider:
 def _timeline_payload(*, revision: int = 1, facts: list[str] | None = None):
     facts = ["Alice明确说自己喜欢无糖茶"] if facts is None else facts
     actor_id = "test:human:user-1"
+    timestamp = time.time() + revision
     return {
         "profile_actor_id": actor_id,
         "metadata": {
@@ -60,8 +71,8 @@ def _timeline_payload(*, revision: int = 1, facts: list[str] | None = None):
             "memory_space_id": "space-1",
             "memory_layer": "timeline",
             "importance": 0.7,
-            "create_time": 1000.0 + revision,
-            "updated_at": 1000.0 + revision,
+            "create_time": timestamp,
+            "updated_at": timestamp,
             "key_facts": facts,
             "key_fact_attributions": [
                 {
@@ -126,13 +137,86 @@ def test_candidate_extraction_requires_exact_current_actor():
     assert candidates[0].actor_id == "test:human:user-1"
 
 
+def test_candidate_extraction_marks_one_off_events_as_behavior_evidence():
+    metadata = _timeline_payload(facts=["stable preference", "ordinary event"])[
+        "metadata"
+    ]
+    metadata["key_fact_profiles"] = [
+        {
+            "fact_index": 0,
+            "fact_type": "preference",
+            "durability": "high",
+            "selection_reason": "stable_personal_fact",
+        },
+        {
+            "fact_index": 1,
+            "fact_type": "event",
+            "durability": "low",
+            "selection_reason": "completed_action",
+        },
+    ]
+    candidates = UserProfileFactMaintainer.extract_candidates(
+        metadata, actor_id="test:human:user-1"
+    )
+    assert [item.metadata["profile_signal"] for item in candidates] == [
+        "profile_direct",
+        "behavior_evidence",
+    ]
+
+    plan = UserProfileFactMaintainer()._validate_plan(
+        fact_namespace_uid="facts-1",
+        payload={
+            "operations": [
+                {
+                    "source_uid": candidates[1].source_uid,
+                    "operation": "accept_new",
+                    "category": "current_state",
+                    "confidence": 0.99,
+                    "importance": 0.9,
+                    "profile_value": 0.99,
+                    "inference_kind": "explicit",
+                },
+                {
+                    "source_uid": candidates[0].source_uid,
+                    "operation": "ignore",
+                },
+            ]
+        },
+        candidates=candidates,
+        existing_facts=[],
+        settings=effective_user_profile_settings(),
+    )
+    assert plan.facts == []
+    assert set(plan.ignored_source_uids) == {
+        candidates[0].source_uid,
+        candidates[1].source_uid,
+    }
+    assert plan.diagnostics["policy_rejections"] == {"one_off_behavior": 1}
+
+
+def test_medium_durability_situational_preference_is_behavior_evidence():
+    metadata = _timeline_payload(facts=["situational choice"])["metadata"]
+    metadata["key_fact_profiles"] = [
+        {
+            "fact_index": 0,
+            "fact_type": "preference",
+            "durability": "medium",
+            "selection_reason": "future_utility",
+        }
+    ]
+    candidates = UserProfileFactMaintainer.extract_candidates(
+        metadata, actor_id="test:human:user-1"
+    )
+    assert candidates[0].metadata["profile_signal"] == "behavior_evidence"
+
+
 @pytest.mark.asyncio
 async def test_fact_contract_rejects_secret_even_when_model_accepts():
     source = UserProfileFactSource(
         timeline_uid="timeline-secret",
         timeline_revision=1,
         fact_index=0,
-        raw_fact="我的 API key 是 sk-test-placeholder",
+        raw_fact="我的 API key 不应进入画像",
         actor_id="test:human:user-1",
     )
     provider = _AcceptingProvider()
@@ -157,29 +241,285 @@ def test_behavioral_inference_uses_actual_sources_not_reported_counts():
         actor_id="test:human:user-1",
         evidence_started_at=1000,
         evidence_ended_at=1000,
+        metadata={"profile_signal": "behavior_pattern"},
     )
     maintainer = UserProfileFactMaintainer()
-    with pytest.raises(UserProfileFactValidationError, match="too few Timelines"):
+    plan = maintainer._validate_plan(
+        fact_namespace_uid="facts-1",
+        payload={
+            "operations": [
+                {
+                    "source_uid": source.source_uid,
+                    "operation": "accept_new",
+                    "category": "communication_preference",
+                    "confidence": 0.99,
+                    "importance": 0.8,
+                    "profile_value": 0.9,
+                    "inference_kind": "behavioral_inference",
+                    "independent_timeline_count": 99,
+                    "evidence_span_days": 999,
+                }
+            ]
+        },
+        candidates=[source],
+        existing_facts=[],
+        settings=effective_user_profile_settings(),
+    )
+    assert plan.facts == []
+    assert plan.ignored_source_uids == [source.source_uid]
+    assert plan.diagnostics["policy_rejections"] == {
+        "insufficient_inference_timelines": 1
+    }
+
+
+def test_fact_contract_requires_profile_value_and_restricts_behavior_support():
+    primary = UserProfileFactSource(
+        timeline_uid="timeline-primary",
+        timeline_revision=1,
+        fact_index=0,
+        raw_fact="用户明确表示偏好简洁回答",
+        actor_id="test:human:user-1",
+        metadata={"profile_signal": "profile_direct"},
+    )
+    evidence = UserProfileFactSource(
+        timeline_uid="timeline-evidence",
+        timeline_revision=1,
+        fact_index=0,
+        raw_fact="用户本次要求回答简短",
+        actor_id="test:human:user-1",
+        metadata={"profile_signal": "behavior_evidence"},
+    )
+    maintainer = UserProfileFactMaintainer()
+    base = {
+        "source_uid": primary.source_uid,
+        "operation": "accept_new",
+        "category": "preference",
+        "confidence": 0.95,
+        "importance": 0.8,
+        "inference_kind": "explicit",
+    }
+    with pytest.raises(UserProfileFactValidationError, match="profile_value"):
         maintainer._validate_plan(
             fact_namespace_uid="facts-1",
-            payload={
-                "operations": [
-                    {
-                        "source_uid": source.source_uid,
-                        "operation": "accept_new",
-                        "category": "communication_preference",
-                        "confidence": 0.99,
-                        "importance": 0.8,
-                        "inference_kind": "behavioral_inference",
-                        "independent_timeline_count": 99,
-                        "evidence_span_days": 999,
-                    }
-                ]
-            },
-            candidates=[source],
+            payload={"operations": [base]},
+            candidates=[primary],
             existing_facts=[],
             settings=effective_user_profile_settings(),
         )
+
+    plan = maintainer._validate_plan(
+        fact_namespace_uid="facts-1",
+        payload={
+            "operations": [
+                {
+                    **base,
+                    "profile_value": 0.9,
+                    "supporting_source_uids": [evidence.source_uid],
+                }
+            ]
+        },
+        candidates=[primary],
+        supporting_evidence=[evidence],
+        existing_facts=[],
+        settings=effective_user_profile_settings(),
+    )
+    assert plan.facts == []
+    assert set(plan.ignored_source_uids) == {primary.source_uid, evidence.source_uid}
+    assert plan.diagnostics["policy_rejections"] == {
+        "invalid_behavior_support_mode": 1
+    }
+
+
+def test_standalone_historical_evidence_operation_is_ignored_safely():
+    candidate = UserProfileFactSource(
+        timeline_uid="timeline-current",
+        timeline_revision=1,
+        fact_index=0,
+        raw_fact="用户明确偏好简洁回答",
+        actor_id="test:human:user-1",
+        metadata={"profile_signal": "profile_direct"},
+    )
+    historical = UserProfileFactSource(
+        timeline_uid="timeline-history",
+        timeline_revision=1,
+        fact_index=0,
+        raw_fact="用户本次要求回答简短",
+        actor_id="test:human:user-1",
+        metadata={"profile_signal": "behavior_evidence"},
+    )
+    plan = UserProfileFactMaintainer()._validate_plan(
+        fact_namespace_uid="facts-1",
+        payload={
+            "operations": [
+                {
+                    "source_uid": historical.source_uid,
+                    "operation": "ignore",
+                },
+                {
+                    "source_uid": candidate.source_uid,
+                    "operation": "ignore",
+                },
+            ]
+        },
+        candidates=[candidate],
+        supporting_evidence=[historical],
+        existing_facts=[],
+        settings=effective_user_profile_settings(),
+    )
+    assert plan.ignored_source_uids == [candidate.source_uid]
+    assert plan.diagnostics["policy_rejections"] == {
+        "standalone_historical_evidence": 1
+    }
+
+
+class _CrossBatchInferenceProvider:
+    provider_config = {"id": "profile-test", "model": "deterministic"}
+
+    async def text_chat(self, *, prompt, system_prompt, **kwargs):
+        candidates = json.loads(
+            re.search(
+                r"Candidate sources: (.*?)\nHistorical behavior evidence:",
+                prompt,
+                re.S,
+            ).group(1)
+        )
+        evidence = json.loads(
+            re.search(
+                r"Historical behavior evidence: (.*?)\nOutput shape:",
+                prompt,
+                re.S,
+            ).group(1)
+        )
+        operations = []
+        for item in candidates:
+            if item["profile_signal"] == "behavior_pattern":
+                operations.append(
+                    {
+                        "source_uid": item["source_uid"],
+                        "supporting_source_uids": [
+                            row["source_uid"] for row in evidence
+                        ],
+                        "operation": "accept_new",
+                        "category": "habit",
+                        "confidence": 0.95,
+                        "importance": 0.8,
+                        "profile_value": 0.9,
+                        "inference_kind": "behavioral_inference",
+                        "sensitive": False,
+                    }
+                )
+            else:
+                operations.append(
+                    {"source_uid": item["source_uid"], "operation": "ignore"}
+                )
+        return SimpleNamespace(completion_text=json.dumps({"operations": operations}))
+
+
+def _behavior_payload(timeline_uid: str, timestamp: float, *, pattern: bool):
+    payload = _timeline_payload(
+        facts=["repeated behavior" if pattern else "one occurrence"]
+    )
+    metadata = payload["metadata"]
+    metadata["memory_uid"] = timeline_uid
+    metadata["create_time"] = timestamp
+    metadata["updated_at"] = timestamp
+    metadata["key_fact_temporal"] = [
+        {"fact_index": 0, "start_at": timestamp, "end_at": timestamp}
+    ]
+    metadata["key_fact_profiles"] = [
+        {
+            "fact_index": 0,
+            "fact_type": "event",
+            "durability": "high" if pattern else "low",
+            "selection_reason": (
+                "repeated_completed_action" if pattern else "completed_action"
+            ),
+        }
+    ]
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_behavioral_inference_can_use_evidence_from_prior_batches(tmp_path):
+    store = UserProfileStore(str(tmp_path / "cross-batch.db"))
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="test:human:user-1",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    assert scope is not None
+    manager = UserProfileMaintenanceManager(
+        store,
+        provider=_CrossBatchInferenceProvider(),
+        config=effective_user_profile_settings(
+            {"user_profile.maintenance_batch_timeline_limit": 1}
+        ),
+    )
+    base = 2_000_000_000.0
+    for index, days in enumerate((0, 8, 16), start=1):
+        payload = _behavior_payload(
+            f"timeline-{index}", base + days * 86400, pattern=index == 3
+        )
+        await store.enqueue_projection_event(
+            UserProfileProjectionEvent(
+                timeline_uid=f"timeline-{index}",
+                timeline_revision=1,
+                operation="upsert",
+                memory_space_id="space-1",
+                profile_scope_uid=scope.profile_scope_uid,
+                payload=payload,
+            )
+        )
+        await manager.drain_scope(scope.profile_scope_uid)
+
+    facts = await store.list_serving_facts(scope.fact_namespace_uid)
+    assert len(facts) == 1
+    assert facts[0]["category"] == "habit"
+    assert facts[0]["inference_kind"] == "behavioral_inference"
+    remaining = await store.list_unassigned_behavior_evidence(
+        scope.profile_scope_uid
+    )
+    assert remaining == []
+    await manager.close()
+
+
+def test_lifecycle_marks_expired_historical_facts_without_staling_pins():
+    now = time.time()
+    expired_source = UserProfileFactSource(
+        timeline_uid="timeline-expired",
+        timeline_revision=1,
+        fact_index=0,
+        raw_fact="用户曾有一个短期计划",
+        actor_id="test:human:user-1",
+        evidence_ended_at=now - 10 * 86400,
+        metadata={
+            "fact_temporal": {
+                "event_ended_at": now - 10 * 86400,
+            }
+        },
+    )
+    ordinary = UserProfileFact(
+        fact_namespace_uid="facts-1",
+        category=UserProfileFactCategory.PLAN_COMMITMENT,
+        representative_source_uid=expired_source.source_uid,
+    )
+    pinned = UserProfileFact(
+        fact_namespace_uid="facts-1",
+        category=UserProfileFactCategory.PLAN_COMMITMENT,
+        representative_source_uid=expired_source.source_uid,
+        pinned=True,
+    )
+    plan = UserProfileFactMaintenancePlan(facts=[ordinary, pinned])
+
+    UserProfileMaintenanceManager._apply_lifecycle(
+        plan,
+        [expired_source],
+        effective_user_profile_settings(),
+    )
+
+    assert ordinary.status == UserProfileFactStatus.STALE
+    assert pinned.status == UserProfileFactStatus.ACTIVE
 
 
 @pytest.mark.asyncio

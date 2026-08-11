@@ -133,6 +133,98 @@ async def test_fact_sources_publish_atomically_and_keep_raw_timeline_text(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_reprojection_drops_obsolete_assignments_but_keeps_admin_overrides(
+    tmp_path,
+):
+    store = UserProfileStore(str(tmp_path / "reprojection.db"))
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="test:human:user-1",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    assert scope is not None
+    sources = [
+        UserProfileFactSource(
+            timeline_uid=f"timeline-{index}",
+            timeline_revision=1,
+            fact_index=0,
+            raw_fact=text,
+            actor_id="test:human:user-1",
+        )
+        for index, text in enumerate(
+            ("用户参加了一次临时活动", "用户明确偏好简短回复"), start=1
+        )
+    ]
+    await store.save_fact_sources(sources)
+    facts = [
+        UserProfileFact(
+            fact_namespace_uid=scope.fact_namespace_uid,
+            category=UserProfileFactCategory.PREFERENCE,
+            representative_source_uid=source.source_uid,
+        )
+        for source in sources
+    ]
+    revision = await store.publish_fact_changes(
+        fact_namespace_uid=scope.fact_namespace_uid,
+        upserts=facts,
+        source_assignments={
+            source.source_uid: fact.profile_fact_uid
+            for source, fact in zip(sources, facts, strict=True)
+        },
+        expected_revision=0,
+    )
+    governed = await store.apply_fact_admin_action(
+        scope.profile_scope_uid,
+        facts[1].profile_fact_uid,
+        action="confirm",
+        expected_revision=revision,
+    )
+
+    replay_sources = [
+        UserProfileFactSource(
+            source_uid=source.source_uid,
+            timeline_uid=source.timeline_uid,
+            timeline_revision=source.timeline_revision,
+            fact_index=source.fact_index,
+            raw_fact=source.raw_fact,
+            actor_id=source.actor_id,
+        )
+        for source in sources
+    ]
+    await store.apply_fact_projection_batch(
+        fact_namespace_uid=scope.fact_namespace_uid,
+        projections=[
+            {
+                "timeline_uid": source.timeline_uid,
+                "timeline_revision": 1,
+                "operation": "upsert",
+                "sources": [source],
+            }
+            for source in replay_sources
+        ],
+        expected_revision=governed["fact_revision"],
+    )
+
+    current = {
+        item["profile_fact_uid"]: item
+        for item in await store.list_facts_for_maintenance(scope.fact_namespace_uid)
+    }
+    assert current[facts[0].profile_fact_uid]["status"] == "archived"
+    assert current[facts[1].profile_fact_uid]["status"] == "active"
+    async with store._connect() as db:
+        rows = await (
+            await db.execute(
+                "SELECT source_uid, profile_fact_uid FROM user_profile_fact_sources "
+                "ORDER BY timeline_uid"
+            )
+        ).fetchall()
+    assignments = {str(row["source_uid"]): row["profile_fact_uid"] for row in rows}
+    assert assignments[sources[0].source_uid] is None
+    assert assignments[sources[1].source_uid] == facts[1].profile_fact_uid
+
+
+@pytest.mark.asyncio
 async def test_relationship_revisions_are_clamped_and_auditable(tmp_path):
     store = UserProfileStore(str(tmp_path / "relationship.db"))
     await store.initialize()
@@ -232,4 +324,3 @@ async def test_migration_v10_3_to_v10_4_creates_profile_schema(tmp_path):
             )
         ).fetchone()
     assert row is not None
-

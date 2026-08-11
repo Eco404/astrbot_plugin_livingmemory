@@ -643,7 +643,7 @@ concern      关切
 ### 12.3 长度预算
 
 - 总字符预算默认 800，可配置范围 300-2000。
-- 人格关系部分预留默认 200，可配置。
+- 人格关系部分预留默认 300，可配置。该值来自真实数据注入检查，给近期余韵和主观叙述留下稳定空间。
 - 未使用的关系预算可以回流给客观事实。
 - 主观叙述存储上限默认 500，可配置。
 - 单条原始事实注入上限默认 200，可配置；完整原文仍保存在数据库。
@@ -753,6 +753,7 @@ WebUI 设置页新增一级分类 **用户画像**，所有本方案涉及的可
 | 配置键 | 类型 | 默认 | 范围 | 说明 |
 | --- | --- | --- | --- | --- |
 | `user_profile.fact_accept_confidence` | float | `0.85` | `0.0-1.0` | 维护模型接受事实并立即生效的门槛 |
+| `user_profile.fact_min_profile_value` | float | `0.65` | `0.0-1.0` | 对未来理解用户有长期价值的最低门槛；与事实真实性置信度分离 |
 | `user_profile.pending_retention_days` | int | `180` | `1-3650` | 待确认候选归档期限 |
 
 Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维护模型。
@@ -764,6 +765,7 @@ Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维�
 | `user_profile.behavior_inference_min_timelines` | int | `3` | `2-20` | 普通习惯/交流偏好推断的独立 Timeline 数 |
 | `user_profile.behavior_inference_min_span_days` | int | `14` | `1-365` | 普通行为证据最小跨度 |
 | `user_profile.behavior_inference_min_confidence` | float | `0.85` | `0.0-1.0` | 普通行为推断置信度 |
+| `user_profile.behavior_evidence_pool_limit` | int | `128` | `10-1000` | 单批提供给模型的历史未归纳行为证据上限 |
 | `user_profile.sensitive_behavior_inference_enabled` | bool | `false` | - | 是否允许敏感信息行为推断 |
 | `user_profile.sensitive_inference_min_timelines` | int | `3` | `2-20` | 敏感行为推断独立 Timeline 数 |
 | `user_profile.sensitive_inference_min_span_days` | int | `14` | `1-3650` | 敏感行为证据最小跨度 |
@@ -793,8 +795,8 @@ Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维�
 | `user_profile.habit_review_days` | int | `180` | `1-3650` | 习惯待确认期限 |
 | `user_profile.current_state_fixed_days` | int | `30` | `1-3650` | 当前状态固定注入期限 |
 | `user_profile.current_state_review_days` | int | `90` | `1-3650` | 当前状态待确认期限 |
-| `user_profile.undated_plan_review_days` | int | `60` | `1-3650` | 无日期计划待确认期限 |
-| `user_profile.dated_plan_grace_days` | int | `14` | `0-365` | 有日期计划结束后的保留期 |
+| `user_profile.undated_plan_review_days` | int | `30` | `1-3650` | 无日期计划待确认期限 |
+| `user_profile.dated_plan_grace_days` | int | `3` | `0-365` | 有日期计划结束后的保留期 |
 
 画像重要性公式的具体权重属于算法版本，不作为首版 UI 参数；所有期限和门槛均可配置。
 
@@ -804,7 +806,7 @@ Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维�
 | --- | --- | --- | --- | --- |
 | `user_profile.injection_mode` | enum | `layered` | `layered / compact_snapshot` | 分层动态或固定精简快照 |
 | `user_profile.injection_max_chars` | int | `800` | `300-2000` | 总注入字符硬上限 |
-| `user_profile.relationship_reserved_chars` | int | `200` | `0-1000` | 关系状态预留字符；不能高于总预算 |
+| `user_profile.relationship_reserved_chars` | int | `300` | `0-1000` | 关系状态预留字符；不能高于总预算 |
 | `user_profile.fact_injection_max_chars` | int | `200` | `50-1000` | 单条事实注入上限 |
 
 当 `injection_enabled=false` 时隐藏注入模式和长度设置。关系功能关闭时，关系预留自动为 0，但不删除已保存值。
@@ -1065,7 +1067,7 @@ POST   /user-profiles/share-groups/save
 - 旧画像注入可确定性清理。
 - 当前消息优先契约。
 - layered 与 compact_snapshot 两种模式。
-- 800 总字符、200 关系预留和 200 单事实截断。
+- 800 总字符、300 关系预留和 200 单事实截断。
 - 敏感事实不进入 layered 固定核心。
 - 原始命令式事实被结构化转义为数据。
 - `include_user_profile=false/true` 工具行为。
@@ -1159,3 +1161,14 @@ POST   /user-profiles/share-groups/save
 10. 被动注入和主动工具只能访问当前私聊用户。
 11. 所有本方案中的可调阈值、时长、长度、并发和默认行为均可在“设置 -> 用户画像”查看、修改和恢复默认。
 12. `3.8.0 / DB v10.4` 的迁移、测试、文档和发布元数据全部通过校验。
+
+## 22. 真实数据校准结果
+
+2026-08-11 使用真实 v10.3 数据库和真实 API 在临时副本中完成迭代验收，原库与凭据文件保持只读：
+
+- 71 条私聊 Timeline 中，31 条具有精确稳定身份并可回填，40 条保持歧义状态且不猜测归属；回填后二次预览缺失数为 0。
+- 初始规则产生 61 条当前事实，独立审计的平均长期用途为 0.278；区分画像价值、行为证据和关系事实并收紧时效后，最终当前有效事实为 9 条，平均长期用途为 0.741，确定性为 0.962。
+- 保持 `fact_accept_confidence=0.85`、`fact_min_profile_value=0.65` 和总注入预算 800，不为单一数据集继续抬高全局门槛。
+- 关系预留调整为 300 后，在 800 总预算中仍可注入 8 条当前事实，并同时保留态度标签、近期余韵和主观叙述；扩大总预算没有带来必要收益。
+- 有日期计划结束后的默认宽限从 14 天收紧为 3 天，无日期计划复核从 60 天收紧为 30 天；中低耐久偏好只作为行为证据，人工固定事实不受自动时效过滤。
+- 关系审计保持较高落地性和连续性，同时提示主观叙述存在复述私密细节的风险，因此关系提示增加数据最小化约束，但不限制人格的主观评价空间。

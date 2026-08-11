@@ -13,7 +13,11 @@ from ...storage.user_profile_store import (
     UserProfileRevisionConflict,
     UserProfileStore,
 )
-from ..models.user_profile import UserProfileTask, UserRelationshipState
+from ..models.user_profile import (
+    UserProfileFactStatus,
+    UserProfileTask,
+    UserRelationshipState,
+)
 from .user_profile_fact_maintainer import (
     UserProfileFactMaintainer,
     UserProfileFactMaintenancePlan,
@@ -362,7 +366,9 @@ class UserProfileMaintenanceManager:
             if maintained is None:
                 return None
             maintained.diagnostics["persona_basis"] = (
-                "timeline_snapshot" if persona_snapshot.get("prompt") else "unavailable"
+                str(persona_snapshot.get("basis") or "timeline_snapshot")
+                if persona_snapshot.get("prompt")
+                else "unavailable"
             )
             maintained.state.relationship_uid = (
                 current.relationship_uid
@@ -613,17 +619,38 @@ class UserProfileMaintenanceManager:
         existing = await self.store.list_facts_for_maintenance(
             scope.fact_namespace_uid
         )
+        needs_behavior_history = any(
+            str(candidate.metadata.get("profile_signal") or "")
+            == "behavior_pattern"
+            for candidate in candidates
+        )
+        supporting_evidence = (
+            await self.store.list_unassigned_behavior_evidence(
+                scope.profile_scope_uid,
+                limit=int(settings["user_profile.behavior_evidence_pool_limit"]),
+                retention_days=int(settings["user_profile.pending_retention_days"]),
+            )
+            if needs_behavior_history
+            else []
+        )
+        supporting_evidence = [
+            source
+            for source in supporting_evidence
+            if source.source_uid not in {candidate.source_uid for candidate in candidates}
+            and not self.fact_maintainer.is_security_secret(source.raw_fact)
+        ]
         if candidates:
             plan = await self.fact_maintainer.maintain(
                 fact_namespace_uid=scope.fact_namespace_uid,
                 candidates=candidates,
+                supporting_evidence=supporting_evidence,
                 existing_facts=existing,
                 settings=settings,
                 provider=provider,
             )
         else:
             plan = UserProfileFactMaintenancePlan()
-        self._apply_lifecycle(plan, candidates, settings)
+        self._apply_lifecycle(plan, [*candidates, *supporting_evidence], settings)
         expected_revision = await self.store.get_fact_namespace_revision(
             scope.fact_namespace_uid
         )
@@ -727,6 +754,14 @@ class UserProfileMaintenanceManager:
             return await self._checkpoint_skipped_relationship(
                 task, "maintainer_declined"
             )
+        maintained.diagnostics.setdefault(
+            "persona_basis",
+            (
+                str(persona_snapshot.get("basis") or "timeline_snapshot")
+                if persona_snapshot.get("prompt")
+                else "unavailable"
+            ),
+        )
         published = await self.store.publish_relationship(
             maintained.state,
             expected_revision=(current.revision if current is not None else 0),
@@ -957,7 +992,12 @@ class UserProfileMaintenanceManager:
                 fact.review_after = confirmed + int(settings[review_key]) * day
             elif category == "plan_commitment":
                 temporal = source.metadata.get("fact_temporal", {}) if source else {}
-                end_at = temporal.get("end_at") or temporal.get("ended_at")
+                end_at = (
+                    temporal.get("event_ended_at")
+                    or temporal.get("event_started_at")
+                    or temporal.get("end_at")
+                    or temporal.get("ended_at")
+                )
                 try:
                     end_timestamp = float(end_at)
                 except (TypeError, ValueError):
@@ -976,6 +1016,18 @@ class UserProfileMaintenanceManager:
                     fact.review_after or float("inf"),
                     confirmed
                     + int(settings["user_profile.pending_retention_days"]) * day,
+                )
+            current_status = str(getattr(fact.status, "value", fact.status))
+            if (
+                fact.review_after is not None
+                and fact.review_after <= now
+                and not fact.pinned
+                and current_status in {"active", "pending"}
+            ):
+                fact.status = (
+                    UserProfileFactStatus.ARCHIVED
+                    if current_status == "pending"
+                    else UserProfileFactStatus.STALE
                 )
 
 
