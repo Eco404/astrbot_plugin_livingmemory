@@ -44,6 +44,17 @@ class UserProfileStore:
     async def initialize(self) -> None:
         async with self._connect() as db:
             await self.create_schema(db)
+            columns = {
+                str(row["name"])
+                for row in await (
+                    await db.execute("PRAGMA table_info(user_profile_scopes)")
+                ).fetchall()
+            }
+            if "relationship_reset_after" not in columns:
+                await db.execute(
+                    "ALTER TABLE user_profile_scopes "
+                    "ADD COLUMN relationship_reset_after REAL"
+                )
             now = time.time()
             await db.execute(
                 """
@@ -134,6 +145,7 @@ class UserProfileStore:
                 reset_after REAL,
                 has_gap INTEGER NOT NULL DEFAULT 0,
                 relationship_frozen INTEGER NOT NULL DEFAULT 0,
+                relationship_reset_after REAL,
                 relationship_sensitivity_override TEXT,
                 relationship_behavior_override TEXT,
                 created_at REAL NOT NULL,
@@ -635,6 +647,7 @@ class UserProfileStore:
         projection_cursor: int | None = None,
         reset_after: float | None | object = ...,
         relationship_frozen: bool | None = None,
+        relationship_reset_after: float | None | object = ...,
         sensitivity_override: str | None | object = ...,
         behavior_override: str | None | object = ...,
     ) -> UserProfileScope | None:
@@ -655,6 +668,9 @@ class UserProfileStore:
         if reset_after is not ...:
             assignments.append("reset_after = ?")
             values.append(reset_after)
+        if relationship_reset_after is not ...:
+            assignments.append("relationship_reset_after = ?")
+            values.append(relationship_reset_after)
         for column, value in (
             ("relationship_sensitivity_override", sensitivity_override),
             ("relationship_behavior_override", behavior_override),
@@ -1216,6 +1232,7 @@ class UserProfileStore:
         diagnostics: dict[str, Any] | None = None,
         provider_signature: dict[str, Any] | None = None,
         full_revision_limit: int = 100,
+        checkpoint_task_uid: str | None = None,
     ) -> UserRelationshipState:
         now = time.time()
         async with self._connect() as db:
@@ -1321,6 +1338,32 @@ class UserProfileStore:
                     """,
                     (relationship_uid, cutoff),
                 )
+                if checkpoint_task_uid:
+                    task_row = await (
+                        await db.execute(
+                            "SELECT result_summary FROM user_profile_tasks "
+                            "WHERE task_uid = ?",
+                            (checkpoint_task_uid,),
+                        )
+                    ).fetchone()
+                    if task_row is None:
+                        raise ValueError("Unknown relationship checkpoint task")
+                    summary = self._json_object(task_row["result_summary"])
+                    summary.update(
+                        {
+                            "relationship_checkpoint": True,
+                            "relationship_revision": new_revision,
+                        }
+                    )
+                    await db.execute(
+                        """
+                        UPDATE user_profile_tasks
+                        SET status = 'running_relationship', result_summary = ?,
+                            error = NULL, updated_at = ?
+                        WHERE task_uid = ?
+                        """,
+                        (self._json(summary), now, checkpoint_task_uid),
+                    )
                 await db.commit()
             except Exception:
                 await db.rollback()
@@ -1353,6 +1396,31 @@ class UserProfileStore:
             }
             for row in rows
         ]
+
+    async def get_relationship_revision(
+        self, relationship_uid: str, revision: int
+    ) -> dict[str, Any] | None:
+        async with self._connect() as db:
+            row = await (
+                await db.execute(
+                    """
+                    SELECT * FROM user_relationship_revisions
+                    WHERE relationship_uid = ? AND revision = ?
+                    """,
+                    (relationship_uid, int(revision)),
+                )
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            **dict(row),
+            "before_state": self._json_object(row["before_state"]),
+            "after_state": self._json_object(row["after_state"]),
+            "source_timeline_uids": self._json_list(row["source_timeline_uids"]),
+            "diagnostics": self._json_object(row["diagnostics"]),
+            "persona_signature": self._json_object(row["persona_signature"]),
+            "provider_signature": self._json_object(row["provider_signature"]),
+        }
 
     async def enqueue_projection_event(
         self, event: UserProfileProjectionEvent
@@ -1447,6 +1515,22 @@ class UserProfileStore:
                         *status_list,
                         max(1, min(1000, int(limit))),
                     ],
+                )
+            ).fetchall()
+        return [self._event_row(row) for row in rows]
+
+    async def list_projection_history(
+        self, profile_scope_uid: str, *, limit: int = 10000
+    ) -> list[dict[str, Any]]:
+        async with self._connect() as db:
+            rows = await (
+                await db.execute(
+                    """
+                    SELECT * FROM user_profile_projection_events
+                    WHERE profile_scope_uid = ?
+                    ORDER BY sequence ASC LIMIT ?
+                    """,
+                    (profile_scope_uid, max(1, min(50000, int(limit)))),
                 )
             ).fetchall()
         return [self._event_row(row) for row in rows]
@@ -1832,6 +1916,7 @@ class UserProfileStore:
             reset_after=row["reset_after"],
             has_gap=bool(row["has_gap"]),
             relationship_frozen=bool(row["relationship_frozen"]),
+            relationship_reset_after=row["relationship_reset_after"],
             relationship_sensitivity_override=row[
                 "relationship_sensitivity_override"
             ],

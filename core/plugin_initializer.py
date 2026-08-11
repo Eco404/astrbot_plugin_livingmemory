@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import hashlib
 import os
 import shutil
 import subprocess
@@ -535,6 +536,44 @@ class PluginInitializer:
                 return candidate
         return self.resolve_topic_providers().get("llm_provider")
 
+    async def resolve_user_profile_persona(
+        self, persona_id: str | None
+    ) -> dict[str, Any]:
+        normalized_id = str(persona_id or "").strip()
+        if not normalized_id:
+            return {}
+        manager = getattr(self.context, "persona_manager", None)
+        resolver = getattr(manager, "get_persona", None)
+        if not callable(resolver):
+            return {"persona_id": normalized_id, "name": normalized_id}
+        try:
+            persona = await resolver(normalized_id)
+        except Exception:
+            logger.debug(
+                "[UserProfile] 读取 persona 快照失败: %s",
+                normalized_id,
+                exc_info=True,
+            )
+            return {"persona_id": normalized_id, "name": normalized_id}
+        if isinstance(persona, dict):
+            name = persona.get("name") or normalized_id
+            prompt = persona.get("system_prompt") or ""
+        else:
+            name = getattr(persona, "name", None) or normalized_id
+            prompt = getattr(persona, "system_prompt", None) or ""
+        normalized_prompt = str(prompt).strip()
+        return {
+            "persona_id": normalized_id,
+            "name": str(name),
+            "prompt": normalized_prompt,
+            "signature": {
+                "algorithm": "sha256",
+                "digest": hashlib.sha256(
+                    normalized_prompt.encode("utf-8")
+                ).hexdigest(),
+            },
+        }
+
     def _check_faiss_runtime(self) -> None:
         try:
             result = subprocess.run(
@@ -878,6 +917,10 @@ class PluginInitializer:
             if hasattr(self.memory_engine, "user_profile_provider_resolver"):
                 self.memory_engine.user_profile_provider_resolver = (
                     self.resolve_user_profile_provider
+                )
+            if hasattr(self.memory_engine, "user_profile_persona_resolver"):
+                self.memory_engine.user_profile_persona_resolver = (
+                    self.resolve_user_profile_persona
                 )
             profile_manager = getattr(
                 self.memory_engine, "user_profile_maintenance_manager", None

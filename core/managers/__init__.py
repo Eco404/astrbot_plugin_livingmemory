@@ -9,6 +9,7 @@ from .memory_engine import MemoryEngine
 from .topic_maintenance_manager import TopicMaintenanceManager
 from .user_profile_fact_maintainer import UserProfileFactMaintainer
 from .user_profile_maintenance_manager import UserProfileMaintenanceManager
+from .user_relationship_maintainer import UserRelationshipMaintainer
 
 __all__ = [
     "ConversationManager",
@@ -17,5 +18,6 @@ __all__ = [
     "TopicMaintenanceManager",
     "UserProfileFactMaintainer",
     "UserProfileMaintenanceManager",
+    "UserRelationshipMaintainer",
     "create_conversation_manager",
 ]

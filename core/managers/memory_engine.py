@@ -150,6 +150,7 @@ class MemoryEngine:
         self.user_profile_provider_resolver = (
             user_profile_provider_resolver or topic_provider_resolver
         )
+        self.user_profile_persona_resolver: Callable[..., Any] | None = None
         self.recall_trace_store = None
         self._session_scope_resolver: Callable[[str], Any] | None = None
         self.config = config or {}
@@ -1087,7 +1088,14 @@ class MemoryEngine:
         display_name: str | None = None,
     ):
         """Create an empty profile only for a stable private-chat human actor."""
-        if not bool(self.user_profile_config.get("user_profile.enabled", True)):
+        if not (
+            bool(self.user_profile_config.get("user_profile.enabled", True))
+            or bool(
+                self.user_profile_config.get(
+                    "user_profile.relationship_enabled", True
+                )
+            )
+        ):
             return None
         if not bool(
             self.user_profile_config.get(
@@ -1116,8 +1124,13 @@ class MemoryEngine:
         memory_space_id: str | None = None,
     ) -> list[str]:
         """Persist a post-commit Timeline projection without failing the Timeline write."""
-        if self._user_profile_projection_suppressed > 0 or not bool(
-            self.user_profile_config.get("user_profile.enabled", True)
+        if self._user_profile_projection_suppressed > 0 or not (
+            bool(self.user_profile_config.get("user_profile.enabled", True))
+            or bool(
+                self.user_profile_config.get(
+                    "user_profile.relationship_enabled", True
+                )
+            )
         ):
             return []
         normalized = dict(metadata or {})
@@ -1185,6 +1198,21 @@ class MemoryEngine:
                 "profile_actor_id": actor_id,
                 "profile_display_name": display_name,
             }
+            if self.user_profile_persona_resolver is not None:
+                try:
+                    persona_snapshot = self.user_profile_persona_resolver(
+                        scope.persona_id
+                    )
+                    if asyncio.iscoroutine(persona_snapshot):
+                        persona_snapshot = await persona_snapshot
+                    if isinstance(persona_snapshot, dict):
+                        payload["persona_snapshot"] = persona_snapshot
+                except Exception:
+                    logger.warning(
+                        "[UserProfile] 无法保存 persona 临时快照 (persona=%s)",
+                        scope.persona_id,
+                        exc_info=True,
+                    )
             try:
                 event_uid = await self.user_profile_store.enqueue_projection_event(
                     UserProfileProjectionEvent(

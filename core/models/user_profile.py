@@ -120,6 +120,7 @@ class UserProfileScope:
     reset_after: float | None = None
     has_gap: bool = False
     relationship_frozen: bool = False
+    relationship_reset_after: float | None = None
     relationship_sensitivity_override: str | None = None
     relationship_behavior_override: str | None = None
     created_at: float = field(default_factory=time.time)
