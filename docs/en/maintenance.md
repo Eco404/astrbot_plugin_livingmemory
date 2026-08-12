@@ -14,20 +14,22 @@ Users can detect reconstructable or low-quality Timeline entries, apply staged e
 
 ## User profile maintenance
 
-The user-profile tab groups scopes by stable private account, Bot account, and persona. Its effective-injection preview uses the same relevance, freshness, and character-budget rules as the private-chat path.
+The user-profile tab groups scopes by stable private account, Bot account, and persona. Four compact status cells summarize the scope and Bot/persona, objective revision and fact-state counts, relationship revision and execution-time persona basis, and active jobs plus unprojected gaps. Its effective-injection preview uses the same relevance, freshness, and character-budget rules as the private-chat path and shows actual characters, fact count, and whether the relationship was included.
 
 | Area | Operations |
 | --- | --- |
-| Objective facts | Inspect raw Timeline facts and revisions; confirm pending facts, pause/resume injection, pin, or exclude |
+| Objective facts | Inspect raw Timeline facts and revisions; confirm pending facts, pause/resume injection, pin, or exclude; only active facts can inject |
 | Conflicts | Select a winner, keep injection paused, or exclude all; later evidence may still trigger automatic review |
 | Relationship | Edit six dimensions, tags, narrative, sensitivity, and behavior; freeze, reset, rebuild, or roll back a revision |
 | Accounts | Manually bind accounts after a preview; unbinding reprojects from original-account provenance |
 | Sharing | Explicitly share objective facts across selected scopes for one logical user; relationships stay isolated |
 | Recovery | Inspect and retry jobs, handle detected gaps, or rebuild from history |
 
-Raw objective-fact text cannot be edited on this page. Correct the authoritative Timeline or use confirmation, pause, exclusion, and conflict overrides. Relationship dimensions and subjective narrative are directly editable, with prior values retained in revision history.
+Raw objective-fact text cannot be edited on this page. Correct the authoritative Timeline or use confirmation, pause, exclusion, and conflict overrides. `pending`, `conflict`, and `stale` are explicitly grouped as non-injecting states. Relationship dimensions and subjective narrative are directly editable, with prior values retained in revision history. Model-maintained revisions identify the current persona used at execution but never store persona prompt text or snapshots.
 
 **Reset profile** clears derived output but keeps the scope enabled and processes new changes from that point. **Delete and disable** also removes relationship state and blocks automatic re-enrollment. Historical rebuild is separate: it previews exactly attributable Timelines, ambiguous identities, missing projections, facts, and overrides, then validates both profile and history fingerprints. Ambiguous legacy identities are never guessed. Relationship rebuilds use the current same-ID persona and record that basis in revision diagnostics.
+
+Periodic profile lifecycle work runs alongside administrator actions. It advances expired `active` facts to `stale`, archives due `pending` and long-stale facts, and removes completed jobs and deterministically rebuildable projection revisions after their retention windows. Current projections and sources still referenced by facts remain. Active-job and gap counters distinguish work in progress from events that have not yet been projected into a published profile.
 
 ## Session and database maintenance
 

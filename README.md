@@ -25,7 +25,7 @@
 <tr>
 <td width="33%"><strong>TIMELINE 保存经历</strong><br><br>连续对话沉淀为可编辑记忆，保留事实、情绪、时间范围、人物绑定与来源快照。</td>
 <td width="33%"><strong>TOPIC 整理主题</strong><br><br>正式片段跨时间归并相关经历，同时保留 Timeline revision 与完整溯源。</td>
-<td width="33%"><strong>召回保持聚焦</strong><br><br>以 Topic 为主体，只补充真正增加信息的事实和片段，必要时回退到 Timeline。</td>
+<td width="33%"><strong>画像理解对象</strong><br><br>从同一 Timeline 并行维护当前私聊用户的客观事实，以及 persona 独立的主观关系。</td>
 </tr>
 </table>
 
@@ -33,7 +33,7 @@
 
 | 构建 | 召回 | 运维 |
 | :--- | :--- | :--- |
-| **双层记忆架构**<br>Timeline 是可修正来源，Topic 是只读派生层。 | **当前消息主导**<br>当前查询决定候选资格，最近上下文只提供有界辅助。 | **原子发布**<br>Topic 构建失败或取消时，现有正式数据保持可用。 |
+| **一源双派生架构**<br>Timeline 是可修正来源；Topic 与受治理的用户画像从它并行派生。 | **当前消息主导**<br>当前查询决定候选资格，最近上下文只提供有界辅助。 | **原子发布**<br>Topic 构建或画像维护失败时，现有正式数据保持可用。 |
 | **完整溯源结构**<br>事实、人物、情绪、正式片段和 revision 保留来源关系。 | **可选 Rerank**<br>可使用 AstrBot Provider 或插件内置 Cloudflare 客户端精排。 | **统一维护中心**<br>重构、审查、会话审计、数据库检查、真实召回与模型测试集中管理。 |
 | **有界增量维护**<br>新增 Timeline 只与有限数量的既有 Topic 近邻匹配。 | **双模式 Topic 搜索**<br>可按标题、摘要和事实关键字搜索，也可使用 Embedding 查找语义相关主题。 | **明确的数据生命周期**<br>备份、暂存编辑、导入导出、清理、归档与同 ID 重构都有独立操作。 |
 | **话题接续**<br>基础轮次后按未总结话题判断是否延后边界，并由强制上限保证最终落库。 | **Agent 原生工具**<br>`recall_long_term_memory` 与 `memorize_long_term_memory` 支持主动使用记忆。 | **防重复操作**<br>长任务提交后锁定对应操作，刷新页面仍可恢复任务状态。 |
@@ -46,8 +46,14 @@ flowchart LR
     C --> D[Topic]
     D --> E[Topic 优先召回]
     C --> E
-    B --> F[维护与重构]
-    F --> C
+    B --> F[画像投影事件]
+    F --> G[客观画像]
+    F --> H[persona 关系]
+    I[执行时当前 persona] -.仅 digest 留库.-> H
+    G --> J[当前私聊用户注入]
+    H --> J
+    E --> K[请求上下文]
+    J --> K
 ```
 
 ## 三步开始
@@ -70,9 +76,9 @@ flowchart LR
 | :--- | :--- | :--- | :--- |
 | [快速开始](https://eco404.github.io/astrbot_plugin_livingmemory/guide/getting-started) | [配置参考](https://eco404.github.io/astrbot_plugin_livingmemory/configuration) | [召回管线](https://eco404.github.io/astrbot_plugin_livingmemory/recall) | [维护中心](https://eco404.github.io/astrbot_plugin_livingmemory/maintenance) |
 
-完整架构、Timeline 与 Topic 数据契约、命令、迁移行为和数据安全边界请查看 [VitePress 文档站](https://eco404.github.io/astrbot_plugin_livingmemory/)。
+完整架构、Timeline、Topic 与用户画像数据契约、命令、迁移行为和数据安全边界请查看 [VitePress 文档站](https://eco404.github.io/astrbot_plugin_livingmemory/)。
 
-数据库升级遵循公开的 `v8 -> v9 -> v10` 路径，再进入当前 `v10.x` 小版本。测试开发版本或执行危险维护操作前，请先备份插件数据。
+数据库升级遵循公开的 `v8 -> v9 -> v10 -> v10.4` 路径；用户画像相关结构在正式发布时作为一次 `v10.3 -> v10.4` 升级加入。测试开发版本或执行危险维护操作前，请先备份插件数据。
 
 ## 项目
 

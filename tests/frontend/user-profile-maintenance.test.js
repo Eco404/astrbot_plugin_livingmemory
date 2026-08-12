@@ -110,6 +110,56 @@ test("excluded facts remain recoverable from the history section", () => {
   }
 });
 
+test("profile architecture status separates serving facts, review facts, relationship, and jobs", () => {
+  globalThis.window = { t(key, ...args) { return `${key}:${args.join(",")}`; } };
+  globalThis.document = {
+    createElement() {
+      let text = "";
+      return {
+        set textContent(value) { text = String(value); },
+        get innerHTML() { return text; },
+      };
+    },
+  };
+  try {
+    const profile = new UserProfileMaintenance({}, () => {}, {});
+    const html = profile.renderArchitectureStatus({
+      scope: { enabled: true, bot_account: "bot-1", persona_id: "persona-1" },
+      fact_revision: 7,
+      facts: [
+        { status: "active" },
+        { status: "active" },
+        { status: "pending" },
+        { status: "conflict" },
+        { status: "stale" },
+      ],
+      relationship: { revision: 4, persona_signature: { digest: "digest" } },
+      relationship_revisions: [
+        { revision: 4, diagnostics: { persona_basis: "current_config" } },
+      ],
+      tasks: [{ status: "running_facts" }, { status: "completed" }],
+      gap: { pending_count: 3 },
+    });
+    assert.match(html, /data-profile-architecture-status/);
+    assert.match(html, /r7 · 2 profile\.factStatus\.active/);
+    assert.match(html, /profile\.state\.reviewCounts:1,1,1/);
+    assert.match(html, /profile\.state\.executionPersona/);
+    assert.match(html, /profile\.state\.queueCount:1/);
+    assert.match(html, /profile\.state\.gapCount:3/);
+
+    const signatureOnly = profile.renderArchitectureStatus({
+      scope: { enabled: true },
+      relationship: { revision: 4, persona_signature: { digest: "digest" } },
+      relationship_revisions: [{ revision: 4, diagnostics: {} }],
+    });
+    assert.match(signatureOnly, /profile\.state\.noPersonaBasis/);
+    assert.doesNotMatch(signatureOnly, /profile\.state\.executionPersona/);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
+});
+
 test("profile rebuild submits both profile and Timeline history fingerprints", async () => {
   const calls = [];
   let confirmation;

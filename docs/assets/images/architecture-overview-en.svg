@@ -1,76 +1,95 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="760" viewBox="0 0 1440 760" role="img" aria-labelledby="title desc">
-  <title id="title">LivingMemory two-layer memory architecture</title>
-  <desc id="desc">Raw conversations produce Timeline, formal fragments, and Topic with traceable provenance, actors, and revisions.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="850" viewBox="0 0 1440 850" role="img" aria-labelledby="title desc">
+  <title id="title">Current LivingMemory layered architecture</title>
+  <desc id="desc">Raw conversations produce editable Timeline. Timeline independently derives Topic and user profiles. Relationship maintenance resolves the current persona at execution and never stores persona prompt text. Topic recall and the current-user profile enter the private request through separate paths and share a bounded injection.</desc>
   <defs>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="5" stdDeviation="8" flood-color="#17303a" flood-opacity="0.10"/></filter>
-    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L8,4 L0,8 Z" fill="#82939d"/></marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#17303a" flood-opacity="0.09"/></filter>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L8 4L0 8Z" fill="#82939d"/></marker>
     <style>
       .title{font:700 34px Inter,"Noto Sans SC",sans-serif;fill:#17212b}.sub{font:400 17px Inter,"Noto Sans SC",sans-serif;fill:#64717d}
-      .h{font:700 21px Inter,"Noto Sans SC",sans-serif;fill:#17212b}.p{font:400 15px Inter,"Noto Sans SC",sans-serif;fill:#52616c}.tag{font:700 12px Inter,"Noto Sans SC",sans-serif;letter-spacing:1px}
-      .small{font:500 13px Inter,"Noto Sans SC",sans-serif;fill:#64717d}.line{stroke:#82939d;stroke-width:2;fill:none;marker-end:url(#arrow)}
+      .h{font:700 19px Inter,"Noto Sans SC",sans-serif;fill:#17212b}.p{font:400 14px Inter,"Noto Sans SC",sans-serif;fill:#52616c}
+      .tag{font:700 12px Inter,"Noto Sans SC",sans-serif;letter-spacing:1px}.small{font:500 13px Inter,"Noto Sans SC",sans-serif;fill:#64717d}
+      .line{stroke:#82939d;stroke-width:2;fill:none;marker-end:url(#arrow)}.dash{stroke:#9aa8b0;stroke-width:2;stroke-dasharray:6 7;fill:none;marker-end:url(#arrow)}
     </style>
   </defs>
-  <rect width="1440" height="760" fill="#ffffff"/>
-  <text x="64" y="68" class="title">From continuous conversation to maintainable Topics</text>
-  <text x="64" y="101" class="sub">Timeline preserves experience; Topic reorganizes themes; every derived item traces back to its source.</text>
+  <rect width="1440" height="850" fill="#fff"/>
+  <text x="40" y="66" class="title">One Timeline, two traceable derivation paths</text>
+  <text x="40" y="99" class="sub">Topic organizes cross-time memory; user profiles identify the current private peer. Neither rewrites its source.</text>
 
   <g filter="url(#shadow)">
-    <rect x="64" y="154" width="278" height="236" rx="8" fill="#f7f9fa" stroke="#d8e1e6"/>
-    <rect x="64" y="154" width="278" height="7" rx="3" fill="#c9791c"/>
-    <text x="88" y="197" class="tag" fill="#a55f10">SOURCE</text>
-    <text x="88" y="235" class="h">Raw conversation</text>
-    <text x="88" y="271" class="p">Messages, senders, roles, time</text>
-    <text x="88" y="299" class="p">Summary cursor and source range</text>
-    <text x="88" y="327" class="p">Optional source snapshots</text>
-    <rect x="88" y="348" width="137" height="25" rx="6" fill="#fff1df"/><text x="102" y="366" class="small" fill="#a55f10">conversations.db</text>
+    <rect x="40" y="166" width="220" height="202" rx="8" fill="#fffaf3" stroke="#eadcc7"/><rect x="40" y="166" width="220" height="7" rx="3" fill="#c9791c"/>
+    <text x="64" y="207" class="tag" fill="#a55f10">SOURCE</text><text x="64" y="241" class="h">Raw conversation</text>
+    <text x="64" y="276" class="p">Messages · senders · roles</text><text x="64" y="304" class="p">Time · source range · cursor</text>
+    <rect x="64" y="326" width="137" height="25" rx="6" fill="#fff1df"/><text x="78" y="344" class="small" fill="#a55f10">conversations.db</text>
   </g>
-
   <g filter="url(#shadow)">
-    <rect x="398" y="154" width="278" height="236" rx="8" fill="#f4fbfa" stroke="#c8e2df"/>
-    <rect x="398" y="154" width="278" height="7" rx="3" fill="#187b78"/>
-    <text x="422" y="197" class="tag" fill="#187b78">TIMELINE</text>
-    <text x="422" y="235" class="h">Timeline source layer</text>
-    <text x="422" y="271" class="p">Summary, facts, themes, affect</text>
-    <text x="422" y="299" class="p">Stable memory_uid + revision</text>
-    <text x="422" y="327" class="p">Actor bindings and source span</text>
-    <rect x="422" y="348" width="101" height="25" rx="6" fill="#daf0ee"/><text x="438" y="366" class="small" fill="#187b78">Editable</text>
+    <rect x="300" y="166" width="270" height="202" rx="8" fill="#f4fbfa" stroke="#c8e2df"/><rect x="300" y="166" width="270" height="7" rx="3" fill="#187b78"/>
+    <text x="324" y="207" class="tag" fill="#187b78">TIMELINE</text><text x="324" y="241" class="h">Editable Timeline source</text>
+    <text x="324" y="276" class="p">Summary · facts · affect · actors</text><text x="324" y="304" class="p">Stable memory_uid + revision</text>
+    <rect x="324" y="326" width="101" height="25" rx="6" fill="#daf0ee"/><text x="340" y="344" class="small" fill="#187b78">Editable</text>
   </g>
+  <path d="M272 267H287" class="line"/>
 
+  <text x="620" y="139" class="tag" fill="#3769d6">TOPIC DERIVATION</text>
   <g filter="url(#shadow)">
-    <rect x="732" y="154" width="278" height="236" rx="8" fill="#f5f7ff" stroke="#d4dcf4"/>
-    <rect x="732" y="154" width="278" height="7" rx="3" fill="#3769d6"/>
-    <text x="756" y="197" class="tag" fill="#3769d6">FORMAL FRAGMENT</text>
-    <text x="756" y="235" class="h">Formal fragment</text>
-    <text x="756" y="271" class="p">One future retrieval intent</text>
-    <text x="756" y="299" class="p">Facts, actors, affect, and time</text>
-    <text x="756" y="327" class="p">Timeline UID + revision</text>
-    <rect x="756" y="348" width="158" height="25" rx="6" fill="#e5eaff"/><text x="771" y="366" class="small" fill="#3769d6">Stable derived identity</text>
+    <rect x="620" y="166" width="230" height="202" rx="8" fill="#f5f7ff" stroke="#d4dcf4"/>
+    <text x="644" y="207" class="tag" fill="#3769d6">FORMAL FRAGMENT</text><text x="644" y="241" class="h">Formal fragment</text>
+    <text x="644" y="276" class="p">One retrieval intent</text><text x="644" y="304" class="p">Provenance + stable logical ID</text><text x="644" y="332" class="p">Rebuildable from its revision</text>
   </g>
-
   <g filter="url(#shadow)">
-    <rect x="1066" y="154" width="310" height="236" rx="8" fill="#fff8f6" stroke="#efd8d2"/>
-    <rect x="1066" y="154" width="310" height="7" rx="3" fill="#c84f3d"/>
-    <text x="1090" y="197" class="tag" fill="#c84f3d">TOPIC</text>
-    <text x="1090" y="235" class="h">Derived Topic layer</text>
-    <text x="1090" y="271" class="p">Cross-time summary and own fact atoms</text>
-    <text x="1090" y="299" class="p">Actor index, affect, related Topics</text>
-    <text x="1090" y="327" class="p">Atomically published snapshot</text>
-    <rect x="1090" y="348" width="88" height="25" rx="6" fill="#fae5e0"/><text x="1107" y="366" class="small" fill="#c84f3d">Read-only</text>
+    <rect x="900" y="166" width="250" height="202" rx="8" fill="#fff8f6" stroke="#efd8d2"/><rect x="900" y="166" width="250" height="7" rx="3" fill="#c84f3d"/>
+    <text x="924" y="207" class="tag" fill="#c84f3d">TOPIC</text><text x="924" y="241" class="h">Cross-time Topic</text>
+    <text x="924" y="276" class="p">Summary · own fact atoms</text><text x="924" y="304" class="p">Actors · affect · related Topics</text>
+    <rect x="924" y="326" width="88" height="25" rx="6" fill="#fae5e0"/><text x="941" y="344" class="small" fill="#c84f3d">Read-only</text>
   </g>
+  <path d="M582 267H607" class="line"/><path d="M862 267H887" class="line"/>
 
-  <path d="M354 272 H385" class="line"/><path d="M688 272 H719" class="line"/><path d="M1022 272 H1053" class="line"/>
-
-  <rect x="64" y="458" width="1312" height="224" rx="8" fill="#f7f8fa" stroke="#dde4e8"/>
-  <text x="88" y="501" class="tag" fill="#64717d">SHARED CONTRACTS</text>
-  <text x="88" y="535" class="h">Contracts across the complete chain</text>
+  <text x="620" y="425" class="tag" fill="#2f7d50">USER PROFILE DERIVATION</text>
+  <g filter="url(#shadow)">
+    <rect x="620" y="452" width="230" height="196" rx="8" fill="#f1faf6" stroke="#cce2d8"/>
+    <text x="644" y="493" class="tag" fill="#2f7d50">PROJECTION EVENTS</text><text x="644" y="527" class="h">Ordered updates</text>
+    <text x="644" y="562" class="p">Stable private actor</text><text x="644" y="590" class="p">Fact + relation checkpoints</text><text x="644" y="618" class="p">Old profile survives failures</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="900" y="416" width="250" height="134" rx="8" fill="#f4fbfa" stroke="#c8e2df"/>
+    <text x="924" y="454" class="tag" fill="#187b78">OBJECTIVE PROFILE</text><text x="924" y="485" class="h">Traceable facts</text>
+    <text x="924" y="512" class="p">active may inject</text><text x="924" y="536" class="p">other states are maintenance-only</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect x="900" y="580" width="250" height="154" rx="8" fill="#fff8f6" stroke="#efd8d2"/>
+    <text x="924" y="618" class="tag" fill="#c84f3d">PERSONA RELATIONSHIP</text><text x="924" y="649" class="h">Subjective relationship</text>
+    <text x="924" y="680" class="p">Six dimensions · tags · narrative</text><text x="924" y="708" class="p">Only a persona digest is retained</text>
+  </g>
   <g>
-    <rect x="88" y="564" width="287" height="88" rx="8" fill="#fff" stroke="#dce3e8"/>
-    <text x="108" y="596" class="h" font-size="17">Provenance and versions</text><text x="108" y="625" class="small">Stable UID · revision · source fact key</text>
-    <rect x="395" y="564" width="287" height="88" rx="8" fill="#fff" stroke="#dce3e8"/>
-    <text x="415" y="596" class="h" font-size="17">Actors and facts</text><text x="415" y="625" class="small">actor ref · fact ref · resolution state</text>
-    <rect x="702" y="564" width="287" height="88" rx="8" fill="#fff" stroke="#dce3e8"/>
-    <text x="722" y="596" class="h" font-size="17">Model artifacts</text><text x="722" y="625" class="small">Provider · model · dimensions · input version</text>
-    <rect x="1009" y="564" width="343" height="88" rx="8" fill="#fff" stroke="#dce3e8"/>
-    <text x="1029" y="596" class="h" font-size="17">Safe publication</text><text x="1029" y="625" class="small">Checkpoints · validation · atomic switch · rollback</text>
+    <rect x="620" y="684" width="230" height="90" rx="8" fill="#fffaf3" stroke="#eadcc7"/>
+    <text x="644" y="714" class="tag" fill="#a55f10">CURRENT PERSONA</text>
+    <text x="644" y="740" class="p">Resolve at execution</text><text x="644" y="762" class="p">Recheck before publish</text>
   </g>
+  <path d="M435 380V550H607" class="line"/><path d="M862 514H887" class="line"/><path d="M862 596H876V657H887" class="line"/><path d="M862 729H878V698H887" class="dash"/>
+
+  <g filter="url(#shadow)">
+    <rect x="1200" y="166" width="200" height="596" rx="8" fill="#f7f8fa" stroke="#dce3e8"/>
+    <rect x="1200" y="166" width="200" height="7" rx="3" fill="#64717d"/>
+    <text x="1220" y="205" class="tag" fill="#64717d">CURRENT PRIVATE</text><text x="1220" y="222" class="tag" fill="#64717d">REQUEST</text>
+
+    <rect x="1220" y="244" width="160" height="94" rx="7" fill="#fff8f6" stroke="#efd8d2"/>
+    <text x="1236" y="271" class="tag" fill="#c84f3d">TOPIC RECALL</text>
+    <text x="1236" y="300" class="h">Relevant Topic</text><text x="1236" y="324" class="small">Timeline on demand</text>
+
+    <text x="1295" y="369" class="h" fill="#64717d">+</text>
+
+    <rect x="1220" y="389" width="160" height="138" rx="7" fill="#f4fbfa" stroke="#c8e2df"/>
+    <text x="1236" y="416" class="tag" fill="#187b78">EXACT USER</text>
+    <text x="1236" y="445" class="h">Exact profile</text>
+    <text x="1236" y="472" class="small">Bot + persona</text><text x="1236" y="494" class="small">+ stable actor</text><text x="1236" y="516" class="small">active facts + relation</text>
+
+    <path d="M1300 536V553" class="line"/>
+
+    <rect x="1220" y="570" width="160" height="144" rx="7" fill="#f5f7ff" stroke="#d4dcf4"/>
+    <text x="1236" y="597" class="tag" fill="#3769d6">INJECTION</text>
+    <text x="1236" y="624" class="h">Bounded</text><text x="1236" y="648" class="h">data-only</text><text x="1236" y="672" class="h">injection</text>
+    <text x="1236" y="700" class="small">Current message wins</text>
+  </g>
+  <path d="M1162 267H1187" class="dash"/>
+  <path d="M1162 483H1187" class="dash"/>
+  <path d="M1162 657H1187" class="dash"/>
 </svg>

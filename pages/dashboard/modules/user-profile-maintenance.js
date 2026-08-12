@@ -136,10 +136,11 @@ export class UserProfileMaintenance {
           <button class="btn btn-danger btn-sm" type="button" data-profile-action="delete-disable">${esc(window.t("profile.deleteDisable"))}</button>
         </div>
       </div>
+      ${this.renderArchitectureStatus(data)}
       <label class="user-profile-rebuild-option"><input id="profile-rebuild-clear-overrides" type="checkbox"> <span>${esc(window.t("profile.clearOverrides"))}</span></label>
       ${scope.has_gap || data.gap?.has_gap ? `<div class="user-profile-alert">${esc(window.t("profile.gap", data.gap?.pending_count || 0))}</div>` : ""}
       <section class="user-profile-section">
-        <div class="user-profile-section-head"><h3>${esc(window.t("profile.injectionPreview"))}</h3><span>${Number(preview?.total_chars || 0)}</span></div>
+        <div class="user-profile-section-head"><h3>${esc(window.t("profile.injectionPreview"))}</h3><span>${esc(window.t("profile.injectionMeta", Number(preview?.total_chars || 0), Number(preview?.fact_count || 0), window.t(preview?.relationship_included ? "profile.included" : "profile.notIncluded")))}</span></div>
         <pre class="user-profile-preview">${esc(preview?.content || window.t("profile.noInjection"))}</pre>
       </section>
       ${this.renderFactSection(window.t("profile.activeFacts"), activeFacts, true)}
@@ -151,6 +152,29 @@ export class UserProfileMaintenance {
       ${this.renderAccounts(accounts)}
       ${this.renderSharing(data.share_group, scope)}
       ${this.renderTasks(data.tasks || [])}`;
+  }
+
+  renderArchitectureStatus(data) {
+    const scope = data.scope || {};
+    const counts = (data.facts || []).reduce((result, fact) => {
+      const status = String(fact.status || "unknown");
+      result[status] = Number(result[status] || 0) + 1;
+      return result;
+    }, {});
+    const terminal = new Set(["completed", "completed_partial", "failed", "cancelled"]);
+    const running = (data.tasks || []).filter(task => !terminal.has(String(task.status || ""))).length;
+    const relationship = data.relationship;
+    const currentRelationshipRevision = (data.relationship_revisions || []).find(
+      item => Number(item.revision || 0) === Number(relationship?.revision || 0),
+    );
+    const personaBased = currentRelationshipRevision?.diagnostics?.persona_basis === "current_config";
+    const scopeStatus = scope.auto_enable_blocked ? "deleted" : scope.enabled ? "enabled" : "disabled";
+    return `<div class="user-profile-state-grid" data-profile-architecture-status>
+      <div class="user-profile-state-item"><span>${esc(window.t("profile.state.scope"))}</span><strong>${esc(window.t(`profile.status.${scopeStatus}`))}</strong><small>${esc(scope.bot_account || "-")} / ${esc(scope.persona_id || "-")}</small></div>
+      <div class="user-profile-state-item"><span>${esc(window.t("profile.state.objective"))}</span><strong>r${Number(data.fact_revision || 0)} · ${Number(counts.active || 0)} ${esc(window.t("profile.factStatus.active"))}</strong><small>${esc(window.t("profile.state.reviewCounts", Number(counts.pending || 0), Number(counts.conflict || 0), Number(counts.stale || 0)))}</small></div>
+      <div class="user-profile-state-item"><span>${esc(window.t("profile.state.relationship"))}</span><strong>${relationship ? `r${Number(relationship.revision || 0)}` : esc(window.t("common.noData"))}</strong><small>${esc(window.t(personaBased ? "profile.state.executionPersona" : "profile.state.noPersonaBasis"))}</small></div>
+      <div class="user-profile-state-item"><span>${esc(window.t("profile.state.maintenance"))}</span><strong>${esc(window.t("profile.state.queueCount", running))}</strong><small>${esc(window.t("profile.state.gapCount", Number(data.gap?.pending_count || 0)))}</small></div>
+    </div>`;
   }
 
   renderFactSection(title, facts, actionable) {
@@ -186,7 +210,10 @@ export class UserProfileMaintenance {
 
   renderRelationship(relationship, revisions, scope) {
     const dimensions = DIMENSIONS.map(key => `<label class="relationship-dimension"><span>${esc(window.t(`profile.dimension.${key}`))}</span><input type="range" min="0" max="100" value="${Math.round(Number(relationship?.[key] || 0) * 100)}" data-relationship-dimension="${key}"><output>${Math.round(Number(relationship?.[key] || 0) * 100)}</output></label>`).join("");
-    const revisionRows = revisions.slice(0, 12).map(item => `<div class="relationship-revision"><span>r${Number(item.revision)} · ${esc(item.operation)} · ${this.formatTime(item.created_at)}</span>${item.full_snapshot ? `<button class="btn btn-secondary btn-sm" data-relationship-rollback="${Number(item.revision)}">${esc(window.t("profile.rollback"))}</button>` : ""}</div>`).join("");
+    const revisionRows = revisions.slice(0, 12).map(item => {
+      const personaBasis = item.diagnostics?.persona_basis === "current_config" ? ` · ${window.t("profile.state.executionPersona")}` : "";
+      return `<div class="relationship-revision"><span>r${Number(item.revision)} · ${esc(item.operation)}${esc(personaBasis)} · ${this.formatTime(item.created_at)}</span>${item.full_snapshot ? `<button class="btn btn-secondary btn-sm" data-relationship-rollback="${Number(item.revision)}">${esc(window.t("profile.rollback"))}</button>` : ""}</div>`;
+    }).join("");
     return `<section class="user-profile-section"><div class="user-profile-section-head"><h3>${esc(window.t("profile.relationship"))}</h3><button class="btn btn-secondary btn-sm" data-relationship-action="freeze">${esc(window.t(scope.relationship_frozen ? "profile.unfreeze" : "profile.freeze"))}</button></div>
       <div class="relationship-dimensions">${dimensions}</div>
       <label class="field"><span>${esc(window.t("profile.stanceTags"))}</span><input class="input" id="relationship-tags" value="${esc((relationship?.stance_tags || []).join(", "))}"></label>
@@ -224,7 +251,8 @@ export class UserProfileMaintenance {
   }
 
   renderTasks(tasks) {
-    const rows = tasks.map(task => `<div class="user-profile-task"><div><strong>${esc(task.status)}</strong><small>${this.formatTime(task.updated_at)}${task.error ? ` · ${esc(task.error)}` : ""}</small></div>${["failed", "facts_failed", "facts_completed"].includes(task.status) ? `<button class="btn btn-secondary btn-sm" data-task-retry="${esc(task.task_uid)}">${esc(window.t("profile.retry"))}</button>` : ""}</div>`).join("");
+    const terminal = new Set(["completed", "completed_partial", "failed", "cancelled"]);
+    const rows = tasks.map(task => `<div class="user-profile-task"><div><strong><span class="status-badge${terminal.has(task.status) ? "" : " warning"}">${esc(task.status)}</span></strong><small>${this.formatTime(task.updated_at)}${task.error ? ` · ${esc(task.error)}` : ""}</small></div>${["failed", "facts_failed", "facts_completed"].includes(task.status) ? `<button class="btn btn-secondary btn-sm" data-task-retry="${esc(task.task_uid)}">${esc(window.t("profile.retry"))}</button>` : ""}</div>`).join("");
     return `<section class="user-profile-section"><h3>${esc(window.t("profile.tasks"))}</h3>${rows || `<div class="identity-state compact">${esc(window.t("common.noData"))}</div>`}</section>`;
   }
 

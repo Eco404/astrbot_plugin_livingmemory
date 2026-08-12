@@ -25,7 +25,7 @@
 <tr>
 <td width="33%"><strong>TIMELINE PRESERVES</strong><br><br>Continuous conversations become editable memories with facts, affect, time ranges, actor bindings, and source snapshots.</td>
 <td width="33%"><strong>TOPIC ORGANIZES</strong><br><br>Formal fragments connect related experiences across time without losing their Timeline revision or provenance.</td>
-<td width="33%"><strong>RECALL STAYS FOCUSED</strong><br><br>Topic-first retrieval adds only useful facts and fragments, then falls back to Timeline when needed.</td>
+<td width="33%"><strong>PROFILES UNDERSTAND</strong><br><br>The same Timeline independently maintains objective facts about the current private user and each persona's subjective relationship.</td>
 </tr>
 </table>
 
@@ -33,7 +33,7 @@
 
 | Build | Recall | Operate |
 | :--- | :--- | :--- |
-| **Two-layer architecture**<br>Timeline is the editable source; Topic is derived and read-only. | **Current-query control**<br>The current message qualifies candidates; recent context only adds bounded support. | **Atomic publication**<br>Failed or cancelled Topic builds leave the active generation intact. |
+| **One source, two derived routes**<br>Timeline is editable; Topic and governed user profiles derive from it in parallel. | **Current-query control**<br>The current message qualifies candidates; recent context only adds bounded support. | **Atomic publication**<br>Failed Topic builds or profile jobs leave the active generation intact. |
 | **Traceable structure**<br>Facts, actors, emotion, formal fragments, and revisions retain source links. | **Optional Rerank**<br>A configured provider or built-in Cloudflare client can refine qualified candidates. | **Unified maintenance**<br>Review, rebuild, session audit, database health, recall traces, and model tests share one workspace. |
 | **Bounded incremental updates**<br>New Timeline revisions match a limited neighborhood of existing Topics. | **Two Topic search modes**<br>Search titles, summaries, and facts by keyword, or use Embedding similarity to find related themes. | **Data lifecycle**<br>Backups, staged edits, import/export, cleanup, archive, and in-place reconstruction are explicit operations. |
 | **Topic continuation**<br>After the base round count, pending themes may extend the summary boundary until the configured hard limit. | **Agent-native tools**<br>`recall_long_term_memory` and `memorize_long_term_memory` support active memory use. | **Duplicate-submit guards**<br>Long-running actions lock immediately and restore persisted task state after refresh. |
@@ -46,8 +46,14 @@ flowchart LR
     C --> D[Topic]
     D --> E[Topic-first recall]
     C --> E
-    B --> F[Maintenance and reconstruction]
-    F --> C
+    B --> F[Profile projection events]
+    F --> G[Objective profile]
+    F --> H[Persona relationship]
+    I[Current persona at execution] -.digest only in DB.-> H
+    G --> J[Current private-user injection]
+    H --> J
+    E --> K[Request context]
+    J --> K
 ```
 
 ## Start in three moves
@@ -70,9 +76,9 @@ Open the workspace at `Plugins -> LivingMemory -> Pages -> dashboard`. The WebUI
 | :--- | :--- | :--- | :--- |
 | [Quick start](https://eco404.github.io/astrbot_plugin_livingmemory/en/guide/getting-started) | [Configuration](https://eco404.github.io/astrbot_plugin_livingmemory/en/configuration) | [Recall pipeline](https://eco404.github.io/astrbot_plugin_livingmemory/en/recall) | [Maintenance center](https://eco404.github.io/astrbot_plugin_livingmemory/en/maintenance) |
 
-The complete architecture, Timeline and Topic contracts, commands, migration behavior, and data-safety boundaries are documented on the [VitePress site](https://eco404.github.io/astrbot_plugin_livingmemory/en/).
+The complete architecture, Timeline, Topic, and user-profile contracts, commands, migration behavior, and data-safety boundaries are documented on the [VitePress site](https://eco404.github.io/astrbot_plugin_livingmemory/en/).
 
-Database upgrades follow the public `v8 -> v9 -> v10` path and then the current `v10.x` schema. Back up plugin data before testing development builds or destructive maintenance operations.
+Database upgrades follow the public `v8 -> v9 -> v10 -> v10.4` path. User-profile structures enter the release line as one `v10.3 -> v10.4` migration. Back up plugin data before testing development builds or destructive maintenance operations.
 
 ## Project
 

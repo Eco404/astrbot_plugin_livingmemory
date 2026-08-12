@@ -20,4 +20,8 @@ The bottom sidebar keeps **Settings** and **Maintenance** separate from daily br
 
 Long-running tasks expose stage, processed count, and state. Failed records retain a readable error and can be manually cleared.
 
+The profile detail header mirrors the derived architecture rather than presenting another editable memory. **Scope** shows enablement and Bot/persona; **Objective profile** shows its revision and active, pending, conflict, and stale counts; **Persona relationship** shows its revision and whether the current persona was resolved at execution; **Maintenance** shows active jobs and unprojected events. The strip uses four columns on desktop, two at medium widths, and one on mobile.
+
+The effective-injection preview reuses the runtime profile renderer and reports actual characters, facts, and relationship inclusion. Pending, conflicting, and stale facts are explicitly non-injecting, while active maintenance jobs use a warning state so they cannot be mistaken for a completed publication.
+
 Split/merge previews preserve the selected primary Topic and fragment groups across redraws. Confirmation controls lock immediately while an operation is running, following the same duplicate-submit contract as other long tasks.

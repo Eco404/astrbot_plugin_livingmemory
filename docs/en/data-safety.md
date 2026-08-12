@@ -9,7 +9,7 @@
 Version 3.8.x uses schema v10.4. The public migration path is:
 
 ```text
-v8 -> v9 -> v10 -> current v10.x
+v8 -> v9 -> v10 -> v10.4
 ```
 
 Schema migration does not call the LLM or synthesize Topic content. Semantic products are created later by an explicit build or maintenance operation.
