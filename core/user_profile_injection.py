@@ -161,7 +161,7 @@ class UserProfileInjectionService:
                 0,
                 min(
                     body_budget,
-                    int(self._get("user_profile.relationship_reserved_chars", 300)),
+                    int(self._get("user_profile.relationship_reserved_chars", 350)),
                 ),
             )
             relationship_text = self._render_relationship(
@@ -173,6 +173,16 @@ class UserProfileInjectionService:
         fact_text, fact_count = self._render_facts(
             facts, query=query, budget=fact_budget, now=now
         )
+        if relationship is not None and relationship_text:
+            # Facts already consumed their preferred share. Let the relationship
+            # use whatever remains so sparse facts do not strand body budget.
+            expanded_budget = body_budget - len(fact_text) - (2 if fact_text else 0)
+            relationship_text = self._render_relationship(
+                relationship,
+                behavior_mode=behavior_mode,
+                now=now,
+                budget=max(0, expanded_budget),
+            )
         body = fact_text
         if relationship_text:
             body = f"{body}\n\n{relationship_text}" if body else relationship_text

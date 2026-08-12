@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -36,12 +35,10 @@ class UserProfileHistoryManager:
         store: Any,
         *,
         actor_resolver: Callable[[dict[str, Any], str], tuple[str, str | None]],
-        persona_resolver: Callable[[str], Any] | None = None,
     ) -> None:
         self.db_path = db_path
         self.store = store
         self.actor_resolver = actor_resolver
-        self.persona_resolver = persona_resolver
 
     async def preview(self, profile_scope_uid: str) -> dict[str, Any]:
         discovered, diagnostics = await self._discover(profile_scope_uid)
@@ -84,11 +81,6 @@ class UserProfileHistoryManager:
             )
             for item in history
         }
-        persona_snapshot = await self._resolve_persona_snapshot(
-            str(discovered[0]["persona_id"]) if discovered else ""
-        )
-        if persona_snapshot:
-            persona_snapshot["basis"] = "current_config"
         inserted = 0
         refreshed = 0
         for item in discovered:
@@ -102,8 +94,6 @@ class UserProfileHistoryManager:
                 "profile_display_name": item["display_name"],
                 "identity_resolution": item["identity_resolution"],
             }
-            if persona_snapshot:
-                payload["persona_snapshot"] = persona_snapshot
             await self.store.enqueue_projection_event(
                 UserProfileProjectionEvent(
                     timeline_uid=item["timeline_uid"],
@@ -650,14 +640,6 @@ class UserProfileHistoryManager:
     def _actor_user_id(actor_id: str) -> str:
         parts = str(actor_id or "").split(":", 2)
         return parts[2] if len(parts) == 3 else ""
-
-    async def _resolve_persona_snapshot(self, persona_id: str) -> dict[str, Any]:
-        if not persona_id or self.persona_resolver is None:
-            return {}
-        result = self.persona_resolver(persona_id)
-        if inspect.isawaitable(result):
-            result = await result
-        return dict(result) if isinstance(result, dict) else {}
 
     @staticmethod
     def _event_key(

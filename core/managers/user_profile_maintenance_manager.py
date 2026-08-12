@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections.abc import Callable
 from typing import Any
@@ -34,11 +35,13 @@ class UserProfileMaintenanceManager:
         *,
         provider: Any = None,
         provider_resolver: Callable[..., Any] | None = None,
+        persona_resolver: Callable[[str], Any] | None = None,
         config: dict[str, Any] | None = None,
     ):
         self.store = store
         self.default_provider = provider
         self.provider_resolver = provider_resolver
+        self.persona_resolver = persona_resolver
         self.config = dict(config or {})
         self.fact_maintainer = UserProfileFactMaintainer(provider)
         self.relationship_maintainer = UserRelationshipMaintainer(provider)
@@ -46,6 +49,8 @@ class UserProfileMaintenanceManager:
         self._namespace_locks: dict[str, asyncio.Lock] = {}
         self._scheduled: dict[str, asyncio.Task] = {}
         self._retry_tasks: set[asyncio.Task] = set()
+        self._lifecycle_task: asyncio.Task | None = None
+        self._settings_changed = asyncio.Event()
         self._closing = False
         self._semaphore = asyncio.Semaphore(self._concurrency())
 
@@ -54,9 +59,13 @@ class UserProfileMaintenanceManager:
         self.config = dict(config)
         if self._concurrency() != old_concurrency:
             self._semaphore = asyncio.Semaphore(self._concurrency())
+        self._settings_changed.set()
 
     async def start(self) -> None:
         """Resume durable tasks first, then any pending unbatched events."""
+        await self.run_lifecycle_maintenance()
+        if self._lifecycle_task is None or self._lifecycle_task.done():
+            self._lifecycle_task = asyncio.create_task(self._lifecycle_loop())
         limit = int(self.config.get("user_profile.startup_recovery_limit", 64))
         recoverable = await self.store.list_recoverable_tasks(limit=limit)
         for task in recoverable:
@@ -72,6 +81,8 @@ class UserProfileMaintenanceManager:
     async def close(self) -> None:
         self._closing = True
         tasks = [*self._scheduled.values(), *self._retry_tasks]
+        if self._lifecycle_task is not None:
+            tasks.append(self._lifecycle_task)
         for task in tasks:
             if not task.done():
                 task.cancel()
@@ -79,6 +90,42 @@ class UserProfileMaintenanceManager:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._scheduled.clear()
         self._retry_tasks.clear()
+        self._lifecycle_task = None
+
+    async def run_lifecycle_maintenance(self) -> dict[str, int]:
+        """Advance time-based states and compact fully derivable maintenance data."""
+        return await self.store.run_profile_lifecycle_maintenance(
+            completed_task_retention_days=int(
+                self.config.get("user_profile.completed_task_retention_days", 30)
+            ),
+            projection_compaction_days=int(
+                self.config.get("user_profile.projection_compaction_days", 30)
+            ),
+            stale_retention_days=int(
+                self.config.get("user_profile.stale_retention_days", 180)
+            ),
+        )
+
+    async def _lifecycle_loop(self) -> None:
+        while not self._closing:
+            hours = max(
+                1,
+                int(self.config.get("user_profile.lifecycle_scan_interval_hours", 24)),
+            )
+            try:
+                await asyncio.wait_for(
+                    self._settings_changed.wait(), timeout=hours * 3600.0
+                )
+                self._settings_changed.clear()
+                continue
+            except TimeoutError:
+                pass
+            try:
+                await self.run_lifecycle_maintenance()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.error("[UserProfile] 周期性生命周期维护失败", exc_info=True)
 
     def schedule_scope(self, profile_scope_uid: str) -> None:
         if self._closing or not profile_scope_uid:
@@ -292,6 +339,7 @@ class UserProfileMaintenanceManager:
                 for event in latest_by_timeline.values()
                 if str(event.get("operation") or "") in {"upsert", "restore"}
             ]
+            active_events.sort(key=lambda event: int(event.get("sequence") or 0))
             actor_id = next(
                 (
                     str(event.get("payload", {}).get("profile_actor_id") or "")
@@ -340,9 +388,13 @@ class UserProfileMaintenanceManager:
                         )
                     ),
                 )
-            persona_snapshot = self._persona_snapshot_from_events(active_events)
+            persona = await self._resolve_current_persona(scope.persona_id)
             objective_facts = await self.store.list_serving_facts(
-                scope.fact_namespace_uid, include_sensitive=False
+                scope.fact_namespace_uid,
+                include_sensitive=False,
+                limit=int(
+                    self.config.get("user_profile.fact_maintenance_context_limit", 200)
+                ),
             )
             sensitivity = str(
                 scope.relationship_sensitivity_override
@@ -356,39 +408,65 @@ class UserProfileMaintenanceManager:
                     "user_profile.relationship_behavior_mode", "natural"
                 )
             )
-            maintained = await self.relationship_maintainer.maintain(
-                profile_scope_uid=profile_scope_uid,
-                timelines=timelines,
-                current_state=None,
-                persona_snapshot=persona_snapshot,
-                objective_facts=objective_facts,
-                sensitivity=sensitivity,
-                behavior_mode=behavior_mode,
-                settings=self.config,
-                provider=self._resolve_provider(),
+            rebuilt: UserRelationshipState | None = None
+            diagnostics: dict[str, Any] = {}
+            summaries: list[str] = []
+            source_timeline_uids: list[str] = []
+            provider = self._resolve_provider()
+            batch_limit = max(
+                1,
+                int(
+                    self.config.get(
+                        "user_profile.relationship_rebuild_batch_limit", 32
+                    )
+                ),
             )
-            if maintained is None:
+            for offset in range(0, len(timelines), batch_limit):
+                maintained = await self.relationship_maintainer.maintain(
+                    profile_scope_uid=profile_scope_uid,
+                    timelines=timelines[offset : offset + batch_limit],
+                    current_state=rebuilt,
+                    current_persona=persona,
+                    objective_facts=objective_facts,
+                    sensitivity=sensitivity,
+                    behavior_mode=behavior_mode,
+                    settings=self.config,
+                    provider=provider,
+                )
+                if maintained is None:
+                    continue
+                rebuilt = maintained.state
+                diagnostics = maintained.diagnostics
+                for timeline_uid in maintained.state.source_timeline_uids:
+                    if timeline_uid not in source_timeline_uids:
+                        source_timeline_uids.append(timeline_uid)
+                if maintained.change_summary:
+                    summaries.append(maintained.change_summary)
+            if rebuilt is None:
                 return None
-            maintained.diagnostics["persona_basis"] = (
-                str(persona_snapshot.get("basis") or "timeline_snapshot")
-                if persona_snapshot.get("prompt")
-                else "unavailable"
-            )
-            maintained.state.relationship_uid = (
+            await self._assert_persona_unchanged(scope.persona_id, persona)
+            diagnostics["persona_basis"] = "current_config"
+            diagnostics["history_event_count"] = len(history)
+            diagnostics["meaningful_timeline_count"] = len(timelines)
+            diagnostics["history_batch_count"] = (
+                len(timelines) + batch_limit - 1
+            ) // batch_limit
+            rebuilt.relationship_uid = (
                 current.relationship_uid
                 if current is not None
-                else maintained.state.relationship_uid
+                else rebuilt.relationship_uid
             )
-            maintained.state.created_at = (
-                current.created_at if current is not None else maintained.state.created_at
+            rebuilt.created_at = (
+                current.created_at if current is not None else rebuilt.created_at
             )
+            rebuilt.source_timeline_uids = source_timeline_uids
             return await self.store.publish_relationship(
-                maintained.state,
+                rebuilt,
                 expected_revision=(current.revision if current is not None else 0),
                 operation="history_rebuild",
                 reason=reason,
-                change_summary=maintained.change_summary,
-                diagnostics=maintained.diagnostics,
+                change_summary="; ".join(summaries)[-1000:],
+                diagnostics=diagnostics,
                 full_revision_limit=int(
                     self.config.get(
                         "user_profile.relationship_full_revision_limit", 100
@@ -442,15 +520,10 @@ class UserProfileMaintenanceManager:
                 if not events:
                     return
                 provider = self._resolve_provider()
-                persona_snapshot = self._persona_snapshot_from_events(events)
                 task = UserProfileTask(
                     profile_scope_uid=profile_scope_uid,
                     settings_snapshot=dict(self.config),
                     provider_signature=self._provider_signature(provider),
-                    persona_signature=dict(
-                        persona_snapshot.get("signature") or {}
-                    ),
-                    persona_prompt=str(persona_snapshot.get("prompt") or ""),
                 )
                 await self.store.create_task(task, events)
                 payload = await self.store.get_task(task.task_uid)
@@ -472,7 +545,6 @@ class UserProfileMaintenanceManager:
                 task_uid,
                 status="cancelled",
                 error="Profile scope is disabled or no longer exists",
-                clear_persona_prompt=True,
             )
             await self.store.finish_task_events(
                 task_uid, status="pending", error="Profile scope is disabled"
@@ -564,7 +636,6 @@ class UserProfileMaintenanceManager:
             task_uid,
             status="completed",
             result_summary=result_summary,
-            clear_persona_prompt=True,
         )
         cursor = await self.store.finish_task_events(
             task_uid, status="completed", error=None
@@ -626,7 +697,11 @@ class UserProfileMaintenanceManager:
             candidates.extend(sources)
 
         existing = await self.store.list_facts_for_maintenance(
-            scope.fact_namespace_uid
+            scope.fact_namespace_uid,
+            statuses=("conflict", "active", "pending", "stale"),
+            limit=int(
+                settings.get("user_profile.fact_maintenance_context_limit", 200)
+            ),
         )
         needs_behavior_history = any(
             str(candidate.metadata.get("profile_signal") or "")
@@ -742,8 +817,15 @@ class UserProfileMaintenanceManager:
         objective_facts = await self.store.list_serving_facts(
             scope.fact_namespace_uid,
             include_sensitive=False,
+            limit=int(settings.get("user_profile.fact_maintenance_context_limit", 200)),
         )
-        persona_snapshot = self._persona_snapshot_from_task(task)
+        persona = await self._resolve_current_persona(scope.persona_id)
+        persona_changed = bool(
+            current is not None
+            and self._persona_digest(current.persona_signature)
+            and self._persona_digest(current.persona_signature)
+            != self._persona_digest(persona.get("signature"))
+        )
         sensitivity = str(
             scope.relationship_sensitivity_override
             or settings.get("user_profile.relationship_sensitivity", "balanced")
@@ -756,7 +838,8 @@ class UserProfileMaintenanceManager:
             profile_scope_uid=scope.profile_scope_uid,
             timelines=timelines,
             current_state=current,
-            persona_snapshot=persona_snapshot,
+            current_persona=persona,
+            persona_changed=persona_changed,
             objective_facts=objective_facts,
             sensitivity=sensitivity,
             behavior_mode=behavior_mode,
@@ -767,14 +850,9 @@ class UserProfileMaintenanceManager:
             return await self._checkpoint_skipped_relationship(
                 task, "maintainer_declined"
             )
-        maintained.diagnostics.setdefault(
-            "persona_basis",
-            (
-                str(persona_snapshot.get("basis") or "timeline_snapshot")
-                if persona_snapshot.get("prompt")
-                else "unavailable"
-            ),
-        )
+        await self._assert_persona_unchanged(scope.persona_id, persona)
+        maintained.diagnostics.setdefault("persona_basis", "current_config")
+        maintained.diagnostics.setdefault("persona_reconciled", persona_changed)
         published = await self.store.publish_relationship(
             maintained.state,
             expected_revision=(current.revision if current is not None else 0),
@@ -839,29 +917,33 @@ class UserProfileMaintenanceManager:
             )
         return result
 
-    @staticmethod
-    def _persona_snapshot_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
-        for event in reversed(events):
-            payload = event.get("payload") or {}
-            snapshot = payload.get("persona_snapshot")
-            if isinstance(snapshot, dict):
-                return dict(snapshot)
-        return {}
+    async def _resolve_current_persona(self, persona_id: str) -> dict[str, Any]:
+        if self.persona_resolver is None:
+            raise RuntimeError("Current persona resolver is unavailable")
+        resolved = self.persona_resolver(str(persona_id or ""))
+        if inspect.isawaitable(resolved):
+            resolved = await resolved
+        persona = dict(resolved) if isinstance(resolved, dict) else {}
+        signature = persona.get("signature")
+        if not persona.get("persona_id") or not isinstance(signature, dict):
+            raise RuntimeError(f"Current persona is unavailable: {persona_id}")
+        if not self._persona_digest(signature):
+            raise RuntimeError(f"Current persona has no valid signature: {persona_id}")
+        persona["basis"] = "current_config"
+        return persona
 
-    @classmethod
-    def _persona_snapshot_from_task(cls, task: dict[str, Any]) -> dict[str, Any]:
-        event_snapshots = [
-            {
-                "payload": dict(item.get("event_payload") or {})
-            }
-            for item in task.get("items") or []
-        ]
-        snapshot = cls._persona_snapshot_from_events(event_snapshots)
-        snapshot["prompt"] = str(task.get("persona_prompt") or snapshot.get("prompt") or "")
-        snapshot["signature"] = dict(
-            task.get("persona_signature") or snapshot.get("signature") or {}
-        )
-        return snapshot
+    async def _assert_persona_unchanged(
+        self, persona_id: str, expected: dict[str, Any]
+    ) -> None:
+        current = await self._resolve_current_persona(persona_id)
+        if self._persona_digest(current.get("signature")) != self._persona_digest(
+            expected.get("signature")
+        ):
+            raise RuntimeError("Current persona changed during relationship maintenance")
+
+    @staticmethod
+    def _persona_digest(signature: Any) -> str:
+        return str(signature.get("digest") or "") if isinstance(signature, dict) else ""
 
     def _resolve_provider(self) -> Any:
         provider_id = str(self.config.get("user_profile.provider_id") or "")

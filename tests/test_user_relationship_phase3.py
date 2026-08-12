@@ -10,6 +10,7 @@ from astrbot_plugin_livingmemory.core.managers.user_profile_maintenance_manager 
     UserProfileMaintenanceManager,
 )
 from astrbot_plugin_livingmemory.core.managers.user_relationship_maintainer import (
+    UserRelationshipMaintenanceResult,
     UserRelationshipMaintainer,
 )
 from astrbot_plugin_livingmemory.core.models.user_profile import (
@@ -79,6 +80,33 @@ class _RelationshipProvider:
         )
 
 
+class _RelationshipCorrectionProvider(_RelationshipProvider):
+    def __init__(self, invalid_responses: int):
+        super().__init__()
+        self.invalid_responses = invalid_responses
+        self.prompts = []
+
+    async def text_chat(self, *, prompt, system_prompt, **kwargs):
+        self.prompts.append(prompt)
+        response = await super().text_chat(
+            prompt=prompt, system_prompt=system_prompt, **kwargs
+        )
+        if len(self.prompts) <= self.invalid_responses:
+            payload = json.loads(response.completion_text)
+            payload["cited_timeline_refs"] = ["T999"]
+            return SimpleNamespace(completion_text=json.dumps(payload))
+        return response
+
+
+def _persona_resolver(persona_id: str):
+    return {
+        "persona_id": persona_id,
+        "name": "Companion",
+        "prompt": "你重视真诚，也会保留自己的判断。",
+        "signature": {"algorithm": "sha256", "digest": "persona-digest"},
+    }
+
+
 def _relationship_event_payload(
     *, assistant_only: bool = False, include_objective_fact: bool = False
 ):
@@ -88,12 +116,6 @@ def _relationship_event_payload(
     subject_actor = assistant_actor if assistant_only else user_actor
     payload = {
         "profile_actor_id": user_actor,
-        "persona_snapshot": {
-            "persona_id": "persona-1",
-            "name": "Companion",
-            "prompt": "你重视真诚，也会保留自己的判断。",
-            "signature": {"algorithm": "sha256", "digest": "persona-digest"},
-        },
         "metadata": {
             "memory_uid": "relationship-timeline-1",
             "revision": 1,
@@ -210,7 +232,7 @@ async def test_legacy_summary_relationship_is_weak_and_initially_capped():
         profile_scope_uid="scope-legacy",
         timelines=timelines,
         current_state=None,
-        persona_snapshot={"signature": {}},
+        current_persona={"signature": {}},
         objective_facts=[],
         sensitivity="balanced",
         behavior_mode="natural",
@@ -231,12 +253,13 @@ def test_relationship_prompt_minimizes_private_detail_repetition():
             }
         ],
         current_state=None,
-        persona_snapshot={"persona_id": "persona-1", "name": "Companion"},
+        current_persona={"persona_id": "persona-1", "name": "Companion"},
         objective_facts=[],
         sensitivity="balanced",
         behavior_mode="natural",
     )
     assert "Do not restate concrete private details" in prompt
+    assert "It is not evidence that the user reciprocates intimacy" in prompt
 
 
 @pytest.mark.asyncio
@@ -268,7 +291,7 @@ async def test_relationship_soft_limit_and_aftereffect_clamp():
             }
         ],
         current_state=current,
-        persona_snapshot={"signature": {"digest": "persona-digest"}},
+        current_persona={"signature": {"digest": "persona-digest"}},
         objective_facts=[],
         sensitivity="balanced",
         behavior_mode="natural",
@@ -285,7 +308,46 @@ async def test_relationship_soft_limit_and_aftereffect_clamp():
 
 
 @pytest.mark.asyncio
-async def test_relationship_stage_publishes_and_clears_persona_prompt(tmp_path):
+async def test_relationship_contract_correction_repeats_allowed_refs():
+    provider = _RelationshipCorrectionProvider(invalid_responses=2)
+    result = await UserRelationshipMaintainer(provider).maintain(
+        profile_scope_uid="scope-correction",
+        timelines=[
+            {
+                "timeline_uid": "timeline-1",
+                "timeline_revision": 1,
+                "summary": "meaningful",
+                "facts": ["Alice表达信任"],
+                "sentiment": "positive",
+                "major_event_eligible": False,
+                "updated_at": 1000,
+            }
+        ],
+        current_state=None,
+        current_persona={"signature": {"digest": "persona-digest"}},
+        objective_facts=[],
+        sensitivity="balanced",
+        behavior_mode="natural",
+        settings=effective_user_profile_settings(
+            {
+                "user_profile.maintenance_max_retries": 0,
+                "user_profile.contract_correction_retries": 2,
+            }
+        ),
+    )
+
+    assert result is not None
+    assert len(provider.prompts) == 3
+    assert result.diagnostics["contract_correction_used"] is True
+    assert result.diagnostics["contract_correction_attempts"] == 2
+    assert all(
+        'Allowed cited_timeline_refs: ["T1"]' in prompt
+        for prompt in provider.prompts[1:]
+    )
+
+
+@pytest.mark.asyncio
+async def test_relationship_stage_uses_current_persona_without_persisting_prompt(tmp_path):
     store = UserProfileStore(str(tmp_path / "relationship.db"))
     await store.initialize()
     scope = await store.ensure_private_scope(
@@ -298,7 +360,12 @@ async def test_relationship_stage_publishes_and_clears_persona_prompt(tmp_path):
     settings = effective_user_profile_settings(
         {"user_profile.maintenance_max_retries": 0}
     )
-    manager = UserProfileMaintenanceManager(store, provider=provider, config=settings)
+    manager = UserProfileMaintenanceManager(
+        store,
+        provider=provider,
+        persona_resolver=_persona_resolver,
+        config=settings,
+    )
     event_uid = await store.enqueue_projection_event(
         UserProfileProjectionEvent(
             timeline_uid="relationship-timeline-1",
@@ -321,7 +388,7 @@ async def test_relationship_stage_publishes_and_clears_persona_prompt(tmp_path):
     async with store._connect() as db:
         task_row = await (
             await db.execute(
-                "SELECT persona_prompt, result_summary FROM user_profile_tasks LIMIT 1"
+                "SELECT result_summary FROM user_profile_tasks LIMIT 1"
             )
         ).fetchone()
         event_row = await (
@@ -330,17 +397,207 @@ async def test_relationship_stage_publishes_and_clears_persona_prompt(tmp_path):
                 (event_uid,),
             )
         ).fetchone()
-    assert task_row["persona_prompt"] == ""
     assert json.loads(task_row["result_summary"])["relationship_checkpoint"] is True
     assert (
         json.loads(task_row["result_summary"])["relationship_diagnostics"][
             "persona_basis"
         ]
-        == "timeline_snapshot"
+        == "current_config"
     )
     assert event_row["status"] == "completed"
     assert provider.fact_calls == 0
     assert provider.relationship_calls == 1
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_relationship_ignores_obsolete_event_persona_and_rejects_midrun_change(
+    tmp_path,
+):
+    store = UserProfileStore(str(tmp_path / "relationship-current-persona.db"))
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="test:human:user-1",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    payload = _relationship_event_payload()
+    payload["persona_snapshot"] = {
+        "persona_id": "persona-1",
+        "prompt": "obsolete prompt",
+        "signature": {"digest": "obsolete"},
+    }
+    await store.enqueue_projection_event(
+        UserProfileProjectionEvent(
+            timeline_uid="relationship-timeline-1",
+            timeline_revision=1,
+            operation="upsert",
+            memory_space_id="space-relationship-1",
+            profile_scope_uid=scope.profile_scope_uid,
+            payload=payload,
+        )
+    )
+    provider = _RelationshipProvider()
+    calls = 0
+
+    async def changing_persona(persona_id: str):
+        nonlocal calls
+        calls += 1
+        digest = "current-v1" if calls == 1 else "current-v2"
+        return {
+            "persona_id": persona_id,
+            "name": "Companion",
+            "prompt": f"current prompt {digest}",
+            "signature": {"algorithm": "sha256", "digest": digest},
+        }
+
+    manager = UserProfileMaintenanceManager(
+        store,
+        provider=provider,
+        persona_resolver=changing_persona,
+        config=effective_user_profile_settings(
+            {
+                "user_profile.maintenance_retry_base_seconds": 5,
+                "user_profile.maintenance_retry_max_seconds": 60,
+            }
+        ),
+    )
+
+    await manager.drain_scope(scope.profile_scope_uid)
+
+    assert await store.get_relationship(scope.profile_scope_uid) is None
+    async with store._connect() as db:
+        task_row = await (
+            await db.execute(
+                "SELECT status, error FROM user_profile_tasks ORDER BY created_at LIMIT 1"
+            )
+        ).fetchone()
+        columns = {
+            str(row[1])
+            for row in await (
+                await db.execute("PRAGMA table_info(user_profile_tasks)")
+            ).fetchall()
+        }
+    assert task_row["status"] == "facts_completed"
+    assert "changed during relationship maintenance" in task_row["error"]
+    assert "persona_prompt" not in columns
+    assert "persona_signature" not in columns
+    assert provider.relationship_calls == 1
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_relationship_history_rebuild_batches_all_latest_events_with_current_persona(
+    tmp_path,
+):
+    store = UserProfileStore(str(tmp_path / "relationship-history-batches.db"))
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="test:human:user-1",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    event_specs = [
+        ("timeline-1", 1, 1001.0),
+        ("timeline-2", 1, 1002.0),
+        ("timeline-1", 2, 1003.0),
+        ("timeline-3", 1, 1004.0),
+        ("timeline-4", 1, 1005.0),
+        ("timeline-5", 1, 1006.0),
+    ]
+    for timeline_uid, revision, updated_at in event_specs:
+        payload = _relationship_event_payload()
+        payload["metadata"].update(
+            {
+                "memory_uid": timeline_uid,
+                "revision": revision,
+                "updated_at": updated_at,
+                "canonical_summary": f"relationship event {timeline_uid} r{revision}",
+            }
+        )
+        await store.enqueue_projection_event(
+            UserProfileProjectionEvent(
+                timeline_uid=timeline_uid,
+                timeline_revision=revision,
+                operation="upsert",
+                memory_space_id="space-relationship-1",
+                profile_scope_uid=scope.profile_scope_uid,
+                status="completed",
+                payload=payload,
+            )
+        )
+
+    persona_calls = 0
+    persona_objects = []
+
+    async def current_persona(persona_id: str):
+        nonlocal persona_calls
+        persona_calls += 1
+        return {
+            "persona_id": persona_id,
+            "name": "Companion",
+            "prompt": "current persona prompt",
+            "signature": {"algorithm": "sha256", "digest": "current-digest"},
+        }
+
+    manager = UserProfileMaintenanceManager(
+        store,
+        provider=object(),
+        persona_resolver=current_persona,
+        config=effective_user_profile_settings(
+            {"user_profile.relationship_rebuild_batch_limit": 2}
+        ),
+    )
+    batches = []
+    prior_states = []
+
+    async def maintain_batch(**kwargs):
+        timelines = kwargs["timelines"]
+        batches.append(
+            [(item["timeline_uid"], item["timeline_revision"]) for item in timelines]
+        )
+        prior_states.append(kwargs["current_state"])
+        persona_objects.append(kwargs["current_persona"])
+        state = UserRelationshipState(
+            profile_scope_uid=scope.profile_scope_uid,
+            familiarity=0.1 * len(batches),
+            persona_signature=dict(kwargs["current_persona"]["signature"]),
+            source_timeline_uids=[item["timeline_uid"] for item in timelines],
+        )
+        return UserRelationshipMaintenanceResult(
+            state=state,
+            change_summary=f"batch {len(batches)}",
+            diagnostics={"batch": len(batches)},
+        )
+
+    manager.relationship_maintainer.maintain = maintain_batch
+    rebuilt = await manager.rebuild_relationship_from_projection_history(
+        scope.profile_scope_uid
+    )
+
+    assert rebuilt is not None
+    assert batches == [
+        [("timeline-2", 1), ("timeline-1", 2)],
+        [("timeline-3", 1), ("timeline-4", 1)],
+        [("timeline-5", 1)],
+    ]
+    assert prior_states[0] is None
+    assert prior_states[1] is not None and prior_states[1].familiarity == 0.1
+    assert prior_states[2] is not None and prior_states[2].familiarity == 0.2
+    assert persona_calls == 2
+    assert len({id(item) for item in persona_objects}) == 1
+    assert rebuilt.source_timeline_uids == [
+        "timeline-2",
+        "timeline-1",
+        "timeline-3",
+        "timeline-4",
+        "timeline-5",
+    ]
+    revision = (await store.list_relationship_revisions(rebuilt.relationship_uid))[0]
+    assert revision["diagnostics"]["history_event_count"] == 6
+    assert revision["diagnostics"]["meaningful_timeline_count"] == 5
+    assert revision["diagnostics"]["history_batch_count"] == 3
+    assert revision["persona_signature"]["digest"] == "current-digest"
     await manager.close()
 
 
@@ -361,7 +618,12 @@ async def test_relationship_runs_when_fact_stage_fails(tmp_path):
             "user_profile.maintenance_retry_max_seconds": 60,
         }
     )
-    manager = UserProfileMaintenanceManager(store, provider=provider, config=settings)
+    manager = UserProfileMaintenanceManager(
+        store,
+        provider=provider,
+        persona_resolver=_persona_resolver,
+        config=settings,
+    )
     await store.enqueue_projection_event(
         UserProfileProjectionEvent(
             timeline_uid="relationship-timeline-1",

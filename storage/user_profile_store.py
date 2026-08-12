@@ -387,8 +387,6 @@ class UserProfileStore:
                 status TEXT NOT NULL DEFAULT 'pending',
                 settings_snapshot TEXT NOT NULL DEFAULT '{}',
                 provider_signature TEXT NOT NULL DEFAULT '{}',
-                persona_signature TEXT NOT NULL DEFAULT '{}',
-                persona_prompt TEXT NOT NULL DEFAULT '',
                 retries INTEGER NOT NULL DEFAULT 0,
                 next_retry_at REAL,
                 error TEXT,
@@ -920,12 +918,18 @@ class UserProfileStore:
         *,
         include_sensitive: bool = True,
         include_pending: bool = False,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         statuses = ["active"]
         if include_pending:
             statuses.append("pending")
         placeholders = ",".join("?" for _ in statuses)
         sensitive_clause = "" if include_sensitive else "AND f.sensitive = 0"
+        limit_sql = ""
+        params: list[Any] = [fact_namespace_uid, *statuses]
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(max(1, min(10000, int(limit))))
         async with self._connect() as db:
             rows = await (
                 await db.execute(
@@ -942,20 +946,35 @@ class UserProfileStore:
                       {sensitive_clause}
                     ORDER BY f.pinned DESC, f.importance DESC,
                              COALESCE(f.last_confirmed_at, f.updated_at) DESC
+                    {limit_sql}
                     """,
-                    [fact_namespace_uid, *statuses],
+                    params,
                 )
             ).fetchall()
         return [self._fact_row(row) for row in rows]
 
     async def list_facts_for_maintenance(
-        self, fact_namespace_uid: str
+        self,
+        fact_namespace_uid: str,
+        *,
+        statuses: Iterable[str] | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return every current logical fact with its immutable display source."""
+        """Return bounded current facts with their immutable display sources."""
+        selected = [str(item) for item in (statuses or ()) if str(item)]
+        clauses = ["f.fact_namespace_uid = ?"]
+        params: list[Any] = [fact_namespace_uid]
+        if selected:
+            clauses.append(f"f.status IN ({','.join('?' for _ in selected)})")
+            params.extend(selected)
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(max(1, min(10000, int(limit))))
         async with self._connect() as db:
             rows = await (
                 await db.execute(
-                    """
+                    f"""
                     SELECT f.*, s.raw_fact, s.actor_id, s.timeline_uid,
                            s.timeline_revision, s.fact_index, s.claim_type,
                            s.evidence_started_at, s.evidence_ended_at,
@@ -963,10 +982,19 @@ class UserProfileStore:
                     FROM user_profile_facts f
                     LEFT JOIN user_profile_fact_sources s
                       ON s.source_uid = f.representative_source_uid
-                    WHERE f.fact_namespace_uid = ?
-                    ORDER BY f.updated_at DESC, f.profile_fact_uid
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY CASE f.status
+                                 WHEN 'conflict' THEN 0
+                                 WHEN 'active' THEN 1
+                                 WHEN 'pending' THEN 2
+                                 WHEN 'stale' THEN 3
+                                 ELSE 4
+                             END,
+                             f.pinned DESC, f.importance DESC,
+                             f.updated_at DESC, f.profile_fact_uid
+                    {limit_sql}
                     """,
-                    (fact_namespace_uid,),
+                    params,
                 )
             ).fetchall()
         return [self._fact_row(row) for row in rows]
@@ -1691,19 +1719,33 @@ class UserProfileStore:
         return [self._event_row(row) for row in rows]
 
     async def list_projection_history(
-        self, profile_scope_uid: str, *, limit: int = 10000
+        self,
+        profile_scope_uid: str,
+        *,
+        limit: int | None = None,
+        after_sequence: int = 0,
     ) -> list[dict[str, Any]]:
+        limit_sql = ""
+        params: list[Any] = [profile_scope_uid, max(0, int(after_sequence))]
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(max(1, min(50000, int(limit))))
         async with self._connect() as db:
-            rows = await (
-                await db.execute(
-                    """
-                    SELECT * FROM user_profile_projection_events
-                    WHERE profile_scope_uid = ?
-                    ORDER BY sequence ASC LIMIT ?
-                    """,
-                    (profile_scope_uid, max(1, min(50000, int(limit)))),
-                )
-            ).fetchall()
+            cursor = await db.execute(
+                f"""
+                SELECT * FROM user_profile_projection_events
+                WHERE profile_scope_uid = ? AND sequence > ?
+                ORDER BY sequence ASC
+                {limit_sql}
+                """,
+                params,
+            )
+            rows = []
+            while True:
+                batch = await cursor.fetchmany(1000)
+                if not batch:
+                    break
+                rows.extend(batch)
         return [self._event_row(row) for row in rows]
 
     async def get_timeline_identity_resolution(
@@ -2169,9 +2211,9 @@ class UserProfileStore:
                     """
                     INSERT INTO user_profile_tasks (
                         task_uid, profile_scope_uid, status, settings_snapshot,
-                        provider_signature, persona_signature, persona_prompt,
-                        retries, error, result_summary, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        provider_signature, retries, error, result_summary,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task.task_uid,
@@ -2179,8 +2221,6 @@ class UserProfileStore:
                         self._enum(task.status),
                         self._json(task.settings_snapshot),
                         self._json(task.provider_signature),
-                        self._json(task.persona_signature),
-                        task.persona_prompt,
                         max(0, int(task.retries)),
                         task.error,
                         self._json(task.result_summary),
@@ -2247,7 +2287,6 @@ class UserProfileStore:
         for key in (
             "settings_snapshot",
             "provider_signature",
-            "persona_signature",
             "result_summary",
         ):
             result[key] = self._json_object(result[key])
@@ -2268,7 +2307,6 @@ class UserProfileStore:
         result_summary: dict[str, Any] | None = None,
         retries: int | None = None,
         next_retry_at: float | None = None,
-        clear_persona_prompt: bool = False,
     ) -> None:
         completed = status in {"completed", "completed_partial", "failed", "cancelled"}
         async with self._connect() as db:
@@ -2278,7 +2316,6 @@ class UserProfileStore:
                 SET status = ?, error = ?,
                     result_summary = COALESCE(?, result_summary),
                     retries = COALESCE(?, retries), next_retry_at = ?,
-                    persona_prompt = CASE WHEN ? THEN '' ELSE persona_prompt END,
                     updated_at = ?, completed_at = CASE WHEN ? THEN ? ELSE NULL END
                 WHERE task_uid = ?
                 """,
@@ -2288,7 +2325,6 @@ class UserProfileStore:
                     self._json(result_summary) if result_summary is not None else None,
                     retries,
                     next_retry_at,
-                    int(clear_persona_prompt),
                     time.time(),
                     int(completed),
                     time.time(),
@@ -2296,6 +2332,126 @@ class UserProfileStore:
                 ),
             )
             await db.commit()
+
+    async def run_profile_lifecycle_maintenance(
+        self,
+        *,
+        completed_task_retention_days: int = 30,
+        projection_compaction_days: int = 30,
+        stale_retention_days: int = 180,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        """Advance due facts and remove old data that can be deterministically rebuilt."""
+        current = float(now if now is not None else time.time())
+        task_cutoff = current - max(1, int(completed_task_retention_days)) * 86400.0
+        projection_cutoff = current - max(1, int(projection_compaction_days)) * 86400.0
+        stale_cutoff = current - max(1, int(stale_retention_days)) * 86400.0
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                affected_rows = await (
+                    await db.execute(
+                        """
+                        SELECT DISTINCT fact_namespace_uid
+                        FROM user_profile_facts
+                        WHERE pinned = 0 AND (
+                            (status IN ('active', 'pending')
+                             AND review_after IS NOT NULL AND review_after <= ?)
+                            OR (status = 'stale' AND updated_at <= ?)
+                        )
+                        """,
+                        (current, stale_cutoff),
+                    )
+                ).fetchall()
+                affected_namespaces = [
+                    str(row["fact_namespace_uid"]) for row in affected_rows
+                ]
+                stale = await db.execute(
+                    """
+                    UPDATE user_profile_facts
+                    SET status = 'stale', updated_at = ?
+                    WHERE status = 'active' AND pinned = 0
+                      AND review_after IS NOT NULL AND review_after <= ?
+                    """,
+                    (current, current),
+                )
+                archived = await db.execute(
+                    """
+                    UPDATE user_profile_facts
+                    SET status = 'archived', updated_at = ?
+                    WHERE status = 'pending' AND pinned = 0
+                      AND review_after IS NOT NULL AND review_after <= ?
+                    """,
+                    (current, current),
+                )
+                stale_archived = await db.execute(
+                    """
+                    UPDATE user_profile_facts
+                    SET status = 'archived', updated_at = ?
+                    WHERE status = 'stale' AND pinned = 0 AND updated_at <= ?
+                    """,
+                    (current, stale_cutoff),
+                )
+                revised_namespace_count = 0
+                if affected_namespaces:
+                    placeholders = ",".join("?" for _ in affected_namespaces)
+                    revised_namespaces = await db.execute(
+                        f"""
+                        UPDATE user_profile_fact_namespaces
+                        SET current_revision = current_revision + 1, updated_at = ?
+                        WHERE fact_namespace_uid IN ({placeholders})
+                        """,
+                        [current, *affected_namespaces],
+                    )
+                    revised_namespace_count = max(
+                        0, int(revised_namespaces.rowcount)
+                    )
+                deleted_tasks = await db.execute(
+                    """
+                    DELETE FROM user_profile_tasks
+                    WHERE status IN ('completed', 'completed_partial', 'cancelled')
+                      AND completed_at IS NOT NULL AND completed_at < ?
+                    """,
+                    (task_cutoff,),
+                )
+                compacted_events = await db.execute(
+                    """
+                    DELETE FROM user_profile_projection_events AS old
+                    WHERE old.status = 'completed' AND old.updated_at < ?
+                      AND EXISTS (
+                          SELECT 1 FROM user_profile_projection_events AS newer
+                          WHERE newer.profile_scope_uid = old.profile_scope_uid
+                            AND newer.timeline_uid = old.timeline_uid
+                            AND newer.sequence > old.sequence
+                            AND newer.status = 'completed'
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM user_profile_task_items AS item
+                          WHERE item.event_uid = old.event_uid
+                      )
+                    """,
+                    (projection_cutoff,),
+                )
+                compacted_sources = await db.execute(
+                    """
+                    DELETE FROM user_profile_fact_sources
+                    WHERE active = 0 AND profile_fact_uid IS NULL AND updated_at < ?
+                    """,
+                    (projection_cutoff,),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "facts_stale": max(0, int(stale.rowcount)),
+            "pending_archived": max(0, int(archived.rowcount)),
+            "stale_archived": max(0, int(stale_archived.rowcount)),
+            "fact_namespaces_revised": revised_namespace_count,
+            "tasks_deleted": max(0, int(deleted_tasks.rowcount)),
+            "projection_events_compacted": max(0, int(compacted_events.rowcount)),
+            "fact_sources_compacted": max(0, int(compacted_sources.rowcount)),
+        }
 
     async def profile_fingerprint(self, profile_scope_uid: str) -> str:
         """Return a stale-preview fingerprint for all administrator-visible state."""

@@ -34,7 +34,7 @@ class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "10.5"
+    CURRENT_VERSION = "10.4"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -51,8 +51,7 @@ class DBMigration:
         "10.1": "Durable Timeline source snapshots",
         "10.2": "Durable document index maintenance state",
         "10.3": "Topic-local importance projection",
-        "10.4": "Private user profiles and persona relationship state",
-        "10.5": "Reviewable legacy Timeline identity resolution",
+        "10.4": "Private user profiles, persona relationships, and legacy identity review",
     }
 
     def __init__(self, db_path: str):
@@ -323,8 +322,6 @@ class DBMigration:
                     migration_steps.append(self._migrate_v10_2_to_v10_3)
                 if current_key < self.version_key("10.4"):
                     migration_steps.append(self._migrate_v10_3_to_v10_4)
-                if current_key < self.version_key("10.5"):
-                    migration_steps.append(self._migrate_v10_4_to_v10_5)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -2261,7 +2258,7 @@ class DBMigration:
         self,
         progress_callback: Callable[[str, int, int], None] | None,
     ) -> None:
-        """Create private user-profile storage without historical backfill."""
+        """Create all private profile and identity-review storage without backfill."""
         logger.info("执行迁移步骤: v10.3 -> v10.4 (private user profiles)")
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("PRAGMA busy_timeout = 10000")
@@ -2269,23 +2266,8 @@ class DBMigration:
             await UserProfileStore.create_schema(db)
             await db.commit()
         if progress_callback:
-            progress_callback("创建用户画像、人格关系与维护任务表", 1, 1)
+            progress_callback("创建用户画像、人格关系、身份审查与维护任务表", 1, 1)
         logger.info("v10.3 -> v10.4 迁移完成")
-
-    async def _migrate_v10_4_to_v10_5(
-        self,
-        progress_callback: Callable[[str, int, int], None] | None,
-    ) -> None:
-        """Add the derived legacy Timeline identity and review sidecar."""
-        logger.info("执行迁移步骤: v10.4 -> v10.5 (Timeline identity review)")
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA busy_timeout = 10000")
-            await db.execute("PRAGMA foreign_keys = ON")
-            await UserProfileStore.create_schema(db)
-            await db.commit()
-        if progress_callback:
-            progress_callback("创建旧 Timeline 身份解析与人工审查表", 1, 1)
-        logger.info("v10.4 -> v10.5 迁移完成")
 
     @staticmethod
     def _migration_json_object(value: Any) -> dict[str, Any]:

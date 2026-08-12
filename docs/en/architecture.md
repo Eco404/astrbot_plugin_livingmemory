@@ -33,7 +33,9 @@ current private request
 
 Objective facts keep the original Timeline key-fact text. The maintenance model may decide admission, category, confidence, importance, conflicts, and lifecycle, but cannot rewrite source text. Timeline edits, reconstruction, archive, and deletion withdraw the old revision's contribution and atomically publish a new profile; a failed job leaves the old profile available.
 
-Relationship state is the current persona's subjective view of a logical user: six continuous dimensions, a few tags, a first-person narrative, and a short-lived aftereffect. It may read non-sensitive objective facts as context, but requires a new user-side interaction to change. It cannot create objective facts or feed Timeline summarization.
+Relationship state is the current persona's subjective view of a logical user: six continuous dimensions, a few tags, a first-person narrative, and a short-lived aftereffect. It may read non-sensitive objective facts as context, but requires a new user-side interaction to change. It cannot create objective facts or feed Timeline summarization. Timeline events and jobs do not persist persona prompt text: maintenance resolves the current persona when it executes and validates its digest again before publication. Relationship state and revisions retain only that signature for audit.
+
+Projection-history reads have no fixed total-row truncation and fetch through the SQLite cursor in batches. A relationship rebuild then processes meaningful Timeline rows in configurable model batches while preserving order and publishes once. Periodic lifecycle maintenance advances fact states, expires completed jobs, and compacts derivable old projection revisions so database and model context growth stay bounded.
 
 A stable account maps to a logical user. Objective facts are isolated by Bot account, persona, and logical user by default; an explicit share group can join selected scopes for the same logical user. Relationship state always stays persona-specific. Nicknames never merge identity, and cross-platform accounts require manual administrator binding.
 

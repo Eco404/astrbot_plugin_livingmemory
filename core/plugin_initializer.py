@@ -550,7 +550,7 @@ class PluginInitializer:
             persona = await resolver(normalized_id)
         except Exception:
             logger.debug(
-                "[UserProfile] 读取 persona 快照失败: %s",
+                "[UserProfile] 读取当前 persona 失败: %s",
                 normalized_id,
                 exc_info=True,
             )

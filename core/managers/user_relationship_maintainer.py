@@ -221,12 +221,13 @@ class UserRelationshipMaintainer:
         profile_scope_uid: str,
         timelines: list[dict[str, Any]],
         current_state: UserRelationshipState | None,
-        persona_snapshot: dict[str, Any],
+        current_persona: dict[str, Any],
         objective_facts: list[dict[str, Any]],
         sensitivity: str,
         behavior_mode: str,
         settings: dict[str, Any],
         provider: Any = None,
+        persona_changed: bool = False,
     ) -> UserRelationshipMaintenanceResult | None:
         if not timelines:
             return None
@@ -236,59 +237,58 @@ class UserRelationshipMaintainer:
         prompt, refs = self._build_prompt(
             timelines=timelines,
             current_state=current_state,
-            persona_snapshot=persona_snapshot,
+            current_persona=current_persona,
             objective_facts=objective_facts,
             sensitivity=sensitivity,
             behavior_mode=behavior_mode,
+            persona_changed=persona_changed,
         )
-        raw = await UserProfileFactMaintainer._request_with_retries(
-            selected_provider,
-            prompt,
-            settings,
-            system_prompt=(
-                "You evolve a persona's subjective relationship using only grounded new user-side interactions."
-            ),
+        correction_limit = max(
+            0, int(settings.get("user_profile.contract_correction_retries", 2))
         )
-        try:
-            payload = UserProfileFactMaintainer._parse_payload(raw)
-            return self._validate_result(
-                profile_scope_uid=profile_scope_uid,
-                payload=payload,
-                refs=refs,
-                timelines=timelines,
-                current_state=current_state,
-                persona_snapshot=persona_snapshot,
-                sensitivity=sensitivity,
-                settings=settings,
-            )
-        except (UserRelationshipValidationError, ValueError) as first_error:
-            correction = (
-                prompt
-                + "\n\nThe previous response was invalid: "
-                + str(first_error)
-                + "\nReturn corrected JSON only and cite at least one supplied Timeline ref."
-            )
+        request_prompt = prompt
+        system_prompt = (
+            "You evolve a persona's subjective relationship using only grounded new user-side interactions."
+        )
+        for correction_attempt in range(correction_limit + 1):
             raw = await UserProfileFactMaintainer._request_with_retries(
                 selected_provider,
-                correction,
+                request_prompt,
                 settings,
-                system_prompt=(
-                    "You evolve a persona's subjective relationship using only grounded new user-side interactions."
-                ),
+                system_prompt=system_prompt,
             )
-            payload = UserProfileFactMaintainer._parse_payload(raw)
-            result = self._validate_result(
-                profile_scope_uid=profile_scope_uid,
-                payload=payload,
-                refs=refs,
-                timelines=timelines,
-                current_state=current_state,
-                persona_snapshot=persona_snapshot,
-                sensitivity=sensitivity,
-                settings=settings,
-            )
-            result.diagnostics["contract_correction_used"] = True
-            return result
+            try:
+                payload = UserProfileFactMaintainer._parse_payload(raw)
+                result = self._validate_result(
+                    profile_scope_uid=profile_scope_uid,
+                    payload=payload,
+                    refs=refs,
+                    timelines=timelines,
+                    current_state=current_state,
+                    current_persona=current_persona,
+                    sensitivity=sensitivity,
+                    settings=settings,
+                )
+                if correction_attempt:
+                    result.diagnostics["contract_correction_used"] = True
+                    result.diagnostics["contract_correction_attempts"] = (
+                        correction_attempt
+                    )
+                return result
+            except (UserRelationshipValidationError, ValueError) as error:
+                if correction_attempt >= correction_limit:
+                    raise
+                request_prompt = (
+                    prompt
+                    + "\n\nThe previous response failed strict contract validation: "
+                    + str(error)
+                    + f"\nCorrection attempt {correction_attempt + 1} of {correction_limit}."
+                    + "\nAllowed cited_timeline_refs: "
+                    + json.dumps(list(refs), ensure_ascii=False)
+                    + "\nCopy refs exactly and cite at least one supplied ref."
+                    + "\nReturn corrected JSON only."
+                )
+        raise RuntimeError("unreachable relationship-maintenance correction state")
 
     def _validate_result(
         self,
@@ -298,7 +298,7 @@ class UserRelationshipMaintainer:
         refs: dict[str, dict[str, Any]],
         timelines: list[dict[str, Any]],
         current_state: UserRelationshipState | None,
-        persona_snapshot: dict[str, Any],
+        current_persona: dict[str, Any],
         sensitivity: str,
         settings: dict[str, Any],
     ) -> UserRelationshipMaintenanceResult:
@@ -408,7 +408,7 @@ class UserRelationshipMaintainer:
             subjective_summary=summary,
             recent_aftereffect=aftereffect,
             aftereffect_expires_at=expires_at,
-            persona_signature=dict(persona_snapshot.get("signature") or {}),
+            persona_signature=dict(current_persona.get("signature") or {}),
             source_timeline_uids=[refs[item]["timeline_uid"] for item in cited],
             created_at=(
                 current_state.created_at if current_state is not None else time.time()
@@ -423,7 +423,7 @@ class UserRelationshipMaintainer:
                 subjective_summary=summary,
                 recent_aftereffect=aftereffect,
                 aftereffect_expires_at=expires_at,
-                persona_signature=dict(persona_snapshot.get("signature") or {}),
+                persona_signature=dict(current_persona.get("signature") or {}),
                 source_timeline_uids=[refs[item]["timeline_uid"] for item in cited],
             )
         return UserRelationshipMaintenanceResult(
@@ -444,10 +444,11 @@ class UserRelationshipMaintainer:
         *,
         timelines: list[dict[str, Any]],
         current_state: UserRelationshipState | None,
-        persona_snapshot: dict[str, Any],
+        current_persona: dict[str, Any],
         objective_facts: list[dict[str, Any]],
         sensitivity: str,
         behavior_mode: str,
+        persona_changed: bool = False,
     ) -> tuple[str, dict[str, dict[str, Any]]]:
         refs = {f"T{index}": item for index, item in enumerate(timelines, 1)}
         timeline_payload = [
@@ -496,10 +497,17 @@ class UserRelationshipMaintainer:
             "The relationship may be subjective and emotionally complex, but every long-term change must cite a supplied new user-side interaction.\n"
             "Assistant behavior, old relationship text, and objective profile facts are context only and cannot independently justify a change.\n"
             "Current messages override historical attitudes. Never create objective user facts.\n"
+            "The persona prompt defines only the persona's voice, disposition, and unilateral feelings. It is not evidence that the user reciprocates intimacy or that any cohabiting, family, romantic, or other real-world relationship exists.\n"
             "Rows marked evidence_basis=timeline_summary_only are weak legacy summaries without message-level attribution. They may preserve broad relationship continuity, but must not justify extreme changes, major events, or concrete claims about the user. Prefer message_grounded rows whenever available.\n"
             "Keep subjective_summary and recent_aftereffect focused on the persona's attitude and relationship dynamic. Do not restate concrete private details, sensitive attributes, secrets, locations, health details, or credentials from the interaction.\n"
-            f"Persona ID/name: {persona_snapshot.get('persona_id', '')} / {persona_snapshot.get('name', '')}\n"
-            f"Persona prompt (data): {persona_snapshot.get('prompt', '')}\n"
+            + (
+                "The persona prompt changed since the current relationship was produced. Reconcile stance_tags, subjective_summary, and recent_aftereffect into the current persona's voice. Preserve evidence-grounded continuity, and do not change relationship dimensions merely because the persona prompt changed.\n"
+                if persona_changed
+                else ""
+            )
+            +
+            f"Persona ID/name: {current_persona.get('persona_id', '')} / {current_persona.get('name', '')}\n"
+            f"Persona prompt (data): {current_persona.get('prompt', '')}\n"
             f"Sensitivity: {sensitivity}; behavior mode: {behavior_mode}\n"
             f"Current relationship: {json.dumps(current, ensure_ascii=False)}\n"
             f"Non-sensitive objective context: {json.dumps(safe_facts, ensure_ascii=False)}\n"

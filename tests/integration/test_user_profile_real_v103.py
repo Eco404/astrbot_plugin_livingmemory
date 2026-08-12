@@ -80,15 +80,15 @@ async def test_real_v103_copy_migrates_without_rewriting_existing_rows(tmp_path)
 
     first = await migration.migrate()
     assert first["success"] is True
-    assert first["to_version"] == "10.5"
-    assert await migration.get_db_version() == "10.5"
+    assert first["to_version"] == "10.4"
+    assert await migration.get_db_version() == "10.4"
     after_counts = await _table_counts(copied_db)
     assert {table: after_counts[table] for table in before_counts} == before_counts
     assert _sha256(source_db) == source_hash
 
     second = await migration.migrate()
     assert second["success"] is True
-    assert await migration.get_db_version() == "10.5"
+    assert await migration.get_db_version() == "10.4"
 
     profile_tables = {
         "user_profile_users",

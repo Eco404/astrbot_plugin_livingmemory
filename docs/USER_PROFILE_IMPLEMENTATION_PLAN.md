@@ -2,8 +2,8 @@
 
 > 状态：已按方案实施并完成发布验收<br>
 > 目标插件版本：`3.8.0`<br>
-> 目标数据库版本：`v10.5`<br>
-> 文档日期：2026-08-11<br>
+> 目标数据库版本：`v10.4`<br>
+> 文档日期：2026-08-12<br>
 > 用途：作为用户画像功能开发、评审、测试和实机验收的事实基线。
 
 ## 1. 目标
@@ -78,7 +78,8 @@
 ### 3.3 版本与发布
 
 - 插件版本提升到 `3.8.0`。
-- 数据库版本提升到 `v10.5`；`v10.4 -> v10.5` 只增加旧 Timeline 身份解析旁表和人工审查状态。
+- 数据库版本提升到 `v10.4`；全部未发布的画像、关系和旧 Timeline 身份审查结构合并进唯一的 `v10.3 -> v10.4` 迁移。
+- 开发期曾生成的中间 schema 不提供降级路径；发布前测试数据库清空重建，正式升级只支持已发布的 `v10.3 -> v10.4`。
 - 开发中分阶段提交和验收，但 `3.8.0` 一次性交付数据库、客观画像、人格关系、注入、主动工具、设置和维护页面。
 
 ## 4. 身份、作用域与共享
@@ -129,7 +130,7 @@ persona_id + logical_user_uid
 
 ## 5. 数据库设计
 
-全部表位于 `livingmemory.db`。`DBMigration v10.3 -> v10.4` 创建画像主体结构，`v10.4 -> v10.5` 增加旧 Timeline 身份解析旁表。迁移本身不扫描旧 Timeline、不调用模型，也不改写现有 Timeline、Topic、会话或补充人物资料；只有管理员显式扫描或历史重建时才写入派生身份结果。
+全部表位于 `livingmemory.db`。`DBMigration v10.3 -> v10.4` 一次性创建画像主体、关系、任务和旧 Timeline 身份解析旁表。迁移本身不扫描旧 Timeline、不调用模型，也不改写现有 Timeline、Topic、会话或补充人物资料；只有管理员显式扫描或历史重建时才写入派生身份结果。
 
 ### 5.1 用户与作用域
 
@@ -250,7 +251,7 @@ persona_id + logical_user_uid
 | `subjective_summary` | 第一人称主观叙述，最大长度由设置控制 |
 | `recent_aftereffect` | 短期情绪余韵 |
 | `aftereffect_expires_at` | 余韵失效时间 |
-| `persona_signature` | 本次维护使用的人格签名 |
+| `persona_signature` | 生成本 revision 时使用的当前 persona 摘要签名，不含提示正文 |
 | `source_timeline_uids` | 本 revision 的新增互动来源 |
 | `updated_at` | 更新时间 |
 
@@ -272,7 +273,7 @@ WebUI 以 `0-100` 滑块展示维度，存储层归一化为 `0.0-1.0`。
 
 #### `user_profile_tasks` 与 `user_profile_task_items`
 
-保存用户级严格有序任务、批次来源、两个业务阶段检查点、Provider 签名、临时 persona 提示、重试次数、错误和结果摘要。
+保存用户级严格有序任务、批次来源、两个业务阶段检查点、Provider 签名、设置快照、重试次数、错误和结果摘要。任务不保存 persona 提示正文或 persona 签名。
 
 任务状态建议：
 
@@ -288,7 +289,7 @@ failed
 cancelled
 ```
 
-临时 persona 提示只在未完成任务中保存；任务完成后立即清空，只保留签名。
+人格关系阶段开始时按作用域的 `persona_id` 读取当前配置，模型返回后再次校验 persona 摘要签名。签名变化时不发布旧结果，并按任务重试策略重新执行。
 
 ### 5.5 旧 Timeline 身份解析旁表
 
@@ -324,7 +325,7 @@ cancelled
 - 逐项记录 Timeline UID/revision；
 - 逐项推进处理游标；
 - 不把 Timeline 重构产生的新 revision 当作独立重复证据；
-- 不因批量合并丢失事实时间范围或 persona 快照；
+- 不因批量合并丢失事实时间范围或当前 persona 解析上下文；
 - 保留两个业务阶段的独立检查点。
 
 最早任务失败时不能绕过。后续变化保留在队列中；旧画像继续注入。管理员可重试、重建或停用。
@@ -546,8 +547,8 @@ communication_preference
 
 关系维护模型接收：
 
-- 当前 persona 的完整提示快照；
-- persona ID、名称和签名；
+- 执行时读取的当前 persona 完整提示；
+- 当前 persona ID、名称和摘要签名；
 - 当前关系状态；
 - 本批具有关系意义的 Timeline；
 - 当前有效的非敏感客观画像；
@@ -556,7 +557,7 @@ communication_preference
 
 敏感画像事实不能用于形成主观评价。
 
-任务运行期间保存完整 persona 提示，完成后清除。旧 Timeline 没有提示快照时，历史重建使用当前同 ID persona，并标记 `persona_basis=current_config`。
+persona 提示仅存在于本次模型请求内，不写入 Timeline 投影或维护任务。历史重建始终使用执行时当前同 ID persona，并标记 `persona_basis=current_config`；关系状态和 revision 只保存摘要签名用于审计。
 
 ### 11.4 反馈循环限制
 
@@ -654,7 +655,7 @@ concern      关切
 ### 12.3 长度预算
 
 - 总字符预算默认 800，可配置范围 300-2000。
-- 人格关系部分预留默认 300，可配置。该值来自真实数据注入检查，给近期余韵和主观叙述留下稳定空间。
+- 人格关系优先预算默认 350，可配置。事实与关系按实际占用双向回流余额，在 800 总上限内给近期余韵和主观叙述留下稳定空间。
 - 未使用的关系预算可以回流给客观事实。
 - 主观叙述存储上限默认 500，可配置。
 - 单条原始事实注入上限默认 200，可配置；完整原文仍保存在数据库。
@@ -753,7 +754,9 @@ WebUI 设置页新增一级分类 **用户画像**，所有本方案涉及的可
 | `user_profile.provider_id` | string | `""` | AstrBot LLM Provider ID | 留空回退 Timeline 总结 Provider |
 | `user_profile.maintenance_concurrency` | int | `1` | `1-16` | 不同用户的维护并发；同一用户始终串行 |
 | `user_profile.maintenance_batch_timeline_limit` | int | `8` | `1-64` | 单批最多合并 Timeline 变化数 |
+| `user_profile.fact_maintenance_context_limit` | int | `200` | `20-2000` | 单次事实维护提供给模型的已有事实数量上限 |
 | `user_profile.maintenance_max_retries` | int | `3` | `0-10` | Provider/API 请求重试上限，不计入业务调用数 |
+| `user_profile.contract_correction_retries` | int | `2` | `0-5` | 响应成功但 JSON/来源引用不合规时，携带允许标识符白名单的纠错次数 |
 | `user_profile.maintenance_retry_base_seconds` | int | `60` | `5-3600` | 指数退避基础时间 |
 | `user_profile.maintenance_retry_max_seconds` | int | `3600` | `60-86400` | 最大重试冷却 |
 
@@ -807,6 +810,7 @@ Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维�
 | `user_profile.habit_review_days` | int | `180` | `1-3650` | 习惯待确认期限 |
 | `user_profile.current_state_fixed_days` | int | `30` | `1-3650` | 当前状态固定注入期限 |
 | `user_profile.current_state_review_days` | int | `90` | `1-3650` | 当前状态待确认期限 |
+| `user_profile.stale_retention_days` | int | `180` | `1-3650` | stale 事实缺少新证据后的归档期限 |
 | `user_profile.undated_plan_review_days` | int | `30` | `1-3650` | 无日期计划待确认期限 |
 | `user_profile.dated_plan_grace_days` | int | `3` | `0-365` | 有日期计划结束后的保留期 |
 
@@ -818,7 +822,7 @@ Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维�
 | --- | --- | --- | --- | --- |
 | `user_profile.injection_mode` | enum | `layered` | `layered / compact_snapshot` | 分层动态或固定精简快照 |
 | `user_profile.injection_max_chars` | int | `800` | `300-2000` | 总注入字符硬上限 |
-| `user_profile.relationship_reserved_chars` | int | `300` | `0-1000` | 关系状态预留字符；不能高于总预算 |
+| `user_profile.relationship_reserved_chars` | int | `350` | `0-1000` | 关系状态优先预算；事实与关系未使用的预算双向回流 |
 | `user_profile.fact_injection_max_chars` | int | `200` | `50-1000` | 单条事实注入上限 |
 
 当 `injection_enabled=false` 时隐藏注入模式和长度设置。关系功能关闭时，关系预留自动为 0，但不删除已保存值。
@@ -836,6 +840,7 @@ Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维�
 | `user_profile.relationship_sensitivity` | enum | `balanced` | `very_slow / slow / balanced / fast / very_fast` | 全局变化敏感度 |
 | `user_profile.relationship_behavior_mode` | enum | `natural` | `restrained / natural / high_autonomy / unrestricted` | 全局关系行为模式 |
 | `user_profile.relationship_full_revision_limit` | int | `100` | `10-1000` | 每个 persona-user 保留的完整 revision 数 |
+| `user_profile.relationship_rebuild_batch_limit` | int | `32` | `1-256` | 全历史关系重建每次模型调用处理的 Timeline 上限 |
 
 五档敏感度对应的内部软限幅映射应纳入关系算法版本和测试，不在首版暴露六组独立系数，避免设置页变成不可验证的权重矩阵。
 
@@ -845,6 +850,8 @@ Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维�
 | --- | --- | --- | --- | --- |
 | `user_profile.startup_recovery_limit` | int | `64` | `1-1000` | 启动时恢复的用户任务上限 |
 | `user_profile.completed_task_retention_days` | int | `30` | `1-3650` | 成功任务摘要保留期 |
+| `user_profile.lifecycle_scan_interval_hours` | int | `24` | `1-168` | 生命周期转换和派生数据清理周期 |
+| `user_profile.projection_compaction_days` | int | `30` | `1-3650` | 可重建旧投影 revision 与无引用来源的压缩期限 |
 
 重建范围、保留/清除管理覆盖和是否执行历史回填属于一次性维护操作选项，不是持久配置。
 
@@ -859,12 +866,16 @@ Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维�
 - 重试最大冷却不得小于基础冷却；
 - 所有浮点阈值必须在 `0.0-1.0`。
 
+Provider/API 重试处理网络或服务错误；契约纠错处理已经收到响应但 JSON、候选来源或现有事实引用不合法。契约纠错不会猜测或替换来源标识符，也不会放宽确定性校验。
+
 设置变化行为：
 
 - 召回长度和注入模式立即生效。
 - 事实准入、推断、冲突和时效参数只影响新维护任务及显式重算。
 - Provider、模型、提示词或契约签名变化不自动重建旧画像；维护页显示签名变化并提供按用户或全量重建。
-- 运行中的任务使用创建时保存的设置和 Provider/persona 快照。
+- 运行中的任务使用创建时保存的设置和 Provider 签名；人格关系在执行时读取当前 persona，不持久化 persona 提示正文。
+- 关系维护开始时读取一次当前 persona，发布前再次校验摘要签名；调用期间发生变化时丢弃结果并进入正常重试。
+- 同一 persona ID 的提示变化会在下一次有用户侧证据的关系维护中重写主观叙述和标签，使其符合当前人格；六个长期关系维度不能仅因人格变化而改变。
 
 ## 15. 维护页面
 
@@ -990,7 +1001,7 @@ POST   /user-profiles/share-groups/save
 
 ### 17.2 修改模块
 
-- `storage/db_migration.py`：数据库 `v10.5` 迁移和健康检查。
+- `storage/db_migration.py`：数据库 `v10.4` 迁移和健康检查。
 - `core/plugin_initializer.py`：Store、Manager、Provider、启动恢复和关闭流程。
 - `core/managers/memory_engine.py`：Timeline 提交后的统一投影事件。
 - `core/managers/timeline_rebuild_manager.py`：重构后的画像事件与任务联动。
@@ -1012,8 +1023,12 @@ POST   /user-profiles/share-groups/save
 - 两阶段分别保存检查点，事实成功、关系失败时不能重复发布事实 revision。
 - 同一用户所有自动任务和人工修改使用同一用户级锁。
 - 插件重启后恢复未完成任务，优先最早任务。
-- 任务设置、Provider 和 persona 使用创建时快照，避免断点续跑混用配置。
-- 成功任务清除临时 persona 提示和大体积 LLM 中间响应，只保留摘要、签名和必要诊断。
+- 任务设置和 Provider 使用创建时快照；persona 始终在关系阶段执行时读取当前配置。
+- Timeline 投影事件和维护任务不保存 persona 提示正文；关系状态与 revision 只保存摘要签名、结果和必要诊断用于审计。
+- 如果当前 persona 在模型调用期间变化，本次关系结果不发布并按任务重试策略重新执行。
+- 生命周期扫描定期执行 `active -> stale`、`pending -> archived` 和长期 `stale -> archived`，并只推进实际变化的事实 namespace revision。
+- 已完成或已取消任务按保留期连同 task items 级联清理；同一 Timeline 的过期旧投影 revision 和无引用失效来源可压缩，当前投影与仍被事实引用的来源不删除。
+- 历史关系重建无 10,000 条截断，存储读取分批分页，模型按可配置批次顺序维护，最后只发布一次完整结果。
 - Timeline 删除只移除对应来源；事实仍有其他有效来源时继续保留。
 - 完整删除会话记忆链后重新计算受影响画像和关系状态。
 - `VACUUM` 不随画像维护自动执行。
@@ -1022,8 +1037,8 @@ POST   /user-profiles/share-groups/save
 
 ### 19.1 数据库和 Store
 
-- `v10.3 -> v10.4 -> v10.5` 迁移幂等。
-- 新安装直接创建 `v10.5`。
+- `v10.3 -> v10.4` 迁移幂等。
+- 新安装直接创建 `v10.4`。
 - 旧 Timeline 的确定性自动解析、冲突入审查、人工绑定、可逆忽略和恢复。
 - 大量会话分批取证及旧 `conversations.db` 缺列降级。
 - 外键、唯一约束和级联行为。
@@ -1040,7 +1055,7 @@ POST   /user-profiles/share-groups/save
 - 事实失败后关系仍可独立完成。
 - 两阶段检查点恢复不重复发布。
 - Provider 变化和契约变化只标记，不自动重建。
-- persona 临时提示在成功、失败清理和插件关闭路径中的行为。
+- persona 只在执行时解析、提示正文不持久化，以及调用期间签名变化拒绝发布并重试。
 
 ### 19.3 客观事实
 
@@ -1085,7 +1100,7 @@ POST   /user-profiles/share-groups/save
 - 旧画像注入可确定性清理。
 - 当前消息优先契约。
 - layered 与 compact_snapshot 两种模式。
-- 800 总字符、300 关系预留和 200 单事实截断。
+- 800 总字符、350 关系优先预算、事实与关系未使用预算双向回流，以及 200 单事实截断。
 - 敏感事实不进入 layered 固定核心。
 - 原始命令式事实被结构化转义为数据。
 - `include_user_profile=false/true` 工具行为。
@@ -1108,7 +1123,7 @@ POST   /user-profiles/share-groups/save
 - `py_compile`。
 - `npm run docs:build`。
 - `git diff --check`。
-- 隐私扫描覆盖画像样例、日志、测试数据和临时 persona 提示。
+- 隐私扫描覆盖画像样例、日志、测试数据，并验证 Timeline 和任务不持久化 persona 提示。
 - 版本一致性和 Release Notes 校验。
 
 ## 20. 实施阶段
@@ -1116,7 +1131,7 @@ POST   /user-profiles/share-groups/save
 ### 阶段一：契约、设置和数据库
 
 - 确定设置修订号、数据枚举和 SQL 表结构。
-- 完成 `v10.5` 迁移、Store 和数据库测试。
+- 完成 `v10.4` 迁移、Store 和数据库测试。
 - 完成 Settings API 的用户画像所有者与交叉校验。
 
 验收：新旧数据库初始化通过，不产生历史回填或模型调用。
@@ -1132,7 +1147,7 @@ POST   /user-profiles/share-groups/save
 
 ### 阶段三：人格关系状态
 
-- persona 临时快照。
+- 执行时解析当前 persona，并在发布前校验签名未变化。
 - 关系触发筛选和第二业务调用。
 - 六维状态、余韵、软限幅、反馈阻断和 revision。
 - 人工编辑、冻结、回滚、重置和历史重建。
@@ -1178,18 +1193,18 @@ POST   /user-profiles/share-groups/save
 9. 当前消息和当前对话始终高于历史画像。
 10. 被动注入和主动工具只能访问当前私聊用户。
 11. 所有本方案中的可调阈值、时长、长度、并发和默认行为均可在“设置 -> 用户画像”查看、修改和恢复默认。
-12. `3.8.0 / DB v10.5` 的迁移、测试、文档和发布元数据全部通过校验。
+12. `3.8.0 / DB v10.4` 的迁移、测试、文档和发布元数据全部通过校验。
 
 ## 22. 真实数据校准结果
 
-2026-08-11 使用真实 v10.3 数据库和真实 API 在临时副本中完成迭代验收，原库与凭据文件保持只读：
+2026-08-12 使用真实 v10.3 数据库、真实 API 和当前 persona 在临时副本中完成迭代验收，原库与凭据文件保持只读：
 
 - 71 条私聊 Timeline 中，31 条具有原生 `role_bindings`；其余 40 条通过同一私聊 session 的稳定账号和会话消息证据自动归入同一用户，0 条待审查。第二次预览缺失数为 0，原 Timeline metadata 未改写。
 - 缺少消息级事实归属的 40 条旧 Timeline 只作为 `timeline_summary_only` 弱证据：旧摘要事实置信度上限为 0.45，始终先进入 pending，不能单独 supersede、制造冲突、强化现有事实或成为代表来源；关系可以利用其保持宽泛连续性，但不能触发重大事件。
-- 最终第二轮真实 API 运行共 9 个维护批次、18 次维护调用和 2 次独立审计，全部成功且无 API 错误。形成 13 条逻辑事实，其中 4 条有效、9 条 pending；9 条事实含旧来源，但 0 条有效事实仅由旧摘要支撑，3 条敏感事实均未进入注入。
-- 有效事实平均审计用途为 0.812、确定性为 0.925；审计把 4 条事实都标记为过长，但事实实际平均 27.3 字、最大 55 字，该问题码与长度指标矛盾，因此未据此针对单一样本继续压缩。另有 1 条当前状态被标记为一次性事件，由现有时效规则继续短期管理。
+- 最终真实 API 运行共 9 个维护批次、18 次维护调用，全部 `completed` 且 0 任务错误。形成 5 条有效事实和 4 条仅供管理员复核的 pending 候选；私聊注入包含 5 条有效事实和人格关系，共 615/800 字符，pending 未作为事实注入。
+- 独立审计的 groundedness、persona consistency、proportionality、continuity value 和 privacy safety 分别为 0.86、0.89、0.79、0.84、0.86。审计仅提示避免无关主动提及生活隐私、避免详尽人格压过用户当前意图；地点、学校和低置信偏好均留在 pending，因此不为当前样本硬编码或继续抬高全局门槛。
 - 保持 `fact_accept_confidence=0.85`、`fact_min_profile_value=0.65` 和总注入预算 800，不为单一数据集继续抬高全局门槛。
-- 关系重建共 9 个 revision，旧摘要初始单维变化被限制在 0.35，后续仅旧摘要批次按 0.04 限幅，无重大事件更新。独立关系审计 groundedness 为 0.95、proportionality 为 0.90、continuity value 为 0.93、persona specificity 为 0.90；复制数据中没有可用 persona 提示快照，因此最后一项只能视为有限参考。
-- 默认 800/300 预算实际注入 4 条当前事实，总长 574 字符，并同时保留态度标签、近期余韵和主观叙述；200 字关系预留会丢失近期余韵，扩大总预算没有带来必要收益。
+- 早期无人格关系结果只作结构校准。最终验收按作用域在每次关系维护时读取当前 persona，发布到 revision 9 前再次核对摘要签名；投影事件和维护任务均未保存 persona 正文或快照，任务表不含 persona 正文列。
+- 保持 800 总上限，将关系优先预算设为 350，并让事实与关系未使用预算双向回流。本轮实际使用 615 字符且完整保留关系，因此无需扩大整体提示；长期增长由事实状态筛选、字符硬上限、关系覆盖更新、revision 保留和周期压缩共同约束。
 - 有日期计划结束后的默认宽限从 14 天收紧为 3 天，无日期计划复核从 60 天收紧为 30 天；中低耐久偏好只作为行为证据，人工固定事实不受自动时效过滤。
 - 原始数据库和凭据文件哈希在测试前后保持一致；迁移、身份旁表、画像、关系和审计写入全部发生在自动删除的临时副本中。

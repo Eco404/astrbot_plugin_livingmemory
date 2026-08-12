@@ -63,7 +63,7 @@ _SECRET_PATTERNS = (
 
 
 class UserProfileFactMaintainer:
-    """Ask one model call to classify source facts, then validate every reference."""
+    """Classify source facts and strictly validate bounded correction responses."""
 
     def __init__(self, provider: Any = None):
         self.provider = provider
@@ -95,38 +95,77 @@ class UserProfileFactMaintainer:
         prompt = self._build_prompt(
             candidate_list, evidence_list, existing_list, settings
         )
-        raw = await self._request_with_retries(selected_provider, prompt, settings)
-        try:
-            payload = self._parse_payload(raw)
-            return self._validate_plan(
-                fact_namespace_uid=fact_namespace_uid,
-                payload=payload,
-                candidates=candidate_list,
-                supporting_evidence=evidence_list,
-                existing_facts=existing_list,
-                settings=settings,
-            )
-        except UserProfileFactValidationError as first_error:
-            correction = (
-                prompt
-                + "\n\nThe previous response was invalid: "
-                + str(first_error)
-                + "\nReturn a corrected JSON object only. Do not add or rewrite fact text."
-            )
+        correction_limit = max(
+            0, int(settings.get("user_profile.contract_correction_retries", 2))
+        )
+        request_prompt = prompt
+        for correction_attempt in range(correction_limit + 1):
             raw = await self._request_with_retries(
-                selected_provider, correction, settings
+                selected_provider, request_prompt, settings
             )
-            payload = self._parse_payload(raw)
-            plan = self._validate_plan(
-                fact_namespace_uid=fact_namespace_uid,
-                payload=payload,
-                candidates=candidate_list,
-                supporting_evidence=evidence_list,
-                existing_facts=existing_list,
-                settings=settings,
-            )
-            plan.diagnostics["contract_correction_used"] = True
-            return plan
+            try:
+                payload = self._parse_payload(raw)
+                plan = self._validate_plan(
+                    fact_namespace_uid=fact_namespace_uid,
+                    payload=payload,
+                    candidates=candidate_list,
+                    supporting_evidence=evidence_list,
+                    existing_facts=existing_list,
+                    settings=settings,
+                )
+                if correction_attempt:
+                    plan.diagnostics["contract_correction_used"] = True
+                    plan.diagnostics["contract_correction_attempts"] = (
+                        correction_attempt
+                    )
+                return plan
+            except UserProfileFactValidationError as error:
+                if correction_attempt >= correction_limit:
+                    raise
+                request_prompt = self._contract_correction_prompt(
+                    prompt,
+                    error=error,
+                    candidates=candidate_list,
+                    supporting_evidence=evidence_list,
+                    existing_facts=existing_list,
+                    attempt=correction_attempt + 1,
+                    limit=correction_limit,
+                )
+        raise RuntimeError("unreachable fact-maintenance correction state")
+
+    @staticmethod
+    def _contract_correction_prompt(
+        prompt: str,
+        *,
+        error: Exception,
+        candidates: list[UserProfileFactSource],
+        supporting_evidence: list[UserProfileFactSource],
+        existing_facts: list[dict[str, Any]],
+        attempt: int,
+        limit: int,
+    ) -> str:
+        candidate_uids = [item.source_uid for item in candidates]
+        supporting_uids = [item.source_uid for item in supporting_evidence]
+        existing_uids = [
+            str(item.get("profile_fact_uid"))
+            for item in existing_facts
+            if item.get("profile_fact_uid")
+        ]
+        return (
+            prompt
+            + "\n\nThe previous response failed strict contract validation: "
+            + str(error)
+            + f"\nCorrection attempt {attempt} of {limit}."
+            + "\nUse each candidate source_uid exactly once as the primary source_uid."
+            + "\nAllowed candidate source_uids: "
+            + json.dumps(candidate_uids, ensure_ascii=False)
+            + "\nAllowed supporting_source_uids (only when policy permits): "
+            + json.dumps(supporting_uids, ensure_ascii=False)
+            + "\nAllowed existing profile_fact_uids: "
+            + json.dumps(existing_uids, ensure_ascii=False)
+            + "\nCopy identifiers exactly. Never invent, shorten, or substitute an identifier."
+            + "\nReturn a corrected JSON object only. Do not add or rewrite fact text."
+        )
 
     @staticmethod
     def extract_candidates(

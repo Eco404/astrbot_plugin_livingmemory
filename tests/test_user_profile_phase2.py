@@ -55,6 +55,31 @@ class _AcceptingProvider:
         return SimpleNamespace(completion_text=json.dumps({"operations": operations}))
 
 
+class _ContractCorrectionProvider:
+    provider_config = {"id": "correction-test", "model": "deterministic"}
+
+    def __init__(self, invalid_responses: int):
+        self.invalid_responses = invalid_responses
+        self.prompts = []
+
+    async def text_chat(self, *, prompt, system_prompt, **kwargs):
+        self.prompts.append(prompt)
+        if len(self.prompts) <= self.invalid_responses:
+            source_uid = f"invented-source-{len(self.prompts)}"
+        else:
+            match = re.search(
+                r"Candidate sources: (.*?)\nHistorical behavior evidence:",
+                prompt,
+                re.S,
+            )
+            source_uid = json.loads(match.group(1))[0]["source_uid"]
+        return SimpleNamespace(
+            completion_text=json.dumps(
+                {"operations": [{"source_uid": source_uid, "operation": "ignore"}]}
+            )
+        )
+
+
 def _timeline_payload(*, revision: int = 1, facts: list[str] | None = None):
     facts = ["Alice明确说自己喜欢无糖茶"] if facts is None else facts
     actor_id = "test:human:user-1"
@@ -277,6 +302,62 @@ async def test_fact_contract_rejects_secret_even_when_model_accepts():
     assert not plan.facts
     assert plan.ignored_source_uids == [source.source_uid]
     assert source.raw_fact not in json.dumps(plan.diagnostics, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_fact_contract_correction_repeats_allowed_uid_whitelist():
+    source = UserProfileFactSource(
+        timeline_uid="timeline-correction",
+        timeline_revision=1,
+        fact_index=0,
+        raw_fact="用户明确表示偏好简洁回答",
+        actor_id="test:human:user-1",
+    )
+    provider = _ContractCorrectionProvider(invalid_responses=2)
+
+    plan = await UserProfileFactMaintainer(provider).maintain(
+        fact_namespace_uid="facts-1",
+        candidates=[source],
+        existing_facts=[],
+        settings=effective_user_profile_settings(
+            {"user_profile.contract_correction_retries": 2}
+        ),
+    )
+
+    assert len(provider.prompts) == 3
+    assert plan.ignored_source_uids == [source.source_uid]
+    assert plan.diagnostics["contract_correction_used"] is True
+    assert plan.diagnostics["contract_correction_attempts"] == 2
+    assert all(
+        source.source_uid in prompt
+        and "Allowed candidate source_uids" in prompt
+        and "Never invent, shorten, or substitute an identifier" in prompt
+        for prompt in provider.prompts[1:]
+    )
+
+
+@pytest.mark.asyncio
+async def test_fact_contract_correction_can_be_disabled():
+    source = UserProfileFactSource(
+        timeline_uid="timeline-no-correction",
+        timeline_revision=1,
+        fact_index=0,
+        raw_fact="用户明确表示偏好简洁回答",
+        actor_id="test:human:user-1",
+    )
+    provider = _ContractCorrectionProvider(invalid_responses=1)
+
+    with pytest.raises(UserProfileFactValidationError, match="unknown source_uid"):
+        await UserProfileFactMaintainer(provider).maintain(
+            fact_namespace_uid="facts-1",
+            candidates=[source],
+            existing_facts=[],
+            settings=effective_user_profile_settings(
+                {"user_profile.contract_correction_retries": 0}
+            ),
+        )
+
+    assert len(provider.prompts) == 1
 
 
 def test_behavioral_inference_uses_actual_sources_not_reported_counts():

@@ -296,7 +296,7 @@ async def test_projection_event_is_idempotent_and_task_keeps_order(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_migration_v10_3_to_v10_5_creates_profile_schema(tmp_path):
+async def test_migration_v10_3_to_v10_4_creates_complete_profile_schema(tmp_path):
     db_path = str(tmp_path / "migration.db")
     async with aiosqlite.connect(db_path) as db:
         await db.executescript(
@@ -317,8 +317,8 @@ async def test_migration_v10_3_to_v10_5_creates_profile_schema(tmp_path):
     result = await DBMigration(db_path).migrate()
 
     assert result["success"] is True
-    assert result["to_version"] == "10.5"
-    assert await DBMigration(db_path).get_db_version() == "10.5"
+    assert result["to_version"] == "10.4"
+    assert await DBMigration(db_path).get_db_version() == "10.4"
     async with aiosqlite.connect(db_path) as db:
         row = await (
             await db.execute(
@@ -327,3 +327,210 @@ async def test_migration_v10_3_to_v10_5_creates_profile_schema(tmp_path):
             )
         ).fetchone()
     assert row is not None
+
+
+@pytest.mark.asyncio
+async def test_projection_history_reads_more_than_ten_thousand_rows(tmp_path):
+    db_path = str(tmp_path / "large-history.db")
+    store = UserProfileStore(db_path)
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="qq:human:user-1",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    assert scope is not None
+    now = 2_000_000_000.0
+    async with store._connect() as db:
+        await db.executemany(
+            """
+            INSERT INTO user_profile_projection_events (
+                event_uid, timeline_uid, timeline_revision, operation,
+                memory_space_id, profile_scope_uid, status, payload,
+                created_at, updated_at
+            ) VALUES (?, ?, 1, 'upsert', ?, ?, 'completed', '{}', ?, ?)
+            """,
+            [
+                (
+                    f"event-{index}",
+                    f"timeline-{index}",
+                    f"space-{index}",
+                    scope.profile_scope_uid,
+                    now,
+                    now,
+                )
+                for index in range(10_025)
+            ],
+        )
+        await db.commit()
+
+    history = await store.list_projection_history(scope.profile_scope_uid)
+
+    assert len(history) == 10_025
+    assert history[0]["timeline_uid"] == "timeline-0"
+    assert history[-1]["timeline_uid"] == "timeline-10024"
+
+
+@pytest.mark.asyncio
+async def test_profile_lifecycle_advances_revisions_and_compacts_derivable_rows(tmp_path):
+    db_path = str(tmp_path / "profile-lifecycle.db")
+    store = UserProfileStore(db_path)
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="qq:human:user-1",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    assert scope is not None
+    unaffected_scope = await store.ensure_private_scope(
+        actor_id="qq:human:user-2",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    assert unaffected_scope is not None
+    now = 2_000_000_000.0
+    sources = [
+        UserProfileFactSource(
+            timeline_uid=f"fact-timeline-{index}",
+            timeline_revision=1,
+            fact_index=0,
+            raw_fact=f"fact {index}",
+            actor_id="qq:human:user-1",
+        )
+        for index in range(3)
+    ]
+    await store.save_fact_sources(sources)
+    facts = [
+        UserProfileFact(
+            fact_namespace_uid=scope.fact_namespace_uid,
+            category=UserProfileFactCategory.PREFERENCE,
+            representative_source_uid=sources[index].source_uid,
+            status=status,
+            review_after=now - 1 if status in {"active", "pending"} else None,
+            updated_at=now - 200 * 86400 if status == "stale" else now - 10,
+        )
+        for index, status in enumerate(("active", "pending", "stale"))
+    ]
+    await store.publish_fact_changes(
+        fact_namespace_uid=scope.fact_namespace_uid,
+        upserts=facts,
+        source_assignments={
+            source.source_uid: fact.profile_fact_uid
+            for source, fact in zip(sources, facts, strict=True)
+        },
+    )
+    unaffected_source = UserProfileFactSource(
+        timeline_uid="unaffected-timeline",
+        timeline_revision=1,
+        fact_index=0,
+        raw_fact="already archived fact",
+        actor_id="qq:human:user-2",
+    )
+    await store.save_fact_sources([unaffected_source])
+    unaffected_fact = UserProfileFact(
+        fact_namespace_uid=unaffected_scope.fact_namespace_uid,
+        category=UserProfileFactCategory.PREFERENCE,
+        representative_source_uid=unaffected_source.source_uid,
+        status="archived",
+    )
+    await store.publish_fact_changes(
+        fact_namespace_uid=unaffected_scope.fact_namespace_uid,
+        upserts=[unaffected_fact],
+        source_assignments={
+            unaffected_source.source_uid: unaffected_fact.profile_fact_uid
+        },
+    )
+    async with store._connect() as db:
+        # Sharing the scan timestamp alone must not make this namespace look changed.
+        await db.execute(
+            "UPDATE user_profile_facts SET updated_at = ? WHERE profile_fact_uid = ?",
+            (now, unaffected_fact.profile_fact_uid),
+        )
+        await db.commit()
+    old_event = UserProfileProjectionEvent(
+        timeline_uid="timeline-revised",
+        timeline_revision=1,
+        operation="upsert",
+        memory_space_id="space-revised",
+        profile_scope_uid=scope.profile_scope_uid,
+        status="completed",
+        created_at=now - 100 * 86400,
+        updated_at=now - 100 * 86400,
+    )
+    await store.enqueue_projection_event(old_event)
+    await store.enqueue_projection_event(
+        UserProfileProjectionEvent(
+            timeline_uid="timeline-revised",
+            timeline_revision=2,
+            operation="upsert",
+            memory_space_id="space-revised",
+            profile_scope_uid=scope.profile_scope_uid,
+            status="completed",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    pending_guard_old = UserProfileProjectionEvent(
+        timeline_uid="timeline-pending-revision",
+        timeline_revision=1,
+        operation="upsert",
+        memory_space_id="space-pending-revision",
+        profile_scope_uid=scope.profile_scope_uid,
+        status="completed",
+        created_at=now - 100 * 86400,
+        updated_at=now - 100 * 86400,
+    )
+    await store.enqueue_projection_event(pending_guard_old)
+    await store.enqueue_projection_event(
+        UserProfileProjectionEvent(
+            timeline_uid="timeline-pending-revision",
+            timeline_revision=2,
+            operation="upsert",
+            memory_space_id="space-pending-revision",
+            profile_scope_uid=scope.profile_scope_uid,
+            status="pending",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    task = UserProfileTask(profile_scope_uid=scope.profile_scope_uid)
+    await store.create_task(task, [])
+    await store.update_task(task.task_uid, status="completed")
+    async with store._connect() as db:
+        await db.execute(
+            "UPDATE user_profile_tasks SET completed_at = ? WHERE task_uid = ?",
+            (now - 100 * 86400, task.task_uid),
+        )
+        await db.commit()
+    before_revision = await store.get_fact_namespace_revision(scope.fact_namespace_uid)
+    unaffected_revision = await store.get_fact_namespace_revision(
+        unaffected_scope.fact_namespace_uid
+    )
+
+    result = await store.run_profile_lifecycle_maintenance(
+        completed_task_retention_days=30,
+        projection_compaction_days=30,
+        stale_retention_days=180,
+        now=now,
+    )
+
+    statuses = {
+        item["raw_fact"]: item["status"]
+        for item in await store.list_facts_for_maintenance(scope.fact_namespace_uid)
+    }
+    assert statuses == {"fact 0": "stale", "fact 1": "archived", "fact 2": "archived"}
+    assert await store.get_fact_namespace_revision(scope.fact_namespace_uid) == before_revision + 1
+    assert (
+        await store.get_fact_namespace_revision(unaffected_scope.fact_namespace_uid)
+        == unaffected_revision
+    )
+    assert await store.get_task(task.task_uid) is None
+    history = await store.list_projection_history(scope.profile_scope_uid)
+    assert [(item["timeline_uid"], item["timeline_revision"]) for item in history] == [
+        ("timeline-revised", 2),
+        ("timeline-pending-revision", 1),
+        ("timeline-pending-revision", 2),
+    ]
+    assert result["tasks_deleted"] == 1
+    assert result["fact_namespaces_revised"] == 1
+    assert result["projection_events_compacted"] == 1

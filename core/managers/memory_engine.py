@@ -202,17 +202,17 @@ class MemoryEngine:
             self.user_profile_store,
             provider=self.llm_provider,
             provider_resolver=self.user_profile_provider_resolver,
+            persona_resolver=lambda persona_id: (
+                self.user_profile_persona_resolver(persona_id)
+                if self.user_profile_persona_resolver is not None
+                else None
+            ),
             config=self.user_profile_config,
         )
         self.user_profile_history_manager = UserProfileHistoryManager(
             self.db_path,
             self.user_profile_store,
             actor_resolver=self._profile_actor_from_metadata,
-            persona_resolver=lambda persona_id: (
-                self.user_profile_persona_resolver(persona_id)
-                if self.user_profile_persona_resolver is not None
-                else None
-            ),
         )
         self.topic_vector_index = TopicVectorIndex(self.topic_memory_store)
         self.topic_maintenance_manager = TopicMaintenanceManager(
@@ -1209,21 +1209,6 @@ class MemoryEngine:
                 "profile_actor_id": actor_id,
                 "profile_display_name": display_name,
             }
-            if self.user_profile_persona_resolver is not None:
-                try:
-                    persona_snapshot = self.user_profile_persona_resolver(
-                        scope.persona_id
-                    )
-                    if asyncio.iscoroutine(persona_snapshot):
-                        persona_snapshot = await persona_snapshot
-                    if isinstance(persona_snapshot, dict):
-                        payload["persona_snapshot"] = persona_snapshot
-                except Exception:
-                    logger.warning(
-                        "[UserProfile] 无法保存 persona 临时快照 (persona=%s)",
-                        scope.persona_id,
-                        exc_info=True,
-                    )
             try:
                 event_uid = await self.user_profile_store.enqueue_projection_event(
                     UserProfileProjectionEvent(

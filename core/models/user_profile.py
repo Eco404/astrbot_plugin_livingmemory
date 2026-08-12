@@ -241,8 +241,6 @@ class UserProfileTask:
     status: UserProfileTaskStatus | str = UserProfileTaskStatus.PENDING
     settings_snapshot: dict[str, Any] = field(default_factory=dict)
     provider_signature: dict[str, Any] = field(default_factory=dict)
-    persona_signature: dict[str, Any] = field(default_factory=dict)
-    persona_prompt: str = ""
     retries: int = 0
     error: str | None = None
     result_summary: dict[str, Any] = field(default_factory=dict)

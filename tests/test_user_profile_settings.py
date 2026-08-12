@@ -14,13 +14,18 @@ from astrbot_plugin_livingmemory.core.user_profile_settings import (
 def test_user_profile_settings_have_complete_metadata_and_defaults():
     defaults = user_profile_setting_defaults()
 
-    assert USER_PROFILE_SETTINGS_REVISION == 3
+    assert USER_PROFILE_SETTINGS_REVISION == 5
     assert defaults["user_profile.legacy_summary_candidate_confidence"] == 0.45
     assert defaults["user_profile.legacy_relationship_initial_dimension_cap"] == 0.35
     assert defaults["user_profile.enabled"] is True
     assert defaults["user_profile.relationship_enabled"] is True
     assert defaults["user_profile.injection_max_chars"] == 800
-    assert defaults["user_profile.relationship_reserved_chars"] == 300
+    assert defaults["user_profile.relationship_reserved_chars"] == 350
+    assert defaults["user_profile.fact_maintenance_context_limit"] == 200
+    assert defaults["user_profile.contract_correction_retries"] == 2
+    assert defaults["user_profile.lifecycle_scan_interval_hours"] == 24
+    assert defaults["user_profile.stale_retention_days"] == 180
+    assert defaults["user_profile.relationship_rebuild_batch_limit"] == 32
     assert defaults["user_profile.fact_min_profile_value"] == 0.65
     assert defaults["user_profile.behavior_evidence_pool_limit"] == 128
     assert defaults["user_profile.undated_plan_review_days"] == 30

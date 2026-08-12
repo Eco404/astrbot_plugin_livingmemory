@@ -108,11 +108,6 @@ async def test_history_preview_backfill_is_exact_idempotent_and_persona_aware(tm
         db_path,
         store,
         actor_resolver=_actor_resolver,
-        persona_resolver=lambda persona_id: {
-            "persona_id": persona_id,
-            "prompt": "current persona prompt",
-            "signature": {"revision": 2},
-        },
     )
     preview = await manager.preview(scope.profile_scope_uid)
     assert preview["eligible_timeline_count"] == 2
@@ -132,8 +127,7 @@ async def test_history_preview_backfill_is_exact_idempotent_and_persona_aware(tm
         "timeline-eligible",
         "timeline-legacy-resolved",
     ]
-    assert events[0]["payload"]["persona_snapshot"]["signature"] == {"revision": 2}
-    assert events[0]["payload"]["persona_snapshot"]["basis"] == "current_config"
+    assert "persona_snapshot" not in events[0]["payload"]
 
     second_preview = await manager.preview(scope.profile_scope_uid)
     assert second_preview["missing_timeline_count"] == 0
