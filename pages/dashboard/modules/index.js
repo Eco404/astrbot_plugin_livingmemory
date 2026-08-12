@@ -16,4 +16,5 @@ export { TimelinePage } from "./timeline-page.js";
 export { SettingsPage } from "./settings-page.js";
 export { MaintenancePage } from "./maintenance-page.js";
 export { UserProfileMaintenance } from "./user-profile-maintenance.js";
+export { UserProfilePage } from "./user-profile-page.js";
 export * from "./utils.js";

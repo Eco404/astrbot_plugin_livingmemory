@@ -3455,6 +3455,46 @@ select.timeline-setting-input { width: min(220px, 100%); }
   border-top: 1px solid var(--border);
 }
 
+.profile-view-page-body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  padding: var(--space-5);
+}
+.profile-view-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-4);
+}
+.profile-view-toolbar .input { width: min(420px, 100%); }
+.profile-view-toolbar .select { width: 180px; }
+.profile-view-workspace { min-height: 0; flex: 1; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.profile-view-workspace .user-profile-list,
+.profile-view-workspace .user-profile-detail { max-height: none; }
+.profile-view-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 0;
+  border-bottom: 1px solid var(--border);
+}
+.profile-view-detail-head h2 { margin: 0 0 4px; font-size: 20px; }
+.profile-view-detail-head p { margin: 0; color: var(--text-tertiary); font-size: 12px; overflow-wrap: anywhere; }
+.profile-view-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-top: 16px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--border); }
+.profile-view-summary > div { display: grid; min-width: 0; gap: 6px; padding: 12px 14px; background: var(--surface-subtle); }
+.profile-view-summary span { color: var(--text-tertiary); font-size: 11px; }
+.profile-view-summary strong { font-size: 16px; }
+.profile-view-dimensions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; }
+.profile-view-dimension { display: grid; grid-template-columns: 76px minmax(60px, 1fr) 30px; align-items: center; gap: 9px; font-size: 12px; }
+.profile-view-meter { height: 7px; overflow: hidden; border-radius: 4px; background: var(--bg-hover); }
+.profile-view-meter i { display: block; height: 100%; background: var(--accent); }
+.profile-view-dimension strong { text-align: right; font-variant-numeric: tabular-nums; }
+.profile-view-narrative { margin-top: 16px; }
+.profile-view-narrative span { color: var(--text-tertiary); font-size: 12px; }
+.profile-view-narrative p { margin: 5px 0 0; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 .user-profile-list {
   max-height: calc(100vh - 250px);
   overflow-y: auto;
@@ -3516,6 +3556,18 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .user-profile-rebuild-option { display: inline-flex; align-items: center; gap: 6px; margin: 12px 0 0; color: var(--text-secondary); font-size: 12px; }
 .user-profile-rebuild-option input { accent-color: var(--accent); }
 .user-profile-alert { margin-top: 12px; padding: 10px 12px; border-left: 3px solid var(--warning); background: var(--warning-light); color: var(--text-primary); }
+.user-profile-empty-state { display: flex; flex-direction: column; gap: 12px; }
+.user-profile-initial-state { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 14px; padding: 14px 16px; border: 1px solid var(--accent); border-radius: 6px; background: var(--accent-light); }
+.user-profile-initial-state p { margin: 4px 0 0; color: var(--text-secondary); font-size: 12px; }
+.user-profile-build-panel { margin: 0 0 16px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
+.user-profile-build-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.user-profile-build-head h3 { margin: 0 0 4px; font-size: 15px; }
+.user-profile-build-head p { margin: 0; color: var(--text-secondary); font-size: 12px; }
+.user-profile-build-candidates { display: grid; gap: 1px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--border); }
+.user-profile-build-candidate { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; background: var(--surface); }
+.user-profile-build-candidate > div { display: grid; min-width: 0; gap: 4px; }
+.user-profile-build-candidate small,
+.user-profile-build-candidate span { color: var(--text-tertiary); font-size: 12px; overflow-wrap: anywhere; }
 
 .user-profile-state-grid {
   display: grid;
@@ -3614,11 +3666,13 @@ select.timeline-setting-input { width: min(220px, 100%); }
   .user-profile-detail { max-height: none; padding-inline: 14px; }
   .user-profile-detail-head { position: static; align-items: flex-start; flex-direction: column; }
   .user-profile-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .profile-view-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 620px) {
   .relationship-dimensions,
-  .relationship-overrides { grid-template-columns: 1fr; }
+  .relationship-overrides,
+  .profile-view-dimensions { grid-template-columns: 1fr; }
   .user-profile-state-grid { grid-template-columns: 1fr; }
   .user-profile-inline-form { grid-template-columns: 1fr; }
   .user-profile-fact,
@@ -3627,6 +3681,14 @@ select.timeline-setting-input { width: min(220px, 100%); }
   .user-profile-identity-review { align-items: flex-start; flex-direction: column; }
   .user-profile-head-actions .btn,
   .user-profile-fact-actions .btn { min-height: 40px; }
+  .profile-view-toolbar,
+  .user-profile-initial-state,
+  .user-profile-build-head,
+  .user-profile-build-candidate { align-items: stretch; flex-direction: column; }
+  .profile-view-toolbar .input,
+  .profile-view-toolbar .select { width: 100%; }
+  .user-profile-build-head { gap: 6px; }
+  .user-profile-build-head .btn { align-self: flex-start; padding-left: 0; }
 }
 .settings-page-content {
   display: grid;
@@ -3950,6 +4012,10 @@ select.timeline-setting-input { width: min(220px, 100%); }
   min-width: min(520px, 50%);
 }
 .maintenance-topic-controls .select { flex: 1; min-width: 0; }
+.user-profile-maintenance-controls { min-width: min(720px, 65%); }
+.user-profile-maintenance-controls #user-profile-search { flex: 1 1 240px; min-width: 180px; }
+.user-profile-maintenance-controls #user-profile-status { flex: 0 0 190px; min-width: 190px; }
+.user-profile-maintenance-controls .btn { flex: 0 0 auto; }
 .maintenance-panel-actions {
   display: flex;
   justify-content: flex-end;

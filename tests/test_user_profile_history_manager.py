@@ -187,6 +187,70 @@ async def test_history_preview_handles_database_without_documents_table(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_build_candidates_only_include_stable_unscoped_private_users(tmp_path):
+    db_path = str(tmp_path / "history-build-candidates.db")
+    store = UserProfileStore(db_path)
+    await store.initialize()
+    await _insert_document(db_path, _metadata("timeline-new"))
+    await _insert_document(
+        db_path,
+        _metadata("timeline-newer", revision=2),
+    )
+    await _insert_document(
+        db_path,
+        _metadata("timeline-existing", actor_id="test:human:user-2", target_id="user-2"),
+    )
+    existing = await store.ensure_private_scope(
+        actor_id="test:human:user-2",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    assert existing is not None
+    manager = UserProfileHistoryManager(db_path, store, actor_resolver=_actor_resolver)
+
+    candidates = await manager.list_build_candidates()
+
+    assert len(candidates) == 1
+    assert candidates[0]["actor_id"] == "test:human:user-1"
+    assert candidates[0]["timeline_count"] == 2
+    assert candidates[0]["identity_basis"] == "native_role_binding"
+    assert len(candidates[0]["candidate_fingerprint"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_build_candidates_do_not_accept_ambiguous_conversation_actors(tmp_path):
+    db_path = str(tmp_path / "history-build-ambiguous.db")
+    store = UserProfileStore(db_path)
+    await store.initialize()
+    await _insert_document(
+        db_path,
+        _metadata("timeline-ambiguous", include_binding=False),
+    )
+    async with aiosqlite.connect(tmp_path / "conversations.db") as db:
+        await db.executescript(
+            """
+            CREATE TABLE sessions (session_id TEXT PRIMARY KEY, platform TEXT);
+            CREATE TABLE messages (
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                sender_id TEXT,
+                metadata TEXT
+            );
+            INSERT INTO sessions(session_id, platform)
+            VALUES ('bot-1:private:user-1', 'test');
+            INSERT INTO messages(session_id, role, sender_id, metadata)
+            VALUES
+              ('bot-1:private:user-1', 'user', 'user-1', '{"actor_id":"test:human:user-1"}'),
+              ('bot-1:private:user-1', 'user', 'user-1', '{"actor_id":"other:human:user-1"}');
+            """
+        )
+        await db.commit()
+    manager = UserProfileHistoryManager(db_path, store, actor_resolver=_actor_resolver)
+
+    assert await manager.list_build_candidates() == []
+
+
+@pytest.mark.asyncio
 async def test_conversation_identity_evidence_batches_and_tolerates_legacy_columns(
     tmp_path,
 ):

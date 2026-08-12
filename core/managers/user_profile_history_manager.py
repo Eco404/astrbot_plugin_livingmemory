@@ -12,6 +12,7 @@ import aiosqlite
 
 from ...storage.user_profile_store import UserProfileRevisionConflict
 from ..models.memory_identity import resolve_memory_space
+from ..models.conversation_models import stable_actor_id
 from ..models.platform_identity import canonical_platform
 from ..models.user_profile import (
     UserProfileProjectionEvent,
@@ -123,6 +124,137 @@ class UserProfileHistoryManager:
         fingerprint = self._fingerprint(discovered)
         self._assert_fingerprint(fingerprint, expected_history_fingerprint)
         return fingerprint
+
+    async def list_build_candidates(self) -> list[dict[str, Any]]:
+        """Find stable private users represented by Timeline but lacking a scope."""
+        records: list[dict[str, Any]] = []
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            table = await (
+                await db.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'documents'"
+                )
+            ).fetchone()
+            if table is None:
+                return []
+            cursor = await db.execute(
+                "SELECT id, metadata FROM documents ORDER BY id ASC"
+            )
+            while True:
+                rows = await cursor.fetchmany(self._SQLITE_BATCH_SIZE)
+                if not rows:
+                    break
+                for row in rows:
+                    metadata = self._json_object(row["metadata"])
+                    if not metadata or str(
+                        metadata.get("memory_layer") or "timeline"
+                    ) != "timeline":
+                        continue
+                    space = resolve_memory_space(
+                        metadata.get("session_id"), metadata.get("persona_id")
+                    )
+                    if space.chat_type != "private":
+                        continue
+                    records.append(
+                        {
+                            "document_id": int(row["id"]),
+                            "timeline_uid": str(
+                                metadata.get("memory_uid") or f"document:{row['id']}"
+                            ),
+                            "session_id": str(metadata.get("session_id") or ""),
+                            "bot_account": space.bot_account,
+                            "persona_id": space.persona_id,
+                            "private_target_id": space.target_id,
+                            "metadata": metadata,
+                        }
+                    )
+        evidence = await self._conversation_identity_evidence(
+            {str(item["session_id"]) for item in records}
+        )
+        candidates: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for record in records:
+            actor_id, display_name = self.actor_resolver(
+                record["metadata"], str(record["private_target_id"])
+            )
+            basis = "native_role_binding"
+            if not self._is_stable_actor(actor_id):
+                actor_id = ""
+                session_evidence = evidence.get(str(record["session_id"]), {})
+                target_id = str(record["private_target_id"] or "")
+                stable_actors = {
+                    str(value)
+                    for value in session_evidence.get("stable_actor_ids", set())
+                    if self._is_stable_actor(str(value))
+                    and self._actor_user_id(str(value)) == target_id
+                }
+                if len(stable_actors) == 1:
+                    actor_id = next(iter(stable_actors))
+                    basis = "conversation_stable_actor"
+                else:
+                    human_senders = {
+                        str(value)
+                        for value in session_evidence.get("human_sender_ids", set())
+                        if value
+                    }
+                    platform = canonical_platform(session_evidence.get("platform"))
+                    if (
+                        not stable_actors
+                        and target_id
+                        and human_senders == {target_id}
+                        and platform
+                    ):
+                        actor_id = stable_actor_id(platform, target_id, "human")
+                        basis = "private_session_sender"
+            if not self._is_stable_actor(actor_id):
+                continue
+            key = (
+                actor_id,
+                str(record["bot_account"]),
+                str(record["persona_id"]),
+            )
+            item = candidates.setdefault(
+                key,
+                {
+                    "actor_id": actor_id,
+                    "bot_account": key[1],
+                    "persona_id": key[2],
+                    "platform": actor_id.split(":", 1)[0],
+                    "stable_user_id": self._actor_user_id(actor_id),
+                    "display_name": display_name or "",
+                    "identity_basis": basis,
+                    "timeline_uids": set(),
+                },
+            )
+            if display_name:
+                item["display_name"] = display_name
+            if basis == "native_role_binding":
+                item["identity_basis"] = basis
+            item["timeline_uids"].add(str(record["timeline_uid"]))
+        result = []
+        for item in candidates.values():
+            existing = await self.store.get_scope_by_actor(
+                actor_id=str(item["actor_id"]),
+                bot_account=str(item["bot_account"]),
+                persona_id=str(item["persona_id"]),
+                include_disabled=True,
+            )
+            if existing is not None:
+                continue
+            timeline_uids = sorted(item.pop("timeline_uids"))
+            public = {**item, "timeline_count": len(timeline_uids)}
+            public["candidate_fingerprint"] = self._build_candidate_fingerprint(
+                public, timeline_uids
+            )
+            result.append(public)
+        return sorted(
+            result,
+            key=lambda item: (
+                str(item["bot_account"]),
+                str(item["persona_id"]),
+                str(item["display_name"] or item["actor_id"]).casefold(),
+            ),
+        )
 
     async def _discover(
         self, profile_scope_uid: str
@@ -624,6 +756,22 @@ class UserProfileHistoryManager:
             for item in candidates
         )
         encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _build_candidate_fingerprint(
+        candidate: dict[str, Any], timeline_uids: list[str]
+    ) -> str:
+        payload = {
+            "actor_id": candidate.get("actor_id"),
+            "bot_account": candidate.get("bot_account"),
+            "persona_id": candidate.get("persona_id"),
+            "identity_basis": candidate.get("identity_basis"),
+            "timeline_uids": timeline_uids,
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        )
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @staticmethod

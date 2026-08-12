@@ -529,6 +529,12 @@ class PluginPageApi:
         )
         user_profile_routes = (
             ("/user-profiles", self.list_user_profiles, ["GET"]),
+            (
+                "/user-profiles/build-candidates",
+                self.list_user_profile_build_candidates,
+                ["GET"],
+            ),
+            ("/user-profiles/build", self.build_user_profile, ["POST"]),
             ("/user-profiles/detail", self.get_user_profile_detail, ["GET"]),
             ("/user-profiles/enable", self.enable_user_profile, ["POST"]),
             ("/user-profiles/disable", self.disable_user_profile, ["POST"]),
@@ -1123,6 +1129,12 @@ class PluginPageApi:
 
     async def list_user_profiles(self):
         return await self._with_user_profiles("list_profiles")
+
+    async def list_user_profile_build_candidates(self):
+        return await self._with_user_profiles("list_build_candidates")
+
+    async def build_user_profile(self):
+        return await self._with_user_profiles("build_candidate")
 
     async def get_user_profile_detail(self):
         return await self._with_user_profiles("get_detail")

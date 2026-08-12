@@ -552,6 +552,67 @@ async def test_profile_rebuild_preview_includes_history_discovery_counts():
 
 
 @pytest.mark.asyncio
+async def test_profile_build_candidate_creates_scope_and_backfills_history():
+    candidate = {
+        "actor_id": "test:human:user-1",
+        "bot_account": "bot-1",
+        "persona_id": "persona-1",
+        "display_name": "User One",
+        "candidate_fingerprint": "candidate-fingerprint",
+    }
+    scope = SimpleNamespace(profile_scope_uid="scope-1")
+    store = MagicMock()
+    store.ensure_private_scope = AsyncMock(return_value=scope)
+    store.profile_detail = AsyncMock(return_value={"fingerprint": "profile-fingerprint"})
+    store.prepare_profile_rebuild = AsyncMock(
+        return_value={"profile_scope_uid": "scope-1", "event_count": 0}
+    )
+    history = MagicMock()
+    history.list_build_candidates = AsyncMock(return_value=[candidate])
+    history.preview = AsyncMock(return_value={"history_fingerprint": "history-fingerprint"})
+    history.backfill = AsyncMock(return_value={"inserted_event_count": 3})
+    manager = MagicMock()
+    engine = SimpleNamespace(
+        user_profile_store=store,
+        user_profile_maintenance_manager=manager,
+        user_profile_history_manager=history,
+    )
+    request = MagicMock()
+    request.get_json = AsyncMock(
+        return_value={
+            "actor_id": candidate["actor_id"],
+            "bot_account": candidate["bot_account"],
+            "persona_id": candidate["persona_id"],
+            "candidate_fingerprint": candidate["candidate_fingerprint"],
+        }
+    )
+    import astrbot_plugin_livingmemory.core.page_api_modules.user_profile_handler as module
+
+    previous = vars(module).get("request")
+    vars(module)["request"] = request
+    try:
+        result = await UserProfileHandler(PageApiUtils()).build_candidate(engine)
+    finally:
+        vars(module)["request"] = previous
+
+    assert result["status"] == "ok"
+    assert result["data"]["profile_scope_uid"] == "scope-1"
+    assert result["data"]["event_count"] == 3
+    assert result["data"]["status"] == "scheduled"
+    store.ensure_private_scope.assert_awaited_once_with(
+        actor_id="test:human:user-1",
+        bot_account="bot-1",
+        persona_id="persona-1",
+        display_name="User One",
+        auto_enable=True,
+    )
+    history.backfill.assert_awaited_once_with(
+        "scope-1", expected_history_fingerprint="history-fingerprint"
+    )
+    manager.schedule_scope.assert_called_once_with("scope-1")
+
+
+@pytest.mark.asyncio
 async def test_profile_rebuild_rejects_stale_history_before_mutating_profile():
     store = MagicMock()
     store.prepare_profile_rebuild = AsyncMock()

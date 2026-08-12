@@ -65,6 +65,96 @@ class UserProfileHandler:
         except Exception as exc:
             return self.utils.error(str(exc))
 
+    async def list_build_candidates(self, memory_engine: Any) -> dict[str, Any]:
+        try:
+            history_manager = self._history_manager(memory_engine)
+            if history_manager is None:
+                raise RuntimeError("用户画像历史解析器尚未初始化")
+            search = str(request.args.get("search") or "").strip().casefold()
+            limit = max(1, min(200, int(request.args.get("limit") or 100)))
+            candidates = await history_manager.list_build_candidates()
+            if search:
+                candidates = [
+                    item
+                    for item in candidates
+                    if search
+                    in " ".join(
+                        str(item.get(key) or "")
+                        for key in (
+                            "display_name",
+                            "actor_id",
+                            "platform",
+                            "stable_user_id",
+                            "bot_account",
+                            "persona_id",
+                        )
+                    ).casefold()
+                ]
+            return self.utils.ok(
+                {"items": candidates[:limit], "count": len(candidates)}
+            )
+        except Exception as exc:
+            return self.utils.error(str(exc))
+
+    async def build_candidate(self, memory_engine: Any) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        try:
+            store, manager = self._components(memory_engine)
+            history_manager = self._history_manager(memory_engine)
+            if manager is None:
+                raise RuntimeError("用户画像维护器尚未初始化")
+            if history_manager is None:
+                raise RuntimeError("用户画像历史解析器尚未初始化")
+            actor_id = str(payload.get("actor_id") or "").strip()
+            bot_account = str(payload.get("bot_account") or "").strip()
+            persona_id = str(payload.get("persona_id") or "").strip()
+            fingerprint = str(payload.get("candidate_fingerprint") or "").strip()
+            candidate = next(
+                (
+                    item
+                    for item in await history_manager.list_build_candidates()
+                    if str(item.get("actor_id") or "") == actor_id
+                    and str(item.get("bot_account") or "") == bot_account
+                    and str(item.get("persona_id") or "") == persona_id
+                ),
+                None,
+            )
+            if candidate is None or not fingerprint or fingerprint != str(
+                candidate.get("candidate_fingerprint") or ""
+            ):
+                raise UserProfileRevisionConflict(
+                    "画像候选已变化，请刷新候选列表后重试"
+                )
+            scope = await store.ensure_private_scope(
+                actor_id=actor_id,
+                bot_account=bot_account,
+                persona_id=persona_id,
+                display_name=str(candidate.get("display_name") or "") or None,
+                auto_enable=True,
+            )
+            if scope is None:
+                raise ValueError("候选用户没有稳定的私聊账号标识")
+            detail = await store.profile_detail(scope.profile_scope_uid)
+            if detail is None:
+                raise RuntimeError("用户画像作用域创建失败")
+            history = await history_manager.preview(scope.profile_scope_uid)
+            result = await store.prepare_profile_rebuild(
+                scope.profile_scope_uid,
+                clear_overrides=False,
+                expected_fingerprint=str(detail["fingerprint"]),
+            )
+            backfill = await history_manager.backfill(
+                scope.profile_scope_uid,
+                expected_history_fingerprint=str(history["history_fingerprint"]),
+            )
+            result["history"] = backfill
+            result["event_count"] += int(backfill["inserted_event_count"])
+            result["status"] = "scheduled" if result["event_count"] else "no_history"
+            manager.schedule_scope(scope.profile_scope_uid)
+            return self.utils.ok(result)
+        except Exception as exc:
+            return self._error(exc)
+
     async def get_detail(self, memory_engine: Any) -> dict[str, Any]:
         try:
             store, _manager = self._components(memory_engine)

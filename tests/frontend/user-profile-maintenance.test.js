@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { UserProfileMaintenance } from "../../pages/dashboard/modules/user-profile-maintenance.js";
+import { UserProfilePage } from "../../pages/dashboard/modules/user-profile-page.js";
 
 test("relationship slider output follows input events while dragging", () => {
   const listeners = {};
@@ -249,4 +251,82 @@ test("legacy Timeline review sends a reversible scoped binding decision", async 
       actor_id: "test:human:user-1",
     },
   }]);
+});
+
+test("profile build submits the exact server-issued candidate scope", async () => {
+  const calls = [];
+  globalThis.window = { t(key) { return key; } };
+  try {
+    const profile = new UserProfileMaintenance({
+      async post(path, body) {
+        calls.push({ path, body });
+        return { profile_scope_uid: "scope-new" };
+      },
+    }, () => {}, { async show() { return true; } });
+    profile.buildCandidates = [{
+      actor_id: "test:human:user-1",
+      bot_account: "bot-1",
+      persona_id: "persona-1",
+      display_name: "User One",
+      timeline_count: 2,
+      candidate_fingerprint: "candidate-fingerprint",
+    }];
+    profile.closeBuildPanel = () => {};
+    profile.loadList = async () => {};
+    profile.loadDetail = async () => {};
+    await profile.buildCandidate({ dataset: { profileBuildCandidate: "0" }, disabled: false });
+    assert.deepEqual(calls, [{
+      path: "user-profiles/build",
+      body: {
+        actor_id: "test:human:user-1",
+        bot_account: "bot-1",
+        persona_id: "persona-1",
+        candidate_fingerprint: "candidate-fingerprint",
+      },
+    }]);
+    assert.equal(profile.selectedScopeUid, "scope-new");
+  } finally {
+    delete globalThis.window;
+  }
+});
+
+test("standalone profile page renders only read-only facts and relationship meters", () => {
+  globalThis.window = { t(key) { return key; } };
+  globalThis.document = {
+    createElement() {
+      let text = "";
+      return {
+        set textContent(value) { text = String(value); },
+        get innerHTML() { return text; },
+      };
+    },
+  };
+  try {
+    const page = new UserProfilePage({});
+    const facts = page.renderFacts("facts", [{
+      category: "preference",
+      raw_fact: "User likes tea",
+      status: "active",
+      confidence: 0.9,
+      importance: 0.8,
+      sources: [{ timeline_uid: "timeline-1", timeline_revision: 2 }],
+    }]);
+    const relationship = page.renderRelationship({ trust: 0.72, stance_tags: ["steady"], subjective_summary: "Known well." }, {});
+    assert.match(facts, /User likes tea/);
+    assert.match(facts, /data-open-timeline="timeline-1"/);
+    assert.doesNotMatch(facts, /data-fact-action/);
+    assert.match(relationship, /width:72%/);
+    assert.doesNotMatch(relationship, /type="range"/);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
+});
+
+test("profile navigation and settings tabs follow the requested order", () => {
+  const html = readFileSync(new URL("../../pages/dashboard/index.html", import.meta.url), "utf8");
+  assert.ok(html.indexOf('data-page="topic"') < html.indexOf('data-page="profiles"'));
+  assert.ok(html.indexOf('data-page="profiles"') < html.indexOf('data-page="identities"'));
+  assert.ok(html.indexOf('data-settings-category="topic"') < html.indexOf('data-settings-category="user_profile"'));
+  assert.ok(html.indexOf('data-settings-category="user_profile"') < html.indexOf('data-settings-category="session"'));
 });

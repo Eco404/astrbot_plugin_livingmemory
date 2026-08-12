@@ -11,12 +11,17 @@ The dashboard adapts to desktop and mobile layouts. On narrow screens, use the t
 | Knowledge graph | Inspect Timeline-derived entities and relations |
 | Timeline memory | Search, edit, stage, import, export, and inspect Topic links |
 | Topic memory | Inspect read-only Topics, fragments, facts, actors, affect, and provenance; search by keyword or Embedding similarity |
+| User profiles | Read current objective facts, review-only facts, the effective injection, and persona relationship state for each user |
 | Supplemental profiles | Add stable-ID hints for otherwise ambiguous actor information |
 | System overview | Review memory, models, indexes, maintenance, and database status |
 
 ## Maintenance
 
 The bottom sidebar keeps **Settings** and **Maintenance** separate from daily browsing. Maintenance includes Topic and Timeline operations, user profiles and persona relationships, account binding and historical rebuild, session audit, database health, recent production recall, recall tests, and model tests.
+
+The daily **User Profiles** page and the maintenance tab read the same derived state, but serve different jobs. The daily page is read-only. Enablement, fact governance, conflict resolution, relationship edits, account binding, and historical rebuild remain in Maintenance.
+
+When no profile exists, Maintenance offers **Build profile**. Candidates must have a stable human actor, a private-chat scope, and an exact Bot/persona assignment, and must not already have a profile scope. Confirming a candidate creates the scope and schedules a historical rebuild. Ambiguous Timelines never become build candidates and remain in identity review. An existing empty scope also exposes **Build from history** in its detail view.
 
 Long-running tasks expose stage, processed count, and state. Failed records retain a readable error and can be manually cleared.
 

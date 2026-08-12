@@ -16,8 +16,9 @@ import {
   SettingsPage,
   SystemPage,
   TopicPage,
-    TimelinePage,
-    UserProfileMaintenance,
+  TimelinePage,
+  UserProfileMaintenance,
+  UserProfilePage,
   esc,
   statusPill,
   nodeBadge,
@@ -69,6 +70,7 @@ import {
   const timelinePage = new TimelinePage(api, showToast);
   const settingsPage = new SettingsPage(api, showToast);
   const userProfileMaintenance = new UserProfileMaintenance(api, showToast, confirmDialog);
+  const userProfilePage = new UserProfilePage(api);
   const maintenancePage = new MaintenancePage(topicPage, recallPage, modelPage, showToast, confirmDialog, userProfileMaintenance);
 
   /* ================================================================
@@ -152,6 +154,7 @@ import {
     }
     if (name === "memory") memoryPage.fetch();
     if (name === "topic") topicPage.fetch();
+    if (name === "profiles") userProfilePage.activate();
     if (name === "identities") identityPage.fetch();
     if (name === "settings") settingsPage.fetch();
     if (name === "maintenance") maintenancePage.activate();
@@ -339,6 +342,7 @@ import {
     settingsPage.initEventListeners();
     maintenancePage.initEventListeners();
     userProfileMaintenance.initEventListeners();
+    userProfilePage.initEventListeners();
     modelPage.initEventListeners();
     identityPage.initEventListeners();
 

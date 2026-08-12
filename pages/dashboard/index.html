@@ -44,6 +44,10 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h13"/><circle cx="19" cy="12" r="2"/></svg>
             <span data-i18n="nav.topic">Topic 记忆</span>
           </button>
+          <button class="nav-item" data-page="profiles">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M9 17a4 4 0 0 0-4-4H3a2 2 0 0 0-2 2v2"/><circle cx="6" cy="7" r="3"/><path d="M10 7h7M13 11h4"/></svg>
+            <span data-i18n="nav.profiles">用户画像</span>
+          </button>
           <button class="nav-item" data-page="identities">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/><path d="m17 11 2 2 3-3"/></svg>
             <span data-i18n="nav.identities">补充人物资料</span>
@@ -324,6 +328,29 @@
           </div>
         </section>
 
+        <!-- Page: User Profiles -->
+        <section class="page" id="page-profiles">
+          <header class="page-header">
+            <span class="page-title" data-i18n="nav.profiles">用户画像</span>
+            <div class="page-actions"><button class="btn btn-secondary btn-sm" id="profile-page-refresh" type="button" data-i18n="common.refresh">刷新</button></div>
+          </header>
+          <div class="page-body profile-view-page-body">
+            <div class="profile-view-toolbar">
+              <input id="profile-page-search" class="input input-sm" type="search" data-i18n-placeholder="profile.search" placeholder="昵称、平台或账号 ID">
+              <select id="profile-page-status" class="select input input-sm">
+                <option value="" data-i18n="profile.status.all">全部状态</option>
+                <option value="enabled" data-i18n="profile.status.enabled">已启用</option>
+                <option value="disabled" data-i18n="profile.status.disabled">已停用</option>
+                <option value="deleted" data-i18n="profile.status.deleted">已删除</option>
+              </select>
+            </div>
+            <div class="user-profile-workspace profile-view-workspace">
+              <div class="user-profile-list" id="profile-page-list"><div class="identity-state" data-i18n="common.loading">加载中...</div></div>
+              <div class="user-profile-detail profile-view-detail" id="profile-page-detail"><div class="identity-state" data-i18n="profile.viewChoose">请选择用户查看画像</div></div>
+            </div>
+          </div>
+        </section>
+
         <!-- Page: Settings -->
         <section class="page" id="page-settings">
           <header class="page-header">
@@ -338,13 +365,13 @@
               <button class="settings-category-tab active" type="button" data-settings-category="recall" role="tab" aria-selected="true" data-i18n="settings.category.recall">召回</button>
               <button class="settings-category-tab" type="button" data-settings-category="timeline" role="tab" aria-selected="false" data-i18n="settings.category.timeline">Timeline</button>
               <button class="settings-category-tab" type="button" data-settings-category="topic" role="tab" aria-selected="false" data-i18n="settings.category.topic">Topic</button>
+              <button class="settings-category-tab" type="button" data-settings-category="user_profile" role="tab" aria-selected="false" data-i18n="settings.category.userProfile">用户画像</button>
               <button class="settings-category-tab" type="button" data-settings-category="session" role="tab" aria-selected="false" data-i18n="settings.category.session">会话</button>
               <button class="settings-category-tab" type="button" data-settings-category="graph" role="tab" aria-selected="false" data-i18n="settings.category.graph">图谱</button>
               <button class="settings-category-tab" type="button" data-settings-category="lifecycle" role="tab" aria-selected="false" data-i18n="settings.category.lifecycle">生命周期</button>
               <button class="settings-category-tab" type="button" data-settings-category="model" role="tab" aria-selected="false" data-i18n="settings.category.model">模型</button>
               <button class="settings-category-tab" type="button" data-settings-category="index" role="tab" aria-selected="false" data-i18n="settings.category.index">索引</button>
               <button class="settings-category-tab" type="button" data-settings-category="maintenance" role="tab" aria-selected="false" data-i18n="settings.category.maintenance">维护</button>
-              <button class="settings-category-tab" type="button" data-settings-category="user_profile" role="tab" aria-selected="false" data-i18n="settings.category.userProfile">用户画像</button>
             </div>
             <div id="settings-page-status" class="text-secondary" aria-live="polite"></div>
             <div id="settings-page-content" class="settings-page-content"></div>
@@ -370,7 +397,7 @@
             <div class="maintenance-panel" id="maintenance-panel-user-profiles">
               <div class="maintenance-review-toolbar">
                 <div><h2 data-i18n="profile.title">用户画像维护</h2></div>
-                <div class="maintenance-topic-controls">
+                <div class="maintenance-topic-controls user-profile-maintenance-controls">
                   <input id="user-profile-search" class="input input-sm" type="search" data-i18n-placeholder="profile.search" placeholder="昵称、平台或账号 ID">
                   <select id="user-profile-status" class="select input input-sm">
                     <option value="" data-i18n="profile.status.all">全部状态</option>
@@ -378,9 +405,17 @@
                     <option value="disabled" data-i18n="profile.status.disabled">已停用</option>
                     <option value="deleted" data-i18n="profile.status.deleted">已删除</option>
                   </select>
+                  <button class="btn btn-primary btn-sm" id="user-profile-build-open" type="button" data-i18n="profile.build">构建画像</button>
                   <button class="btn btn-secondary btn-sm" id="user-profile-refresh" type="button" data-i18n="common.refresh">刷新</button>
                 </div>
               </div>
+              <section class="user-profile-build-panel hidden" id="user-profile-build-panel" aria-live="polite">
+                <div class="user-profile-build-head">
+                  <div><h3 data-i18n="profile.buildTitle">从私聊 Timeline 构建画像</h3><p data-i18n="profile.buildDescription">仅列出具有稳定账号和明确 Bot/persona 归属、但尚未创建画像的用户。</p></div>
+                  <button class="btn btn-ghost btn-sm" id="user-profile-build-close" type="button" data-i18n="common.close">关闭</button>
+                </div>
+                <div id="user-profile-build-list"><div class="identity-state compact" data-i18n="common.loading">加载中...</div></div>
+              </section>
               <div class="user-profile-workspace">
                 <div class="user-profile-list" id="user-profile-list"><div class="identity-state" data-i18n="common.loading">加载中...</div></div>
                 <div class="user-profile-detail" id="user-profile-detail"><div class="identity-state" data-i18n="profile.choose">选择用户查看画像</div></div>

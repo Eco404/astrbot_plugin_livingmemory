@@ -13,6 +13,7 @@ export class UserProfileMaintenance {
     this.searchTimer = null;
     this.bindPreview = null;
     this.sharePreview = null;
+    this.buildCandidates = [];
   }
 
   initEventListeners() {
@@ -22,6 +23,12 @@ export class UserProfileMaintenance {
     });
     document.getElementById("user-profile-status")?.addEventListener("change", () => this.loadList());
     document.getElementById("user-profile-refresh")?.addEventListener("click", () => this.refresh());
+    document.getElementById("user-profile-build-open")?.addEventListener("click", () => this.openBuildPanel());
+    document.getElementById("user-profile-build-close")?.addEventListener("click", () => this.closeBuildPanel());
+    document.getElementById("user-profile-build-list")?.addEventListener("click", event => {
+      const button = event.target.closest("[data-profile-build-candidate]");
+      if (button) this.buildCandidate(button);
+    });
     document.getElementById("user-profile-list")?.addEventListener("click", event => {
       const item = event.target.closest("[data-profile-scope]");
       if (item) this.select(item.dataset.profileScope);
@@ -34,6 +41,7 @@ export class UserProfileMaintenance {
     window.addEventListener("languagechange", () => {
       this.renderList();
       this.renderDetail();
+      this.renderBuildCandidates();
     });
   }
 
@@ -72,7 +80,8 @@ export class UserProfileMaintenance {
     const list = document.getElementById("user-profile-list");
     if (!list) return;
     if (!this.items.length) {
-      list.innerHTML = `<div class="identity-state">${esc(window.t("profile.empty"))}</div>`;
+      list.innerHTML = `<div class="identity-state user-profile-empty-state"><span>${esc(window.t("profile.empty"))}</span><button class="btn btn-primary btn-sm" type="button" data-profile-empty-build>${esc(window.t("profile.build"))}</button></div>`;
+      list.querySelector("[data-profile-empty-build]")?.addEventListener("click", () => this.openBuildPanel());
       return;
     }
     list.innerHTML = this.items.map(item => {
@@ -126,6 +135,7 @@ export class UserProfileMaintenance {
     const historicalFacts = (data.facts || []).filter(item => !["active", "pending", "conflict"].includes(item.status));
     const relationship = data.relationship;
     const preview = data.injection_preview;
+    const hasGeneratedProfile = (data.facts || []).length > 0 || Boolean(relationship);
     root.innerHTML = `
       <div class="user-profile-detail-head">
         <div><h2>${esc(accounts[0]?.last_observed_name || accounts[0]?.actor_id || scope.logical_user_uid)}</h2><p>${esc(scope.bot_account)} / ${esc(scope.persona_id || "-")} · ${esc(scope.profile_scope_uid)}</p></div>
@@ -136,6 +146,7 @@ export class UserProfileMaintenance {
           <button class="btn btn-danger btn-sm" type="button" data-profile-action="delete-disable">${esc(window.t("profile.deleteDisable"))}</button>
         </div>
       </div>
+      ${hasGeneratedProfile ? "" : `<div class="user-profile-initial-state"><div><strong>${esc(window.t("profile.notGeneratedTitle"))}</strong><p>${esc(window.t("profile.notGeneratedDescription"))}</p></div><button class="btn btn-primary btn-sm" type="button" data-profile-action="rebuild">${esc(window.t("profile.buildFromHistory"))}</button></div>`}
       ${this.renderArchitectureStatus(data)}
       <label class="user-profile-rebuild-option"><input id="profile-rebuild-clear-overrides" type="checkbox"> <span>${esc(window.t("profile.clearOverrides"))}</span></label>
       ${scope.has_gap || data.gap?.has_gap ? `<div class="user-profile-alert">${esc(window.t("profile.gap", data.gap?.pending_count || 0))}</div>` : ""}
@@ -152,6 +163,69 @@ export class UserProfileMaintenance {
       ${this.renderAccounts(accounts)}
       ${this.renderSharing(data.share_group, scope)}
       ${this.renderTasks(data.tasks || [])}`;
+  }
+
+  async openBuildPanel() {
+    document.getElementById("user-profile-build-panel")?.classList.remove("hidden");
+    await this.loadBuildCandidates();
+  }
+
+  closeBuildPanel() {
+    document.getElementById("user-profile-build-panel")?.classList.add("hidden");
+  }
+
+  async loadBuildCandidates() {
+    const root = document.getElementById("user-profile-build-list");
+    if (root) root.innerHTML = `<div class="identity-state compact">${esc(window.t("common.loading"))}</div>`;
+    try {
+      const data = await this.api.get("user-profiles/build-candidates", { limit: 200 });
+      this.buildCandidates = data.items || [];
+      this.renderBuildCandidates();
+    } catch (error) {
+      if (root) root.innerHTML = `<div class="identity-state compact error">${esc(error.message)}</div>`;
+    }
+  }
+
+  renderBuildCandidates() {
+    const root = document.getElementById("user-profile-build-list");
+    if (!root || root.closest(".hidden")) return;
+    if (!this.buildCandidates.length) {
+      root.innerHTML = `<div class="identity-state compact">${esc(window.t("profile.noBuildCandidates"))}</div>`;
+      return;
+    }
+    root.innerHTML = `<div class="user-profile-build-candidates">${this.buildCandidates.map((item, index) => `<div class="user-profile-build-candidate">
+      <div><strong>${esc(item.display_name || item.actor_id)}</strong><small>${esc(item.platform || "")} · ${esc(item.stable_user_id || "")} · ${esc(item.bot_account || "-")} / ${esc(item.persona_id || "-")}</small><span>${esc(window.t("profile.buildCandidateMeta", Number(item.timeline_count || 0), window.t(`profile.buildBasis.${item.identity_basis}`)))}</span></div>
+      <button class="btn btn-primary btn-sm" type="button" data-profile-build-candidate="${index}">${esc(window.t("profile.build"))}</button>
+    </div>`).join("")}</div>`;
+  }
+
+  async buildCandidate(button) {
+    const item = this.buildCandidates[Number(button.dataset.profileBuildCandidate)];
+    if (!item) return;
+    const confirmed = await this.confirmDialog.show({
+      title: window.t("profile.build"),
+      message: window.t("profile.confirmBuild", item.display_name || item.actor_id, item.bot_account, item.persona_id || "-", Number(item.timeline_count || 0)),
+      confirmLabel: window.t("profile.build"),
+    });
+    if (!confirmed) return;
+    button.disabled = true;
+    try {
+      const result = await this.api.post("user-profiles/build", {
+        actor_id: item.actor_id,
+        bot_account: item.bot_account,
+        persona_id: item.persona_id,
+        candidate_fingerprint: item.candidate_fingerprint,
+      });
+      this.selectedScopeUid = result.profile_scope_uid || "";
+      this.detail = null;
+      this.showToast(window.t("profile.rebuildScheduled"), "success");
+      this.closeBuildPanel();
+      await this.loadList();
+      if (this.selectedScopeUid) await this.loadDetail();
+    } catch (error) {
+      button.disabled = false;
+      this.showToast(error.message, "error");
+    }
   }
 
   renderArchitectureStatus(data) {

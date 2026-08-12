@@ -18,9 +18,8 @@ if TYPE_CHECKING:
 
 
 _CATEGORY_ORDER = (
-    "recall", "timeline", "topic", "session", "graph",
+    "recall", "timeline", "topic", "user_profile", "session", "graph",
     "lifecycle", "model", "index", "maintenance",
-    "user_profile",
 )
 
 
