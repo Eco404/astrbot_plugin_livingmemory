@@ -21,6 +21,7 @@ from ..retrieval.unified_recall import (
     UnifiedRecallRequest,
 )
 from ..utils import content_with_temporal_key_facts, get_persona_id
+from ..user_profile_injection import UserProfileInjectionService
 
 
 def _json_result(data: dict[str, Any]) -> str:
@@ -88,6 +89,11 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     },
                     "additionalProperties": False,
                 },
+                "include_user_profile": {
+                    "type": "boolean",
+                    "description": "Explicitly include the current private user's profile and persona relationship state. This never accepts another user ID.",
+                    "default": False,
+                },
             },
             "required": ["query"],
         }
@@ -99,10 +105,11 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
         query: str,
         k: int = 5,
         temporal: dict[str, Any] | None = None,
+        include_user_profile: bool = False,
     ) -> ToolExecResult:
         """执行长期记忆回忆。"""
         cleaned_query = (query or "").strip()
-        if not cleaned_query:
+        if not cleaned_query and not include_user_profile:
             return _json_result(
                 {
                     "query": "",
@@ -166,9 +173,52 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
             topic_enabled = coordinator.topic_enabled()
             persona_id = (
                 await get_persona_id(self.context, event)
-                if use_persona_filtering or topic_enabled
+                if use_persona_filtering or topic_enabled or include_user_profile
                 else None
             )
+
+            profile_payload = None
+            if include_user_profile:
+                sender_id = (
+                    event.get_sender_id()
+                    if hasattr(event, "get_sender_id")
+                    else getattr(event, "sender_id", "")
+                )
+                platform = (
+                    event.get_platform_name()
+                    if hasattr(event, "get_platform_name")
+                    else ""
+                )
+                actor_id = (
+                    stable_actor_id(platform, str(sender_id), "human")
+                    if sender_id and str(sender_id).strip()
+                    else ""
+                )
+                store = getattr(self.memory_engine, "user_profile_store", None)
+                scope_loader = getattr(store, "get_scope_by_actor", None)
+                if not inspect.iscoroutinefunction(scope_loader):
+                    profile_payload = {"status": "profile_store_unavailable", "content": ""}
+                else:
+                    rendered = await UserProfileInjectionService(
+                        store,
+                        getattr(self.memory_engine, "user_profile_config", {}),
+                    ).render_current_user(
+                        session_id=session_id,
+                        persona_id=persona_id,
+                        actor_id=actor_id,
+                        query=cleaned_query,
+                    )
+                    profile_payload = rendered.to_tool_payload()
+
+            if not cleaned_query:
+                return _json_result(
+                    {
+                        "query": "",
+                        "count": 0,
+                        "results": [],
+                        "user_profile": profile_payload,
+                    }
+                )
 
             recall_session_id = session_id if use_session_filtering else None
             recall_persona_id = persona_id if use_persona_filtering else None
@@ -417,6 +467,11 @@ class MemorySearchTool(FunctionTool[AstrAgentContext]):
                     "count": len(serialized_results),
                     "results": serialized_results,
                     "diagnostics": unified_outcome.diagnostics(),
+                    **(
+                        {"user_profile": profile_payload}
+                        if include_user_profile
+                        else {}
+                    ),
                 }
             )
         except asyncio.CancelledError:

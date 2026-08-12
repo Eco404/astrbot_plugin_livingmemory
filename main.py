@@ -88,7 +88,7 @@ elif _version_lt(_CURRENT_ASTRBOT_VERSION, _MIN_ASTRBOT_VERSION):
     "LivingMemory",
     "econeco",
     "An intelligent long-term memory plugin with a dynamic lifecycle for AstrBot.",
-    "3.7.0",
+    "3.8.0",
     "https://github.com/Eco404/astrbot_plugin_livingmemory",
 )
 class LivingMemoryPlugin(Star):

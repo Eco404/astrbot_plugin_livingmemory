@@ -61,6 +61,32 @@
             }
         }
     },
+    "user_profile": {
+        "description": "用户画像",
+        "hint": "这里只保留首次启用所需的基础项。全部阈值、时效、注入和人格关系参数请在插件 WebUI 的「设置 → 用户画像」中调整。",
+        "type": "object",
+        "items": {
+            "enabled": {
+                "description": "启用客观用户画像",
+                "hint": "为具有稳定账号 ID 的私聊用户自动维护可溯源画像。",
+                "type": "bool",
+                "default": true
+            },
+            "relationship_enabled": {
+                "description": "启用人格关系状态",
+                "hint": "维护当前人格对私聊用户的主观感受与关系连续性。",
+                "type": "bool",
+                "default": true
+            },
+            "provider_id": {
+                "description": "画像维护 LLM Provider",
+                "hint": "留空时使用 Timeline 总结 Provider。",
+                "type": "string",
+                "_special": "select_provider",
+                "default": ""
+            }
+        }
+    },
     "cloudflare_rerank": {
         "description": "Cloudflare Rerank 模型",
         "hint": "AstrBot 尚未提供 Cloudflare Rerank Provider 时，可由插件直接调用 Workers AI。启用后优先于 AstrBot 的 rerank_provider_id，且不需要填写上方的 Rerank 模型 ID。",

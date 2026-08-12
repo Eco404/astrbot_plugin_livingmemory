@@ -27,13 +27,14 @@ from ..core.topic_fragment_identity import (
 )
 from .memory_identity_store import MemoryIdentityStore
 from .topic_memory_store import TopicMemoryStore
+from .user_profile_store import UserProfileStore
 
 
 class DBMigration:
     """数据库迁移管理器"""
 
     # 当前数据库版本
-    CURRENT_VERSION = "10.3"
+    CURRENT_VERSION = "10.4"
 
     # 版本历史记录
     VERSION_HISTORY = {
@@ -50,6 +51,7 @@ class DBMigration:
         "10.1": "Durable Timeline source snapshots",
         "10.2": "Durable document index maintenance state",
         "10.3": "Topic-local importance projection",
+        "10.4": "Private user profiles, persona relationships, and legacy identity review",
     }
 
     def __init__(self, db_path: str):
@@ -318,6 +320,8 @@ class DBMigration:
                     migration_steps.append(self._migrate_v10_1_to_v10_2)
                 if current_key < self.version_key("10.3"):
                     migration_steps.append(self._migrate_v10_2_to_v10_3)
+                if current_key < self.version_key("10.4"):
+                    migration_steps.append(self._migrate_v10_3_to_v10_4)
 
                 # 执行所有迁移步骤
                 for step in migration_steps:
@@ -2249,6 +2253,21 @@ class DBMigration:
         if progress_callback:
             progress_callback("重算 Topic 来源重要性贡献", 1, 1)
         logger.info("v10.2 -> v10.3 迁移完成")
+
+    async def _migrate_v10_3_to_v10_4(
+        self,
+        progress_callback: Callable[[str, int, int], None] | None,
+    ) -> None:
+        """Create all private profile and identity-review storage without backfill."""
+        logger.info("执行迁移步骤: v10.3 -> v10.4 (private user profiles)")
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("PRAGMA busy_timeout = 10000")
+            await db.execute("PRAGMA foreign_keys = ON")
+            await UserProfileStore.create_schema(db)
+            await db.commit()
+        if progress_callback:
+            progress_callback("创建用户画像、人格关系、身份审查与维护任务表", 1, 1)
+        logger.info("v10.3 -> v10.4 迁移完成")
 
     @staticmethod
     def _migration_json_object(value: Any) -> dict[str, Any]:

@@ -95,6 +95,8 @@ export class SettingsPage {
       input = `<input class="settings-page-input" data-setting-key="${esc(key)}" type="checkbox" ${value ? "checked" : ""} ${disabled}>`;
     } else if (definition.type === "select") {
       input = `<select class="select input settings-page-input" data-setting-key="${esc(key)}" ${disabled}>${(definition.options || []).map(option => `<option value="${esc(option)}" ${option === value ? "selected" : ""}>${esc(definition.option_labels?.[option] || option)}</option>`).join("")}</select>`;
+    } else if (definition.type === "string") {
+      input = `<input class="input settings-page-input" data-setting-key="${esc(key)}" type="text" value="${esc(value || "")}" ${disabled}>`;
     } else {
       input = `<input class="input settings-page-input" data-setting-key="${esc(key)}" type="number" value="${esc(value)}" min="${esc(definition.min)}" max="${esc(definition.max)}" step="${esc(definition.step || 1)}" ${disabled}>`;
     }
@@ -139,10 +141,10 @@ export class SettingsPage {
         const key = input.dataset.settingKey;
         const definition = this.data.definitions[key];
         const value = definition.type === "bool" ? input.checked
-          : definition.type === "select" ? input.value
+          : ["select", "string"].includes(definition.type) ? input.value
           : definition.type === "int" ? Number.parseInt(input.value, 10)
           : Number.parseFloat(input.value);
-        if (!["bool", "select"].includes(definition.type) && !Number.isFinite(value)) {
+        if (!["bool", "select", "string"].includes(definition.type) && !Number.isFinite(value)) {
           throw new Error(`${definition.label}: ${window.t("topic.invalidSetting")}`);
         }
         if (value === definition.default) this.resetKeys.add(key);

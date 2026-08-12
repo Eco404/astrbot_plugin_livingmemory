@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import hashlib
 import os
 import shutil
 import subprocess
@@ -526,6 +527,53 @@ class PluginInitializer:
             "rerank_provider": rerank,
         }
 
+    def resolve_user_profile_provider(self, provider_id: str = ""):
+        """Resolve the explicit profile Provider, falling back to Timeline's LLM."""
+        selected_id = str(provider_id or "").strip()
+        if selected_id:
+            candidate = self._get_provider_by_id(selected_id, silent=True)
+            if isinstance(candidate, Provider):
+                return candidate
+        return self.resolve_topic_providers().get("llm_provider")
+
+    async def resolve_user_profile_persona(
+        self, persona_id: str | None
+    ) -> dict[str, Any]:
+        normalized_id = str(persona_id or "").strip()
+        if not normalized_id:
+            return {}
+        manager = getattr(self.context, "persona_manager", None)
+        resolver = getattr(manager, "get_persona", None)
+        if not callable(resolver):
+            return {"persona_id": normalized_id, "name": normalized_id}
+        try:
+            persona = await resolver(normalized_id)
+        except Exception:
+            logger.debug(
+                "[UserProfile] 读取当前 persona 失败: %s",
+                normalized_id,
+                exc_info=True,
+            )
+            return {"persona_id": normalized_id, "name": normalized_id}
+        if isinstance(persona, dict):
+            name = persona.get("name") or normalized_id
+            prompt = persona.get("system_prompt") or ""
+        else:
+            name = getattr(persona, "name", None) or normalized_id
+            prompt = getattr(persona, "system_prompt", None) or ""
+        normalized_prompt = str(prompt).strip()
+        return {
+            "persona_id": normalized_id,
+            "name": str(name),
+            "prompt": normalized_prompt,
+            "signature": {
+                "algorithm": "sha256",
+                "digest": hashlib.sha256(
+                    normalized_prompt.encode("utf-8")
+                ).hexdigest(),
+            },
+        }
+
     def _check_faiss_runtime(self) -> None:
         try:
             result = subprocess.run(
@@ -851,6 +899,9 @@ class PluginInitializer:
                 "topic_memory_legacy_overrides": self.config_manager.get_raw_section(
                     "topic_memory"
                 ),
+                "user_profile_initial_overrides": self.config_manager.get_raw_section(
+                    "user_profile"
+                ),
             }
 
             self.memory_engine = MemoryEngine(
@@ -863,6 +914,19 @@ class PluginInitializer:
                 identity_profile_store=self.identity_profile_store,
                 topic_provider_resolver=self.resolve_topic_providers,
             )
+            if hasattr(self.memory_engine, "user_profile_provider_resolver"):
+                self.memory_engine.user_profile_provider_resolver = (
+                    self.resolve_user_profile_provider
+                )
+            if hasattr(self.memory_engine, "user_profile_persona_resolver"):
+                self.memory_engine.user_profile_persona_resolver = (
+                    self.resolve_user_profile_persona
+                )
+            profile_manager = getattr(
+                self.memory_engine, "user_profile_maintenance_manager", None
+            )
+            if profile_manager is not None:
+                profile_manager.provider_resolver = self.resolve_user_profile_provider
             await self.memory_engine.initialize()
             self.recall_trace_store = RecallTraceStore(str(db_path))
             await self.recall_trace_store.initialize()

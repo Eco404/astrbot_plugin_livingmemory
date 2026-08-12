@@ -16,7 +16,7 @@ The dashboard adapts to desktop and mobile layouts. On narrow screens, use the t
 
 ## Maintenance
 
-The bottom sidebar keeps **Settings** and **Maintenance** separate from daily browsing. Maintenance includes Topic and Timeline operations, session audit, database health, recent production recall, recall tests, and model tests.
+The bottom sidebar keeps **Settings** and **Maintenance** separate from daily browsing. Maintenance includes Topic and Timeline operations, user profiles and persona relationships, account binding and historical rebuild, session audit, database health, recent production recall, recall tests, and model tests.
 
 Long-running tasks expose stage, processed count, and state. Failed records retain a readable error and can be manually cleared.
 

@@ -2,7 +2,9 @@
 Tests for PluginInitializer state management and provider resolution.
 """
 
+import hashlib
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import astrbot_plugin_livingmemory.core.plugin_initializer as plugin_initializer_mod
@@ -31,6 +33,30 @@ def test_initializer_default_state(initializer):
     assert initializer.is_initialized is False
     assert initializer.is_failed is False
     assert initializer.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_user_profile_persona_resolver_reads_current_prompt_and_digest(
+    mock_context, tmp_path
+):
+    prompt = "你重视真诚，也保留自己的判断。"
+    mock_context.persona_manager = Mock()
+    mock_context.persona_manager.get_persona = AsyncMock(
+        return_value=SimpleNamespace(
+            name="Companion", system_prompt=f"  {prompt}\n"
+        )
+    )
+    init = PluginInitializer(mock_context, ConfigManager(), str(tmp_path))
+
+    persona = await init.resolve_user_profile_persona("persona-1")
+
+    assert persona["persona_id"] == "persona-1"
+    assert persona["name"] == "Companion"
+    assert persona["prompt"] == prompt
+    assert persona["signature"] == {
+        "algorithm": "sha256",
+        "digest": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+    }
 
 
 @pytest.mark.asyncio

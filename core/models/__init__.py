@@ -38,6 +38,16 @@ from .topic_memory import (
     TopicCandidateGroup,
     TopicFragmentDraft,
 )
+from .user_profile import (
+    UserProfileFact,
+    UserProfileFactCategory,
+    UserProfileFactSource,
+    UserProfileFactStatus,
+    UserProfileProjectionEvent,
+    UserProfileScope,
+    UserProfileTask,
+    UserRelationshipState,
+)
 
 __all__ = [
     "MemoryEvent",
@@ -73,4 +83,12 @@ __all__ = [
     "TimelineTopicCandidate",
     "TopicCandidateGroup",
     "TopicFragmentDraft",
+    "UserProfileFact",
+    "UserProfileFactCategory",
+    "UserProfileFactSource",
+    "UserProfileFactStatus",
+    "UserProfileProjectionEvent",
+    "UserProfileScope",
+    "UserProfileTask",
+    "UserRelationshipState",
 ]

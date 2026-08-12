@@ -344,6 +344,7 @@
               <button class="settings-category-tab" type="button" data-settings-category="model" role="tab" aria-selected="false" data-i18n="settings.category.model">模型</button>
               <button class="settings-category-tab" type="button" data-settings-category="index" role="tab" aria-selected="false" data-i18n="settings.category.index">索引</button>
               <button class="settings-category-tab" type="button" data-settings-category="maintenance" role="tab" aria-selected="false" data-i18n="settings.category.maintenance">维护</button>
+              <button class="settings-category-tab" type="button" data-settings-category="user_profile" role="tab" aria-selected="false" data-i18n="settings.category.userProfile">用户画像</button>
             </div>
             <div id="settings-page-status" class="text-secondary" aria-live="polite"></div>
             <div id="settings-page-content" class="settings-page-content"></div>
@@ -359,11 +360,31 @@
             <div class="maintenance-tabs" role="tablist">
               <button class="maintenance-tab active" type="button" data-maintenance-tab="topic" role="tab" aria-selected="true" data-i18n="maintenance.topicTab">Topic 维护</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="timeline-rebuild" role="tab" aria-selected="false" data-i18n="maintenance.timelineRebuildTab">Timeline 维护</button>
+              <button class="maintenance-tab" type="button" data-maintenance-tab="user-profiles" role="tab" aria-selected="false" data-i18n="profile.tab">用户画像</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="sessions" role="tab" aria-selected="false" data-i18n="maintenance.sessionsTab">会话审计</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="database" role="tab" aria-selected="false" data-i18n="maintenance.databaseTab">数据库</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="recent-recall" role="tab" aria-selected="false" data-i18n="maintenance.recentRecallTab">最近召回</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="recall" role="tab" aria-selected="false" data-i18n="nav.recall">召回测试</button>
               <button class="maintenance-tab" type="button" data-maintenance-tab="models" role="tab" aria-selected="false" data-i18n="nav.models">模型测试</button>
+            </div>
+            <div class="maintenance-panel" id="maintenance-panel-user-profiles">
+              <div class="maintenance-review-toolbar">
+                <div><h2 data-i18n="profile.title">用户画像维护</h2></div>
+                <div class="maintenance-topic-controls">
+                  <input id="user-profile-search" class="input input-sm" type="search" data-i18n-placeholder="profile.search" placeholder="昵称、平台或账号 ID">
+                  <select id="user-profile-status" class="select input input-sm">
+                    <option value="" data-i18n="profile.status.all">全部状态</option>
+                    <option value="enabled" data-i18n="profile.status.enabled">已启用</option>
+                    <option value="disabled" data-i18n="profile.status.disabled">已停用</option>
+                    <option value="deleted" data-i18n="profile.status.deleted">已删除</option>
+                  </select>
+                  <button class="btn btn-secondary btn-sm" id="user-profile-refresh" type="button" data-i18n="common.refresh">刷新</button>
+                </div>
+              </div>
+              <div class="user-profile-workspace">
+                <div class="user-profile-list" id="user-profile-list"><div class="identity-state" data-i18n="common.loading">加载中...</div></div>
+                <div class="user-profile-detail" id="user-profile-detail"><div class="identity-state" data-i18n="profile.choose">选择用户查看画像</div></div>
+              </div>
             </div>
             <div class="maintenance-panel active" id="maintenance-panel-topic">
               <div class="maintenance-memory-page-head">

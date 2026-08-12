@@ -1,12 +1,13 @@
 import { esc } from "./utils.js";
 
 export class MaintenancePage {
-  constructor(topicPage, recallPage, modelPage, showToast, confirmDialog) {
+  constructor(topicPage, recallPage, modelPage, showToast, confirmDialog, userProfileMaintenance = null) {
     this.topicPage = topicPage;
     this.recallPage = recallPage;
     this.modelPage = modelPage;
     this.showToast = showToast;
     this.confirmDialog = confirmDialog;
+    this.userProfileMaintenance = userProfileMaintenance;
     this.tab = "topic";
     this.reviewUid = null;
     this.reviewPreviewToken = "";
@@ -137,6 +138,7 @@ export class MaintenancePage {
       this.resumeDatabaseRepair();
       this.resumeDatabaseStorageMaintenance();
     }
+    if (this.tab === "user-profiles") await this.userProfileMaintenance?.activate();
   }
 
   selectTab(tab) {
@@ -164,6 +166,7 @@ export class MaintenancePage {
       if (!this.databaseHealth) this.resumeDatabaseRepair();
       if (!this.databaseStoragePreview) this.resumeDatabaseStorageMaintenance();
     }
+    if (tab === "user-profiles") this.userProfileMaintenance?.activate();
   }
 
   selectedDatabaseIssues() {

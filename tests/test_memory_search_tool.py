@@ -10,6 +10,12 @@ import pytest
 from astrbot_plugin_livingmemory.core.base.config_manager import ConfigManager
 from astrbot_plugin_livingmemory.core.retrieval.hybrid_retriever import HybridResult
 from astrbot_plugin_livingmemory.core.tools.memory_search_tool import MemorySearchTool
+from astrbot_plugin_livingmemory.core.models.user_profile import (
+    UserProfileFact,
+    UserProfileFactCategory,
+    UserProfileFactSource,
+)
+from astrbot_plugin_livingmemory.storage.user_profile_store import UserProfileStore
 
 
 @pytest.fixture
@@ -549,3 +555,96 @@ async def test_memory_search_tool_applies_temporal_constraint_and_reports_anchor
     assert result["applied_filters"]["temporal"]["mode"] == "range"
     assert result["results"][0]["matched_source_uids"] == ["timeline-7"]
     assert result["results"][0]["time_basis"] == "timeline_source_span"
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_explicitly_returns_profile_without_query(
+    tmp_path, memory_engine, astr_context
+):
+    store = UserProfileStore(str(tmp_path / "tool-profile.db"))
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="qq:human:user-1",
+        bot_account="test",
+        persona_id="persona_a",
+    )
+    assert scope is not None
+    source = UserProfileFactSource(
+        timeline_uid="timeline-profile",
+        timeline_revision=1,
+        fact_index=0,
+        raw_fact="用户喜欢简洁回答",
+        actor_id="qq:human:user-1",
+    )
+    await store.save_fact_sources([source])
+    fact = UserProfileFact(
+        fact_namespace_uid=scope.fact_namespace_uid,
+        category=UserProfileFactCategory.COMMUNICATION_PREFERENCE,
+        representative_source_uid=source.source_uid,
+        pinned=True,
+    )
+    await store.publish_fact_changes(
+        fact_namespace_uid=scope.fact_namespace_uid,
+        upserts=[fact],
+        source_assignments={source.source_uid: fact.profile_fact_uid},
+    )
+    memory_engine.user_profile_store = store
+    memory_engine.user_profile_config = {}
+    memory_engine.resolve_session_scope = AsyncMock(
+        return_value=["test:private:session-1"]
+    )
+    run_context = _make_run_context()
+    run_context.context.event.get_sender_id = Mock(return_value="user-1")
+    run_context.context.event.get_platform_name = Mock(return_value="qq")
+    tool = MemorySearchTool(
+        context=astr_context,
+        config_manager=ConfigManager(),
+        memory_engine=memory_engine,
+    )
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.tools.memory_search_tool.get_persona_id",
+        new=AsyncMock(return_value="persona_a"),
+    ):
+        raw_result = await tool.call(
+            run_context, query="", include_user_profile=True
+        )
+
+    result = json.loads(raw_result)
+    assert result["count"] == 0
+    assert result["user_profile"]["status"] == "available"
+    assert "用户喜欢简洁回答" in result["user_profile"]["content"]
+    memory_engine.search_memories.assert_not_awaited()
+    memory_engine.record_memory_access.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_memory_search_tool_profile_rejects_group_context(
+    tmp_path, memory_engine, astr_context
+):
+    store = UserProfileStore(str(tmp_path / "tool-profile-group.db"))
+    await store.initialize()
+    memory_engine.user_profile_store = store
+    memory_engine.user_profile_config = {}
+    memory_engine.resolve_session_scope = AsyncMock(return_value=["test:group:room-1"])
+    run_context = _make_run_context()
+    run_context.context.event.unified_msg_origin = "test:group:room-1"
+    run_context.context.event.get_sender_id = Mock(return_value="user-1")
+    run_context.context.event.get_platform_name = Mock(return_value="qq")
+    tool = MemorySearchTool(
+        context=astr_context,
+        config_manager=ConfigManager(),
+        memory_engine=memory_engine,
+    )
+
+    with patch(
+        "astrbot_plugin_livingmemory.core.tools.memory_search_tool.get_persona_id",
+        new=AsyncMock(return_value="persona_a"),
+    ):
+        raw_result = await tool.call(
+            run_context, query="", include_user_profile=True
+        )
+
+    result = json.loads(raw_result)
+    assert result["user_profile"]["status"] == "private_chat_required"
+    assert result["user_profile"]["content"] == ""

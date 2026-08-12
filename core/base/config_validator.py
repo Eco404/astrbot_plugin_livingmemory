@@ -172,6 +172,14 @@ class ProviderConfig(BaseModel):
     )
 
 
+class UserProfileConfig(BaseModel):
+    """Bootstrap settings mirrored by AstrBot's native plugin config."""
+
+    enabled: bool = True
+    relationship_enabled: bool = True
+    provider_id: str = ""
+
+
 class TopicMemoryConfig(BaseModel):
     """Automatically maintained derived Topic-memory settings."""
 
@@ -365,6 +373,7 @@ class LivingMemoryConfig(BaseModel):
     filtering_settings: FilteringConfig = Field(default_factory=FilteringConfig)
     provider_settings: ProviderConfig = Field(default_factory=ProviderConfig)
     topic_memory: TopicMemoryConfig = Field(default_factory=TopicMemoryConfig)
+    user_profile: UserProfileConfig = Field(default_factory=UserProfileConfig)
     cloudflare_rerank: CloudflareRerankConfig = Field(
         default_factory=CloudflareRerankConfig
     )
