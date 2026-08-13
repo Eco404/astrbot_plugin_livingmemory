@@ -144,6 +144,37 @@ async def test_pinned_fact_remains_current_after_review_deadline(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_layered_concrete_example_requires_query_relevance_during_fixed_period(
+    tmp_path,
+):
+    store, scope = await _profile_store(tmp_path)
+    await _publish_fact(
+        store,
+        scope,
+        text="用户最近沉迷于三体",
+        category=UserProfileFactCategory.PREFERENCE,
+        fixed_injection_until=time.time() + 86400,
+        metadata={"statement_kind": "concrete_example"},
+    )
+
+    unrelated = await UserProfileInjectionService(store, {}).render_current_user(
+        session_id="bot:private:user-1",
+        persona_id="persona",
+        actor_id="qq:human:user-1",
+        query="今天几点下班",
+    )
+    relevant = await UserProfileInjectionService(store, {}).render_current_user(
+        session_id="bot:private:user-1",
+        persona_id="persona",
+        actor_id="qq:human:user-1",
+        query="最近还在看三体吗",
+    )
+
+    assert unrelated.status == "empty_profile"
+    assert "三体" in relevant.content
+
+
+@pytest.mark.asyncio
 async def test_compact_snapshot_hard_budget_and_relationship_rendering(tmp_path):
     store, scope = await _profile_store(tmp_path)
     for index in range(10):

@@ -23,6 +23,7 @@ from .user_profile_fact_maintainer import (
     UserProfileFactMaintainer,
     UserProfileFactMaintenancePlan,
 )
+from .user_profile_behavior_synthesizer import UserProfileBehaviorSynthesizer
 from .user_relationship_maintainer import UserRelationshipMaintainer
 
 
@@ -52,6 +53,7 @@ class UserProfileMaintenanceManager:
         self.persona_resolver = persona_resolver
         self.config = dict(config or {})
         self.fact_maintainer = UserProfileFactMaintainer(provider)
+        self.behavior_synthesizer = UserProfileBehaviorSynthesizer()
         self.relationship_maintainer = UserRelationshipMaintainer(provider)
         self._scope_locks: dict[str, asyncio.Lock] = {}
         self._namespace_locks: dict[str, asyncio.Lock] = {}
@@ -638,6 +640,10 @@ class UserProfileMaintenanceManager:
                 )
             ),
         )
+        legacy_limit = max(
+            1,
+            int(settings.get("user_profile.legacy_review_batch_candidate_limit", 64)),
+        )
         prompt_limit = max(
             4000,
             int(settings.get("user_profile.maintenance_prompt_max_chars", 16000)),
@@ -664,14 +670,31 @@ class UserProfileMaintenanceManager:
                         )
                     ),
                 )
-            proposed_candidates = [*candidates, *sources]
+            behavior = [
+                source
+                for source in sources
+                if str(source.metadata.get("profile_signal") or "")
+                in {"behavior_evidence", "behavior_pattern"}
+            ]
+            proposed_candidates, proposed_legacy_groups = (
+                self.fact_maintainer.group_legacy_candidates(
+                    [*candidates, *[source for source in sources if source not in behavior]]
+                )
+            )
+            ordinary_count = sum(
+                1
+                for source in proposed_candidates
+                if not self.fact_maintainer._is_legacy_summary_source(source)
+            )
+            legacy_count = len(proposed_legacy_groups)
             proposed_prompt_chars = len(
                 self.fact_maintainer._build_prompt(
                     proposed_candidates, [], [], settings
                 )
             )
             exceeds = (
-                len(proposed_candidates) > candidate_limit
+                ordinary_count > candidate_limit
+                or legacy_count > legacy_limit
                 or proposed_prompt_chars > prompt_limit
             )
             if selected and exceeds:
@@ -685,6 +708,7 @@ class UserProfileMaintenanceManager:
             "batch_candidate_count": len(candidates),
             "batch_prompt_estimate_chars": prompt_chars,
             "batch_candidate_limit": candidate_limit,
+            "batch_legacy_candidate_limit": legacy_limit,
             "batch_prompt_target_chars": prompt_limit,
             "batch_was_bounded": len(selected) < len(events),
             "projection_mode": selected_mode or "incremental",
@@ -738,11 +762,27 @@ class UserProfileMaintenanceManager:
                 status=str(task.get("status") or "pending"),
                 result_summary=result_summary,
             )
+        if result_summary.get("facts_checkpoint") and not result_summary.get(
+            "behavior_checkpoint"
+        ) and result_summary.get("relationship_checkpoint"):
+            # Development tasks produced before behavior had an independent
+            # checkpoint need one synthesis pass before relationship serving.
+            result_summary = {
+                key: value
+                for key, value in result_summary.items()
+                if not key.startswith("relationship_")
+            }
+            await self.store.update_task(
+                task_uid,
+                status=str(task.get("status") or "pending"),
+                result_summary=result_summary,
+            )
         selected_provider = provider or self._resolve_provider()
         result_summary["automatic_retry_pending"] = False
         result_summary.pop("failed_stage", None)
         result_summary.pop("request_elapsed_seconds", None)
         fact_error: Exception | None = None
+        behavior_error: Exception | None = None
         relationship_error: Exception | None = None
 
         if not result_summary.get("facts_checkpoint"):
@@ -790,6 +830,52 @@ class UserProfileMaintenanceManager:
             return False
 
         if result_summary.get("facts_checkpoint") and not result_summary.get(
+            "behavior_checkpoint"
+        ):
+            started = time.monotonic()
+            try:
+                namespace_lock = self._namespace_locks.setdefault(
+                    str(scope.fact_namespace_uid), asyncio.Lock()
+                )
+                async with namespace_lock:
+                    behavior_result = await self._run_behavior_stage(
+                        task=task,
+                        scope=scope,
+                        settings=settings,
+                        provider=selected_provider,
+                    )
+                result_summary.update(behavior_result)
+                result_summary.pop("behavior_error", None)
+                result_summary["behavior_elapsed_seconds"] = round(
+                    time.monotonic() - started, 3
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                behavior_error = exc
+                result_summary["behavior_error"] = str(exc)[:4000]
+                result_summary["request_elapsed_seconds"] = round(
+                    time.monotonic() - started, 3
+                )
+                logger.error(
+                    "[UserProfile] 行为归纳失败 (scope=%s, task=%s): %s",
+                    scope_uid,
+                    task_uid,
+                    exc,
+                    exc_info=True,
+                )
+
+        if behavior_error is not None:
+            await self._record_task_failure(
+                task=task,
+                settings=settings,
+                result_summary=result_summary,
+                stage="behavior",
+                error=behavior_error,
+            )
+            return False
+
+        if result_summary.get("behavior_checkpoint") and not result_summary.get(
             "relationship_checkpoint"
         ):
             started = time.monotonic()
@@ -871,7 +957,7 @@ class UserProfileMaintenanceManager:
         will_retry = retries <= retry_limit
         status = (
             "facts_failed"
-            if will_retry and stage == "facts"
+            if will_retry and stage in {"facts", "behavior"}
             else "facts_completed"
             if will_retry
             else "failed"
@@ -924,7 +1010,7 @@ class UserProfileMaintenanceManager:
             return result
         await self.store.update_task(task_uid, status="running_facts")
         projections: list[dict[str, Any]] = []
-        candidates = []
+        extracted_candidates = []
         for event in self._normalized_task_events(task):
             event_payload = event["payload"]
             operation = event["operation"]
@@ -948,7 +1034,20 @@ class UserProfileMaintenanceManager:
                     "sources": sources,
                 }
             )
-            candidates.extend(sources)
+            extracted_candidates.extend(sources)
+
+        behavior_sources = [
+            source
+            for source in extracted_candidates
+            if str(source.metadata.get("profile_signal") or "")
+            in {"behavior_evidence", "behavior_pattern"}
+        ]
+        candidates = [
+            source for source in extracted_candidates if source not in behavior_sources
+        ]
+        candidates, legacy_groups = self.fact_maintainer.group_legacy_candidates(
+            candidates
+        )
 
         existing = await self.store.list_facts_for_maintenance(
             scope.fact_namespace_uid,
@@ -957,38 +1056,48 @@ class UserProfileMaintenanceManager:
                 settings.get("user_profile.fact_maintenance_context_limit", 200)
             ),
         )
-        needs_behavior_history = any(
-            str(candidate.metadata.get("profile_signal") or "")
-            == "behavior_pattern"
-            for candidate in candidates
-        )
-        supporting_evidence = (
-            await self.store.list_unassigned_behavior_evidence(
-                scope.profile_scope_uid,
-                limit=int(settings["user_profile.behavior_evidence_pool_limit"]),
-                retention_days=int(settings["user_profile.pending_retention_days"]),
+        legacy_preassignments: dict[str, str] = {}
+        unmatched_candidates = []
+        for candidate in candidates:
+            if not self.fact_maintainer._is_legacy_summary_source(candidate):
+                unmatched_candidates.append(candidate)
+                continue
+            target_uid = self.fact_maintainer.match_legacy_pending_fact(
+                candidate, existing
             )
-            if needs_behavior_history
-            else []
-        )
-        supporting_evidence = [
-            source
-            for source in supporting_evidence
-            if source.source_uid not in {candidate.source_uid for candidate in candidates}
-            and not self.fact_maintainer.is_security_secret(source.raw_fact)
-        ]
+            if not target_uid:
+                unmatched_candidates.append(candidate)
+                continue
+            for source in legacy_groups.get(candidate.source_uid, [candidate]):
+                legacy_preassignments[source.source_uid] = target_uid
+        candidates = unmatched_candidates
         if candidates:
             plan = await self.fact_maintainer.maintain(
                 fact_namespace_uid=scope.fact_namespace_uid,
                 candidates=candidates,
-                supporting_evidence=supporting_evidence,
+                supporting_evidence=[],
                 existing_facts=existing,
                 settings=settings,
                 provider=provider,
             )
         else:
             plan = UserProfileFactMaintenancePlan()
-        self._apply_lifecycle(plan, [*candidates, *supporting_evidence], settings)
+        plan.source_assignments.update(legacy_preassignments)
+        for representative_uid, group in legacy_groups.items():
+            target_uid = plan.source_assignments.get(representative_uid)
+            if not target_uid:
+                continue
+            for source in group:
+                plan.source_assignments[source.source_uid] = target_uid
+        if legacy_groups:
+            plan.diagnostics.update(
+                {
+                    "legacy_source_count": sum(len(group) for group in legacy_groups.values()),
+                    "legacy_group_count": len(legacy_groups),
+                    "legacy_preassigned_source_count": len(legacy_preassignments),
+                }
+            )
+        self._apply_lifecycle(plan, candidates, settings)
         expected_revision = await self.store.get_fact_namespace_revision(
             scope.fact_namespace_uid
         )
@@ -1005,6 +1114,7 @@ class UserProfileMaintenanceManager:
             "facts_checkpoint": True,
             "fact_revision": fact_revision,
             "fact_diagnostics": plan.diagnostics,
+            "behavior_sources_collected": len(behavior_sources),
         }
         await self.store.update_task_items(
             task_uid,
@@ -1021,6 +1131,150 @@ class UserProfileMaintenanceManager:
             },
         )
         return result
+
+    async def _run_behavior_stage(
+        self,
+        *,
+        task: dict[str, Any],
+        scope: Any,
+        settings: dict[str, Any],
+        provider: Any,
+    ) -> dict[str, Any]:
+        task_uid = str(task["task_uid"])
+        current = await self.store.get_task(task_uid)
+        await self.store.update_task(
+            task_uid,
+            status="running_behavior",
+            result_summary=dict((current or task).get("result_summary") or {}),
+        )
+        behavior_result = await self._run_behavior_synthesis(
+            task=task,
+            scope=scope,
+            settings=settings,
+            provider=provider,
+        )
+        result = {
+            "behavior_checkpoint": True,
+            "behavior_diagnostics": behavior_result,
+        }
+        if behavior_result.get("fact_revision") is not None:
+            result["fact_revision"] = int(behavior_result["fact_revision"])
+        current = await self.store.get_task(task_uid)
+        await self.store.update_task(
+            task_uid,
+            status="facts_completed",
+            result_summary={
+                **dict((current or task).get("result_summary") or {}),
+                **result,
+            },
+        )
+        return result
+
+    async def _run_behavior_synthesis(
+        self,
+        *,
+        task: dict[str, Any],
+        scope: Any,
+        settings: dict[str, Any],
+        provider: Any,
+    ) -> dict[str, Any]:
+        evidence = await self.store.list_unassigned_behavior_evidence(
+            scope.profile_scope_uid,
+            limit=int(settings["user_profile.behavior_evidence_pool_limit"]),
+            retention_days=int(settings["user_profile.pending_retention_days"]),
+            include_assigned_patterns=True,
+        )
+        evidence = self.behavior_synthesizer.eligible_evidence(evidence)
+        source_uids = [item.source_uid for item in evidence]
+        fingerprint = self.behavior_synthesizer.evidence_fingerprint(evidence)
+        projection_mode = self._task_projection_mode(task)
+        final_history_batch = False
+        if projection_mode == "history_rebuild":
+            final_history_batch = not bool(
+                await self.store.count_pending_projection_events(
+                    scope.profile_scope_uid,
+                    projection_mode="history_rebuild",
+                )
+            )
+        previous_uids = set(scope.behavior_synthesis_evidence_uids or [])
+        new_evidence_count = len(set(source_uids) - previous_uids)
+        elapsed_hours = (
+            (time.time() - float(scope.behavior_synthesis_last_at)) / 3600.0
+            if scope.behavior_synthesis_last_at is not None
+            else float("inf")
+        )
+        minimum_new = int(
+            settings.get("user_profile.behavior_synthesis_min_new_evidence", 3)
+        )
+        cooldown = float(
+            settings.get("user_profile.behavior_synthesis_cooldown_hours", 24)
+        )
+        should_run = bool(evidence) and (
+            final_history_batch
+            or (
+                projection_mode != "history_rebuild"
+                and new_evidence_count >= minimum_new
+                and elapsed_hours >= cooldown
+            )
+        )
+        diagnostics: dict[str, Any] = {
+            "eligible_evidence_count": len(evidence),
+            "new_evidence_count": new_evidence_count,
+            "final_history_batch": final_history_batch,
+            "model_called": False,
+        }
+        if not should_run:
+            diagnostics["skipped"] = (
+                "history_rebuild_deferred"
+                if projection_mode == "history_rebuild" and not final_history_batch
+                else "trigger_threshold_or_cooldown"
+            )
+            return diagnostics
+
+        existing = await self.store.list_facts_for_maintenance(
+            scope.fact_namespace_uid,
+            statuses=("conflict", "active", "pending", "stale"),
+            limit=int(settings.get("user_profile.fact_maintenance_context_limit", 200)),
+        )
+        synthesis = await self.behavior_synthesizer.synthesize(
+            fact_namespace_uid=scope.fact_namespace_uid,
+            evidence=evidence,
+            existing_facts=existing,
+            settings=settings,
+            provider=provider,
+        )
+        self._apply_lifecycle(synthesis, evidence, settings)
+        if synthesis.facts or synthesis.source_assignments or synthesis.conflicts:
+            fact_revision = await self.store.apply_fact_projection_batch(
+                fact_namespace_uid=scope.fact_namespace_uid,
+                projections=[],
+                facts=synthesis.facts,
+                source_assignments=synthesis.source_assignments,
+                conflicts=synthesis.conflicts,
+                expected_revision=await self.store.get_fact_namespace_revision(
+                    scope.fact_namespace_uid
+                ),
+            )
+            diagnostics["fact_revision"] = fact_revision
+        remaining = await self.store.list_unassigned_behavior_evidence(
+            scope.profile_scope_uid,
+            limit=int(settings["user_profile.behavior_evidence_pool_limit"]),
+            retention_days=int(settings["user_profile.pending_retention_days"]),
+            include_assigned_patterns=True,
+        )
+        remaining = self.behavior_synthesizer.eligible_evidence(remaining)
+        await self.store.set_scope_state(
+            scope.profile_scope_uid,
+            behavior_synthesis_last_at=time.time(),
+            behavior_synthesis_evidence_fingerprint=(
+                self.behavior_synthesizer.evidence_fingerprint(remaining)
+            ),
+            behavior_synthesis_evidence_uids=[item.source_uid for item in remaining],
+        )
+        diagnostics.update(synthesis.diagnostics)
+        diagnostics["evidence_fingerprint"] = fingerprint
+        diagnostics["tracked_evidence_count"] = len(remaining)
+        return diagnostics
 
     async def _run_relationship_stage(
         self,

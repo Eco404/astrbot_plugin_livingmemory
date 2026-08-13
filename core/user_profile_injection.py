@@ -209,14 +209,30 @@ class UserProfileInjectionService:
             if category not in _CATEGORY_GROUPS:
                 continue
             sensitive = bool(fact.get("sensitive"))
+            display_text = str(
+                fact.get("display_text")
+                or fact.get("derived_claim")
+                or fact.get("raw_fact")
+                or ""
+            )
             relevance = (
                 0.0
                 if mode == "compact_snapshot"
-                else self._relevance(str(fact.get("raw_fact") or ""), query)
+                else self._relevance(display_text, query)
             )
-            is_fixed = bool(fact.get("pinned")) or category == "stable_info" or (
-                fact.get("fixed_injection_until") is not None
-                and float(fact["fixed_injection_until"]) > now
+            concrete_example = (
+                str((fact.get("metadata") or {}).get("statement_kind") or "")
+                == "concrete_example"
+            )
+            is_fixed = bool(fact.get("pinned")) or (
+                not concrete_example
+                and (
+                    category == "stable_info"
+                    or (
+                        fact.get("fixed_injection_until") is not None
+                        and float(fact["fixed_injection_until"]) > now
+                    )
+                )
             )
             if mode == "layered" and (sensitive or not is_fixed) and relevance <= 0:
                 continue
@@ -236,7 +252,14 @@ class UserProfileInjectionService:
 
         grouped: dict[str, list[str]] = {name: [] for name in _GROUP_ORDER}
         for _score, fact in candidates:
-            raw = " ".join(str(fact.get("raw_fact") or "").split())
+            raw = " ".join(
+                str(
+                    fact.get("display_text")
+                    or fact.get("derived_claim")
+                    or fact.get("raw_fact")
+                    or ""
+                ).split()
+            )
             if not raw:
                 continue
             grouped[_CATEGORY_GROUPS[str(fact.get("category"))]].append(

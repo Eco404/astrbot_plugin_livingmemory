@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-USER_PROFILE_SETTINGS_REVISION = 6
+USER_PROFILE_SETTINGS_REVISION = 8
 
 
 def _setting(
@@ -52,6 +53,15 @@ USER_PROFILE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "user_profile.behavior_inference_min_span_days": _setting(14, "int", "inference", "行为证据最小跨度", "普通行为推断证据必须覆盖的天数。", min=1, max=365),
     "user_profile.behavior_inference_min_confidence": _setting(0.85, "float", "inference", "行为推断置信度", "普通行为推断所需的最低综合置信度。", min=0.0, max=1.0, step=0.01),
     "user_profile.behavior_evidence_pool_limit": _setting(128, "int", "inference", "跨批行为证据上限", "每次维护最多提供给模型的历史未归纳行为证据数；证据保留期限沿用候选保留天数。", min=10, max=1000),
+    "user_profile.behavior_candidate_cluster_limit": _setting(12, "int", "inference", "行为候选簇上限", "行为发现阶段一次最多保留的候选规律数；最终发布仍需通过独立 Timeline、跨度、置信度和画像价值硬阈值。", min=1, max=50),
+    "user_profile.behavior_cluster_evidence_limit": _setting(24, "int", "inference", "单个行为簇证据上限", "单个候选规律在语义补证后最多保留的来源数，防止宽泛候选挤占判定上下文。", min=3, max=128),
+    "user_profile.behavior_cluster_time_tolerance_minutes": _setting(120, "int", "inference", "行为补证时刻容差", "时间型行为候选仅共享一个语义锚点时，观察时刻与原簇允许相差的分钟数；只用于补充候选，不改变发布硬阈值。", min=15, max=720),
+    "user_profile.behavior_temporal_candidate_limit": _setting(4, "int", "inference", "时间规律候选上限", "每次行为综合最多增加的确定性时间邻域候选数；候选只提高召回，仍需模型与全部发布硬阈值判定。", min=0, max=20),
+    "user_profile.behavior_evidence_timezone": _setting("Asia/Shanghai", "string", "inference", "行为证据时区", "将消息证据时间转换为模型可读时间时使用的 IANA 时区，例如 Asia/Shanghai；事实正文与原始时间戳不会被改写。"),
+    "user_profile.behavior_synthesis_min_new_evidence": _setting(3, "int", "inference", "触发归纳的新增证据", "增量维护中，至少积累多少条新的未归纳行为证据才调用模型；历史重建末批不受此限制。", min=1, max=100),
+    "user_profile.behavior_synthesis_cooldown_hours": _setting(24, "int", "inference", "行为归纳冷却时间", "两次增量行为归纳之间的最短小时数，避免短时间内反复请求；历史重建末批不受此限制。", min=0, max=720),
+    "user_profile.behavior_derived_claim_max_chars": _setting(120, "int", "inference", "行为归纳文本上限", "模型形成的单条习惯或交流偏好结论的最大字符数。", min=20, max=500),
+    "user_profile.legacy_review_batch_candidate_limit": _setting(64, "int", "fact_admission", "旧摘要单批候选上限", "旧版摘要经过保守去重后，单批最多交给模型复核的候选组数；不占用消息级普通事实候选额度。", min=1, max=512),
     "user_profile.sensitive_behavior_inference_enabled": _setting(False, "bool", "inference", "允许敏感行为推断", "允许根据多条行为证据推断敏感画像；安全秘密始终禁止。"),
     "user_profile.sensitive_inference_min_timelines": _setting(3, "int", "inference", "敏感推断最少 Timeline", "敏感行为推断所需的独立 Timeline 数。", min=2, max=20, visible_when={"key": "user_profile.sensitive_behavior_inference_enabled", "equals": True}),
     "user_profile.sensitive_inference_min_span_days": _setting(14, "int", "inference", "敏感证据最小跨度", "敏感行为推断证据必须覆盖的天数。", min=1, max=3650, visible_when={"key": "user_profile.sensitive_behavior_inference_enabled", "equals": True}),
@@ -144,6 +154,10 @@ def effective_user_profile_settings(
 
 
 def validate_user_profile_settings(values: dict[str, Any]) -> None:
+    try:
+        ZoneInfo(str(values["user_profile.behavior_evidence_timezone"]))
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError("行为证据时区必须是有效的 IANA 时区") from None
     if int(values["user_profile.relationship_reserved_chars"]) > int(
         values["user_profile.injection_max_chars"]
     ):

@@ -72,6 +72,7 @@ class UserProfileTaskStatus(str, Enum):
     RUNNING_FACTS = "running_facts"
     FACTS_COMPLETED = "facts_completed"
     FACTS_FAILED = "facts_failed"
+    RUNNING_BEHAVIOR = "running_behavior"
     RUNNING_RELATIONSHIP = "running_relationship"
     COMPLETED = "completed"
     COMPLETED_PARTIAL = "completed_partial"
@@ -123,6 +124,9 @@ class UserProfileScope:
     relationship_reset_after: float | None = None
     relationship_sensitivity_override: str | None = None
     relationship_behavior_override: str | None = None
+    behavior_synthesis_last_at: float | None = None
+    behavior_synthesis_evidence_fingerprint: str = ""
+    behavior_synthesis_evidence_uids: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -167,6 +171,7 @@ class UserProfileFact:
     fact_namespace_uid: str
     category: UserProfileFactCategory | str
     representative_source_uid: str
+    derived_claim: str | None = None
     profile_fact_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
     status: UserProfileFactStatus | str = UserProfileFactStatus.ACTIVE
     confidence: float = 0.85

@@ -313,7 +313,7 @@ export class UserProfileMaintenance {
       if (Number.isFinite(supplied)) return Math.max(0, Math.min(100, supplied));
     }
     const status = String(task?.status || "pending");
-    return ({ pending: 5, running_facts: 25, facts_completed: 50, facts_failed: 50, running_relationship: 75, completed: 100, completed_partial: 100, failed: 100, cancelled: 100 })[status] ?? 0;
+    return ({ pending: 5, running_facts: 20, facts_completed: 40, facts_failed: 40, running_behavior: 55, running_relationship: 75, completed: 100, completed_partial: 100, failed: 100, cancelled: 100 })[status] ?? 0;
   }
 
   taskStageLabel(task) {
@@ -334,7 +334,7 @@ export class UserProfileMaintenance {
 
   taskElapsed(task) {
     const stored = Number(task?.request_elapsed_seconds || task?.relationship_elapsed_seconds || task?.facts_elapsed_seconds || 0);
-    const running = ["running_facts", "running_relationship"].includes(String(task?.status || ""));
+    const running = ["running_facts", "running_behavior", "running_relationship"].includes(String(task?.status || ""));
     const live = running && Number(task?.updated_at || 0) > 0 ? Math.max(0, Date.now() / 1000 - Number(task.updated_at)) : 0;
     const seconds = Math.round(Math.max(stored, live));
     if (!seconds) return "";
@@ -353,7 +353,7 @@ export class UserProfileMaintenance {
     let progress = displayed ? this.taskProgress(displayed) : 5;
     let label = displayed ? this.taskStageLabel(displayed) : window.t("profile.taskStatus.pending");
     let meta = displayed
-      ? window.t("profile.taskProgress", Math.round(progress), Number(displayed.completed_stage_count || 0), Number(displayed.total_stage_count || 2), Number(displayed.total_count || displayed.items?.length || 0))
+      ? window.t("profile.taskProgress", Math.round(progress), Number(displayed.completed_stage_count || 0), Number(displayed.total_stage_count || 3), Number(displayed.total_count || displayed.items?.length || 0))
       : window.t("profile.taskWaiting", pendingCount);
     const details = displayed ? [this.taskBatchMeta(displayed), this.taskElapsed(displayed)].filter(Boolean).join(" · ") : "";
     let indeterminate = false;
@@ -488,7 +488,7 @@ export class UserProfileMaintenance {
         ${fact.status !== "excluded" ? `<button class="btn btn-danger btn-sm" data-fact-action="exclude" data-fact-uid="${esc(fact.profile_fact_uid)}">${esc(window.t("profile.excludeFact"))}</button>` : ""}
       </div>` : "";
       return `<div class="user-profile-fact">
-        <div class="user-profile-fact-main"><span class="status-badge">${esc(window.t(`profile.category.${fact.category}`))}</span><strong>${esc(fact.raw_fact || "")}</strong><small>${esc(window.t(`profile.factStatus.${fact.status}`))} · ${Math.round(Number(fact.confidence || 0) * 100)}% · ${Math.round(Number(fact.importance || 0) * 100)}%</small></div>
+        <div class="user-profile-fact-main"><span class="status-badge">${esc(window.t(`profile.category.${fact.category}`))}</span><strong>${esc(fact.display_text || fact.raw_fact || "")}</strong><small>${esc(window.t(`profile.factStatus.${fact.status}`))} · ${Math.round(Number(fact.confidence || 0) * 100)}% · ${Math.round(Number(fact.importance || 0) * 100)}%${fact.inference_kind === "behavioral_inference" ? ` · ${esc(window.t("profile.derivedPattern"))} · ${Number(fact.sources?.length || 0)} ${esc(window.t("profile.sourcesShort"))}` : ""}</small></div>
         ${source ? `<a class="user-profile-source" href="#" data-open-timeline="${esc(source.timeline_uid)}">${esc(source.timeline_uid)} r${Number(source.timeline_revision || 1)}</a>` : ""}
         ${controls}
       </div>`;
@@ -503,7 +503,7 @@ export class UserProfileMaintenance {
     return `<details class="user-profile-section user-profile-disclosure user-profile-conflict-section" open><summary><span>${esc(window.t("profile.conflicts"))}</span><small>${open.length}</small></summary>${open.map(conflict => `<div class="user-profile-conflict">
       <strong>${esc(conflict.conflict_key || conflict.conflict_uid)}</strong>
       <p>${esc(conflict.resolution_reason || "")}</p>
-      <div class="user-profile-conflict-options">${(conflict.fact_uids || []).map(uid => `<button class="btn btn-secondary btn-sm" data-conflict-action="select" data-conflict-uid="${esc(conflict.conflict_uid)}" data-fact-uid="${esc(uid)}">${esc(facts.get(uid)?.raw_fact || uid)}</button>`).join("")}</div>
+      <div class="user-profile-conflict-options">${(conflict.fact_uids || []).map(uid => `<button class="btn btn-secondary btn-sm" data-conflict-action="select" data-conflict-uid="${esc(conflict.conflict_uid)}" data-fact-uid="${esc(uid)}">${esc(facts.get(uid)?.display_text || facts.get(uid)?.raw_fact || uid)}</button>`).join("")}</div>
       <div class="user-profile-fact-actions"><button class="btn btn-secondary btn-sm" data-conflict-action="pause" data-conflict-uid="${esc(conflict.conflict_uid)}">${esc(window.t("profile.keepPaused"))}</button><button class="btn btn-danger btn-sm" data-conflict-action="exclude" data-conflict-uid="${esc(conflict.conflict_uid)}">${esc(window.t("profile.excludeConflict"))}</button></div>
     </div>`).join("")}</details>`;
   }

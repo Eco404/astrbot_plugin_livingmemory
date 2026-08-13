@@ -54,29 +54,38 @@ class UserProfileHandler:
         ]
         summary = dict(result.get("result_summary") or {})
         status = str(result.get("status") or "pending")
-        completed_stages = int(bool(summary.get("facts_checkpoint"))) + int(
-            bool(summary.get("relationship_checkpoint"))
+        completed_stages = sum(
+            int(bool(summary.get(key)))
+            for key in (
+                "facts_checkpoint",
+                "behavior_checkpoint",
+                "relationship_checkpoint",
+            )
         )
-        progress = completed_stages * 50
+        progress = int(completed_stages / 3 * 100)
         if status == "running_facts":
             progress = max(progress, 20)
         elif status == "facts_failed":
             progress = max(progress, 25)
         elif status == "facts_completed":
-            progress = max(progress, 50)
+            progress = max(progress, 34)
             if summary.get("relationship_error"):
                 progress = max(progress, 75)
+        elif status == "running_behavior":
+            progress = max(progress, 50)
         elif status == "running_relationship":
             progress = max(progress, 75)
         elif status in {"completed", "completed_partial"}:
             progress = 100
         elif status == "failed" and summary.get("failed_stage") == "relationship":
             progress = max(progress, 75)
+        elif status == "failed" and summary.get("failed_stage") == "behavior":
+            progress = max(progress, 50)
         elif status == "failed" and summary.get("failed_stage") == "facts":
             progress = max(progress, 25)
         result["stage"] = status
         result["completed_stage_count"] = completed_stages
-        result["total_stage_count"] = 2
+        result["total_stage_count"] = 3
         result["progress_percent"] = max(0, min(100, progress))
         result["total_count"] = len(items)
         for key in (
@@ -86,6 +95,7 @@ class UserProfileHandler:
             "batch_candidate_limit",
             "batch_prompt_target_chars",
             "facts_elapsed_seconds",
+            "behavior_elapsed_seconds",
             "relationship_elapsed_seconds",
             "request_elapsed_seconds",
             "failed_stage",

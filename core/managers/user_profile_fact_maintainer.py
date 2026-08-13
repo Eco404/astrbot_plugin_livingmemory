@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Iterable
@@ -137,6 +138,71 @@ class UserProfileFactMaintainer:
                     limit=correction_limit,
                 )
         raise RuntimeError("unreachable fact-maintenance correction state")
+
+    @classmethod
+    def group_legacy_candidates(
+        cls, candidates: Iterable[UserProfileFactSource]
+    ) -> tuple[list[UserProfileFactSource], dict[str, list[UserProfileFactSource]]]:
+        """Collapse only deterministic legacy duplicates while retaining provenance."""
+        ordinary: list[UserProfileFactSource] = []
+        legacy: list[UserProfileFactSource] = []
+        for source in candidates:
+            (legacy if cls._is_legacy_summary_source(source) else ordinary).append(source)
+        groups: list[list[UserProfileFactSource]] = []
+        for source in legacy:
+            normalized = cls._legacy_normalized_text(source.raw_fact)
+            target = None
+            for group in groups:
+                representative = cls._legacy_normalized_text(group[0].raw_fact)
+                shorter, longer = sorted((normalized, representative), key=len)
+                # Containment is accepted only for a substantial complete claim;
+                # this avoids merging terse but semantically distinct fragments.
+                if normalized == representative or (
+                    len(shorter) >= 12 and shorter in longer
+                ):
+                    target = group
+                    break
+            if target is None:
+                groups.append([source])
+            else:
+                target.append(source)
+        representatives: list[UserProfileFactSource] = []
+        grouped: dict[str, list[UserProfileFactSource]] = {}
+        for group in groups:
+            representative = max(
+                group,
+                key=lambda item: (
+                    len(cls._legacy_normalized_text(item.raw_fact)),
+                    item.evidence_ended_at or item.updated_at,
+                ),
+            )
+            representatives.append(representative)
+            grouped[representative.source_uid] = group
+        return [*ordinary, *representatives], grouped
+
+    @staticmethod
+    def _legacy_normalized_text(value: str) -> str:
+        normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        return re.sub(r"[\W_]+", "", normalized, flags=re.UNICODE)
+
+    @classmethod
+    def match_legacy_pending_fact(
+        cls, source: UserProfileFactSource, existing_facts: Iterable[dict[str, Any]]
+    ) -> str | None:
+        candidate = cls._legacy_normalized_text(source.raw_fact)
+        for fact in existing_facts:
+            metadata = fact.get("metadata") or {}
+            if (
+                str(fact.get("status") or "") != "pending"
+                or str(metadata.get("evidence_basis") or "")
+                != "timeline_summary_only"
+            ):
+                continue
+            current = cls._legacy_normalized_text(str(fact.get("raw_fact") or ""))
+            shorter, longer = sorted((candidate, current), key=len)
+            if candidate == current or (len(shorter) >= 12 and shorter in longer):
+                return str(fact.get("profile_fact_uid") or "") or None
+        return None
 
     @classmethod
     def fit_prompt_context(
@@ -666,6 +732,7 @@ class UserProfileFactMaintainer:
                     "evidence_basis": str(
                         source.metadata.get("evidence_basis") or "message_grounded"
                     ),
+                    "statement_kind": self._statement_kind(category, source),
                 },
             )
             for consumed_uid in operation_source_uids:
@@ -904,6 +971,19 @@ class UserProfileFactMaintainer:
             ) from exc
 
     @staticmethod
+    def _statement_kind(
+        category: UserProfileFactCategory, source: UserProfileFactSource
+    ) -> str:
+        value = str(getattr(category, "value", category))
+        if value in {"current_state", "plan_commitment"}:
+            return "concrete_example"
+        if value == "preference":
+            profile = source.metadata.get("fact_profile") or {}
+            if str(profile.get("selection_reason") or "") != "stable_personal_fact":
+                return "concrete_example"
+        return "general_profile"
+
+    @staticmethod
     def _inference(value: Any) -> UserProfileInferenceKind:
         try:
             return UserProfileInferenceKind(str(value or "explicit"))
@@ -920,6 +1000,7 @@ class UserProfileFactMaintainer:
             category=str(row["category"]),
             status=str(row["status"]),
             representative_source_uid=str(row["representative_source_uid"]),
+            derived_claim=(str(row.get("derived_claim") or "").strip() or None),
             confidence=_score(row.get("confidence"), 0.0),
             importance=_score(row.get("importance"), 0.5),
             inference_kind=str(row.get("inference_kind") or "explicit"),
@@ -948,7 +1029,7 @@ class UserProfileFactMaintainer:
                 "profile_fact_uid": row.get("profile_fact_uid"),
                 "category": row.get("category"),
                 "status": row.get("status"),
-                "raw_fact": row.get("raw_fact"),
+                "raw_fact": row.get("display_text") or row.get("raw_fact"),
                 "confidence": row.get("confidence"),
                 "inference_kind": row.get("inference_kind"),
                 "last_confirmed_at": row.get("last_confirmed_at"),

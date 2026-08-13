@@ -166,8 +166,8 @@ export class UserProfilePage {
         const confidence = Math.round(Number(fact.confidence || 0) * 100);
         const importance = Math.round(Number(fact.importance || 0) * 100);
         return `<article class="profile-view-fact" data-fact-category="${category}">
-          <strong>${esc(fact.raw_fact || "")}</strong>
-          <div class="profile-view-fact-footer"><small>${esc(window.t("profile.viewFactMeta", window.t(`profile.factStatus.${fact.status}`), confidence, importance))}</small>${source ? `<a class="profile-view-source" href="#" title="${esc(source.timeline_uid)} r${Number(source.timeline_revision || 1)}" data-open-timeline="${esc(source.timeline_uid)}">${esc(window.t("profile.viewSourceRevision", Number(source.timeline_revision || 1)))}</a>` : ""}</div>
+          <strong>${esc(fact.display_text || fact.raw_fact || "")}</strong>
+          <div class="profile-view-fact-footer"><small>${esc(window.t("profile.viewFactMeta", window.t(`profile.factStatus.${fact.status}`), confidence, importance))}</small>${source ? `<a class="profile-view-source" href="#" title="${esc(source.timeline_uid)} r${Number(source.timeline_revision || 1)}" data-open-timeline="${esc(source.timeline_uid)}">${esc(window.t("profile.viewSourceCount", Number(fact.sources?.length || 1)))}</a>` : ""}</div>
         </article>`;
       }).join("");
       return `<section class="profile-view-fact-group" data-fact-group="${category}"><header><span class="profile-view-category-marker"></span><strong>${esc(window.t(`profile.category.${category}`))}</strong><small>${grouped.get(category).length}</small></header><div class="profile-view-fact-list">${rows}</div></section>`;

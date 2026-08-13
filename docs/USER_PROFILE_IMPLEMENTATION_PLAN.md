@@ -1,9 +1,9 @@
 # 用户画像与人格关系状态实施方案
 
 > 状态：已按方案实施并完成发布验收<br>
-> 目标插件版本：`3.8.0`<br>
+> 当前插件版本：`3.8.2`（功能首次发布于 `3.8.0`）<br>
 > 目标数据库版本：`v10.4`<br>
-> 文档日期：2026-08-12<br>
+> 文档日期：2026-08-13<br>
 > 用途：作为用户画像功能开发、评审、测试和实机验收的事实基线。
 
 ## 1. 目标
@@ -172,6 +172,8 @@ persona_id + logical_user_uid
 | `relationship_frozen` | 是否冻结关系自动维护 |
 | `relationship_sensitivity_override` | 单用户五档敏感度覆盖 |
 | `relationship_behavior_override` | 单用户行为模式覆盖 |
+| `behavior_synthesis_last_at` | 最近一次跨时间行为归纳时间 |
+| `behavior_synthesis_evidence_fingerprint / behavior_synthesis_evidence_uids` | 持久化归纳触发游标；重启后仍能区分新增证据 |
 | `created_at / updated_at` | 生命周期时间 |
 
 #### `user_profile_share_groups` 与 `user_profile_share_members`
@@ -189,6 +191,7 @@ persona_id + logical_user_uid
 | `category` | 六类画像事实之一 |
 | `status` | `active / pending / conflict / superseded / stale / archived / excluded` |
 | `representative_source_uid` | 当前展示原始事实来源 |
+| `derived_claim` | 仅供 `behavioral_inference` 使用的只读多来源归纳结论；普通事实为空 |
 | `confidence` | 维护模型接受置信度 |
 | `importance` | 独立画像重要性 |
 | `inference_kind` | `explicit / direct_observation / behavioral_inference` |
@@ -202,7 +205,7 @@ persona_id + logical_user_uid
 | `created_at / updated_at` | 生命周期时间 |
 | `metadata` | 维护诊断与算法版本 |
 
-事实表不保存维护模型改写的正文。实际显示文本来自 `representative_source_uid` 指向的 Timeline 原始关键事实。
+明确自述和直接观察的显示文本始终来自 `representative_source_uid` 指向的 Timeline 原始关键事实，维护模型不得改写。只有跨 Timeline 的 `behavioral_inference` 可以保存单独的 `derived_claim`；它必须引用多条真实来源，WebUI 只读展示归纳结论及全部来源，不能伪造合成 Timeline。
 
 #### `user_profile_fact_sources`
 
@@ -273,7 +276,7 @@ WebUI 以 `0-100` 滑块展示维度，存储层归一化为 `0.0-1.0`。
 
 #### `user_profile_tasks` 与 `user_profile_task_items`
 
-保存用户级严格有序任务、批次来源、两个业务阶段检查点、Provider 签名、设置快照、重试次数、错误和结果摘要。任务不保存 persona 提示正文或 persona 签名。
+保存用户级严格有序任务、批次来源、三个业务阶段检查点、Provider 签名、设置快照、重试次数、错误和结果摘要。任务不保存 persona 提示正文或 persona 签名。
 
 任务状态建议：
 
@@ -326,18 +329,19 @@ cancelled
 - 逐项推进处理游标；
 - 不把 Timeline 重构产生的新 revision 当作独立重复证据；
 - 不因批量合并丢失事实时间范围或当前 persona 解析上下文；
-- 保留两个业务阶段的独立检查点。
+- 保留客观事实、行为归纳和人格关系三个业务阶段的独立检查点。
 
 最早任务失败时不能绕过。后续变化保留在队列中；旧画像继续注入。管理员可重试失败任务、取消未完成任务、从断层继续构建或执行完整历史重建。
 
-### 6.3 两个业务调用
+### 6.3 三个业务阶段
 
 一个维护批次最多执行：
 
 1. 一次客观事实维护调用；
-2. 一次人格关系维护调用。
+2. 达到触发条件时一次跨时间行为归纳调用；
+3. 一次人格关系维护调用。
 
-每次业务调用只允许 AstrBot Provider 执行一轮传输尝试，并受单次总超时约束；失败由持久维护任务按指数退避重试。事实阶段先执行并原子发布，只有事实检查点成功后才能进入关系阶段，避免关系基于尚未发布的事实生成。显式历史重建会先完成全部客观事实批次，再基于该历史序列和当前 persona 统一分批重建关系并只发布一次。
+每次业务调用只允许 AstrBot Provider 执行一轮传输尝试，并受单次总超时约束；失败由持久维护任务按指数退避重试。普通事实来源先原子投影并保存事实检查点，行为归纳超时后只重试归纳，不重复普通事实调用；关系只能在行为检查点后运行。显式历史重建在最后一个事实批次集中归纳一次行为，再基于完整历史序列和当前 persona 统一分批重建关系并只发布一次。
 
 ### 6.4 任务重试、取消与断点续建
 
@@ -421,6 +425,10 @@ communication_preference
 
 这些门槛全部在“设置 -> 用户画像”中可调。
 
+行为证据由独立归纳器处理，不要求任何单条来源预先标记为 `behavior_pattern`。历史重建在末批扫描全部符合期限的消息级证据；增量模式默认积累 3 条新证据且距上次归纳至少 24 小时才触发。候选发现只使用短引用和可读本地观察时间；应用层可保守补充同语义、同本地时刻来源，并只把达到数量与跨度门槛的候选交给第二阶段。发布模型只能输出习惯或交流偏好、精简的 `derived_claim` 和精确短来源引用；应用层重新计算独立 Timeline 数、跨度、置信度、敏感策略和画像价值。未达到门槛的聚类保持未分配并继续积累，不能被永久忽略。
+
+已发布行为事实继续保留全部证据来源。Timeline 修改或删除使有效证据低于原准入门槛时，事实自动进入 `stale` 并暂停注入；新证据可再次归纳、合并、标记冲突或明确 supersede，不能静默改写历史结论。
+
 ### 7.5 低质量 Timeline
 
 不按 Timeline 总体质量硬过滤。维护模型必须看到质量报告并自行判断候选。
@@ -440,6 +448,8 @@ communication_preference
 - 选择最新且证据最强的一条原始事实作为展示文本；
 - 代表来源被删除或失效时，从剩余有效来源重新选择；
 - 画像维护模型不得生成归一化改写文本。
+
+旧版 `timeline_summary_only` 候选在进入模型前只做确定性去重：统一 Unicode、空白、大小写和标点后合并完全重复，或合并长度足够的明确包含关系。所有来源仍挂到同一个 pending 事实；不做 embedding 或激进语义聚类，旧摘要仍不能提高置信度、强化 active 事实或触发行为归纳。
 
 ## 8. 敏感信息与安全秘密
 
@@ -780,6 +790,7 @@ WebUI 设置页新增一级分类 **用户画像**，所有本方案涉及的可
 | `user_profile.fact_accept_confidence` | float | `0.85` | `0.0-1.0` | 维护模型接受事实并立即生效的门槛 |
 | `user_profile.fact_min_profile_value` | float | `0.65` | `0.0-1.0` | 对未来理解用户有长期价值的最低门槛；与事实真实性置信度分离 |
 | `user_profile.legacy_summary_candidate_confidence` | float | `0.45` | `0.1-0.69` | 缺少消息级归属的旧摘要事实作为待确认候选时的置信度上限 |
+| `user_profile.legacy_review_batch_candidate_limit` | int | `64` | `1-512` | 旧摘要保守去重后单批复核的候选组上限 |
 | `user_profile.pending_retention_days` | int | `180` | `1-3650` | 待确认候选归档期限 |
 
 Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维护模型。
@@ -792,6 +803,14 @@ Timeline 总体质量不配置硬过滤开关；质量报告始终提供给维�
 | `user_profile.behavior_inference_min_span_days` | int | `14` | `1-365` | 普通行为证据最小跨度 |
 | `user_profile.behavior_inference_min_confidence` | float | `0.85` | `0.0-1.0` | 普通行为推断置信度 |
 | `user_profile.behavior_evidence_pool_limit` | int | `128` | `10-1000` | 单批提供给模型的历史未归纳行为证据上限 |
+| `user_profile.behavior_candidate_cluster_limit` | int | `12` | `1-50` | 行为发现阶段最多保留的候选规律数 |
+| `user_profile.behavior_cluster_evidence_limit` | int | `24` | `3-128` | 单个候选规律在保守补证后的来源上限 |
+| `user_profile.behavior_cluster_time_tolerance_minutes` | int | `120` | `15-720` | 时间型候选语义补证的本地观察时刻容差 |
+| `user_profile.behavior_temporal_candidate_limit` | int | `4` | `0-20` | 每次行为综合最多增加的确定性时间邻域候选数 |
+| `user_profile.behavior_evidence_timezone` | string | `Asia/Shanghai` | IANA 时区 | 将证据时间转换为模型可读本地时间；不改写原始时间戳 |
+| `user_profile.behavior_synthesis_min_new_evidence` | int | `3` | `1-100` | 增量模式触发归纳所需的新增行为证据数 |
+| `user_profile.behavior_synthesis_cooldown_hours` | int | `24` | `0-720` | 两次增量行为归纳的最短间隔；历史末批不受限制 |
+| `user_profile.behavior_derived_claim_max_chars` | int | `120` | `20-500` | 单条派生行为结论的字符上限 |
 | `user_profile.sensitive_behavior_inference_enabled` | bool | `false` | - | 是否允许敏感信息行为推断 |
 | `user_profile.sensitive_inference_min_timelines` | int | `3` | `2-20` | 敏感行为推断独立 Timeline 数 |
 | `user_profile.sensitive_inference_min_span_days` | int | `14` | `1-3650` | 敏感行为证据最小跨度 |
@@ -965,7 +984,7 @@ Provider/API 重试处理网络或服务错误；契约纠错处理已经收到�
 - 已完成任务显示“删除”，任务区提供“清空已完成”。
 - 取消历史构建的任一未完成批次时，确认框必须说明会同时取消同一父级构建中的未完成批次，但不会撤销已经发布的画像事实。
 - 存在失败或取消事件时显示“从断层继续构建”；继续操作恢复未完成事件和原任务检查点，不等同于清空后全量重建。
-- 页面轮询持久任务并展示两阶段进度；刷新页面或服务重启后仍以数据库任务状态为准。
+- 页面轮询持久任务并展示三阶段进度；刷新页面或服务重启后仍以数据库任务状态为准。
 
 ## 16. Page API
 
@@ -1011,7 +1030,7 @@ POST   /user-profiles/share-groups/save
 - `core/models/user_profile.py`：数据契约、状态枚举和序列化。
 - `core/user_profile_settings.py`：设置定义、默认值、修订号和验证。
 - `storage/user_profile_store.py`：用户、事实、关系、来源、冲突和任务存储。
-- `core/managers/user_profile_maintenance_manager.py`：队列、批量、两阶段维护、恢复和重建。
+- `core/managers/user_profile_maintenance_manager.py`：队列、批量、三阶段维护、恢复和重建。
 - `core/managers/user_profile_fact_maintainer.py`：客观事实 LLM 契约和确定性校验。
 - `core/managers/user_relationship_maintainer.py`：关系 LLM 契约、软限幅和 revision。
 - `core/user_profile_injection.py`：当前用户解析、选择、预算和格式化。
@@ -1039,7 +1058,7 @@ POST   /user-profiles/share-groups/save
 
 - 客观事实和关系状态分别原子发布新 revision。
 - 维护失败时不使旧快照失效。
-- 两阶段分别保存检查点，事实成功、关系失败时不能重复发布事实 revision。
+- 三阶段分别保存检查点，普通事实或行为归纳成功、后续阶段失败时不能重复发布既有 revision。
 - 事实失败时不运行关系阶段；旧开发任务若曾提前保存关系检查点，事实重试成功后必须重新计算关系。
 - 待自动重试事件保持由原任务占有，重启或新事件不能绕过重试上限另建任务；耗尽后只能由管理员重试或重建。
 - 同一用户所有自动任务和人工修改使用同一用户级锁。
@@ -1074,7 +1093,7 @@ POST   /user-profiles/share-groups/save
 - 同用户严格串行，不同用户按并发设置运行。
 - 多 Timeline 批量不丢来源。
 - 事实失败后关系仍可独立完成。
-- 两阶段检查点恢复不重复发布。
+- 三阶段检查点恢复不重复发布。
 - Provider 变化和契约变化只标记，不自动重建。
 - persona 只在执行时解析、提示正文不持久化，以及调用期间签名变化拒绝发布并重试。
 
@@ -1222,6 +1241,9 @@ POST   /user-profiles/share-groups/save
 
 - 71 条私聊 Timeline 中，31 条具有原生 `role_bindings`；其余 40 条通过同一私聊 session 的稳定账号和会话消息证据自动归入同一用户，0 条待审查。第二次预览缺失数为 0，原 Timeline metadata 未改写。
 - 缺少消息级事实归属的 40 条旧 Timeline 只作为 `timeline_summary_only` 弱证据：旧摘要事实置信度上限为 0.45，始终先进入 pending，不能单独 supersede、制造冲突、强化现有事实或成为代表来源；关系可以利用其保持宽泛连续性，但不能触发重大事件。
+- 2026-08-13 针对规律行为漏提取新增独立两阶段行为归纳：普通事实维护不再消费行为来源；行为发现使用短证据/Timeline 引用和可读本地观察时间主动聚类，再由应用层保守补充同语义、同本地时刻来源，并只把满足 Timeline 数与跨度硬门槛的候选交给第二阶段发布判定。时间邻域候选只提高召回，不能绕过 LLM、置信度、画像价值和敏感信息校验。派生结论单独保存并关联所有来源，未达门槛证据保持积累中；旧摘要仍不进入行为门槛计数。
+- 最终 v10.4 真实库行为阶段读取 54 条消息级行为证据和 24 个独立 Timeline；真实 API 在约 58 秒内完成 2 次调用，稳定形成“工作日通常于上午 10 点左右到达公司”的习惯，使用 3 个独立 Timeline、16 天跨度、置信度 0.91。食堂、跑步、洗澡、打卡等跨度或独立 Timeline 不足的规律未发布，展会和地点型偶发模式未作为习惯发布，源数据库保持不变。
+- 2026-08-13 复验从空画像生成同一规律（置信度 0.88）；加入一条内存中的新增到公司证据后，增量维护沿用已有事实 UID 和原始归纳文本，将置信度提升到 0.92 并合并新来源，没有创建近义重复。两次运行均只读取真实源库并在临时副本中初始化，源库哈希保持不变。
 - 最终真实 API 运行共 9 个维护批次、18 次维护调用，全部 `completed` 且 0 任务错误。形成 5 条有效事实和 4 条仅供管理员复核的 pending 候选；私聊注入包含 5 条有效事实和人格关系，共 615/800 字符，pending 未作为事实注入。
 - 独立审计的 groundedness、persona consistency、proportionality、continuity value 和 privacy safety 分别为 0.86、0.89、0.79、0.84、0.86。审计仅提示避免无关主动提及生活隐私、避免详尽人格压过用户当前意图；地点、学校和低置信偏好均留在 pending，因此不为当前样本硬编码或继续抬高全局门槛。
 - 保持 `fact_accept_confidence=0.85`、`fact_min_profile_value=0.65` 和总注入预算 800，不为单一数据集继续抬高全局门槛。

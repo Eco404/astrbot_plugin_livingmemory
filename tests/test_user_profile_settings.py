@@ -14,7 +14,7 @@ from astrbot_plugin_livingmemory.core.user_profile_settings import (
 def test_user_profile_settings_have_complete_metadata_and_defaults():
     defaults = user_profile_setting_defaults()
 
-    assert USER_PROFILE_SETTINGS_REVISION == 6
+    assert USER_PROFILE_SETTINGS_REVISION == 8
     assert defaults["user_profile.legacy_summary_candidate_confidence"] == 0.45
     assert defaults["user_profile.legacy_relationship_initial_dimension_cap"] == 0.35
     assert defaults["user_profile.enabled"] is True
@@ -31,6 +31,17 @@ def test_user_profile_settings_have_complete_metadata_and_defaults():
     assert defaults["user_profile.relationship_rebuild_batch_limit"] == 32
     assert defaults["user_profile.fact_min_profile_value"] == 0.65
     assert defaults["user_profile.behavior_evidence_pool_limit"] == 128
+    assert defaults["user_profile.behavior_candidate_cluster_limit"] == 12
+    assert defaults["user_profile.behavior_cluster_evidence_limit"] == 24
+    assert (
+        defaults["user_profile.behavior_cluster_time_tolerance_minutes"] == 120
+    )
+    assert defaults["user_profile.behavior_temporal_candidate_limit"] == 4
+    assert defaults["user_profile.behavior_evidence_timezone"] == "Asia/Shanghai"
+    assert defaults["user_profile.behavior_synthesis_min_new_evidence"] == 3
+    assert defaults["user_profile.behavior_synthesis_cooldown_hours"] == 24
+    assert defaults["user_profile.behavior_derived_claim_max_chars"] == 120
+    assert defaults["user_profile.legacy_review_batch_candidate_limit"] == 64
     assert defaults["user_profile.undated_plan_review_days"] == 30
     assert defaults["user_profile.dated_plan_grace_days"] == 3
     assert defaults["user_profile.relationship_behavior_mode"] == "natural"
@@ -72,4 +83,8 @@ def test_user_profile_settings_validate_scalar_and_cross_field_rules():
                 "user_profile.behavior_inference_min_confidence": 0.9,
                 "user_profile.sensitive_inference_min_confidence": 0.8,
             }
+        )
+    with pytest.raises(ValueError, match="IANA"):
+        effective_user_profile_settings(
+            {"user_profile.behavior_evidence_timezone": "Not/A-Timezone"}
         )

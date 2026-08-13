@@ -3810,6 +3810,7 @@ select.timeline-setting-input { width: min(220px, 100%); }
 .user-profile-task-actions { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .user-profile-task .status-pending,
 .user-profile-task .status-running_facts,
+.user-profile-task .status-running_behavior,
 .user-profile-task .status-facts_completed,
 .user-profile-task .status-running_relationship { border-color: color-mix(in srgb, var(--accent) 35%, var(--border-normal)); background: var(--accent-light); color: var(--accent); }
 .user-profile-task .status-facts_failed,

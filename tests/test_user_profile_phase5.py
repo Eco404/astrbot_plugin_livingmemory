@@ -509,7 +509,7 @@ async def test_task_page_api_never_exposes_persona_prompt():
     assert item["status"] == "failed"
     assert item["progress_percent"] == 0
     assert item["completed_stage_count"] == 0
-    assert item["total_stage_count"] == 2
+    assert item["total_stage_count"] == 3
     assert item["total_count"] == 0
     assert result["data"]["gap"] == {"pending_count": 0}
     assert "persona_prompt" not in item
@@ -517,7 +517,7 @@ async def test_task_page_api_never_exposes_persona_prompt():
     assert "settings_snapshot" not in item
 
 
-def test_task_page_api_reports_two_stage_progress():
+def test_task_page_api_reports_three_stage_progress():
     fact_stage = UserProfileHandler._task_public(
         {
             "task_uid": "task-facts",
@@ -531,7 +531,10 @@ def test_task_page_api_reports_two_stage_progress():
             "task_uid": "task-relationship",
             "status": "running_relationship",
             "items": [{"timeline_uid": "timeline-1"}],
-            "result_summary": {"facts_checkpoint": True},
+            "result_summary": {
+                "facts_checkpoint": True,
+                "behavior_checkpoint": True,
+            },
         }
     )
     completed = UserProfileHandler._task_public(
@@ -541,6 +544,7 @@ def test_task_page_api_reports_two_stage_progress():
             "items": [{"timeline_uid": "timeline-1"}],
             "result_summary": {
                 "facts_checkpoint": True,
+                "behavior_checkpoint": True,
                 "relationship_checkpoint": True,
             },
         }
@@ -548,9 +552,9 @@ def test_task_page_api_reports_two_stage_progress():
 
     assert fact_stage["progress_percent"] == 20
     assert relationship_stage["progress_percent"] == 75
-    assert relationship_stage["completed_stage_count"] == 1
+    assert relationship_stage["completed_stage_count"] == 2
     assert completed["progress_percent"] == 100
-    assert completed["completed_stage_count"] == 2
+    assert completed["completed_stage_count"] == 3
 
 
 @pytest.mark.asyncio

@@ -56,6 +56,31 @@ class UserProfileStore:
                     "ALTER TABLE user_profile_scopes "
                     "ADD COLUMN relationship_reset_after REAL"
                 )
+            if "behavior_synthesis_last_at" not in columns:
+                await db.execute(
+                    "ALTER TABLE user_profile_scopes "
+                    "ADD COLUMN behavior_synthesis_last_at REAL"
+                )
+            if "behavior_synthesis_evidence_fingerprint" not in columns:
+                await db.execute(
+                    "ALTER TABLE user_profile_scopes ADD COLUMN "
+                    "behavior_synthesis_evidence_fingerprint TEXT NOT NULL DEFAULT ''"
+                )
+            if "behavior_synthesis_evidence_uids" not in columns:
+                await db.execute(
+                    "ALTER TABLE user_profile_scopes ADD COLUMN "
+                    "behavior_synthesis_evidence_uids TEXT NOT NULL DEFAULT '[]'"
+                )
+            fact_columns = {
+                str(row["name"])
+                for row in await (
+                    await db.execute("PRAGMA table_info(user_profile_facts)")
+                ).fetchall()
+            }
+            if "derived_claim" not in fact_columns:
+                await db.execute(
+                    "ALTER TABLE user_profile_facts ADD COLUMN derived_claim TEXT"
+                )
             now = time.time()
             await db.execute(
                 """
@@ -68,6 +93,7 @@ class UserProfileStore:
                     END
                 WHERE status IN (
                     'running_facts', 'facts_completed', 'facts_failed',
+                    'running_behavior',
                     'running_relationship'
                 )
                 """,
@@ -149,6 +175,9 @@ class UserProfileStore:
                 relationship_reset_after REAL,
                 relationship_sensitivity_override TEXT,
                 relationship_behavior_override TEXT,
+                behavior_synthesis_last_at REAL,
+                behavior_synthesis_evidence_fingerprint TEXT NOT NULL DEFAULT '',
+                behavior_synthesis_evidence_uids TEXT NOT NULL DEFAULT '[]',
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL,
                 UNIQUE(logical_user_uid, bot_account, persona_id),
@@ -216,6 +245,7 @@ class UserProfileStore:
                 category TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
                 representative_source_uid TEXT NOT NULL,
+                derived_claim TEXT,
                 confidence REAL NOT NULL DEFAULT 0.85,
                 importance REAL NOT NULL DEFAULT 0.5,
                 inference_kind TEXT NOT NULL DEFAULT 'explicit',
@@ -717,6 +747,9 @@ class UserProfileStore:
         relationship_reset_after: float | None | object = ...,
         sensitivity_override: str | None | object = ...,
         behavior_override: str | None | object = ...,
+        behavior_synthesis_last_at: float | None | object = ...,
+        behavior_synthesis_evidence_fingerprint: str | None | object = ...,
+        behavior_synthesis_evidence_uids: list[str] | None | object = ...,
     ) -> UserProfileScope | None:
         assignments: list[str] = []
         values: list[Any] = []
@@ -745,6 +778,19 @@ class UserProfileStore:
             if value is not ...:
                 assignments.append(f"{column} = ?")
                 values.append(value)
+        for column, value in (
+            ("behavior_synthesis_last_at", behavior_synthesis_last_at),
+            (
+                "behavior_synthesis_evidence_fingerprint",
+                behavior_synthesis_evidence_fingerprint,
+            ),
+        ):
+            if value is not ...:
+                assignments.append(f"{column} = ?")
+                values.append(value)
+        if behavior_synthesis_evidence_uids is not ...:
+            assignments.append("behavior_synthesis_evidence_uids = ?")
+            values.append(self._json(behavior_synthesis_evidence_uids or []))
         if not assignments:
             return await self.get_scope(profile_scope_uid)
         assignments.append("updated_at = ?")
@@ -849,15 +895,16 @@ class UserProfileStore:
                         """
                         INSERT INTO user_profile_facts (
                             profile_fact_uid, fact_namespace_uid, category, status,
-                            representative_source_uid, confidence, importance,
+                            representative_source_uid, derived_claim, confidence, importance,
                             inference_kind, sensitive, admin_confirmed, pinned,
                             first_seen_at, last_confirmed_at, fixed_injection_until,
                             review_after, superseded_by, created_at, updated_at, metadata
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(profile_fact_uid) DO UPDATE SET
                             category = excluded.category,
                             status = excluded.status,
                             representative_source_uid = excluded.representative_source_uid,
+                            derived_claim = excluded.derived_claim,
                             confidence = excluded.confidence,
                             importance = excluded.importance,
                             inference_kind = excluded.inference_kind,
@@ -877,6 +924,7 @@ class UserProfileStore:
                             self._enum(fact.category),
                             self._enum(fact.status),
                             fact.representative_source_uid,
+                            fact.derived_claim,
                             self._score(fact.confidence),
                             self._score(fact.importance),
                             self._enum(fact.inference_kind),
@@ -1005,12 +1053,30 @@ class UserProfileStore:
         *,
         limit: int = 128,
         retention_days: int = 180,
+        include_assigned_patterns: bool = False,
     ) -> list[UserProfileFactSource]:
         cutoff = time.time() - max(1, int(retention_days)) * 86400.0
+        assignment_clause = (
+            """AND (s.profile_fact_uid IS NULL OR EXISTS (
+                    SELECT 1 FROM user_profile_facts f
+                    JOIN user_profile_scopes scope
+                      ON scope.fact_namespace_uid = f.fact_namespace_uid
+                    WHERE f.profile_fact_uid = s.profile_fact_uid
+                      AND scope.profile_scope_uid = ?
+                      AND f.inference_kind = 'behavioral_inference'
+                      AND f.status IN ('active', 'pending', 'conflict', 'stale')
+                ))"""
+            if include_assigned_patterns
+            else "AND s.profile_fact_uid IS NULL"
+        )
+        params: list[Any] = [profile_scope_uid]
+        if include_assigned_patterns:
+            params.append(profile_scope_uid)
+        params.extend((cutoff, max(1, min(1000, int(limit)))))
         async with self._connect() as db:
             rows = await (
                 await db.execute(
-                    """
+                    f"""
                     SELECT DISTINCT s.*
                     FROM user_profile_fact_sources s
                     JOIN user_profile_projection_events e
@@ -1018,7 +1084,7 @@ class UserProfileStore:
                      AND e.timeline_revision = s.timeline_revision
                     WHERE e.profile_scope_uid = ?
                       AND s.active = 1
-                      AND s.profile_fact_uid IS NULL
+                      {assignment_clause}
                       AND json_extract(s.metadata, '$.profile_signal') IN (
                           'behavior_evidence', 'behavior_pattern'
                       )
@@ -1027,11 +1093,7 @@ class UserProfileStore:
                              s.source_uid
                     LIMIT ?
                     """,
-                    (
-                        profile_scope_uid,
-                        cutoff,
-                        max(1, min(1000, int(limit))),
-                    ),
+                    params,
                 )
             ).fetchall()
         return [self._row_to_fact_source(row) for row in rows]
@@ -1186,15 +1248,16 @@ class UserProfileStore:
                         """
                         INSERT INTO user_profile_facts (
                             profile_fact_uid, fact_namespace_uid, category, status,
-                            representative_source_uid, confidence, importance,
+                            representative_source_uid, derived_claim, confidence, importance,
                             inference_kind, sensitive, admin_confirmed, pinned,
                             first_seen_at, last_confirmed_at, fixed_injection_until,
                             review_after, superseded_by, created_at, updated_at, metadata
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(profile_fact_uid) DO UPDATE SET
                             category = excluded.category,
                             status = excluded.status,
                             representative_source_uid = excluded.representative_source_uid,
+                            derived_claim = excluded.derived_claim,
                             confidence = excluded.confidence,
                             importance = excluded.importance,
                             inference_kind = excluded.inference_kind,
@@ -1217,6 +1280,7 @@ class UserProfileStore:
                             self._enum(fact.category),
                             self._enum(fact.status),
                             fact.representative_source_uid,
+                            fact.derived_claim,
                             self._score(fact.confidence),
                             self._score(fact.importance),
                             self._enum(fact.inference_kind),
@@ -1279,7 +1343,8 @@ class UserProfileStore:
                 for fact_uid in affected_fact_uids:
                     fact_row = await (
                         await db.execute(
-                            "SELECT status, representative_source_uid "
+                            "SELECT status, representative_source_uid, "
+                            "inference_kind, metadata "
                             "FROM user_profile_facts WHERE profile_fact_uid = ? "
                             "AND fact_namespace_uid = ?",
                             (fact_uid, fact_namespace_uid),
@@ -1300,6 +1365,49 @@ class UserProfileStore:
                         )
                     ).fetchone()
                     status = str(fact_row["status"])
+                    if (
+                        str(fact_row["inference_kind"] or "")
+                        == "behavioral_inference"
+                        and status in {"active", "pending", "stale"}
+                    ):
+                        policy = self._json_object(fact_row["metadata"])
+                        evidence_stats = await (
+                            await db.execute(
+                                """
+                                SELECT COUNT(DISTINCT timeline_uid) AS timeline_count,
+                                       MIN(COALESCE(evidence_ended_at, updated_at)) AS first_at,
+                                       MAX(COALESCE(evidence_ended_at, updated_at)) AS last_at
+                                FROM user_profile_fact_sources
+                                WHERE profile_fact_uid = ? AND active = 1
+                                """,
+                                (fact_uid,),
+                            )
+                        ).fetchone()
+                        timeline_count = int(
+                            evidence_stats["timeline_count"] if evidence_stats else 0
+                        )
+                        span_days = 0.0
+                        if (
+                            evidence_stats
+                            and evidence_stats["first_at"] is not None
+                            and evidence_stats["last_at"] is not None
+                        ):
+                            span_days = (
+                                float(evidence_stats["last_at"])
+                                - float(evidence_stats["first_at"])
+                            ) / 86400.0
+                        if (
+                            timeline_count
+                            < int(policy.get("minimum_timeline_count") or 2)
+                            or span_days + 1e-9
+                            < float(policy.get("minimum_span_days") or 0)
+                        ):
+                            await db.execute(
+                                "UPDATE user_profile_facts SET status = 'stale', "
+                                "updated_at = ? WHERE profile_fact_uid = ?",
+                                (now, fact_uid),
+                            )
+                            status = "stale"
                     if best is None and status in {"active", "pending", "stale"}:
                         await db.execute(
                             "UPDATE user_profile_facts SET status = 'archived', "
@@ -2115,7 +2223,7 @@ class UserProfileStore:
                     SELECT task_uid FROM user_profile_tasks
                     WHERE status IN (
                         'pending', 'running_facts', 'facts_completed',
-                        'facts_failed', 'running_relationship'
+                        'facts_failed', 'running_behavior', 'running_relationship'
                     ) {retry_clause}
                     ORDER BY created_at ASC LIMIT ?
                     """,
@@ -2717,6 +2825,9 @@ class UserProfileStore:
                     """
                     UPDATE user_profile_scopes
                     SET projection_cursor = ?, reset_after = ?, has_gap = 0,
+                        behavior_synthesis_last_at = NULL,
+                        behavior_synthesis_evidence_fingerprint = '',
+                        behavior_synthesis_evidence_uids = '[]',
                         updated_at = ? WHERE profile_scope_uid = ?
                     """,
                     (cursor, now, now, profile_scope_uid),
@@ -3092,7 +3203,7 @@ class UserProfileStore:
                     WHERE t.profile_scope_uid = ?
                       AND t.status IN (
                           'pending', 'running_facts', 'facts_completed',
-                          'facts_failed', 'running_relationship', 'failed'
+                          'facts_failed', 'running_behavior', 'running_relationship', 'failed'
                       )
                       AND e.status IN ('queued', 'running', 'failed')
                     ORDER BY t.created_at ASC LIMIT 1
@@ -4360,6 +4471,17 @@ class UserProfileStore:
             relationship_reset_after=row["relationship_reset_after"],
             relationship_sensitivity_override=row["relationship_sensitivity_override"],
             relationship_behavior_override=row["relationship_behavior_override"],
+            behavior_synthesis_last_at=row["behavior_synthesis_last_at"],
+            behavior_synthesis_evidence_fingerprint=str(
+                row["behavior_synthesis_evidence_fingerprint"] or ""
+            ),
+            behavior_synthesis_evidence_uids=[
+                str(value)
+                for value in UserProfileStore._json_list(
+                    row["behavior_synthesis_evidence_uids"]
+                )
+                if value
+            ],
             created_at=float(row["created_at"]),
             updated_at=float(row["updated_at"]),
         )
@@ -4407,6 +4529,12 @@ class UserProfileStore:
         result["admin_confirmed"] = bool(result["admin_confirmed"])
         result["pinned"] = bool(result["pinned"])
         result["metadata"] = cls._json_object(result["metadata"])
+        derived = str(result.get("derived_claim") or "").strip()
+        result["display_text"] = (
+            derived
+            if str(result.get("inference_kind") or "") == "behavioral_inference"
+            else str(result.get("raw_fact") or "")
+        )
         return result
 
     @classmethod
