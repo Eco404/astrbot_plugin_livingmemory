@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from types import SimpleNamespace
@@ -602,7 +603,7 @@ async def test_relationship_history_rebuild_batches_all_latest_events_with_curre
 
 
 @pytest.mark.asyncio
-async def test_relationship_runs_when_fact_stage_fails(tmp_path):
+async def test_fact_failure_blocks_relationship_until_successful_retry(tmp_path):
     store = UserProfileStore(str(tmp_path / "relationship-partial.db"))
     await store.initialize()
     scope = await store.ensure_private_scope(
@@ -637,7 +638,7 @@ async def test_relationship_runs_when_fact_stage_fails(tmp_path):
     await manager.drain_scope(scope.profile_scope_uid)
 
     relationship = await store.get_relationship(scope.profile_scope_uid)
-    assert relationship is not None
+    assert relationship is None
     async with store._connect() as db:
         row = await (
             await db.execute(
@@ -645,10 +646,250 @@ async def test_relationship_runs_when_fact_stage_fails(tmp_path):
             )
         ).fetchone()
     task = await store.get_task(str(row["task_uid"]))
-    assert task["status"] == "facts_failed"
-    assert task["result_summary"]["relationship_checkpoint"] is True
+    assert task["status"] == "failed"
+    assert task["result_summary"]["failed_stage"] == "facts"
+    assert task["result_summary"]["automatic_retry_pending"] is False
+    assert "relationship_checkpoint" not in task["result_summary"]
     assert provider.fact_calls == 1
+    assert provider.relationship_calls == 0
+    assert await store.list_pending_projection_events() == []
+    async with store._connect() as db:
+        failed_event = await (
+            await db.execute(
+                "SELECT status FROM user_profile_projection_events "
+                "WHERE profile_scope_uid = ?",
+                (scope.profile_scope_uid,),
+            )
+        ).fetchone()
+    assert failed_event["status"] == "failed"
+
+    provider.fail_facts = False
+    await store.retry_profile_task(task["task_uid"])
+    await manager.resume_task(task["task_uid"])
+    await manager._scheduled[scope.profile_scope_uid]
+
+    relationship = await store.get_relationship(scope.profile_scope_uid)
+    retried = await store.get_task(task["task_uid"])
+    assert relationship is not None
+    assert retried["status"] == "completed"
+    assert retried["result_summary"]["facts_checkpoint"] is True
+    assert retried["result_summary"]["relationship_checkpoint"] is True
+    assert provider.fact_calls == 2
     assert provider.relationship_calls == 1
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_history_rebuild_defers_relationship_until_all_fact_batches_finish(
+    tmp_path,
+):
+    store = UserProfileStore(str(tmp_path / "relationship-history-pipeline.db"))
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="test:human:user-1",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    provider = _RelationshipProvider()
+    manager = UserProfileMaintenanceManager(
+        store,
+        provider=provider,
+        persona_resolver=_persona_resolver,
+        config=effective_user_profile_settings(
+            {
+                "user_profile.maintenance_batch_timeline_limit": 1,
+                "user_profile.maintenance_max_retries": 0,
+            }
+        ),
+    )
+    for index in range(2):
+        payload = _relationship_event_payload(include_objective_fact=True)
+        payload["projection_mode"] = "history_rebuild"
+        payload["metadata"]["memory_uid"] = f"history-timeline-{index}"
+        payload["metadata"]["revision"] = 1
+        await store.enqueue_projection_event(
+            UserProfileProjectionEvent(
+                timeline_uid=f"history-timeline-{index}",
+                timeline_revision=1,
+                operation="upsert",
+                memory_space_id=f"history-space-{index}",
+                profile_scope_uid=scope.profile_scope_uid,
+                payload=payload,
+            )
+        )
+
+    await manager.drain_scope(scope.profile_scope_uid)
+
+    relationship = await store.get_relationship(scope.profile_scope_uid)
+    tasks = list(reversed(await store.list_profile_tasks(scope.profile_scope_uid)))
+    assert relationship is not None
+    assert relationship.revision == 1
+    assert provider.fact_calls == 2
+    assert provider.relationship_calls == 1
+    assert tasks[0]["result_summary"]["relationship_skipped"] == (
+        "history_rebuild_deferred"
+    )
+    assert tasks[1]["result_summary"]["relationship_history_rebuilt"] is True
+    assert all(task["status"] == "completed" for task in tasks)
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_task_blocks_newer_events_until_manual_retry(tmp_path):
+    store = UserProfileStore(str(tmp_path / "relationship-blocking-failure.db"))
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="test:human:user-1",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    provider = _RelationshipProvider(fail_facts=True)
+    manager = UserProfileMaintenanceManager(
+        store,
+        provider=provider,
+        persona_resolver=_persona_resolver,
+        config=effective_user_profile_settings(
+            {"user_profile.maintenance_max_retries": 0}
+        ),
+    )
+    for index in range(2):
+        payload = _relationship_event_payload(include_objective_fact=True)
+        await store.enqueue_projection_event(
+            UserProfileProjectionEvent(
+                timeline_uid=f"blocking-timeline-{index}",
+                timeline_revision=1,
+                operation="upsert",
+                memory_space_id=f"blocking-space-{index}",
+                profile_scope_uid=scope.profile_scope_uid,
+                payload=payload,
+            )
+        )
+        if index == 0:
+            await manager.drain_scope(scope.profile_scope_uid)
+
+    await manager.drain_scope(scope.profile_scope_uid)
+
+    tasks = await store.list_profile_tasks(scope.profile_scope_uid)
+    pending = await store.list_projection_events_for_scope(scope.profile_scope_uid)
+    assert len(tasks) == 1
+    assert tasks[0]["status"] == "failed"
+    assert [item["timeline_uid"] for item in pending] == ["blocking-timeline-1"]
+    assert provider.fact_calls == 1
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_retry_cooldown_task_blocks_newer_events_until_original_wakes(tmp_path):
+    store = UserProfileStore(str(tmp_path / "relationship-retry-order.db"))
+    await store.initialize()
+    scope = await store.ensure_private_scope(
+        actor_id="test:human:user-1",
+        bot_account="bot-1",
+        persona_id="persona-1",
+    )
+    provider = _RelationshipProvider(fail_facts=True)
+    manager = UserProfileMaintenanceManager(
+        store,
+        provider=provider,
+        persona_resolver=_persona_resolver,
+        config=effective_user_profile_settings(
+            {
+                "user_profile.maintenance_max_retries": 1,
+                "user_profile.maintenance_retry_base_seconds": 60,
+                "user_profile.maintenance_retry_max_seconds": 60,
+            }
+        ),
+    )
+    payload = _relationship_event_payload(include_objective_fact=True)
+    await store.enqueue_projection_event(
+        UserProfileProjectionEvent(
+            timeline_uid="retry-order-first",
+            timeline_revision=1,
+            operation="upsert",
+            memory_space_id="retry-order-space-1",
+            profile_scope_uid=scope.profile_scope_uid,
+            payload=payload,
+        )
+    )
+    await manager.drain_scope(scope.profile_scope_uid)
+    await store.enqueue_projection_event(
+        UserProfileProjectionEvent(
+            timeline_uid="retry-order-newer",
+            timeline_revision=1,
+            operation="upsert",
+            memory_space_id="retry-order-space-2",
+            profile_scope_uid=scope.profile_scope_uid,
+            payload=payload,
+        )
+    )
+
+    await manager.drain_scope(scope.profile_scope_uid)
+
+    tasks = await store.list_profile_tasks(scope.profile_scope_uid)
+    pending = await store.list_projection_events_for_scope(scope.profile_scope_uid)
+    assert len(tasks) == 1
+    assert tasks[0]["status"] == "facts_failed"
+    assert tasks[0]["result_summary"]["automatic_retry_pending"] is True
+    assert [item["timeline_uid"] for item in pending] == ["retry-order-newer"]
+    assert provider.fact_calls == 1
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_task_is_not_revived_by_stale_retry_wakeup():
+    class _TaskStore:
+        async def get_task(self, task_uid):
+            return {
+                "task_uid": task_uid,
+                "status": "cancelled",
+                "result_summary": {"automatic_retry_pending": True},
+            }
+
+    manager = UserProfileMaintenanceManager(
+        _TaskStore(), config=effective_user_profile_settings()
+    )
+    scheduled = []
+    manager._schedule_existing_task = lambda scope_uid, task: scheduled.append(
+        (scope_uid, task)
+    )
+
+    manager._schedule_retry("scope-1", "task-1", 0)
+    retry_task = manager._retry_by_task_uid["task-1"]
+    await asyncio.wait_for(retry_task, timeout=1)
+
+    assert scheduled == []
+    await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_stops_the_running_scope_worker_before_store_update():
+    worker_cancelled = asyncio.Event()
+
+    class _TaskStore:
+        async def get_task(self, task_uid):
+            return {"task_uid": task_uid, "profile_scope_uid": "scope-1"}
+
+        async def cancel_profile_task_group(self, task_uid):
+            assert worker_cancelled.is_set()
+            return {"task_uids": [task_uid], "profile_scope_uid": "scope-1"}
+
+    async def worker():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            worker_cancelled.set()
+
+    manager = UserProfileMaintenanceManager(
+        _TaskStore(), config=effective_user_profile_settings()
+    )
+    running = asyncio.create_task(worker())
+    manager._scheduled["scope-1"] = running
+    await asyncio.sleep(0)
+
+    result = await manager.cancel_task("task-1")
+
+    assert running.cancelled()
+    assert result["task_uids"] == ["task-1"]
     await manager.close()
 
 

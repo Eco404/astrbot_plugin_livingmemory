@@ -1718,6 +1718,27 @@ class UserProfileStore:
             ).fetchall()
         return [self._event_row(row) for row in rows]
 
+    async def count_pending_projection_events(
+        self,
+        profile_scope_uid: str,
+        *,
+        projection_mode: str | None = None,
+    ) -> int:
+        clauses = ["profile_scope_uid = ?", "status = 'pending'"]
+        params: list[Any] = [profile_scope_uid]
+        if projection_mode is not None:
+            clauses.append("json_extract(payload, '$.projection_mode') = ?")
+            params.append(str(projection_mode))
+        async with self._connect() as db:
+            row = await (
+                await db.execute(
+                    f"SELECT COUNT(*) AS total FROM user_profile_projection_events "
+                    f"WHERE {' AND '.join(clauses)}",
+                    params,
+                )
+            ).fetchone()
+        return int(row["total"] if row else 0)
+
     async def list_projection_history(
         self,
         profile_scope_uid: str,
@@ -2080,20 +2101,25 @@ class UserProfileStore:
             raise RuntimeError("Timeline identity review was not updated")
         return self._timeline_identity_row(row)
 
-    async def list_recoverable_tasks(self, *, limit: int = 64) -> list[dict[str, Any]]:
+    async def list_recoverable_tasks(
+        self, *, limit: int = 64, include_future: bool = False
+    ) -> list[dict[str, Any]]:
         now = time.time()
+        retry_clause = "" if include_future else "AND (next_retry_at IS NULL OR next_retry_at <= ?)"
+        params: list[Any] = [] if include_future else [now]
+        params.append(max(1, min(1000, int(limit))))
         async with self._connect() as db:
             rows = await (
                 await db.execute(
-                    """
+                    f"""
                     SELECT task_uid FROM user_profile_tasks
                     WHERE status IN (
                         'pending', 'running_facts', 'facts_completed',
                         'facts_failed', 'running_relationship'
-                    ) AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                    ) {retry_clause}
                     ORDER BY created_at ASC LIMIT ?
                     """,
-                    (now, max(1, min(1000, int(limit)))),
+                    params,
                 )
             ).fetchall()
         result: list[dict[str, Any]] = []
@@ -2512,7 +2538,10 @@ class UserProfileStore:
                     SELECT COALESCE(MAX(sequence), 0) AS max_sequence,
                            COUNT(CASE WHEN status IN (
                                'pending', 'queued', 'running'
-                           ) THEN 1 END) AS pending_count
+                           ) THEN 1 END) AS pending_count,
+                           COUNT(CASE WHEN status IN (
+                               'failed', 'cancelled'
+                           ) THEN 1 END) AS resumable_count
                     FROM user_profile_projection_events
                     WHERE profile_scope_uid = ?
                     """,
@@ -2521,14 +2550,17 @@ class UserProfileStore:
             ).fetchone()
         max_sequence = int(row["max_sequence"] if row else 0)
         pending_count = int(row["pending_count"] if row else 0)
+        resumable_count = int(row["resumable_count"] if row else 0)
         has_gap = bool(
             scope.has_gap
             or pending_count
+            or resumable_count
             or max_sequence > int(scope.projection_cursor)
         )
         return {
             "has_gap": has_gap,
             "pending_count": pending_count,
+            "resumable_count": resumable_count,
             "projection_cursor": int(scope.projection_cursor),
             "max_sequence": max_sequence,
         }
@@ -3001,7 +3033,7 @@ class UserProfileStore:
                     "UPDATE user_profile_tasks SET status = 'cancelled', "
                     "error = 'Superseded by explicit profile rebuild', updated_at = ?, "
                     "completed_at = ? WHERE profile_scope_uid = ? AND status NOT IN "
-                    "('completed', 'completed_partial', 'failed', 'cancelled')",
+                    "('completed', 'completed_partial', 'cancelled')",
                     (now, now, profile_scope_uid),
                 )
                 cursor = await db.execute(
@@ -3045,16 +3077,47 @@ class UserProfileStore:
                 result.append(task)
         return result
 
+    async def get_blocking_failed_task(
+        self, profile_scope_uid: str
+    ) -> dict[str, Any] | None:
+        """Return the oldest unfinished task that still owns queued or failed events."""
+        async with self._connect() as db:
+            row = await (
+                await db.execute(
+                    """
+                    SELECT DISTINCT t.task_uid
+                    FROM user_profile_tasks t
+                    JOIN user_profile_task_items i ON i.task_uid = t.task_uid
+                    JOIN user_profile_projection_events e ON e.event_uid = i.event_uid
+                    WHERE t.profile_scope_uid = ?
+                      AND t.status IN (
+                          'pending', 'running_facts', 'facts_completed',
+                          'facts_failed', 'running_relationship', 'failed'
+                      )
+                      AND e.status IN ('queued', 'running', 'failed')
+                    ORDER BY t.created_at ASC LIMIT 1
+                    """,
+                    (profile_scope_uid,),
+                )
+            ).fetchone()
+        return await self.get_task(str(row["task_uid"])) if row else None
+
     async def retry_profile_task(self, task_uid: str) -> str:
         task = await self.get_task(task_uid)
         if task is None:
             raise ValueError("Unknown user-profile task")
+        if str(task.get("status") or "") not in {
+            "facts_failed",
+            "facts_completed",
+            "failed",
+        }:
+            raise ValueError("User-profile task is not retryable")
         now = time.time()
         async with self._connect() as db:
             try:
                 await db.execute(
                     "UPDATE user_profile_tasks SET status = 'pending', error = NULL, "
-                    "next_retry_at = NULL, updated_at = ? WHERE task_uid = ?",
+                    "retries = 0, next_retry_at = NULL, updated_at = ? WHERE task_uid = ?",
                     (now, task_uid),
                 )
                 await db.execute(
@@ -3063,7 +3126,7 @@ class UserProfileStore:
                     (now, task_uid),
                 )
                 await db.execute(
-                    "UPDATE user_profile_projection_events SET status = 'pending', "
+                    "UPDATE user_profile_projection_events SET status = 'queued', "
                     "error = NULL, updated_at = ? WHERE event_uid IN "
                     "(SELECT event_uid FROM user_profile_task_items WHERE task_uid = ?)",
                     (now, task_uid),
@@ -3073,6 +3136,222 @@ class UserProfileStore:
                 await db.rollback()
                 raise
         return str(task["profile_scope_uid"])
+
+    async def cancel_profile_task_group(self, task_uid: str) -> dict[str, Any]:
+        """Cancel a task and any unfinished events from the same history build."""
+        task = await self.get_task(task_uid)
+        if task is None:
+            raise ValueError("Unknown user-profile task")
+        if str(task.get("status") or "") in {
+            "completed",
+            "completed_partial",
+            "cancelled",
+        }:
+            raise ValueError("User-profile task is not cancellable")
+        scope_uid = str(task["profile_scope_uid"])
+        build_uid = str(
+            (task.get("result_summary") or {}).get("build_operation_uid") or ""
+        )
+        now = time.time()
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                if build_uid:
+                    task_rows = await (
+                        await db.execute(
+                            "SELECT task_uid FROM user_profile_tasks "
+                            "WHERE profile_scope_uid = ? AND "
+                            "json_extract(result_summary, '$.build_operation_uid') = ? "
+                            "AND status NOT IN ('completed', 'completed_partial', 'cancelled')",
+                            (scope_uid, build_uid),
+                        )
+                    ).fetchall()
+                else:
+                    task_rows = await (
+                        await db.execute(
+                            "SELECT task_uid FROM user_profile_tasks WHERE task_uid = ?",
+                            (task_uid,),
+                        )
+                    ).fetchall()
+                task_uids = [str(row["task_uid"]) for row in task_rows]
+                if not task_uids:
+                    raise ValueError("User-profile task is no longer cancellable")
+                placeholders = ",".join("?" for _ in task_uids)
+                await db.execute(
+                    f"UPDATE user_profile_tasks SET status = 'cancelled', "
+                    f"error = 'Cancelled by administrator', next_retry_at = NULL, "
+                    f"result_summary = json_set(result_summary, "
+                    f"'$.automatic_retry_pending', json('false')), "
+                    f"updated_at = ?, completed_at = ? "
+                    f"WHERE task_uid IN ({placeholders})",
+                    [now, now, *task_uids],
+                )
+                await db.execute(
+                    f"UPDATE user_profile_task_items SET status = CASE "
+                    f"WHEN status IN ('facts_completed', 'relationship_completed') "
+                    f"THEN status ELSE 'cancelled' END, updated_at = ? "
+                    f"WHERE task_uid IN ({placeholders})",
+                    [now, *task_uids],
+                )
+                if build_uid:
+                    event_cursor = await db.execute(
+                        "UPDATE user_profile_projection_events SET status = 'cancelled', "
+                        "error = 'Cancelled by administrator', updated_at = ? "
+                        "WHERE profile_scope_uid = ? AND "
+                        "json_extract(payload, '$.build_operation_uid') = ? "
+                        "AND status NOT IN ('completed', 'cancelled')",
+                        (now, scope_uid, build_uid),
+                    )
+                else:
+                    event_cursor = await db.execute(
+                        f"UPDATE user_profile_projection_events SET status = 'cancelled', "
+                        f"error = 'Cancelled by administrator', updated_at = ? "
+                        f"WHERE event_uid IN (SELECT event_uid "
+                        f"FROM user_profile_task_items WHERE task_uid IN ({placeholders})) "
+                        f"AND status != 'completed'",
+                        [now, *task_uids],
+                    )
+                await db.execute(
+                    "UPDATE user_profile_scopes SET has_gap = 1, updated_at = ? "
+                    "WHERE profile_scope_uid = ?",
+                    (now, scope_uid),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "profile_scope_uid": scope_uid,
+            "task_uids": task_uids,
+            "cancelled_event_count": max(0, int(event_cursor.rowcount)),
+            "build_operation_uid": build_uid or None,
+        }
+
+    async def continue_profile_gap(self, profile_scope_uid: str) -> dict[str, Any]:
+        """Requeue the earliest interrupted build without replaying completed events."""
+        now = time.time()
+        async with self._connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                active = await (
+                    await db.execute(
+                        "SELECT 1 FROM user_profile_tasks WHERE profile_scope_uid = ? "
+                        "AND status NOT IN ('completed', 'completed_partial', 'failed', 'cancelled') "
+                        "LIMIT 1",
+                        (profile_scope_uid,),
+                    )
+                ).fetchone()
+                if active is not None:
+                    raise ValueError("User-profile maintenance is already running")
+                first = await (
+                    await db.execute(
+                        "SELECT event_uid, payload FROM user_profile_projection_events "
+                        "WHERE profile_scope_uid = ? AND status IN ('failed', 'cancelled') "
+                        "ORDER BY sequence ASC LIMIT 1",
+                        (profile_scope_uid,),
+                    )
+                ).fetchone()
+                if first is None:
+                    raise ValueError("No resumable user-profile gap")
+                payload = self._json_object(first["payload"])
+                build_uid = str(payload.get("build_operation_uid") or "")
+                if build_uid:
+                    event_rows = await (
+                        await db.execute(
+                            "SELECT event_uid FROM user_profile_projection_events "
+                            "WHERE profile_scope_uid = ? AND status IN ('failed', 'cancelled') "
+                            "AND json_extract(payload, '$.build_operation_uid') = ? "
+                            "ORDER BY sequence ASC",
+                            (profile_scope_uid, build_uid),
+                        )
+                    ).fetchall()
+                else:
+                    event_rows = [first]
+                event_uids = [str(row["event_uid"]) for row in event_rows]
+                event_placeholders = ",".join("?" for _ in event_uids)
+                task_row = await (
+                    await db.execute(
+                        f"SELECT t.task_uid, t.result_summary "
+                        f"FROM user_profile_tasks t JOIN user_profile_task_items i "
+                        f"ON i.task_uid = t.task_uid "
+                        f"WHERE i.event_uid IN ({event_placeholders}) "
+                        f"AND t.status IN ('failed', 'cancelled') "
+                        f"ORDER BY t.created_at ASC LIMIT 1",
+                        event_uids,
+                    )
+                ).fetchone()
+                resume_task_uid = str(task_row["task_uid"]) if task_row else ""
+                await db.execute(
+                    f"UPDATE user_profile_projection_events SET status = 'pending', "
+                    f"error = NULL, updated_at = ? "
+                    f"WHERE event_uid IN ({event_placeholders})",
+                    [now, *event_uids],
+                )
+                if resume_task_uid:
+                    task_summary = self._json_object(task_row["result_summary"])
+                    task_summary["automatic_retry_pending"] = False
+                    task_summary.pop("failed_stage", None)
+                    task_summary.pop("request_elapsed_seconds", None)
+                    await db.execute(
+                        "UPDATE user_profile_tasks SET status = 'pending', error = NULL, "
+                        "retries = 0, next_retry_at = NULL, result_summary = ?, "
+                        "updated_at = ?, completed_at = NULL WHERE task_uid = ?",
+                        (self._json(task_summary), now, resume_task_uid),
+                    )
+                    item_status = (
+                        "facts_completed"
+                        if task_summary.get("facts_checkpoint")
+                        else "pending"
+                    )
+                    await db.execute(
+                        "UPDATE user_profile_task_items SET status = ?, updated_at = ? "
+                        "WHERE task_uid = ?",
+                        (item_status, now, resume_task_uid),
+                    )
+                    await db.execute(
+                        "UPDATE user_profile_projection_events SET status = 'queued' "
+                        "WHERE event_uid IN (SELECT event_uid "
+                        "FROM user_profile_task_items WHERE task_uid = ?)",
+                        (resume_task_uid,),
+                    )
+                await db.execute(
+                    "UPDATE user_profile_scopes SET has_gap = 1, updated_at = ? "
+                    "WHERE profile_scope_uid = ?",
+                    (now, profile_scope_uid),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        return {
+            "profile_scope_uid": profile_scope_uid,
+            "event_count": len(event_uids),
+            "resume_task_uid": resume_task_uid or None,
+            "build_operation_uid": build_uid or None,
+        }
+
+    async def delete_completed_profile_task(self, task_uid: str) -> str:
+        task = await self.get_task(task_uid)
+        if task is None:
+            raise ValueError("Unknown user-profile task")
+        if str(task.get("status") or "") not in {"completed", "completed_partial"}:
+            raise ValueError("Only completed user-profile tasks can be deleted")
+        async with self._connect() as db:
+            await db.execute(
+                "DELETE FROM user_profile_tasks WHERE task_uid = ?", (task_uid,)
+            )
+            await db.commit()
+        return str(task["profile_scope_uid"])
+
+    async def clear_completed_profile_tasks(self, profile_scope_uid: str) -> int:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "DELETE FROM user_profile_tasks WHERE profile_scope_uid = ? "
+                "AND status IN ('completed', 'completed_partial')",
+                (profile_scope_uid,),
+            )
+            await db.commit()
+        return max(0, int(cursor.rowcount))
 
     async def preview_account_binding(
         self, *, target_actor_id: str, actor_ids: Iterable[str]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -68,10 +69,12 @@ class UserProfileHistoryManager:
         profile_scope_uid: str,
         *,
         expected_history_fingerprint: str,
+        build_operation_uid: str | None = None,
     ) -> dict[str, Any]:
         discovered, diagnostics = await self._discover(profile_scope_uid)
         fingerprint = self._fingerprint(discovered)
         self._assert_fingerprint(fingerprint, expected_history_fingerprint)
+        operation_uid = str(build_operation_uid or uuid.uuid4())
         history = await self.store.list_projection_history(profile_scope_uid)
         projected = {
             self._event_key(
@@ -94,6 +97,8 @@ class UserProfileHistoryManager:
                 "profile_actor_id": item["actor_id"],
                 "profile_display_name": item["display_name"],
                 "identity_resolution": item["identity_resolution"],
+                "projection_mode": "history_rebuild",
+                "build_operation_uid": operation_uid,
             }
             await self.store.enqueue_projection_event(
                 UserProfileProjectionEvent(
@@ -111,6 +116,7 @@ class UserProfileHistoryManager:
             "inserted_event_count": inserted,
             "refreshed_event_count": refreshed,
             "history_fingerprint": fingerprint,
+            "build_operation_uid": operation_uid,
         }
 
     async def validate_fingerprint(

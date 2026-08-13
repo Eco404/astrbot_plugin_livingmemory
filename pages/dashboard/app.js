@@ -138,6 +138,7 @@ import {
      Sidebar / Routing
      ================================================================ */
   function switchPage(name) {
+    if (state.page === "maintenance" && name !== "maintenance") maintenancePage.deactivate();
     state.page = name;
 
     document.querySelectorAll(".nav-item[data-page]").forEach(item => {

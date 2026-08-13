@@ -128,6 +128,9 @@ async def test_history_preview_backfill_is_exact_idempotent_and_persona_aware(tm
         "timeline-legacy-resolved",
     ]
     assert "persona_snapshot" not in events[0]["payload"]
+    assert events[0]["payload"]["projection_mode"] == "history_rebuild"
+    assert events[0]["payload"]["build_operation_uid"]
+    assert result["build_operation_uid"] == events[0]["payload"]["build_operation_uid"]
 
     second_preview = await manager.preview(scope.profile_scope_uid)
     assert second_preview["missing_timeline_count"] == 0

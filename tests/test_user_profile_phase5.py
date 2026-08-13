@@ -485,6 +485,7 @@ async def test_task_page_api_never_exposes_persona_prompt():
             }
         ]
     )
+    store.profile_gap_status = AsyncMock(return_value={"pending_count": 0})
     engine = SimpleNamespace(
         user_profile_store=store,
         user_profile_maintenance_manager=None,
@@ -503,7 +504,53 @@ async def test_task_page_api_never_exposes_persona_prompt():
         vars(module)["request"] = previous
 
     assert result["status"] == "ok"
-    assert result["data"]["items"] == [{"task_uid": "task-1", "status": "failed"}]
+    item = result["data"]["items"][0]
+    assert item["task_uid"] == "task-1"
+    assert item["status"] == "failed"
+    assert item["progress_percent"] == 0
+    assert item["completed_stage_count"] == 0
+    assert item["total_stage_count"] == 2
+    assert item["total_count"] == 0
+    assert result["data"]["gap"] == {"pending_count": 0}
+    assert "persona_prompt" not in item
+    assert "provider_signature" not in item
+    assert "settings_snapshot" not in item
+
+
+def test_task_page_api_reports_two_stage_progress():
+    fact_stage = UserProfileHandler._task_public(
+        {
+            "task_uid": "task-facts",
+            "status": "running_facts",
+            "items": [{"timeline_uid": "timeline-1"}],
+            "result_summary": {},
+        }
+    )
+    relationship_stage = UserProfileHandler._task_public(
+        {
+            "task_uid": "task-relationship",
+            "status": "running_relationship",
+            "items": [{"timeline_uid": "timeline-1"}],
+            "result_summary": {"facts_checkpoint": True},
+        }
+    )
+    completed = UserProfileHandler._task_public(
+        {
+            "task_uid": "task-completed",
+            "status": "completed",
+            "items": [{"timeline_uid": "timeline-1"}],
+            "result_summary": {
+                "facts_checkpoint": True,
+                "relationship_checkpoint": True,
+            },
+        }
+    )
+
+    assert fact_stage["progress_percent"] == 20
+    assert relationship_stage["progress_percent"] == 75
+    assert relationship_stage["completed_stage_count"] == 1
+    assert completed["progress_percent"] == 100
+    assert completed["completed_stage_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -679,6 +726,115 @@ async def test_enabling_profile_marks_gap_when_historical_timelines_are_missing(
     assert result["data"]["has_gap"] is True
     store.set_scope_state.assert_awaited_once_with("scope-1", has_gap=True)
     manager.schedule_scope.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancel_continue_and_clear_profile_build_tasks(tmp_path):
+    store = UserProfileStore(str(tmp_path / "task-control.db"))
+    await store.initialize()
+    scope = await _new_scope(store, "test:human:user-1")
+    build_uid = "build-operation-1"
+    events = []
+    for index in range(3):
+        event = UserProfileProjectionEvent(
+            timeline_uid=f"timeline-{index}",
+            timeline_revision=1,
+            operation="upsert",
+            memory_space_id=f"space-{index}",
+            profile_scope_uid=scope.profile_scope_uid,
+            payload={
+                "projection_mode": "history_rebuild",
+                "build_operation_uid": build_uid,
+            },
+        )
+        await store.enqueue_projection_event(event)
+        events.append(event)
+
+    from astrbot_plugin_livingmemory.core.models.user_profile import UserProfileTask
+
+    completed = UserProfileTask(
+        profile_scope_uid=scope.profile_scope_uid,
+        result_summary={"build_operation_uid": build_uid},
+    )
+    await store.create_task(
+        completed,
+        [
+            {
+                "event_uid": events[0].event_uid,
+                "timeline_uid": events[0].timeline_uid,
+                "timeline_revision": 1,
+            }
+        ],
+    )
+    await store.update_task(
+        completed.task_uid,
+        status="completed",
+        result_summary={
+            "build_operation_uid": build_uid,
+            "facts_checkpoint": True,
+            "relationship_checkpoint": True,
+        },
+    )
+    await store.finish_task_events(completed.task_uid, status="completed")
+
+    running = UserProfileTask(
+        profile_scope_uid=scope.profile_scope_uid,
+        result_summary={"build_operation_uid": build_uid},
+    )
+    await store.create_task(
+        running,
+        [
+            {
+                "event_uid": events[1].event_uid,
+                "timeline_uid": events[1].timeline_uid,
+                "timeline_revision": 1,
+            }
+        ],
+    )
+
+    cancelled = await store.cancel_profile_task_group(running.task_uid)
+    assert cancelled["task_uids"] == [running.task_uid]
+    async with store._connect() as db:
+        statuses = {
+            str(row["timeline_uid"]): str(row["status"])
+            for row in await (
+                await db.execute(
+                    "SELECT timeline_uid, status FROM user_profile_projection_events"
+                )
+            ).fetchall()
+        }
+    assert statuses == {
+        "timeline-0": "completed",
+        "timeline-1": "cancelled",
+        "timeline-2": "cancelled",
+    }
+
+    resumed = await store.continue_profile_gap(scope.profile_scope_uid)
+    assert resumed["resume_task_uid"] == running.task_uid
+    assert resumed["event_count"] == 2
+    restored_task = await store.get_task(running.task_uid)
+    assert restored_task["status"] == "pending"
+    assert restored_task["result_summary"].get("facts_checkpoint") is not True
+    async with store._connect() as db:
+        statuses = {
+            str(row["timeline_uid"]): str(row["status"])
+            for row in await (
+                await db.execute(
+                    "SELECT timeline_uid, status FROM user_profile_projection_events"
+                )
+            ).fetchall()
+        }
+    assert statuses == {
+        "timeline-0": "completed",
+        "timeline-1": "queued",
+        "timeline-2": "pending",
+    }
+
+    with pytest.raises(ValueError, match="Only completed"):
+        await store.delete_completed_profile_task(running.task_uid)
+    assert await store.clear_completed_profile_tasks(scope.profile_scope_uid) == 1
+    assert await store.get_task(completed.task_uid) is None
+    assert len(await store.list_projection_history(scope.profile_scope_uid)) == 3
 
 
 @pytest.mark.asyncio

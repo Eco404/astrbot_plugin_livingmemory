@@ -549,6 +549,10 @@ class PluginPageApi:
             ("/user-profiles/tasks", self.list_user_profile_tasks, ["GET"]),
             ("/user-profiles/task", self.get_user_profile_task, ["GET"]),
             ("/user-profiles/tasks/retry", self.retry_user_profile_task, ["POST"]),
+            ("/user-profiles/tasks/cancel", self.cancel_user_profile_task, ["POST"]),
+            ("/user-profiles/tasks/delete", self.delete_user_profile_task, ["POST"]),
+            ("/user-profiles/tasks/clear-completed", self.clear_completed_user_profile_tasks, ["POST"]),
+            ("/user-profiles/rebuild/continue", self.continue_user_profile_rebuild, ["POST"]),
             ("/user-profiles/relationship/update", self.update_user_relationship, ["POST"]),
             ("/user-profiles/relationship/freeze", self.freeze_user_relationship, ["POST"]),
             ("/user-profiles/relationship/reset", self.reset_user_relationship, ["POST"]),
@@ -1177,6 +1181,18 @@ class PluginPageApi:
 
     async def retry_user_profile_task(self):
         return await self._with_user_profiles("retry_task")
+
+    async def cancel_user_profile_task(self):
+        return await self._with_user_profiles("cancel_task")
+
+    async def delete_user_profile_task(self):
+        return await self._with_user_profiles("delete_task")
+
+    async def clear_completed_user_profile_tasks(self):
+        return await self._with_user_profiles("clear_completed_tasks")
+
+    async def continue_user_profile_rebuild(self):
+        return await self._with_user_profiles("continue_gap")
 
     async def update_user_relationship(self):
         return await self._with_user_profiles("relationship_update")

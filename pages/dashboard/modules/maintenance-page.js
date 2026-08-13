@@ -143,6 +143,9 @@ export class MaintenancePage {
 
   selectTab(tab) {
     if (!tab) return;
+    if (this.tab === "user-profiles" && tab !== "user-profiles") {
+      this.userProfileMaintenance?.deactivate();
+    }
     this.tab = tab;
     document.querySelectorAll("[data-maintenance-tab]").forEach(button => {
       const active = button.dataset.maintenanceTab === tab;
@@ -167,6 +170,10 @@ export class MaintenancePage {
       if (!this.databaseStoragePreview) this.resumeDatabaseStorageMaintenance();
     }
     if (tab === "user-profiles") this.userProfileMaintenance?.activate();
+  }
+
+  deactivate() {
+    this.userProfileMaintenance?.deactivate();
   }
 
   selectedDatabaseIssues() {

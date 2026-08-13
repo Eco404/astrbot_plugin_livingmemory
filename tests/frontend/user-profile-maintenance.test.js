@@ -290,7 +290,149 @@ test("profile build submits the exact server-issued candidate scope", async () =
   }
 });
 
-test("standalone profile page renders only read-only facts and relationship meters", () => {
+test("profile tasks expose stage progress and readable job rows", () => {
+  globalThis.window = { t(key, ...args) { return `${key}:${args.join(",")}`; } };
+  globalThis.document = {
+    createElement() {
+      let text = "";
+      return {
+        set textContent(value) { text = String(value); },
+        get innerHTML() { return text; },
+      };
+    },
+  };
+  try {
+    const profile = new UserProfileMaintenance({}, () => {}, {});
+    const task = {
+      task_uid: "task-12345678",
+      status: "running_relationship",
+      progress_percent: 75,
+      completed_stage_count: 1,
+      total_stage_count: 2,
+      total_count: 4,
+      retries: 0,
+      updated_at: 1,
+      batch_timeline_count: 4,
+      batch_candidate_count: 7,
+      batch_prompt_estimate_chars: 12000,
+    };
+    const monitor = profile.renderTaskMonitor([task], { pending_count: 2 });
+    const rows = profile.renderTaskRows([task]);
+    assert.match(monitor, /width:75%/);
+    assert.match(monitor, /profile\.taskStatus\.running_relationship/);
+    assert.match(rows, /maintenance-task-progress/);
+    assert.match(rows, /profile\.taskRowMeta:75,4,0/);
+    assert.match(rows, /profile\.taskBatchMeta:4,7/);
+    assert.doesNotMatch(rows, /data-task-retry/);
+    assert.match(profile.renderTaskRows([{ ...task, status: "facts_completed", error: "provider failed", result_summary: { relationship_error: "provider failed" } }]), /profile\.taskStatus\.relationship_failed/);
+    assert.match(profile.renderTaskMonitor([], { pending_count: 5 }), /class="user-profile-task-monitor hidden"/);
+    profile.selectedScopeUid = "scope-1";
+    profile.taskProgressBaseline = { scope: "scope-1", total: 5 };
+    assert.match(profile.renderTaskMonitor([task], { pending_count: 5 }), /profile\.taskOverallProgress:60,3,5,2/);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
+});
+
+test("task polling refreshes derived profile after the queue drains", async () => {
+  const calls = [];
+  globalThis.window = { t(key) { return key; } };
+  globalThis.document = {
+    getElementById() { return null; },
+    querySelector() { return null; },
+    createElement() {
+      let text = "";
+      return {
+        set textContent(value) { text = String(value); },
+        get innerHTML() { return text; },
+      };
+    },
+  };
+  try {
+    const profile = new UserProfileMaintenance({
+      async get(path) {
+        calls.push(path);
+        return { items: [{ status: "completed" }], gap: { pending_count: 0 } };
+      },
+    }, () => {}, {});
+    profile.selectedScopeUid = "scope-1";
+    profile.detail = { scope: { enabled: true }, tasks: [{ status: "running_facts" }], gap: { pending_count: 1 } };
+    profile.loadList = async () => { calls.push("list"); };
+    profile.loadDetail = async () => { calls.push("detail"); };
+    await profile.pollTasks(profile.taskPollGeneration);
+    assert.deepEqual(calls, ["user-profiles/tasks", "list", "detail"]);
+    assert.equal(profile.taskProgressBaseline, null);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
+});
+
+test("task polling stops a tracked queue when its profile is disabled", async () => {
+  const calls = [];
+  globalThis.window = { t(key) { return key; } };
+  globalThis.document = {
+    getElementById() { return null; },
+    querySelector() { return null; },
+  };
+  try {
+    const profile = new UserProfileMaintenance({
+      async get(path) {
+        calls.push(path);
+        return { items: [], gap: { has_gap: true, pending_count: 4 } };
+      },
+    }, key => calls.push(key), {});
+    profile.selectedScopeUid = "scope-1";
+    profile.detail = { scope: { enabled: false }, tasks: [], gap: { pending_count: 4 } };
+    profile.taskProgressBaseline = { scope: "scope-1", total: 4 };
+    await profile.pollTasks(profile.taskPollGeneration);
+    assert.deepEqual(calls, ["user-profiles/tasks"]);
+    assert.equal(profile.taskProgressBaseline, null);
+    assert.equal(profile.taskPollTimer, null);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
+});
+
+test("task polling stops when automatic retries are exhausted", async () => {
+  const calls = [];
+  globalThis.window = { t(key) { return key; } };
+  globalThis.document = {
+    getElementById() { return null; },
+    querySelector() { return null; },
+    createElement() {
+      let text = "";
+      return {
+        set textContent(value) { text = String(value); },
+        get innerHTML() { return text; },
+      };
+    },
+  };
+  try {
+    const failed = { status: "failed", failed_stage: "facts", error: "timeout" };
+    const profile = new UserProfileMaintenance({
+      async get(path) {
+        calls.push(path);
+        return { items: [failed], gap: { has_gap: true, pending_count: 4 } };
+      },
+    }, () => {}, {});
+    profile.selectedScopeUid = "scope-1";
+    profile.detail = { scope: { enabled: true }, tasks: [{ status: "running_facts" }], gap: { pending_count: 4 } };
+    profile.taskProgressBaseline = { scope: "scope-1", total: 4 };
+    await profile.pollTasks(profile.taskPollGeneration);
+    assert.deepEqual(calls, ["user-profiles/tasks"]);
+    assert.equal(profile.taskProgressBaseline, null);
+    assert.equal(profile.taskPollTimer, null);
+    assert.match(profile.renderTaskMonitor([failed], { pending_count: 4 }), /profile\.taskStatus\.failed/);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
+});
+
+test("profile task rows expose actions appropriate to each state", () => {
   globalThis.window = { t(key) { return key; } };
   globalThis.document = {
     createElement() {
@@ -302,21 +444,103 @@ test("standalone profile page renders only read-only facts and relationship mete
     },
   };
   try {
+    const profile = new UserProfileMaintenance({}, () => {}, {});
+    const running = profile.renderTaskRows([{ task_uid: "run", status: "running_facts", items: [] }]);
+    const failed = profile.renderTaskRows([{ task_uid: "fail", status: "failed", items: [] }]);
+    const completed = profile.renderTaskRows([{ task_uid: "done", status: "completed", items: [] }]);
+    assert.match(running, /data-task-cancel="run"/);
+    assert.doesNotMatch(running, /data-task-delete/);
+    assert.match(failed, /data-task-retry="fail"/);
+    assert.match(failed, /data-task-cancel="fail"/);
+    assert.match(completed, /data-task-delete="done"/);
+    assert.doesNotMatch(completed, /data-task-cancel/);
+    assert.match(profile.renderTasks([{ task_uid: "done", status: "completed", items: [] }]), /data-task-clear-completed/);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
+});
+
+test("empty profile list keeps the toolbar as the only build entry", () => {
+  globalThis.window = { t(key) { return key; } };
+  const list = { innerHTML: "" };
+  globalThis.document = {
+    getElementById(id) { return id === "user-profile-list" ? list : null; },
+    createElement() {
+      let text = "";
+      return {
+        set textContent(value) { text = String(value); },
+        get innerHTML() { return text; },
+      };
+    },
+  };
+  try {
+    const profile = new UserProfileMaintenance({}, () => {}, {});
+    profile.renderList();
+    assert.doesNotMatch(list.innerHTML, /data-profile-empty-build/);
+  } finally {
+    delete globalThis.document;
+    delete globalThis.window;
+  }
+});
+
+test("standalone profile page renders only read-only facts and relationship meters", () => {
+  globalThis.window = { t(key) { return key; } };
+  const detailRoot = { innerHTML: "" };
+  globalThis.document = {
+    getElementById(id) { return id === "profile-page-detail" ? detailRoot : null; },
+    createElement() {
+      let text = "";
+      return {
+        set textContent(value) { text = String(value); },
+        get innerHTML() { return text; },
+      };
+    },
+  };
+  try {
     const page = new UserProfilePage({});
-    const facts = page.renderFacts("facts", [{
-      category: "preference",
-      raw_fact: "User likes tea",
-      status: "active",
-      confidence: 0.9,
-      importance: 0.8,
-      sources: [{ timeline_uid: "timeline-1", timeline_revision: 2 }],
-    }]);
+    const activeFacts = [
+      {
+        category: "preference",
+        raw_fact: "User likes tea",
+        status: "active",
+        confidence: 0.9,
+        importance: 0.8,
+        sources: [{ timeline_uid: "timeline-1", timeline_revision: 2 }],
+      },
+      {
+        category: "stable_info",
+        raw_fact: "User writes software",
+        status: "active",
+        confidence: 0.95,
+        importance: 0.85,
+        sources: [],
+      },
+    ];
+    const facts = page.renderFacts("facts", activeFacts);
     const relationship = page.renderRelationship({ trust: 0.72, stance_tags: ["steady"], subjective_summary: "Known well." }, {});
     assert.match(facts, /User likes tea/);
     assert.match(facts, /data-open-timeline="timeline-1"/);
+    assert.ok(facts.indexOf('data-fact-group="stable_info"') < facts.indexOf('data-fact-group="preference"'));
     assert.doesNotMatch(facts, /data-fact-action/);
     assert.match(relationship, /width:72%/);
     assert.doesNotMatch(relationship, /type="range"/);
+
+    page.selectedScopeUid = "scope-1";
+    page.detail = {
+      scope: { profile_scope_uid: "scope-1", logical_user_uid: "user-1", bot_account: "bot-1", persona_id: "persona-1", enabled: true },
+      accounts: [{ last_observed_name: "User" }],
+      facts: [...activeFacts, { category: "habit", raw_fact: "Needs review", status: "pending", confidence: 0.6, importance: 0.5 }],
+      fact_revision: 3,
+      relationship: { revision: 2, trust: 0.72, subjective_summary: "Known well." },
+      injection_preview: { total_chars: 42, fact_count: 2, relationship_included: true, content: "preview" },
+    };
+    page.renderDetail();
+    assert.match(detailRoot.innerHTML, /profile-view-facts-panel is-review/);
+    assert.match(detailRoot.innerHTML, /<details class="profile-view-injection">/);
+    assert.ok(detailRoot.innerHTML.indexOf("profile-view-primary-grid") < detailRoot.innerHTML.indexOf("profile-view-facts-panel is-review"));
+    assert.ok(detailRoot.innerHTML.indexOf("profile-view-facts-panel is-review") < detailRoot.innerHTML.indexOf("profile-view-injection"));
+    assert.doesNotMatch(detailRoot.innerHTML, /type="range"|data-fact-action/);
   } finally {
     delete globalThis.document;
     delete globalThis.window;

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import random
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -92,8 +91,13 @@ class UserProfileFactMaintainer:
             if item.source_uid
             not in {candidate.source_uid for candidate in candidate_list}
         ]
-        prompt = self._build_prompt(
-            candidate_list, evidence_list, existing_list, settings
+        existing_list, evidence_list, prompt, prompt_diagnostics = (
+            self.fit_prompt_context(
+                candidate_list,
+                evidence_list,
+                existing_list,
+                settings,
+            )
         )
         correction_limit = max(
             0, int(settings.get("user_profile.contract_correction_retries", 2))
@@ -118,6 +122,7 @@ class UserProfileFactMaintainer:
                     plan.diagnostics["contract_correction_attempts"] = (
                         correction_attempt
                     )
+                plan.diagnostics.update(prompt_diagnostics)
                 return plan
             except UserProfileFactValidationError as error:
                 if correction_attempt >= correction_limit:
@@ -132,6 +137,74 @@ class UserProfileFactMaintainer:
                     limit=correction_limit,
                 )
         raise RuntimeError("unreachable fact-maintenance correction state")
+
+    @classmethod
+    def fit_prompt_context(
+        cls,
+        candidates: Iterable[UserProfileFactSource],
+        supporting_evidence: Iterable[UserProfileFactSource],
+        existing_facts: Iterable[dict[str, Any]],
+        settings: dict[str, Any],
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[UserProfileFactSource],
+        str,
+        dict[str, Any],
+    ]:
+        """Keep mandatory candidates and fit lower-priority context to a prompt budget."""
+        candidate_list = list(candidates)
+        existing_list = [dict(item) for item in existing_facts]
+        evidence_list = list(supporting_evidence)
+        original_existing_count = len(existing_list)
+        original_evidence_count = len(evidence_list)
+        limit = max(
+            4000,
+            int(settings.get("user_profile.maintenance_prompt_max_chars", 16000)),
+        )
+
+        def build() -> str:
+            return cls._build_prompt(
+                candidate_list, evidence_list, existing_list, settings
+            )
+
+        prompt = build()
+        required_evidence = 0
+        if any(
+            str(item.metadata.get("profile_signal") or "") == _BEHAVIOR_PATTERN
+            for item in candidate_list
+        ):
+            required_evidence = max(
+                0,
+                int(settings.get("user_profile.behavior_inference_min_timelines", 3))
+                - 1,
+            )
+            if bool(settings.get("user_profile.sensitive_behavior_inference_enabled")):
+                required_evidence = max(
+                    required_evidence,
+                    int(settings.get("user_profile.sensitive_inference_min_timelines", 3))
+                    - 1,
+                )
+        while len(prompt) > limit and len(evidence_list) > required_evidence:
+            evidence_list.pop()
+            prompt = build()
+        while len(prompt) > limit and existing_list:
+            existing_list.pop()
+            prompt = build()
+        while len(prompt) > limit and evidence_list:
+            evidence_list.pop()
+            prompt = build()
+        return existing_list, evidence_list, prompt, {
+            "candidate_count": len(candidate_list),
+            "prompt_chars": len(prompt),
+            "prompt_target_chars": limit,
+            "prompt_target_exceeded": len(prompt) > limit,
+            "existing_fact_count": len(existing_list),
+            "existing_fact_count_omitted": original_existing_count
+            - len(existing_list),
+            "supporting_evidence_count": len(evidence_list),
+            "supporting_evidence_count_omitted": original_evidence_count
+            - len(evidence_list),
+        }
 
     @staticmethod
     def _contract_correction_prompt(
@@ -988,9 +1061,6 @@ class UserProfileFactMaintainer:
         settings: dict[str, Any],
         system_prompt: str | None = None,
     ) -> str:
-        retries = max(0, int(settings["user_profile.maintenance_max_retries"]))
-        base = max(0.0, float(settings["user_profile.maintenance_retry_base_seconds"]))
-        cap = max(base, float(settings["user_profile.maintenance_retry_max_seconds"]))
         method = getattr(provider, "text_chat", None)
         if not callable(method):
             raise RuntimeError("User-profile Provider does not support text_chat")
@@ -1006,23 +1076,26 @@ class UserProfileFactMaintainer:
         except (TypeError, ValueError):
             parameters = {}
         if "request_max_retries" in parameters:
-            kwargs["request_max_retries"] = retries + 1
-            response = await method(**kwargs)
-            return str(getattr(response, "completion_text", "") or "")
-        last_error: Exception | None = None
-        for attempt in range(retries + 1):
-            try:
-                response = await method(**kwargs)
-                return str(getattr(response, "completion_text", "") or "")
-            except Exception as exc:
-                last_error = exc
-                if attempt < retries:
-                    delay = min(cap, base * (2**attempt))
-                    if delay:
-                        await asyncio.sleep(delay + random.uniform(0, min(0.5, delay)))
-        raise RuntimeError(
-            f"User-profile fact Provider request failed: {last_error}"
-        ) from last_error
+            kwargs["request_max_retries"] = 1
+        try:
+            timeout = max(
+                30.0,
+                float(
+                    settings.get(
+                        "user_profile.maintenance_request_timeout_seconds", 180
+                    )
+                ),
+            )
+            response = await asyncio.wait_for(method(**kwargs), timeout=timeout)
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"User-profile Provider request exceeded {timeout:g} seconds"
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"User-profile fact Provider request failed: {exc}"
+            ) from exc
+        return str(getattr(response, "completion_text", "") or "")
 
 
 def _score(value: Any, default: float) -> float:

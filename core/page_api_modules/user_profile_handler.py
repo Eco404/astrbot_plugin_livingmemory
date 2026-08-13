@@ -37,6 +37,63 @@ class UserProfileHandler:
     def _task_public(task: dict[str, Any]) -> dict[str, Any]:
         result = dict(task)
         result.pop("persona_prompt", None)
+        result.pop("settings_snapshot", None)
+        result.pop("provider_signature", None)
+        items = list(result.get("items") or [])
+        result["items"] = [
+            {
+                key: item.get(key)
+                for key in (
+                    "timeline_uid",
+                    "timeline_revision",
+                    "status",
+                    "updated_at",
+                )
+            }
+            for item in items
+        ]
+        summary = dict(result.get("result_summary") or {})
+        status = str(result.get("status") or "pending")
+        completed_stages = int(bool(summary.get("facts_checkpoint"))) + int(
+            bool(summary.get("relationship_checkpoint"))
+        )
+        progress = completed_stages * 50
+        if status == "running_facts":
+            progress = max(progress, 20)
+        elif status == "facts_failed":
+            progress = max(progress, 25)
+        elif status == "facts_completed":
+            progress = max(progress, 50)
+            if summary.get("relationship_error"):
+                progress = max(progress, 75)
+        elif status == "running_relationship":
+            progress = max(progress, 75)
+        elif status in {"completed", "completed_partial"}:
+            progress = 100
+        elif status == "failed" and summary.get("failed_stage") == "relationship":
+            progress = max(progress, 75)
+        elif status == "failed" and summary.get("failed_stage") == "facts":
+            progress = max(progress, 25)
+        result["stage"] = status
+        result["completed_stage_count"] = completed_stages
+        result["total_stage_count"] = 2
+        result["progress_percent"] = max(0, min(100, progress))
+        result["total_count"] = len(items)
+        for key in (
+            "batch_timeline_count",
+            "batch_candidate_count",
+            "batch_prompt_estimate_chars",
+            "batch_candidate_limit",
+            "batch_prompt_target_chars",
+            "facts_elapsed_seconds",
+            "relationship_elapsed_seconds",
+            "request_elapsed_seconds",
+            "failed_stage",
+            "retry_limit",
+            "automatic_retry_pending",
+        ):
+            if key in summary:
+                result[key] = summary[key]
         return result
 
     async def list_profiles(self, memory_engine: Any) -> dict[str, Any]:
@@ -425,9 +482,11 @@ class UserProfileHandler:
             store, _manager = self._components(memory_engine)
             scope_uid = str(request.args.get("profile_scope_uid") or "").strip()
             tasks = await store.list_profile_tasks(scope_uid, limit=100)
-            return self.utils.ok(
-                {"items": [self._task_public(task) for task in tasks]}
-            )
+            gap = await store.profile_gap_status(scope_uid) if scope_uid else None
+            return self.utils.ok({
+                "items": [self._task_public(task) for task in tasks],
+                "gap": gap,
+            })
         except Exception as exc:
             return self.utils.error(str(exc))
 
@@ -449,8 +508,53 @@ class UserProfileHandler:
                 str(payload.get("task_uid") or "")
             )
             if manager is not None:
-                manager.schedule_scope(scope_uid)
+                await manager.resume_task(str(payload.get("task_uid") or ""))
             return self.utils.ok({"profile_scope_uid": scope_uid, "status": "scheduled"})
+        except Exception as exc:
+            return self.utils.error(str(exc))
+
+    async def cancel_task(self, memory_engine: Any) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        try:
+            _store, manager = self._components(memory_engine)
+            if manager is None:
+                raise RuntimeError("用户画像维护器尚未初始化")
+            result = await manager.cancel_task(str(payload.get("task_uid") or ""))
+            return self.utils.ok(result)
+        except Exception as exc:
+            return self.utils.error(str(exc))
+
+    async def continue_gap(self, memory_engine: Any) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        try:
+            _store, manager = self._components(memory_engine)
+            if manager is None:
+                raise RuntimeError("用户画像维护器尚未初始化")
+            result = await manager.continue_gap(self._scope_uid(payload))
+            return self.utils.ok({**result, "status": "scheduled"})
+        except Exception as exc:
+            return self.utils.error(str(exc))
+
+    async def delete_task(self, memory_engine: Any) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        try:
+            store, _manager = self._components(memory_engine)
+            scope_uid = await store.delete_completed_profile_task(
+                str(payload.get("task_uid") or "")
+            )
+            return self.utils.ok({"profile_scope_uid": scope_uid})
+        except Exception as exc:
+            return self.utils.error(str(exc))
+
+    async def clear_completed_tasks(self, memory_engine: Any) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        try:
+            store, _manager = self._components(memory_engine)
+            scope_uid = self._scope_uid(payload)
+            deleted = await store.clear_completed_profile_tasks(scope_uid)
+            return self.utils.ok(
+                {"profile_scope_uid": scope_uid, "deleted_count": deleted}
+            )
         except Exception as exc:
             return self.utils.error(str(exc))
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-USER_PROFILE_SETTINGS_REVISION = 5
+USER_PROFILE_SETTINGS_REVISION = 6
 
 
 def _setting(
@@ -35,8 +35,11 @@ USER_PROFILE_SETTING_DEFINITIONS: dict[str, dict[str, Any]] = {
     "user_profile.provider_id": _setting("", "string", "model_tasks", "画像维护 LLM Provider", "留空时使用 Timeline 总结 Provider。", special="select_provider"),
     "user_profile.maintenance_concurrency": _setting(1, "int", "model_tasks", "用户维护并发", "不同用户可以并行维护，同一用户始终严格串行。", min=1, max=16),
     "user_profile.maintenance_batch_timeline_limit": _setting(8, "int", "model_tasks", "单批 Timeline 上限", "一次画像维护最多合并的连续 Timeline 变化数。", min=1, max=64),
+    "user_profile.maintenance_batch_candidate_limit": _setting(16, "int", "model_tasks", "单批候选事实上限", "一次客观事实维护最多交给模型判断的候选事实数；与 Timeline 和提示字符上限共同决定实际批次大小。单条 Timeline 超限时仍会单独处理。", min=1, max=256),
+    "user_profile.maintenance_prompt_max_chars": _setting(16000, "int", "model_tasks", "事实维护提示字符上限", "客观事实维护提示的目标字符上限。系统会优先保留本批候选，再按优先级裁剪已有事实和历史行为证据；单条 Timeline 本身超限时允许超过该目标以保证任务可推进。", min=4000, max=200000),
+    "user_profile.maintenance_request_timeout_seconds": _setting(180, "int", "model_tasks", "单次模型调用总超时", "单次画像模型调用（包括 Provider/SDK 内部行为）的总时间上限。超时后由可见的持久维护任务按退避策略重试。", min=30, max=1800),
     "user_profile.fact_maintenance_context_limit": _setting(200, "int", "model_tasks", "已有事实上下文上限", "一次事实维护最多向模型提供的当前事实数；优先保留冲突、有效、待确认和失效待复核事实，不发送长期归档、排除或已取代事实。", min=20, max=2000),
-    "user_profile.maintenance_max_retries": _setting(3, "int", "model_tasks", "模型请求重试", "Provider/API 请求重试上限，不计入每批业务调用数量。", min=0, max=10),
+    "user_profile.maintenance_max_retries": _setting(3, "int", "model_tasks", "维护任务自动重试", "一次模型调用失败后，持久维护任务自动重试的次数。每次调用只执行一轮 AstrBot Provider 请求，达到上限后保留任务和断层供人工重试。", min=0, max=10),
     "user_profile.contract_correction_retries": _setting(2, "int", "model_tasks", "模型契约纠错次数", "事实或关系模型返回内容通过网络请求但不符合 JSON 或来源引用契约时，携带允许标识符白名单重新请求的次数；不放宽确定性校验。", min=0, max=5),
     "user_profile.maintenance_retry_base_seconds": _setting(60, "int", "model_tasks", "重试基础等待", "画像维护失败后的指数退避基础秒数。", min=5, max=3600),
     "user_profile.maintenance_retry_max_seconds": _setting(3600, "int", "model_tasks", "重试最大等待", "画像维护失败后的最大冷却秒数。", min=60, max=86400),

@@ -26,6 +26,14 @@ from .user_profile_fact_maintainer import (
 from .user_relationship_maintainer import UserRelationshipMaintainer
 
 
+class _AsyncNoopContext:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool:
+        return False
+
+
 class UserProfileMaintenanceManager:
     """Drain projection events serially per user and checkpoint each business stage."""
 
@@ -49,6 +57,7 @@ class UserProfileMaintenanceManager:
         self._namespace_locks: dict[str, asyncio.Lock] = {}
         self._scheduled: dict[str, asyncio.Task] = {}
         self._retry_tasks: set[asyncio.Task] = set()
+        self._retry_by_task_uid: dict[str, asyncio.Task] = {}
         self._lifecycle_task: asyncio.Task | None = None
         self._settings_changed = asyncio.Event()
         self._closing = False
@@ -67,11 +76,18 @@ class UserProfileMaintenanceManager:
         if self._lifecycle_task is None or self._lifecycle_task.done():
             self._lifecycle_task = asyncio.create_task(self._lifecycle_loop())
         limit = int(self.config.get("user_profile.startup_recovery_limit", 64))
-        recoverable = await self.store.list_recoverable_tasks(limit=limit)
+        recoverable = await self.store.list_recoverable_tasks(
+            limit=limit, include_future=True
+        )
         for task in recoverable:
             scope_uid = str(task.get("profile_scope_uid") or "")
             if scope_uid:
-                self._schedule_existing_task(scope_uid, task)
+                retry_at = float(task.get("next_retry_at") or 0)
+                delay = max(0.0, retry_at - time.time())
+                if delay:
+                    self._schedule_retry(scope_uid, str(task["task_uid"]), delay)
+                else:
+                    self._schedule_existing_task(scope_uid, task)
         pending = await self.store.list_pending_projection_events(limit=limit)
         for event in pending:
             scope_uid = str(event.get("profile_scope_uid") or "")
@@ -90,6 +106,7 @@ class UserProfileMaintenanceManager:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._scheduled.clear()
         self._retry_tasks.clear()
+        self._retry_by_task_uid.clear()
         self._lifecycle_task = None
 
     async def run_lifecycle_maintenance(self) -> dict[str, int]:
@@ -140,6 +157,57 @@ class UserProfileMaintenanceManager:
             if self._scheduled.get(uid) is finished
             else None
         )
+
+    async def resume_task(self, task_uid: str) -> None:
+        """Resume the original durable task after an explicit administrator retry."""
+        task = await self.store.get_task(task_uid)
+        if task is None:
+            raise ValueError("Unknown user-profile task")
+        scope_uid = str(task.get("profile_scope_uid") or "")
+        if not scope_uid:
+            raise ValueError("User-profile task has no scope")
+        retry_wake = self._retry_by_task_uid.pop(task_uid, None)
+        if retry_wake is not None and not retry_wake.done():
+            retry_wake.cancel()
+        self._schedule_existing_task(scope_uid, task)
+
+    async def cancel_task(self, task_uid: str) -> dict[str, Any]:
+        """Stop the scope worker and cancel the task's complete build group."""
+        task = await self.store.get_task(task_uid)
+        if task is None:
+            raise ValueError("Unknown user-profile task")
+        scope_uid = str(task.get("profile_scope_uid") or "")
+        retry_wakes = []
+        for candidate_uid, retry_wake in list(self._retry_by_task_uid.items()):
+            candidate = await self.store.get_task(candidate_uid)
+            if str((candidate or {}).get("profile_scope_uid") or "") != scope_uid:
+                continue
+            self._retry_by_task_uid.pop(candidate_uid, None)
+            if not retry_wake.done():
+                retry_wake.cancel()
+                retry_wakes.append(retry_wake)
+        if retry_wakes:
+            await asyncio.gather(*retry_wakes, return_exceptions=True)
+        scheduled = self._scheduled.get(scope_uid)
+        if scheduled is not None and not scheduled.done():
+            scheduled.cancel()
+            await asyncio.gather(scheduled, return_exceptions=True)
+        result = await self.store.cancel_profile_task_group(task_uid)
+        for cancelled_uid in result.get("task_uids", []):
+            retry_wake = self._retry_by_task_uid.pop(str(cancelled_uid), None)
+            if retry_wake is not None and not retry_wake.done():
+                retry_wake.cancel()
+        return result
+
+    async def continue_gap(self, profile_scope_uid: str) -> dict[str, Any]:
+        """Resume interrupted events without replaying completed fact batches."""
+        result = await self.store.continue_profile_gap(profile_scope_uid)
+        task_uid = str(result.get("resume_task_uid") or "")
+        if task_uid:
+            await self.resume_task(task_uid)
+        elif int(result.get("event_count") or 0):
+            self.schedule_scope(profile_scope_uid)
+        return result
 
     async def drain_scope(self, profile_scope_uid: str) -> None:
         """Synchronous entry used by tests and explicit maintenance actions."""
@@ -323,14 +391,28 @@ class UserProfileMaintenanceManager:
         *,
         use_all_history: bool = True,
         reason: str | None = None,
+        _lock_held: bool = False,
+        _settings: dict[str, Any] | None = None,
+        _provider: Any = None,
+        _history_through_sequence: int | None = None,
+        _checkpoint_task_uid: str | None = None,
     ) -> UserRelationshipState | None:
         """Replace the current relationship from durable projection history."""
         lock = self._scope_locks.setdefault(profile_scope_uid, asyncio.Lock())
-        async with lock:
+        context = _AsyncNoopContext() if _lock_held else lock
+        config = dict(_settings or self.config)
+        async with context:
             scope = await self.store.get_scope(profile_scope_uid)
             if scope is None:
                 raise ValueError("Unknown user-profile scope")
             history = await self.store.list_projection_history(profile_scope_uid)
+            if _history_through_sequence is not None:
+                history = [
+                    event
+                    for event in history
+                    if int(event.get("sequence") or 0)
+                    <= int(_history_through_sequence)
+                ]
             latest_by_timeline: dict[str, dict[str, Any]] = {}
             for event in history:
                 latest_by_timeline[str(event.get("timeline_uid") or "")] = event
@@ -387,24 +469,25 @@ class UserProfileMaintenanceManager:
                             "user_profile.relationship_full_revision_limit", 100
                         )
                     ),
+                    checkpoint_task_uid=_checkpoint_task_uid,
                 )
             persona = await self._resolve_current_persona(scope.persona_id)
             objective_facts = await self.store.list_serving_facts(
                 scope.fact_namespace_uid,
                 include_sensitive=False,
                 limit=int(
-                    self.config.get("user_profile.fact_maintenance_context_limit", 200)
+                    config.get("user_profile.fact_maintenance_context_limit", 200)
                 ),
             )
             sensitivity = str(
                 scope.relationship_sensitivity_override
-                or self.config.get(
+                or config.get(
                     "user_profile.relationship_sensitivity", "balanced"
                 )
             )
             behavior_mode = str(
                 scope.relationship_behavior_override
-                or self.config.get(
+                or config.get(
                     "user_profile.relationship_behavior_mode", "natural"
                 )
             )
@@ -412,11 +495,11 @@ class UserProfileMaintenanceManager:
             diagnostics: dict[str, Any] = {}
             summaries: list[str] = []
             source_timeline_uids: list[str] = []
-            provider = self._resolve_provider()
+            provider = _provider or self._resolve_provider()
             batch_limit = max(
                 1,
                 int(
-                    self.config.get(
+                    config.get(
                         "user_profile.relationship_rebuild_batch_limit", 32
                     )
                 ),
@@ -430,7 +513,7 @@ class UserProfileMaintenanceManager:
                     objective_facts=objective_facts,
                     sensitivity=sensitivity,
                     behavior_mode=behavior_mode,
-                    settings=self.config,
+                    settings=config,
                     provider=provider,
                 )
                 if maintained is None:
@@ -468,16 +551,18 @@ class UserProfileMaintenanceManager:
                 change_summary="; ".join(summaries)[-1000:],
                 diagnostics=diagnostics,
                 full_revision_limit=int(
-                    self.config.get(
+                    config.get(
                         "user_profile.relationship_full_revision_limit", 100
                     )
                 ),
+                checkpoint_task_uid=_checkpoint_task_uid,
             )
 
     def _schedule_existing_task(
         self, profile_scope_uid: str, task_payload: dict[str, Any]
     ) -> None:
-        if self._closing or profile_scope_uid in self._scheduled:
+        current = self._scheduled.get(profile_scope_uid)
+        if self._closing or (current is not None and not current.done()):
             return
         task = asyncio.create_task(
             self._resume_then_drain(profile_scope_uid, task_payload)
@@ -509,6 +594,9 @@ class UserProfileMaintenanceManager:
                 if not scope.enabled:
                     await self.store.set_scope_state(profile_scope_uid, has_gap=True)
                     return
+                if await self.store.get_blocking_failed_task(profile_scope_uid):
+                    await self.store.set_scope_state(profile_scope_uid, has_gap=True)
+                    return
                 events = await self.store.list_projection_events_for_scope(
                     profile_scope_uid,
                     limit=int(
@@ -519,16 +607,96 @@ class UserProfileMaintenanceManager:
                 )
                 if not events:
                     return
+                events, batch_diagnostics = self._select_task_events(
+                    events, self.config
+                )
                 provider = self._resolve_provider()
                 task = UserProfileTask(
                     profile_scope_uid=profile_scope_uid,
                     settings_snapshot=dict(self.config),
                     provider_signature=self._provider_signature(provider),
+                    result_summary=batch_diagnostics,
                 )
                 await self.store.create_task(task, events)
                 payload = await self.store.get_task(task.task_uid)
                 if payload is None or not await self._process_task(payload, provider=provider):
                     return
+
+    def _select_task_events(
+        self,
+        events: list[dict[str, Any]],
+        settings: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Bound a task by Timeline count, candidate count, and mandatory prompt size."""
+        if not events:
+            return [], {}
+        candidate_limit = max(
+            1,
+            int(
+                settings.get(
+                    "user_profile.maintenance_batch_candidate_limit", 16
+                )
+            ),
+        )
+        prompt_limit = max(
+            4000,
+            int(settings.get("user_profile.maintenance_prompt_max_chars", 16000)),
+        )
+        selected: list[dict[str, Any]] = []
+        candidates = []
+        prompt_chars = 0
+        selected_mode = self._event_projection_mode(events[0])
+        selected_build_uid = self._event_build_operation_uid(events[0])
+        for event in events:
+            if selected and self._event_projection_mode(event) != selected_mode:
+                break
+            if selected and self._event_build_operation_uid(event) != selected_build_uid:
+                break
+            payload = dict(event.get("payload") or {})
+            sources = []
+            if str(event.get("operation") or "upsert") in {"upsert", "restore"}:
+                sources = self.fact_maintainer.extract_candidates(
+                    payload,
+                    actor_id=str(payload.get("profile_actor_id") or ""),
+                    legacy_attribution_confidence=float(
+                        settings.get(
+                            "user_profile.legacy_summary_candidate_confidence", 0.45
+                        )
+                    ),
+                )
+            proposed_candidates = [*candidates, *sources]
+            proposed_prompt_chars = len(
+                self.fact_maintainer._build_prompt(
+                    proposed_candidates, [], [], settings
+                )
+            )
+            exceeds = (
+                len(proposed_candidates) > candidate_limit
+                or proposed_prompt_chars > prompt_limit
+            )
+            if selected and exceeds:
+                break
+            selected.append(event)
+            candidates = proposed_candidates
+            prompt_chars = proposed_prompt_chars
+
+        return selected, {
+            "batch_timeline_count": len(selected),
+            "batch_candidate_count": len(candidates),
+            "batch_prompt_estimate_chars": prompt_chars,
+            "batch_candidate_limit": candidate_limit,
+            "batch_prompt_target_chars": prompt_limit,
+            "batch_was_bounded": len(selected) < len(events),
+            "projection_mode": selected_mode or "incremental",
+            "build_operation_uid": selected_build_uid,
+            "batch_single_timeline_exceeded_target": bool(
+                len(selected) == 1
+                and (
+                    len(candidates) > candidate_limit
+                    or prompt_chars > prompt_limit
+                )
+            ),
+        }
 
     async def _process_task(
         self,
@@ -554,11 +722,31 @@ class UserProfileMaintenanceManager:
             return False
 
         result_summary = dict(task.get("result_summary") or {})
+        if (
+            not result_summary.get("facts_checkpoint")
+            and result_summary.get("relationship_checkpoint")
+        ):
+            # Tasks created by older development builds could publish a relationship
+            # after facts failed. A successful fact retry must always recompute it.
+            result_summary = {
+                key: value
+                for key, value in result_summary.items()
+                if not key.startswith("relationship_")
+            }
+            await self.store.update_task(
+                task_uid,
+                status=str(task.get("status") or "pending"),
+                result_summary=result_summary,
+            )
         selected_provider = provider or self._resolve_provider()
+        result_summary["automatic_retry_pending"] = False
+        result_summary.pop("failed_stage", None)
+        result_summary.pop("request_elapsed_seconds", None)
         fact_error: Exception | None = None
         relationship_error: Exception | None = None
 
         if not result_summary.get("facts_checkpoint"):
+            started = time.monotonic()
             try:
                 namespace_lock = self._namespace_locks.setdefault(
                     str(scope.fact_namespace_uid), asyncio.Lock()
@@ -571,11 +759,18 @@ class UserProfileMaintenanceManager:
                         provider=selected_provider,
                     )
                 result_summary.update(fact_result)
+                result_summary.pop("facts_error", None)
+                result_summary["facts_elapsed_seconds"] = round(
+                    time.monotonic() - started, 3
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 fact_error = exc
                 result_summary["facts_error"] = str(exc)[:4000]
+                result_summary["request_elapsed_seconds"] = round(
+                    time.monotonic() - started, 3
+                )
                 logger.error(
                     "[UserProfile] 客观事实维护失败 (scope=%s, task=%s): %s",
                     scope_uid,
@@ -584,7 +779,20 @@ class UserProfileMaintenanceManager:
                     exc_info=True,
                 )
 
-        if not result_summary.get("relationship_checkpoint"):
+        if fact_error is not None:
+            await self._record_task_failure(
+                task=task,
+                settings=settings,
+                result_summary=result_summary,
+                stage="facts",
+                error=fact_error,
+            )
+            return False
+
+        if result_summary.get("facts_checkpoint") and not result_summary.get(
+            "relationship_checkpoint"
+        ):
+            started = time.monotonic()
             try:
                 relationship_result = await self._run_relationship_stage(
                     task=task,
@@ -593,11 +801,18 @@ class UserProfileMaintenanceManager:
                     provider=selected_provider,
                 )
                 result_summary.update(relationship_result)
+                result_summary.pop("relationship_error", None)
+                result_summary["relationship_elapsed_seconds"] = round(
+                    time.monotonic() - started, 3
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 relationship_error = exc
                 result_summary["relationship_error"] = str(exc)[:4000]
+                result_summary["request_elapsed_seconds"] = round(
+                    time.monotonic() - started, 3
+                )
                 logger.error(
                     "[UserProfile] 人格关系维护失败 (scope=%s, task=%s): %s",
                     scope_uid,
@@ -606,30 +821,14 @@ class UserProfileMaintenanceManager:
                     exc_info=True,
                 )
 
-        if fact_error is not None or relationship_error is not None:
-            retries = int(task.get("retries") or 0) + 1
-            base = float(
-                settings.get("user_profile.maintenance_retry_base_seconds", 60)
-            )
-            maximum = float(
-                settings.get("user_profile.maintenance_retry_max_seconds", 3600)
-            )
-            delay = min(maximum, base * (2 ** max(0, retries - 1)))
-            failure_status = "facts_failed" if fact_error is not None else "facts_completed"
-            error_text = str(fact_error or relationship_error)[:4000]
-            await self.store.update_task(
-                task_uid,
-                status=failure_status,
-                error=error_text,
+        if relationship_error is not None:
+            await self._record_task_failure(
+                task=task,
+                settings=settings,
                 result_summary=result_summary,
-                retries=retries,
-                next_retry_at=time.time() + delay,
+                stage="relationship",
+                error=relationship_error,
             )
-            await self.store.finish_task_events(
-                task_uid, status="pending", error=error_text
-            )
-            await self.store.set_scope_state(scope_uid, has_gap=True)
-            self._schedule_retry(scope_uid, task_uid, delay)
             return False
 
         await self.store.update_task(
@@ -646,6 +845,61 @@ class UserProfileMaintenanceManager:
             has_gap=False,
         )
         return True
+
+    async def _record_task_failure(
+        self,
+        *,
+        task: dict[str, Any],
+        settings: dict[str, Any],
+        result_summary: dict[str, Any],
+        stage: str,
+        error: Exception,
+    ) -> None:
+        task_uid = str(task["task_uid"])
+        scope_uid = str(task["profile_scope_uid"])
+        retries = int(task.get("retries") or 0) + 1
+        retry_limit = max(
+            0, int(settings.get("user_profile.maintenance_max_retries", 3))
+        )
+        base = float(
+            settings.get("user_profile.maintenance_retry_base_seconds", 60)
+        )
+        maximum = float(
+            settings.get("user_profile.maintenance_retry_max_seconds", 3600)
+        )
+        delay = min(maximum, base * (2 ** max(0, retries - 1)))
+        will_retry = retries <= retry_limit
+        status = (
+            "facts_failed"
+            if will_retry and stage == "facts"
+            else "facts_completed"
+            if will_retry
+            else "failed"
+        )
+        error_text = str(error)[:4000]
+        result_summary.update(
+            {
+                "failed_stage": stage,
+                "retry_limit": retry_limit,
+                "automatic_retry_pending": will_retry,
+            }
+        )
+        await self.store.update_task(
+            task_uid,
+            status=status,
+            error=error_text,
+            result_summary=result_summary,
+            retries=retries,
+            next_retry_at=time.time() + delay if will_retry else None,
+        )
+        await self.store.finish_task_events(
+            task_uid,
+            status="queued" if will_retry else "failed",
+            error=error_text,
+        )
+        await self.store.set_scope_state(scope_uid, has_gap=True)
+        if will_retry:
+            self._schedule_retry(scope_uid, task_uid, delay)
 
     async def _run_fact_stage(
         self,
@@ -757,10 +1011,14 @@ class UserProfileMaintenanceManager:
             status="facts_completed",
             result={"fact_revision": fact_revision},
         )
+        current = await self.store.get_task(task_uid)
         await self.store.update_task(
             task_uid,
             status="facts_completed",
-            result_summary={**dict(task.get("result_summary") or {}), **result},
+            result_summary={
+                **dict((current or task).get("result_summary") or {}),
+                **result,
+            },
         )
         return result
 
@@ -781,6 +1039,46 @@ class UserProfileMaintenanceManager:
             return await self._checkpoint_skipped_relationship(
                 task, "relationship_frozen"
             )
+        if self._task_projection_mode(task) == "history_rebuild":
+            remaining = await self.store.count_pending_projection_events(
+                scope.profile_scope_uid,
+                projection_mode="history_rebuild",
+            )
+            if remaining:
+                result = await self._checkpoint_skipped_relationship(
+                    task, "history_rebuild_deferred"
+                )
+                result["relationship_deferred_pending_timelines"] = remaining
+                return result
+            await self.store.update_task(task_uid, status="running_relationship")
+            rebuilt = await self.rebuild_relationship_from_projection_history(
+                scope.profile_scope_uid,
+                use_all_history=True,
+                reason="Automatic relationship rebuild after historical facts",
+                _lock_held=True,
+                _settings=settings,
+                _provider=provider,
+                _history_through_sequence=max(
+                    int(item.get("event_sequence") or 0)
+                    for item in (task.get("items") or [])
+                ),
+                _checkpoint_task_uid=task_uid,
+            )
+            if rebuilt is None:
+                return await self._checkpoint_skipped_relationship(
+                    task, "history_rebuild_no_meaningful_interaction"
+                )
+            result = {
+                "relationship_checkpoint": True,
+                "relationship_revision": rebuilt.revision,
+                "relationship_history_rebuilt": True,
+            }
+            await self.store.update_task_items(
+                task_uid,
+                status="relationship_completed",
+                result={"relationship_revision": rebuilt.revision},
+            )
+            return result
         events = self._normalized_task_events(task)
         actor_id = next(
             (
@@ -917,6 +1215,24 @@ class UserProfileMaintenanceManager:
             )
         return result
 
+    @staticmethod
+    def _event_projection_mode(event: dict[str, Any]) -> str:
+        payload = event.get("payload") or event.get("event_payload") or {}
+        return str(payload.get("projection_mode") or "")
+
+    @staticmethod
+    def _event_build_operation_uid(event: dict[str, Any]) -> str:
+        payload = event.get("payload") or event.get("event_payload") or {}
+        return str(payload.get("build_operation_uid") or "")
+
+    @classmethod
+    def _task_projection_mode(cls, task: dict[str, Any]) -> str:
+        modes = {
+            cls._event_projection_mode(item)
+            for item in (task.get("items") or [])
+        }
+        return modes.pop() if len(modes) == 1 else ""
+
     async def _resolve_current_persona(self, persona_id: str) -> dict[str, Any]:
         if self.persona_resolver is None:
             raise RuntimeError("Current persona resolver is unavailable")
@@ -963,18 +1279,35 @@ class UserProfileMaintenanceManager:
     ) -> None:
         if self._closing:
             return
+        existing = self._retry_by_task_uid.get(task_uid)
+        if existing is not None and not existing.done():
+            return
 
         async def wake() -> None:
             await asyncio.sleep(max(0.0, delay))
             task_payload = await self.store.get_task(task_uid)
-            if task_payload is not None:
+            if (
+                task_payload is not None
+                and str(task_payload.get("status") or "")
+                in {"pending", "facts_failed", "facts_completed"}
+                and bool(
+                    (task_payload.get("result_summary") or {}).get(
+                        "automatic_retry_pending"
+                    )
+                )
+            ):
                 self._schedule_existing_task(profile_scope_uid, task_payload)
-            else:
-                self.schedule_scope(profile_scope_uid)
 
         task = asyncio.create_task(wake())
         self._retry_tasks.add(task)
-        task.add_done_callback(self._retry_tasks.discard)
+        self._retry_by_task_uid[task_uid] = task
+
+        def discard(finished: asyncio.Task) -> None:
+            self._retry_tasks.discard(finished)
+            if self._retry_by_task_uid.get(task_uid) is finished:
+                self._retry_by_task_uid.pop(task_uid, None)
+
+        task.add_done_callback(discard)
 
     def _concurrency(self) -> int:
         return max(

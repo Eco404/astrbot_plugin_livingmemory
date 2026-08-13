@@ -80,6 +80,18 @@ class _ContractCorrectionProvider:
         )
 
 
+class _RetryBudgetProvider:
+    def __init__(self, *, fail_with_timeout: bool = False):
+        self.fail_with_timeout = fail_with_timeout
+        self.request_max_retries = None
+
+    async def text_chat(self, *, prompt, system_prompt, request_max_retries=None):
+        self.request_max_retries = request_max_retries
+        if self.fail_with_timeout:
+            raise TimeoutError("simulated provider deadline")
+        return SimpleNamespace(completion_text="ok")
+
+
 def _timeline_payload(*, revision: int = 1, facts: list[str] | None = None):
     facts = ["Alice明确说自己喜欢无糖茶"] if facts is None else facts
     actor_id = "test:human:user-1"
@@ -644,6 +656,94 @@ def test_lifecycle_marks_expired_historical_facts_without_staling_pins():
 
     assert ordinary.status == UserProfileFactStatus.STALE
     assert pinned.status == UserProfileFactStatus.ACTIVE
+
+
+def test_adaptive_task_batch_respects_candidate_limit_without_dropping_timeline():
+    manager = UserProfileMaintenanceManager(
+        None,
+        config=effective_user_profile_settings(
+            {
+                "user_profile.maintenance_batch_candidate_limit": 3,
+                "user_profile.maintenance_prompt_max_chars": 200000,
+            }
+        ),
+    )
+    events = []
+    for index in range(2):
+        payload = _timeline_payload(
+            facts=[
+                f"Alice明确说自己喜欢饮品 {index}-A",
+                f"Alice明确说自己喜欢饮品 {index}-B",
+            ]
+        )
+        events.append({"operation": "upsert", "payload": payload})
+
+    selected, diagnostics = manager._select_task_events(events, manager.config)
+
+    assert selected == events[:1]
+    assert diagnostics["batch_timeline_count"] == 1
+    assert diagnostics["batch_candidate_count"] == 2
+    assert diagnostics["batch_was_bounded"] is True
+
+
+def test_fact_prompt_budget_trims_optional_context_before_candidates():
+    settings = effective_user_profile_settings(
+        {"user_profile.maintenance_prompt_max_chars": 5000}
+    )
+    candidate = UserProfileFactMaintainer.extract_candidates(
+        _timeline_payload(), actor_id="test:human:user-1"
+    )[0]
+    existing = [
+        {
+            "profile_fact_uid": f"fact-{index}",
+            "category": "preference",
+            "status": "active",
+            "raw_fact": "已有事实" + "x" * 500,
+        }
+        for index in range(10)
+    ]
+
+    fitted, evidence, prompt, diagnostics = (
+        UserProfileFactMaintainer.fit_prompt_context(
+            [candidate], [], existing, settings
+        )
+    )
+
+    assert candidate.source_uid in prompt
+    assert evidence == []
+    assert len(fitted) < len(existing)
+    assert len(prompt) <= 5000
+    assert diagnostics["existing_fact_count_omitted"] > 0
+
+
+@pytest.mark.asyncio
+async def test_profile_request_disables_stacked_provider_retries():
+    provider = _RetryBudgetProvider()
+
+    result = await UserProfileFactMaintainer._request_with_retries(
+        provider,
+        "bounded prompt",
+        effective_user_profile_settings(),
+    )
+
+    assert result == "ok"
+    assert provider.request_max_retries == 1
+
+
+@pytest.mark.asyncio
+async def test_profile_request_surfaces_provider_timeout_to_durable_task():
+    provider = _RetryBudgetProvider(fail_with_timeout=True)
+
+    with pytest.raises(
+        RuntimeError, match="User-profile Provider request exceeded 180 seconds"
+    ):
+        await UserProfileFactMaintainer._request_with_retries(
+            provider,
+            "bounded prompt",
+            effective_user_profile_settings(),
+        )
+
+    assert provider.request_max_retries == 1
 
 
 @pytest.mark.asyncio
